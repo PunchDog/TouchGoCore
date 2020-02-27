@@ -3,13 +3,12 @@ package db
 import (
 	"database/sql"
 	"fmt"
-	"payserver/util"
-	"payserver/variable"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/TouchGoCore/variable"
 	_ "github.com/go-sql-driver/mysql"
 )
 

@@ -9,8 +9,9 @@ import (
 	"mime/multipart"
 	"net/http"
 	"os"
-	"payserver/jsonthr"
 	"time"
+
+	"github.com/TouchGoCore/jsonthr"
 )
 
 //HTTPGet get 请求

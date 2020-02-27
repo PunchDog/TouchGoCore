@@ -1,8 +1,9 @@
 package rpc
 
 import (
-	"server/core/syncmap"
 	"time"
+
+	"github.com/TouchGoCore/syncmap"
 )
 
 //注册rpc功能接口

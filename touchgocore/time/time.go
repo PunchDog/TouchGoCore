@@ -1,7 +1,7 @@
 package time
 
 import (
-	"payserver/syncmap"
+	"github.com/TouchGoCore/touchgocore/syncmap"
 	"time"
 )
 

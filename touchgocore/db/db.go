@@ -8,7 +8,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/TouchGoCore/variable"
+	"github.com/TouchGoCore/touchgocore/util"
+	"github.com/TouchGoCore/touchgocore/vars"
 	_ "github.com/go-sql-driver/mysql"
 )
 
@@ -234,7 +235,7 @@ type DbMysql struct {
 	group     string
 }
 
-func NewDbMysql(config *util.DBConfig) (*DbMysql, error) {
+func NewDbMysql(config *DBConfig) (*DbMysql, error) {
 	this := new(DbMysql)
 	configModel := &DBConfigModel{config.Host, config.Username, config.Password, config.Name, 0, config.MaxIdleConns, config.MaxOpenConns}
 	this.config = configModel
@@ -446,13 +447,13 @@ func (this *DbMysql) QueryExec(strSql string) (*DBResult, error) {
 	rows, err := this.db.Query(strSql)
 
 	if err != nil {
-		variable.Log.Println(err)
+		vars.Error(err.Error())
 		return nil, &DatabaseError{"查询语句出错"}
 	}
 	defer rows.Close()
 	cloumns, err := rows.Columns()
 	if err != nil {
-		variable.Log.Println(err)
+		vars.Error(err.Error())
 		return nil, &DatabaseError{"获取关键字出错"}
 	}
 
@@ -466,7 +467,7 @@ func (this *DbMysql) QueryExec(strSql string) (*DBResult, error) {
 	for rows.Next() {
 		err = rows.Scan(scanArgs...)
 		if err != nil {
-			variable.Log.Println(err)
+			vars.Error(err.Error())
 			continue
 		}
 		var datas map[string]interface{} = make(map[string]interface{})
@@ -476,7 +477,7 @@ func (this *DbMysql) QueryExec(strSql string) (*DBResult, error) {
 		this.Result.values = append(this.Result.values, datas)
 	}
 	if err = rows.Err(); err != nil {
-		variable.Log.Println(err)
+		vars.Error(err.Error())
 	}
 	return this.Result, nil
 }

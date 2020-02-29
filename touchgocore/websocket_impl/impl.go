@@ -5,12 +5,12 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"payserver/variable"
 	"runtime"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/TouchGoCore/touchgocore/vars"
 	"github.com/golang/protobuf/proto"
 	"github.com/gorilla/websocket"
 )
@@ -69,7 +69,7 @@ func InitConnection(port int, wsConn *websocket.Conn, remoteAddr string, callbac
 		return nil, &dataerr{"连接出错"}
 	}
 
-	variable.Log.Printf("%s创建连接成功！", remoteAddr)
+	vars.Info("%s创建连接成功！", remoteAddr)
 
 	//执行
 	go conn.handleLoop()
@@ -96,12 +96,12 @@ func (s *Connection) SendMsg(pb proto.Message, msgId int32, cbid int64) {
 	if !s.IsClose() {
 		data, err := proto.Marshal(pb)
 		if err != nil {
-			variable.Log.Println(err)
+			vars.Error(err.Error())
 		}
 
 		s.Write(data, msgId, cbid)
 	} else {
-		variable.Log.Fatal("服务器连接还没创建上！！！")
+		vars.Error("服务器连接还没创建上！！！")
 	}
 }
 
@@ -109,7 +109,7 @@ func (s *Connection) SendMsgByMust(pb proto.Message, msgId int32, cbid int64) {
 	if !s.IsClose() {
 		data, err := proto.Marshal(pb)
 		if err != nil {
-			variable.Log.Println(err)
+			vars.Error(err.Error())
 		}
 
 		protocol := NewEchoPacket(data, msgId, cbid)
@@ -145,7 +145,7 @@ func (conn *Connection) Close(desc string) {
 		close(conn.outChan)
 		conn.connCallback.OnClose(conn)
 		if desc != "" {
-			variable.Log.Println(desc)
+			vars.Info(desc)
 			conn.wsConnect.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(10000, desc))
 		}
 	}
@@ -236,7 +236,7 @@ func WsListenAndServe(port int, call ConnCallback) {
 		defer func() {
 			if err := recover(); err != nil {
 				strerr := fmt.Sprintf("%s", err)
-				variable.Log.Println("异常捕获:", strerr)
+				vars.Error("异常捕获:", strerr)
 			}
 		}()
 		var (
@@ -252,7 +252,7 @@ func WsListenAndServe(port int, call ConnCallback) {
 		// 完成ws协议的握手操作
 		// Upgrade:websocket
 		if wsConn, err = upgrader.Upgrade(w, r, nil); err != nil {
-			variable.Log.Println(err)
+			vars.Error(err.Error())
 			return
 		}
 
@@ -267,7 +267,7 @@ func WsListenAndServe(port int, call ConnCallback) {
 		defer func() {
 			if err := recover(); err != nil {
 				strerr := fmt.Sprintf("%s", err)
-				variable.Log.Println("异常捕获:", strerr)
+				vars.Error("异常捕获:", strerr)
 			}
 		}()
 		var (
@@ -279,10 +279,10 @@ func WsListenAndServe(port int, call ConnCallback) {
 			}
 		)
 		if _, err := upgrader.Upgrade(w, r, nil); err != nil {
-			variable.Log.Println(err)
+			vars.Error(err.Error())
 			return
 		} else {
-			variable.Log.Println("链接/成功")
+			vars.Info("链接/成功")
 		}
 	})
 
@@ -316,7 +316,6 @@ func (s *Client) SendMsg(pb proto.Message, msgId int32, cbid int64, Fn func(c *C
 		for {
 			select {
 			case <-s.conn.connCallback2[cbid1].callbackChan:
-				variable.Log.Println("db call back ok")
 				delete(s.conn.connCallback2, cbid)
 				return
 			case <-time.After(time.Second * 5):
@@ -348,9 +347,9 @@ func (this *Client) Connection1(ipstring string, call ConnCallback) error {
 		}
 		this.closed = false
 		this.connected = true
-		variable.Log.Printf("connecting to %s", u.String())
+		vars.Info("connecting to %s", u.String())
 	} else {
-		variable.Log.Fatal("dial:", err)
+		vars.Error("dial:", err)
 		return err
 	}
 	return nil

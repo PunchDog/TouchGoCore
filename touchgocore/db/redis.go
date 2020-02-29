@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strconv"
 	"sync"
+	"time"
 
 	"github.com/go-redis/redis"
 )
@@ -22,7 +23,7 @@ type Redis struct {
 	config       *RedisConfigModel
 }
 
-func NewRedis(config *util.RedisConfig) (*Redis, error) {
+func NewRedis(config *RedisConfig) (*Redis, error) {
 	this := new(Redis)
 	configModel := &RedisConfigModel{config.Host, config.Db, config.Password}
 	this.config = configModel
@@ -71,14 +72,16 @@ func (this *Redis) RedisLock(lockkey string) {
 	}
 
 	for {
-		fields, err := this.redisClient.HGet(lockkey, "lock").Result()
-		if err != nil {
-			break
+		select {
+		case <-time.After(time.Nanosecond * 10):
+			fields, err := this.redisClient.HGet(lockkey, "lock").Result()
+			if err != nil {
+				break
+			}
+			if fields == "unlock" {
+				break
+			}
 		}
-		if fields == "unlock" {
-			break
-		}
-		//time.Sleep(time.Nanosecond * 10)
 	}
 	this.redisClient.HSet(lockkey, "lock", "lock")
 }
@@ -111,6 +114,38 @@ func (this *Redis) Close() {
 	this.redisClient = nil
 }
 
-func (this *Redis) Get() *redis.Client {
-	return this.redisClient
+func (this *Redis) Set(key string, value interface{}, expiration time.Duration) *redis.StatusCmd {
+	this.RedisLock(key)
+	defer this.RedisUnLock(key)
+	return this.redisClient.Set(key, value, expiration)
+}
+
+func (this *Redis) Get(key string) *redis.StringCmd {
+	this.RedisLock(key)
+	defer this.RedisUnLock(key)
+	return this.redisClient.Get(key)
+}
+
+func (this *Redis) HSet(key, field string, value interface{}) *redis.BoolCmd {
+	this.RedisLock(key)
+	defer this.RedisUnLock(key)
+	return this.redisClient.HSet(key, field, value)
+}
+
+func (this *Redis) HGet(key, field string) *redis.StringCmd {
+	this.RedisLock(key)
+	defer this.RedisUnLock(key)
+	return this.redisClient.HGet(key, field)
+}
+
+func (this *Redis) HDel(key string, fields ...string) *redis.IntCmd {
+	this.RedisLock(key)
+	defer this.RedisUnLock(key)
+	return this.redisClient.HDel(key, fields...)
+}
+
+func (this *Redis) Del(key ...string) *redis.IntCmd {
+	this.RedisLock("default")
+	defer this.RedisUnLock("default")
+	return this.redisClient.Del(key...)
 }

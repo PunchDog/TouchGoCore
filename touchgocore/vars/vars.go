@@ -59,23 +59,35 @@ func (this *SLoger) getFile() string {
 	return str
 }
 
-func (this *SLoger) println(level int, format string, v ...interface{}) {
-	format = this.getFile() + format
-	str := fmt.Sprintf(format, v...)
-	if level >= loglevelmap[log_.logLevel] {
-		this.log.Println(str)
+func (this *SLoger) println(level int, v ...interface{}) {
+	var format interface{}
+	//识别是不是格式化类型
+	switch v[0].(type) {
+	case string:
+		str := v[0].(string)
+		str = this.getFile() + str
+		if strings.Index(str, "%") > 0 {
+			format = fmt.Sprintf(str, v[1:]...)
+		} else {
+			format = fmt.Sprintln(v...)
+		}
+	default:
+		format = v[:]
 	}
-	log.Println(str)
+
+	if level >= loglevelmap[log_.logLevel] {
+	}
+	log.Println(format)
 }
 
-func Info(format string, v ...interface{}) {
-	log_.println(LogLevel_Info, format, v...)
+func Info(v ...interface{}) {
+	log_.println(LogLevel_Info, v...)
 }
 
-func Debug(format string, v ...interface{}) {
-	log_.println(LogLevel_Debug, format, v...)
+func Debug(v ...interface{}) {
+	log_.println(LogLevel_Debug, v...)
 }
 
-func Error(format string, v ...interface{}) {
-	log_.println(LogLevel_Error, format, v...)
+func Error(v ...interface{}) {
+	log_.println(LogLevel_Error, v...)
 }

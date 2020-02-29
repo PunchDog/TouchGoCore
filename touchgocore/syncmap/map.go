@@ -27,7 +27,6 @@ func (this *Map) Store(k, v interface{}) {
 
 //删除数据
 func (this *Map) Delete(k interface{}) {
-	this.Map.Delete()
 	_, ok := this.Load(k)
 	this.Map.Delete(k)
 	if ok {
@@ -44,4 +43,5 @@ func (this *Map) LoadOrStore(key, value interface{}) (actual interface{}, loaded
 		defer this.lock.Unlock()
 		this.num++
 	}
+	return
 }

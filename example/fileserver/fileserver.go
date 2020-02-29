@@ -34,7 +34,7 @@ func main() {
 	mux["/"] = index
 	mux["/upload"] = upload
 	mux["/file"] = StaticServer
-	server.ListenAndServe()
+	go server.ListenAndServe()
 
 	//启动核心代码
 	touchgocore.Run(ServerName)

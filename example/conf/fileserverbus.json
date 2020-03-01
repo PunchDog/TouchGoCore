@@ -1,0 +1,10 @@
+{
+    "redis_host":"127.0.0.1:6397",
+    "redis_password":"",
+    "redis_db":0,
+    "protocol1":1,
+    "busid":1,
+    "ip":"127.0.0.1",
+    "port":8898,
+    "servertype":"exec"
+}

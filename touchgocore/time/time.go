@@ -2,7 +2,6 @@ package time
 
 import (
 	"github.com/TouchGoCore/touchgocore/syncmap"
-	"github.com/TouchGoCore/touchgocore/vars"
 	"sync"
 	"time"
 )
@@ -185,7 +184,6 @@ func (this *CTimerManager) DelTimer(timer ITimer) {
 
 //开启计时器
 func (this *CTimerManager) Tick() {
-	vars.Info("启动计时器")
 	for {
 		if !this.havedData {
 			time.Sleep(time.Millisecond * 10)

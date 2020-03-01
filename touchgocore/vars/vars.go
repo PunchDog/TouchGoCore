@@ -9,6 +9,8 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 )
 
 var (
@@ -40,12 +42,28 @@ func Run(servername string, level string) {
 
 	fileAndStdoutWriter := io.MultiWriter(writers...)
 	log_.new(fileAndStdoutWriter, "", log.Ldate|log.Lmicroseconds|log.Lshortfile, level)
+	go func() {
+		//启动日志打印线程
+		lock := sync.Mutex{}
+		for {
+			list := []func(){}
+			lock.Lock()
+			list = append(list, log_.printList...)
+			log_.printList = nil
+			lock.Unlock()
+			for _, fn := range list {
+				fn()
+			}
+			time.Sleep(time.Millisecond * 10)
+		}
+	}()
 	Info("初始化日志模块完成！")
 }
 
 type SLoger struct {
-	log      *log.Logger
-	logLevel string
+	log       *log.Logger
+	logLevel  string
+	printList []func()
 }
 
 func (this *SLoger) new(out io.Writer, prefix string, flag int, logLevel string) {
@@ -60,35 +78,51 @@ func (this *SLoger) getFile() string {
 	return str
 }
 
-func (this *SLoger) println(level int, v ...interface{}) {
+func (this *SLoger) println(file string, level int, v ...interface{}) {
 	var format interface{}
 	//识别是不是格式化类型
 	switch v[0].(type) {
 	case string:
 		str := v[0].(string)
-		str = this.getFile() + str
+		str = file + str
 		if n := strings.Index(str, "%"); n > -1 {
 			format = fmt.Sprintf(str, v[1:]...)
 		} else {
-			format = fmt.Sprintln(v...)
+			list := []interface{}(v)
+			list[0] = str
+			format = list
 		}
 	default:
-		format = v[:]
+		list := []interface{}{}
+		list = append(list, file)
+		list = append(list, v...)
+		format = list
 	}
 
 	if level >= loglevelmap[log_.logLevel] {
+		this.log.Println(format)
+	} else {
+		log.Println(format)
 	}
-	log.Println(format)
 }
 
 func Info(v ...interface{}) {
-	log_.println(LogLevel_Info, v...)
+	file := log_.getFile()
+	log_.printList = append(log_.printList, func() {
+		log_.println(file, LogLevel_Info, v...)
+	})
 }
 
 func Debug(v ...interface{}) {
-	log_.println(LogLevel_Debug, v...)
+	file := log_.getFile()
+	log_.printList = append(log_.printList, func() {
+		log_.println(file, LogLevel_Debug, v...)
+	})
 }
 
 func Error(v ...interface{}) {
-	log_.println(LogLevel_Error, v...)
+	file := log_.getFile()
+	log_.printList = append(log_.printList, func() {
+		log_.println(file, LogLevel_Error, v...)
+	})
 }

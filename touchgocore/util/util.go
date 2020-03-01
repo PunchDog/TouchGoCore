@@ -10,6 +10,7 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -166,4 +167,13 @@ func GetNowtimeMD5_TouchGoCore() string {
 	t := time.Now()
 	timestamp := strconv.FormatInt(t.UTC().UnixNano(), 10)
 	return MD5_TouchGoCore(timestamp)
+}
+
+//获取类名
+func GetClassName(p interface{}) string {
+	//神奇的获取类名
+	cla := p
+	rcvr := reflect.ValueOf(cla)
+	sname := reflect.Indirect(rcvr).Type().Name()
+	return sname
 }

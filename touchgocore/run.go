@@ -5,7 +5,9 @@ import (
 	"github.com/TouchGoCore/touchgocore/time"
 	"github.com/TouchGoCore/touchgocore/vars"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 )
 
 //总体开关
@@ -13,7 +15,6 @@ func Run(serverName string, version string) {
 	defer func() {
 		if err := recover(); err != nil {
 			vars.Error("捕获错误:", err)
-			os.Exit(-1)
 		}
 	}()
 
@@ -45,6 +46,18 @@ func Run(serverName string, version string) {
 	rpc.Run(serverName, conf["-b"].(string))
 
 	//启动timer定时器
+	vars.Info("启动计时器")
 	go time.TimerManager_.Tick()
 
+	//启动完成
+	vars.Info("启动附加配置：", conf)
+	vars.Info("touchgocore启动完成")
+
+	go func() {
+		chSig := make(chan os.Signal)
+		signal.Notify(chSig, syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
+		vars.Info("Signal: ", <-chSig)
+		rpc.Stop() //关闭通道
+		os.Exit(-1)
+	}()
 }

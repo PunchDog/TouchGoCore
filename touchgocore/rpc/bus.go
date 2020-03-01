@@ -32,8 +32,9 @@ func createBus(maps map[string]string) {
 		redis.HSet(szkey, "ServerName", serverName_)
 		maps1 = append(maps1, szkey)
 	}
+	//busid对应的消息列表
 	if d, err := jsonthr.Json.Marshal(maps1); err == nil {
-		redis.Set(szbusid, string(d), 0)
+		redis.HSet(szbusid, "keylist", string(d))
 	}
 
 	//映射连接信息
@@ -70,7 +71,7 @@ func removeBus() {
 	}
 	delete(list, rpcCfg_.ListenPort)
 	if len(list) == 0 {
-		if cmd := redis.Get(szbusid); cmd.Err() == nil {
+		if cmd := redis.HGet(szbusid, "keylist"); cmd.Err() == nil {
 			var maps1 []string = nil
 			jsonthr.Json.Unmarshal([]byte(cmd.Val()), maps1)
 			for _, szkey := range maps1 {
@@ -94,13 +95,13 @@ func getConnectInfo(szKey string) (ip string, port int, sztype string, keyValue 
 		panic(err)
 	}
 
-	if cmd := redis.Get(szKey); cmd.Err() == nil {
+	if cmd := redis.HGet(szKey, "BusId"); cmd.Err() == nil {
 		szbusid := cmd.Val()
 		//查询exec和dll列表
 		//busid不同，取exec列表ip:port,真实服务器类型；budis相同，取与自身真实服务器类型相反的类型列表
 		list := map[int]*connectData{}
 		if szbusid != strconv.FormatInt((int64(rpcCfg_.BusId)), 10) || rpcCfg_.ServerType == "dll" {
-			if jsonthr.Json.Unmarshal([]byte(redis.HGet(szbusid, "exec").Val()), list) == nil {
+			if jsonthr.Json.Unmarshal([]byte(redis.HGet(szbusid, "exec").Val()), &list) == nil {
 				num := 0
 				//查询一个合适的连接信息
 				for _, data := range list {
@@ -122,6 +123,8 @@ func getConnectInfo(szKey string) (ip string, port int, sztype string, keyValue 
 					}
 				}
 				return
+			} else {
+				panic("获取bus数据错误")
 			}
 		} else {
 			if jsonthr.Json.Unmarshal([]byte(redis.HGet(szbusid, "dll").Val()), list) == nil {
@@ -154,7 +157,7 @@ func getMsgKey(szKey string) string {
 		panic(err)
 	}
 
-	if cmd := redis.Get(szKey); cmd.Err() == nil {
+	if cmd := redis.HGet(szKey, "BusId"); cmd.Err() == nil {
 		szbusid := cmd.Val()
 		return redis.HGet(szbusid, szKey).Val()
 	}

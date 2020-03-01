@@ -2,7 +2,9 @@ package main
 
 import (
 	"fmt"
+	"github.com/TouchGoCore/example/fileserver/rpcptoto"
 	"github.com/TouchGoCore/touchgocore"
+	"github.com/TouchGoCore/touchgocore/rpc"
 	"html/template"
 	"io"
 	"net/http"
@@ -22,7 +24,13 @@ const (
 	Template_Dir = "./view/"
 	Upload_Dir   = "./upload/"
 	ServerName   = "file_server"
+	Version      = "1.0"
 )
+
+func init() {
+	//注册协议
+	rpc.AddServerListen(new(rpcptoto.RegisterFunc))
+}
 
 func main() {
 	server := http.Server{
@@ -37,7 +45,9 @@ func main() {
 	go server.ListenAndServe()
 
 	//启动核心代码
-	touchgocore.Run(ServerName)
+	touchgocore.Run(ServerName, Version)
+	chSig := make(chan byte)
+	<-chSig
 }
 
 func (*Myhandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {

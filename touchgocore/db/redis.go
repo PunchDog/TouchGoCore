@@ -67,32 +67,32 @@ func (this *Redis) connectOnly(dataSourceName string) bool {
 
 //redis锁
 func (this *Redis) RedisLock(lockkey string) {
-	if val, ok := this.redisLockCnt.LoadOrStore(lockkey, int32(1)); ok {
-		this.redisLockCnt.Store(lockkey, val.(int32)+1)
-	}
-
-	for {
-		select {
-		case <-time.After(time.Nanosecond * 10):
-			fields, err := this.redisClient.HGet(lockkey, "lock").Result()
-			if err != nil {
-				break
-			}
-			if fields == "unlock" {
-				break
-			}
-		}
-	}
-	this.redisClient.HSet(lockkey, "lock", "lock")
+	//if val, ok := this.redisLockCnt.LoadOrStore(lockkey, int32(1)); ok {
+	//	this.redisLockCnt.Store(lockkey, val.(int32)+1)
+	//}
+	//
+	//for {
+	//	select {
+	//	case <-time.After(time.Nanosecond * 10):
+	//		fields, err := this.redisClient.HGet(lockkey, "lock").Result()
+	//		if err != nil {
+	//			break
+	//		}
+	//		if fields == "unlock" {
+	//			break
+	//		}
+	//	}
+	//}
+	//this.redisClient.HSet(lockkey, "lock", "lock")
 }
 
 //redis解锁
 func (this *Redis) RedisUnLock(lockkey string) {
-	this.redisClient.HSet(lockkey, "lock", "unlock")
-	if val, ok := this.redisLockCnt.LoadOrStore(lockkey, int32(0)); ok && val.(int32) > 0 {
-		cnt := val.(int32) - 1
-		this.redisLockCnt.Store(lockkey, cnt)
-	}
+	//this.redisClient.HSet(lockkey, "lock", "unlock")
+	//if val, ok := this.redisLockCnt.LoadOrStore(lockkey, int32(0)); ok && val.(int32) > 0 {
+	//	cnt := val.(int32) - 1
+	//	this.redisLockCnt.Store(lockkey, cnt)
+	//}
 }
 
 func (this *Redis) RedisUnLockAndDo(lockkey string, fn func()) {

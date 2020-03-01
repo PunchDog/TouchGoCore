@@ -6,14 +6,12 @@ import (
 	"github.com/TouchGoCore/touchgocore/util"
 	"net/rpc"
 	"strconv"
-	"time"
 )
 
 type Client struct {
 	client     *rpc.Client
 	serverType string
 	keyValue   map[string]*string
-	registerCh chan bool //注册阻断
 }
 
 //所有的连接信息(map[port](client))
@@ -29,21 +27,17 @@ func SendMsgByBurdenMin(protocol1 int, protocol2 int, req interface{}, res inter
 	}
 	var client *Client = nil
 	if c, ok := rpcClientMap_.Load(port); !ok {
-		client = &Client{serverType: types, keyValue: make(map[string]*string), registerCh: make(chan bool)}
+		client = &Client{serverType: types, keyValue: make(map[string]*string)}
 		client.client, err = rpc.Dial("tcp", ip+":"+strconv.FormatInt(int64(port), 10))
 		if err != nil {
 			return
 		}
-		rpcClientMap_.Store(port, client) //先放入临时空间
-		go func() {                       //创建个定时器，超时删除连接
-			time.Sleep(time.Second * 2)
-			client.registerCh <- false
-		}()
-		b := <-client.registerCh
-		if !b {
-			rpcClientMap_.Delete(port)
+		ret := new(string)
+		if err := client.client.Call("DefaultMsg.Register", SQRegister{Ip: rpcCfg_.Ip, Port: rpcCfg_.ListenPort, ServerType: rpcCfg_.ServerType}, ret); err != nil || *ret != "OK" {
+			client.client.Close()
 			return 0, &util.Error{ErrMsg: "注册超时，创建连接失败"}
 		}
+		rpcClientMap_.Store(port, client) //注册成功的，放入map
 	} else {
 		client = c.(*Client)
 	}
@@ -82,7 +76,7 @@ func send(protocol1 int, protocol2 int, req interface{}, res interface{}, client
 			err = call.Error
 			return
 		case "dll":
-			proxyreq := &sqsproxy{
+			proxyreq := &SQProxy{
 				protocol1: protocol1,
 				protocol2: protocol2,
 				data:      req,
@@ -96,7 +90,7 @@ func send(protocol1 int, protocol2 int, req interface{}, res interface{}, client
 		//发给功能插件服务器的消息
 		switch client.serverType {
 		case "exec":
-			proxyreq := &sqsproxy{
+			proxyreq := &SQProxy{
 				protocol1: protocol1,
 				protocol2: protocol2,
 				data:      req,

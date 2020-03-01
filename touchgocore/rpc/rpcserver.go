@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/rpc"
 	"strconv"
+	"strings"
 
 	"github.com/TouchGoCore/touchgocore/vars"
 )
@@ -38,7 +39,20 @@ func (this *HttpServer) run() {
 				vars.Error("Accept error:", err)
 				continue
 			}
-			go rpc.ServeConn(conn)
+			client := &Client{client: rpc.NewClient(conn)}
+			res := new(string)
+			if client.client.Call("defaultMsg.Register", rpcCfg_.ListenPort, res) == nil { //注册消息发送
+				szlist := strings.Split(*res, "-")
+				if len(szlist) != 2 {
+					vars.Error("注册连接失败，返回的注册信息错误")
+					continue
+				}
+
+				client.serverType = szlist[1]
+				port, _ := strconv.Atoi(szlist[0])
+				rpcClientMap_.Store(port, client)
+				go rpc.ServeConn(conn)
+			}
 		}
 	}()
 }
@@ -72,4 +86,6 @@ func Run(serverName string, buscfgpath string) {
 
 	//开始写BUS数据
 	httpserver_.setBus()
+
+	vars.Info("初始化RPC模块完成!")
 }

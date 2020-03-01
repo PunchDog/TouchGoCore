@@ -2,6 +2,8 @@ package time
 
 import (
 	"github.com/TouchGoCore/touchgocore/syncmap"
+	"github.com/TouchGoCore/touchgocore/vars"
+	"sync"
 	"time"
 )
 
@@ -161,6 +163,7 @@ func (this *ITimerObj) GetLastTime() int64 {
 type CTimerManager struct {
 	timerList *syncmap.Map
 	havedData bool
+	lock      sync.Mutex
 }
 
 var TimerManager_ *CTimerManager = &CTimerManager{
@@ -182,15 +185,19 @@ func (this *CTimerManager) DelTimer(timer ITimer) {
 
 //开启计时器
 func (this *CTimerManager) Tick() {
+	vars.Info("启动计时器")
 	for {
 		if !this.havedData {
 			time.Sleep(time.Millisecond * 10)
 			continue
 		}
 
+		old := time.Now().UnixNano()
+		this.lock.Lock()
 		TimerList := *this.timerList //拷贝计时器数据
 		//清空原来的计时器数据
 		this.timerList = &syncmap.Map{}
+		this.lock.Unlock()
 
 		//检查数据
 		for TimerList.Length() > 0 {
@@ -220,6 +227,10 @@ func (this *CTimerManager) Tick() {
 			}
 			this.AddTimer(pTimer)
 		}
-		time.Sleep(time.Millisecond * 100)
+		new := time.Now().UnixNano()
+		used := time.Duration(new-old) / time.Millisecond
+		if used < 100 {
+			time.Sleep(time.Millisecond * (100 - used))
+		}
 	}
 }

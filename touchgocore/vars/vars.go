@@ -40,6 +40,7 @@ func Run(servername string, level string) {
 
 	fileAndStdoutWriter := io.MultiWriter(writers...)
 	log_.new(fileAndStdoutWriter, "", log.Ldate|log.Lmicroseconds|log.Lshortfile, level)
+	Info("初始化日志模块完成！")
 }
 
 type SLoger struct {
@@ -66,7 +67,7 @@ func (this *SLoger) println(level int, v ...interface{}) {
 	case string:
 		str := v[0].(string)
 		str = this.getFile() + str
-		if strings.Index(str, "%") > 0 {
+		if n := strings.Index(str, "%"); n > -1 {
 			format = fmt.Sprintf(str, v[1:]...)
 		} else {
 			format = fmt.Sprintln(v...)

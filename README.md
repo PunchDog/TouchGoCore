@@ -1,7 +1,7 @@
 # TouchGoCore v0.01
 开发方便使用全球服框架
 touchgocore:框架基本信息与组件
-ezample:实例
+example:实例
 
 当前设计以BusID作为模块组，同一组服务器内部分成exec（主服务器）,dll（功能服务器），模拟动态服务器组模式
 目前功能：

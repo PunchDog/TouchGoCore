@@ -146,3 +146,17 @@ func getConnectInfo(szKey string) (ip string, port int, sztype string, keyValue 
 	}
 	return
 }
+
+//获取发送协议
+func getMsgKey(szKey string) string {
+	redis, err := db.NewRedis(&rpcCfg_.RedisConfig)
+	if err != nil {
+		panic(err)
+	}
+
+	if cmd := redis.Get(szKey); cmd.Err() == nil {
+		szbusid := cmd.Val()
+		return redis.HGet(szbusid, szKey).Val()
+	}
+	return ""
+}

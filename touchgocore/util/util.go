@@ -1,13 +1,16 @@
 package util
 
 import (
+	"crypto/md5"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"io/ioutil"
 	"log"
 	"math/rand"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -136,4 +139,31 @@ func RandRange(min int64, max int64) int64 {
 	}
 	rr := rand.New(rand.NewSource(time.Now().UnixNano() * rand.Int63n(9999)))
 	return rr.Int63n(max-min+1) + min
+}
+
+// 生成时间戳的函数
+func UTCTime_TouchGoCore() string {
+	t := time.Now()
+	return strconv.FormatInt(t.UTC().UnixNano(), 10)
+}
+
+// MD5 实现 :主要是针对 字符串的加密
+func MD5_TouchGoCore(data string) string {
+	h := md5.New()
+	h.Write([]byte(data))
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+func GetTime_TouchGoCore() string {
+	const shortForm = "2006-01-02 15:04:05"
+	t := time.Now()
+	temp := time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), t.Second(), t.Nanosecond(), time.Local)
+	str := temp.Format(shortForm)
+	return str
+}
+
+func GetNowtimeMD5_TouchGoCore() string {
+	t := time.Now()
+	timestamp := strconv.FormatInt(t.UTC().UnixNano(), 10)
+	return MD5_TouchGoCore(timestamp)
 }

@@ -1,9 +1,11 @@
 package touchgocore
 
 import (
+	"github.com/TouchGoCore/touchgocore/config"
 	"github.com/TouchGoCore/touchgocore/rpc"
 	"github.com/TouchGoCore/touchgocore/time"
 	"github.com/TouchGoCore/touchgocore/vars"
+	impl "github.com/TouchGoCore/touchgocore/websocket_impl"
 	"os"
 	"os/signal"
 	"strings"
@@ -38,16 +40,22 @@ func Run(serverName string, version string) {
 	vars.Info("*********************************************")
 	vars.Info("           系统:[%s]版本:[%s]", serverName, version)
 	vars.Info("*********************************************")
+	//加载配置
+	config.ServerName_ = serverName
+	config.Cfg_.Load(conf["-b"].(string))
 
 	//创建日志文件
-	vars.Run(serverName, conf["-l"].(string))
+	vars.Run(config.ServerName_, conf["-l"].(string))
 
 	//启动rpc相关
-	rpc.Run(serverName, conf["-b"].(string))
+	rpc.Run()
 
 	//启动timer定时器
 	vars.Info("启动计时器")
 	go time.TimerManager_.Tick()
+
+	//启动ws
+	impl.Run()
 
 	//启动完成
 	vars.Info("启动附加配置：", conf)

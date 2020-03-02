@@ -2,6 +2,7 @@ package rpc
 
 import (
 	"fmt"
+	"github.com/TouchGoCore/touchgocore/config"
 	"github.com/TouchGoCore/touchgocore/util"
 	"github.com/TouchGoCore/touchgocore/vars"
 	"net"
@@ -27,7 +28,7 @@ func (this *HttpServer) run() {
 	}
 
 	//添加监听
-	listener, err := net.Listen("tcp", ":"+strconv.FormatInt(int64(rpcCfg_.ListenPort), 10))
+	listener, err := net.Listen("tcp", ":"+strconv.FormatInt(int64(config.Cfg_.ListenPort), 10))
 	if err != nil {
 		vars.Error("ListenTCP error:", err)
 		return
@@ -50,7 +51,7 @@ func (this *HttpServer) setBus() {
 	for _, regMsgClass := range this.msgClassMap_ {
 		list := regMsgClass.MsgMap() //生成协议对应值
 		for protocol2, strVal := range list {
-			key := fmt.Sprintf("%d-%d", rpcCfg_.Protocol1, protocol2)
+			key := fmt.Sprintf("%d-%d", config.Cfg_.Protocol1, protocol2)
 			maps[key] = strVal
 		}
 	}
@@ -64,11 +65,7 @@ func AddServerListen(class IRpcCallFunctionClass) {
 }
 
 //启动监控(协议一级协议,通道ID)
-func Run(serverName string, buscfgpath string) {
-	serverName_ = serverName
-	//读取bus配置
-	rpcCfg_.load(buscfgpath)
-
+func Run() {
 	//开启监听
 	httpserver_.run()
 

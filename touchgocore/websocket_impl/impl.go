@@ -1,78 +1,53 @@
 package impl
 
 import (
-	"errors"
 	"fmt"
+	"github.com/TouchGoCore/touchgocore/util"
+	"github.com/TouchGoCore/touchgocore/vars"
+	"github.com/golang/protobuf/proto"
+	"github.com/gorilla/websocket"
 	"net/http"
 	"net/url"
 	"runtime"
 	"strconv"
 	"strings"
-	"time"
-
-	"github.com/TouchGoCore/touchgocore/vars"
-	"github.com/golang/protobuf/proto"
-	"github.com/gorilla/websocket"
 )
 
-type ConnCallback interface {
-	OnConnect(*Connection) bool
-	OnMessage(*Connection, interface{}) bool
-	OnClose(*Connection)
-}
-
-type connCallBack struct {
-	fn           func(c *Connection, body []byte)
-	callbackChan chan byte //
-}
-
 type Connection struct {
-	enterPort     int                     //
-	wsConnect     *websocket.Conn         //
-	remoteAddr    string                  //
-	outChan       chan []byte             //
-	closeChan     chan byte               //
-	isClosed      bool                    // 防止closeChan被关闭多次
-	connCallback  ConnCallback            //通常回调函数
-	connCallback2 map[int64]*connCallBack //特定执行的回调函数
-	Uid           int64                   //全局用唯一ID
-}
-
-type dataerr struct {
-	err string
-}
-
-func (this *dataerr) Error() string {
-	return this.err
+	enterPort  int             //
+	wsConnect  *websocket.Conn //
+	remoteAddr string          //
+	closeChan  chan byte       //
+	outChan    chan []byte     //
+	isClosed   bool            // 防止closeChan被关闭多次
+	Uid        int64           //全局用唯一ID
 }
 
 var maxUid int64 = 0
 
-func InitConnection(port int, wsConn *websocket.Conn, remoteAddr string, callback ConnCallback) (*Connection, error) {
+func InitConnection(port int, wsConn *websocket.Conn, remoteAddr string) (*Connection, error) {
 	maxUid++
 	conn := &Connection{
-		enterPort:     port,
-		wsConnect:     wsConn,
-		outChan:       make(chan []byte, 1000),
-		closeChan:     make(chan byte, 1),
-		connCallback:  callback,
-		connCallback2: make(map[int64]*connCallBack),
-		isClosed:      false,
-		remoteAddr:    "",
-		Uid:           maxUid,
+		enterPort:  port,
+		wsConnect:  wsConn,
+		closeChan:  make(chan byte, 1),
+		outChan:    make(chan []byte, 1000),
+		isClosed:   false,
+		remoteAddr: "",
+		Uid:        maxUid,
 	}
 	if remoteAddr != "" {
 		conn.remoteAddr = remoteAddr
 	}
-	if !conn.connCallback.OnConnect(conn) {
+	if !callBack_.OnConnect(conn) {
 		conn.Close("连接初始化失败")
-		return nil, &dataerr{"连接出错"}
+		return nil, &util.Error{ErrMsg: "连接出错"}
 	}
 
 	vars.Info("%s创建连接成功！", remoteAddr)
 
 	//执行
-	go conn.handleLoop()
+	go conn.readLoop()
 	go conn.writeLoop()
 
 	return conn, nil
@@ -92,47 +67,41 @@ func (this *Connection) IsClose() bool {
 	return this.isClosed
 }
 
-func (s *Connection) SendMsg(pb proto.Message, msgId int32, cbid int64) {
+func (s *Connection) SendMsg(protocol1 int32, protocol2 int32, pb proto.Message) {
 	if !s.IsClose() {
 		data, err := proto.Marshal(pb)
 		if err != nil {
 			vars.Error(err.Error())
 		}
 
-		s.Write(data, msgId, cbid)
+		s.Write(protocol1, protocol2, data)
 	} else {
 		vars.Error("服务器连接还没创建上！！！")
 	}
 }
 
-func (s *Connection) SendMsgByMust(pb proto.Message, msgId int32, cbid int64) {
-	if !s.IsClose() {
-		data, err := proto.Marshal(pb)
-		if err != nil {
-			vars.Error(err.Error())
-		}
+//func (s *Connection) SendMsgByMust(protocol1 int32, protocol2 int32, pb proto.Message) {
+//	if !s.IsClose() {
+//		data, err := proto.Marshal(pb)
+//		if err != nil {
+//			vars.Error(err.Error())
+//		}
+//
+//		protocol := NewEchoPacket(protocol1, protocol2, data)
+//		s.wsConnect.WriteMessage(websocket.BinaryMessage, protocol.Serialize())
+//	}
+//}
 
-		protocol := NewEchoPacket(data, msgId, cbid)
-		s.wsConnect.WriteMessage(websocket.BinaryMessage, protocol.Serialize())
-	}
-}
-
-func (s *Connection) Write(buffer []byte, msgId int32, cbid int64) {
+func (s *Connection) Write(protocol1 int32, protocol2 int32, buffer []byte) {
 	if s.IsClose() {
 		return
 	}
-	protocol := NewEchoPacket(buffer, msgId, cbid)
-	s.WriteMessage(protocol.Serialize())
-}
-
-func (conn *Connection) WriteMessage(data []byte) (err error) {
-
+	protocol := NewEchoPacket(protocol1, protocol2, buffer)
 	select {
-	case conn.outChan <- data:
-	case <-conn.closeChan:
-		err = errors.New("connection is closeed")
+	case s.outChan <- protocol.Serialize():
+	case <-s.closeChan:
+		//err = errors.New("connection is closeed")
 	}
-	return
 }
 
 func (conn *Connection) Close(desc string) {
@@ -143,7 +112,7 @@ func (conn *Connection) Close(desc string) {
 		conn.isClosed = true
 		close(conn.closeChan)
 		close(conn.outChan)
-		conn.connCallback.OnClose(conn)
+		callBack_.OnClose(conn)
 		if desc != "" {
 			vars.Info(desc)
 			conn.wsConnect.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(10000, desc))
@@ -151,7 +120,7 @@ func (conn *Connection) Close(desc string) {
 	}
 }
 
-func (conn *Connection) handleLoop() {
+func (conn *Connection) readLoop() {
 	var (
 		data []byte
 		err  error
@@ -170,18 +139,7 @@ func (conn *Connection) handleLoop() {
 		if _, data, err = conn.wsConnect.ReadMessage(); err != nil {
 			return
 		}
-		//解析操作
-		data := &EchoPacket{buff: data}
-		cbid := int64(data.GetCbid())
-		if conn.connCallback2[cbid] == nil {
-			if !conn.connCallback.OnMessage(conn, data) {
-				return
-			}
-		} else {
-			conn.connCallback2[cbid].fn(conn, data.GetBody())
-			conn.connCallback2[cbid].fn = nil
-			conn.connCallback2[cbid].callbackChan <- 1
-		}
+		wsOnMessage_.readChan <- &readData{data, conn}
 	}
 }
 
@@ -231,7 +189,7 @@ func HttpListenAndServe(port int) {
 }
 
 //ws监听
-func WsListenAndServe(port int, call ConnCallback) {
+func WsListenAndServe(port int) {
 	AddListenFunc(port, "/ws", func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if err := recover(); err != nil {
@@ -261,7 +219,7 @@ func WsListenAndServe(port int, call ConnCallback) {
 		if len(ips) > 0 {
 			proxy_add_x_forwarded_for = ips[0]
 		}
-		InitConnection(port, wsConn, proxy_add_x_forwarded_for, call)
+		InitConnection(port, wsConn, proxy_add_x_forwarded_for)
 	})
 	AddListenFunc(port, "/", func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
@@ -300,37 +258,16 @@ func (this *Client) GetConn() *Connection {
 	return this.conn
 }
 
-func (s *Client) SendMsg(pb proto.Message, msgId int32, cbid int64, Fn func(c *Connection, body []byte)) {
-	cbid1 := cbid
-	if Fn != nil {
-		maxUid++
-		cbid1 = maxUid
-		s.conn.connCallback2[cbid1] = &connCallBack{
-			fn:           Fn,
-			callbackChan: make(chan byte, 1),
-		}
-	}
-	s.conn.SendMsg(pb, msgId, cbid1)
-	//等待数据回复
-	if Fn != nil {
-		for {
-			select {
-			case <-s.conn.connCallback2[cbid1].callbackChan:
-				delete(s.conn.connCallback2, cbid)
-				return
-			case <-time.After(time.Second * 5):
-				return
-			}
-		}
-	}
+func (s *Client) SendMsg(protocol1 int32, protocol2 int32, pb proto.Message) {
+	s.conn.SendMsg(protocol1, protocol2, pb)
 }
 
-func (s *Client) Write(buffer []byte, msgId int32, cbid int64) {
-	s.conn.Write(buffer, msgId, cbid)
+func (s *Client) Write(protocol1 int32, protocol2 int32, buffer []byte) {
+	s.conn.Write(protocol1, protocol2, buffer)
 }
 
 //主动连接
-func (this *Client) Connection1(ipstring string, call ConnCallback) error {
+func (this *Client) Connection1(ipstring string) error {
 	this.closed = true
 	// var addr = flag.String("addr", ipstring, "http service address")
 	u := url.URL{Scheme: "ws", Host: ipstring, Path: "/ws"}
@@ -338,10 +275,10 @@ func (this *Client) Connection1(ipstring string, call ConnCallback) error {
 	if err == nil {
 		host := strings.Split(ipstring, ":")
 		if len(host) != 2 {
-			return &dataerr{"获取连接端口出错"}
+			return &util.Error{ErrMsg: "获取连接端口出错"}
 		}
 		port, _ := strconv.Atoi(host[1])
-		if this.conn, err = InitConnection(port, c, "", call); err != nil {
+		if this.conn, err = InitConnection(port, c, ""); err != nil {
 			// this.conn.Close(err.Error())
 			return err
 		}
@@ -356,9 +293,9 @@ func (this *Client) Connection1(ipstring string, call ConnCallback) error {
 
 }
 
-func (this *Client) Connection(ip string, port int, call ConnCallback) error {
+func (this *Client) Connection(ip string, port int) error {
 	str := ip + ":" + strconv.Itoa(port)
-	return this.Connection1(str, call)
+	return this.Connection1(str)
 }
 
 func (this *Client) Connected() bool {

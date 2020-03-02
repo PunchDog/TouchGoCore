@@ -2,6 +2,7 @@ package rpc
 
 import (
 	"fmt"
+	"github.com/TouchGoCore/touchgocore/config"
 	"github.com/TouchGoCore/touchgocore/syncmap"
 	"github.com/TouchGoCore/touchgocore/util"
 	"net/rpc"
@@ -33,7 +34,7 @@ func SendMsgByBurdenMin(protocol1 int, protocol2 int, req interface{}, res inter
 			return
 		}
 		ret := new(string)
-		if err := client.client.Call("DefaultMsg.Register", SQRegister{Ip: rpcCfg_.Ip, Port: rpcCfg_.ListenPort, ServerType: rpcCfg_.ServerType}, ret); err != nil || *ret != "OK" {
+		if err := client.client.Call("DefaultMsg.Register", SQRegister{Ip: config.Cfg_.Ip, Port: config.Cfg_.ListenPort, ServerType: config.Cfg_.ServerType}, ret); err != nil || *ret != "OK" {
 			client.client.Close()
 			return 0, &util.Error{ErrMsg: "注册超时，创建连接失败"}
 		}
@@ -67,7 +68,7 @@ func SendMsg(port int, protocol1 int, protocol2 int, req interface{}, res interf
 
 func send(protocol1 int, protocol2 int, req interface{}, res interface{}, client *Client) (err error) {
 	szkey := fmt.Sprintf("%d-%d", protocol1, protocol2)
-	if protocol1 != rpcCfg_.Protocol1 {
+	if protocol1 != config.Cfg_.Protocol1 {
 		//发送给其他主要服务器的消息
 		switch client.serverType {
 		case "exec":

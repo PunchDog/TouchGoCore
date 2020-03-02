@@ -177,3 +177,27 @@ func GetClassName(p interface{}) string {
 	sname := reflect.Indirect(rcvr).Type().Name()
 	return sname
 }
+
+//检查端口占用
+func CheckPort(port string) (err error) {
+	tcpAddress, err := net.ResolveTCPAddr("tcp4", ":"+port)
+	if err != nil {
+		return err
+	}
+
+	for i := 0; i < 3; i++ {
+		listener, err := net.ListenTCP("tcp", tcpAddress)
+		if err != nil {
+			time.Sleep(time.Duration(100) * time.Millisecond)
+			if i == 3 {
+				return err
+			}
+			continue
+		} else {
+			listener.Close()
+			break
+		}
+	}
+
+	return nil
+}

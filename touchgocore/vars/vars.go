@@ -109,20 +109,20 @@ func (this *SLoger) println(file string, level int, v ...interface{}) {
 func Info(v ...interface{}) {
 	file := log_.getFile()
 	log_.printList = append(log_.printList, func() {
-		log_.println(file, LogLevel_Info, v...)
+		log_.println("【INFO】"+file, LogLevel_Info, v...)
 	})
 }
 
 func Debug(v ...interface{}) {
 	file := log_.getFile()
 	log_.printList = append(log_.printList, func() {
-		log_.println(file, LogLevel_Debug, v...)
+		log_.println("【DEBUG】"+file, LogLevel_Debug, v...)
 	})
 }
 
 func Error(v ...interface{}) {
 	file := log_.getFile()
 	log_.printList = append(log_.printList, func() {
-		log_.println(file, LogLevel_Error, v...)
+		log_.println("【ERROR】"+file, LogLevel_Error, v...)
 	})
 }

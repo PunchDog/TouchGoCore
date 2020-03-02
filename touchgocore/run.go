@@ -2,6 +2,7 @@ package touchgocore
 
 import (
 	"github.com/TouchGoCore/touchgocore/config"
+	"github.com/TouchGoCore/touchgocore/lua"
 	"github.com/TouchGoCore/touchgocore/rpc"
 	"github.com/TouchGoCore/touchgocore/time"
 	"github.com/TouchGoCore/touchgocore/vars"
@@ -41,6 +42,7 @@ func Run(serverName string, version string) {
 	vars.Info("           系统:[%s]版本:[%s]", serverName, version)
 	vars.Info("*********************************************")
 	//加载配置
+	vars.Info("加载核心配置")
 	config.ServerName_ = serverName
 	config.Cfg_.Load(conf["-b"].(string))
 
@@ -56,6 +58,9 @@ func Run(serverName string, version string) {
 
 	//启动ws
 	impl.Run()
+
+	//启动lua脚本
+	lua.Run()
 
 	//启动完成
 	vars.Info("启动附加配置：", conf)

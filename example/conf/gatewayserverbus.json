@@ -7,5 +7,6 @@
     "servertype":"exec",
     "ip":"127.0.0.1",
     "init_port":7000,
-    "ws": "off"
+    "ws": "off",
+    "http": "off"
 }

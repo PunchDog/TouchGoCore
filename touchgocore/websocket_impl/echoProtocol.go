@@ -16,12 +16,12 @@ func (this *EchoPacket) GetLength() uint32 {
 	return binary.BigEndian.Uint32(this.buff[0:4])
 }
 
-func (this *EchoPacket) GetProtocol2() uint32 {
-	return binary.BigEndian.Uint32(this.buff[4:8])
+func (this *EchoPacket) GetProtocol2() int32 {
+	return int32(binary.BigEndian.Uint32(this.buff[4:8]))
 }
 
-func (this *EchoPacket) GetProtocol1() uint32 {
-	return binary.BigEndian.Uint32(this.buff[8:12])
+func (this *EchoPacket) GetProtocol1() int32 {
+	return int32(binary.BigEndian.Uint32(this.buff[8:12]))
 }
 
 func (this *EchoPacket) GetBody() []byte {

@@ -10,7 +10,6 @@ import (
 
 type Cfg struct {
 	db.RedisConfig
-	Protocol1  int    `json:"protocol1"`  //协议1级协议号
 	BusId      int    `json:"busid"`      //通道ID
 	Ip         string `json:"ip"`         //端口所在IP
 	ListenPort int    `json:"port"`       //监听端口

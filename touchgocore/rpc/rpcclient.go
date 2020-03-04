@@ -3,6 +3,7 @@ package rpc
 import (
 	"fmt"
 	"github.com/TouchGoCore/touchgocore/config"
+	"github.com/TouchGoCore/touchgocore/db"
 	"github.com/TouchGoCore/touchgocore/syncmap"
 	"github.com/TouchGoCore/touchgocore/util"
 	"net/rpc"
@@ -68,7 +69,16 @@ func SendMsg(port int, protocol1 int, protocol2 int, req interface{}, res interf
 
 func send(protocol1 int, protocol2 int, req interface{}, res interface{}, client *Client) (err error) {
 	szkey := fmt.Sprintf("%d-%d", protocol1, protocol2)
-	if protocol1 != config.Cfg_.Protocol1 {
+	redis, err := db.NewRedis(&config.Cfg_.RedisConfig)
+	if err != nil {
+		panic(err)
+	}
+
+	busid := 0
+	if cmd := redis.HGet(szkey, "BusId"); cmd.Err() == nil {
+		busid, _ = cmd.Int()
+	}
+	if busid != config.Cfg_.BusId {
 		//发送给其他主要服务器的消息
 		switch client.serverType {
 		case "exec":

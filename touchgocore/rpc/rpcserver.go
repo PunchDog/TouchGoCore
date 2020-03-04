@@ -51,7 +51,7 @@ func (this *HttpServer) setBus() {
 	for _, regMsgClass := range this.msgClassMap_ {
 		list := regMsgClass.MsgMap() //生成协议对应值
 		for protocol2, strVal := range list {
-			key := fmt.Sprintf("%d-%d", config.Cfg_.Protocol1, protocol2)
+			key := fmt.Sprintf("%d-%d", regMsgClass.Protocol1(), protocol2)
 			maps[key] = strVal
 		}
 	}

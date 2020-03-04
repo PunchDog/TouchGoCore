@@ -9,14 +9,21 @@ type RegisterFunc struct {
 	p TestProto
 }
 
+//二级协议对应rpc传输函数
 func (this *RegisterFunc) MsgMap() map[int]string {
 	return map[int]string{
 		1: "TestProto.Test",
 	}
 }
 
+//rpc协议具体实现的类
 func (this *RegisterFunc) RpcFunc() interface{} {
 	return &this.p
+}
+
+//rpc协议对应的主协议号
+func Protocol1() int {
+	return 1
 }
 
 type TestProto struct {

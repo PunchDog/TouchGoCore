@@ -2,12 +2,13 @@ package rpc
 
 import (
 	"fmt"
+	"net/rpc"
+	"strconv"
+
 	"github.com/TouchGoCore/touchgocore/config"
 	"github.com/TouchGoCore/touchgocore/db"
 	"github.com/TouchGoCore/touchgocore/syncmap"
 	"github.com/TouchGoCore/touchgocore/util"
-	"net/rpc"
-	"strconv"
 )
 
 type Client struct {
@@ -58,8 +59,12 @@ func SendMsg(port int, protocol1 int, protocol2 int, req interface{}, res interf
 		port1 = port
 		szkey := fmt.Sprintf("%d-%d", protocol1, protocol2)
 		if client.keyValue[szkey] == nil {
-			client.keyValue[szkey] = new(string)
-			*client.keyValue[szkey] = getMsgKey(szkey)
+			if msgKey := getMsgKey(szkey); msgKey != "" {
+				client.keyValue[szkey] = &msgKey
+			} else {
+				err = util.CommonError{ErrorMsg: "获取rpc函数错误：" + szkey}
+				return
+			}
 		}
 		err = send(protocol1, protocol2, req, res, client)
 		return

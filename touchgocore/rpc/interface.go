@@ -13,6 +13,7 @@ type IRpcCallFunctionClass interface {
 type SQProxy struct {
 	protocol1 int
 	protocol2 int
+	port      int
 	data      interface{} //数据
 }
 
@@ -22,7 +23,12 @@ type SQRegister struct {
 	ServerType string //对方的类型
 }
 
+type ReqBuffer struct {
+	port    int         //要转发的端口号
+	ReqData interface{} //数据
+}
+
 type RetBuffer struct {
-	prot    int         //要转发的端口号
+	port    int         //要转发的端口号
 	RetData interface{} //数据
 }

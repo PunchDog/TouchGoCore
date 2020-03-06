@@ -18,7 +18,6 @@ type Connection struct {
 	wsConnect  *websocket.Conn //
 	remoteAddr string          //
 	closeChan  chan byte       //
-	outChan    chan []byte     //
 	isClosed   bool            // 防止closeChan被关闭多次
 	Uid        int64           //全局用唯一ID
 }
@@ -31,7 +30,6 @@ func InitConnection(port int, wsConn *websocket.Conn, remoteAddr string) (*Conne
 		enterPort:  port,
 		wsConnect:  wsConn,
 		closeChan:  make(chan byte, 1),
-		outChan:    make(chan []byte, 1000),
 		isClosed:   false,
 		remoteAddr: "",
 		Uid:        maxUid,
@@ -48,7 +46,6 @@ func InitConnection(port int, wsConn *websocket.Conn, remoteAddr string) (*Conne
 
 	//执行
 	go conn.readLoop()
-	go conn.writeLoop()
 
 	return conn, nil
 }
@@ -80,27 +77,13 @@ func (s *Connection) SendMsg(protocol1 int32, protocol2 int32, pb proto.Message)
 	}
 }
 
-//func (s *Connection) SendMsgByMust(protocol1 int32, protocol2 int32, pb proto.Message) {
-//	if !s.IsClose() {
-//		data, err := proto.Marshal(pb)
-//		if err != nil {
-//			vars.Error(err.Error())
-//		}
-//
-//		protocol := NewEchoPacket(protocol1, protocol2, data)
-//		s.wsConnect.WriteMessage(websocket.BinaryMessage, protocol.Serialize())
-//	}
-//}
-
 func (s *Connection) Write(protocol1 int32, protocol2 int32, buffer []byte) {
 	if s.IsClose() {
 		return
 	}
 	protocol := NewEchoPacket(protocol1, protocol2, buffer)
 	select {
-	case s.outChan <- protocol.Serialize():
-	case <-s.closeChan:
-		//err = errors.New("connection is closeed")
+	case wsOnMessage_.writeChan <- &rwData{data: protocol.Serialize(), conn: s}:
 	}
 }
 
@@ -111,7 +94,6 @@ func (conn *Connection) Close(desc string) {
 	if !conn.isClosed {
 		conn.isClosed = true
 		close(conn.closeChan)
-		close(conn.outChan)
 		callBack_.OnClose(conn)
 		if desc != "" {
 			vars.Info(desc)
@@ -139,34 +121,7 @@ func (conn *Connection) readLoop() {
 		if _, data, err = conn.wsConnect.ReadMessage(); err != nil {
 			return
 		}
-		wsOnMessage_.readChan <- &readData{data, conn}
-	}
-}
-
-func (conn *Connection) writeLoop() {
-	var (
-		data []byte
-		err  error
-	)
-	defer func() {
-		recover()
-		conn.Close("")
-		runtime.Goexit()
-	}()
-	for {
-		//写数据
-		select {
-		case data = <-conn.outChan:
-			if conn.IsClose() {
-				return
-			}
-
-			if err = conn.wsConnect.WriteMessage(websocket.BinaryMessage, data); err != nil {
-				return
-			}
-		case <-conn.closeChan:
-			return
-		}
+		wsOnMessage_.readChan <- &rwData{data, conn}
 	}
 }
 

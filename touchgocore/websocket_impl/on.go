@@ -3,6 +3,7 @@ package impl
 import (
 	"github.com/TouchGoCore/touchgocore/config"
 	"github.com/TouchGoCore/touchgocore/vars"
+	"github.com/gorilla/websocket"
 	"strconv"
 	"strings"
 )
@@ -59,40 +60,18 @@ func (this *defaultCallBack) OnMessage(conn *Connection, data interface{}) bool 
 func (this *defaultCallBack) OnClose(conn *Connection) {
 }
 
-type readData struct {
+type rwData struct {
 	data []byte
 	conn *Connection
 }
 
 //消息处理
 type WsOnMessage struct {
-	readChan chan *readData //
+	readChan  chan *rwData //
+	writeChan chan *rwData //
 }
 
 var wsOnMessage_ *WsOnMessage = nil
-
-func init() {
-	wsOnMessage_ = &WsOnMessage{
-		readChan: make(chan *readData, 100000), //10W读大军
-	}
-	go func() {
-		for {
-			//读数据
-			select {
-			case data := <-wsOnMessage_.readChan:
-				if data.conn.IsClose() {
-					continue
-				}
-
-				//解析操作
-				data1 := &EchoPacket{buff: data.data}
-				if !callBack_.OnMessage(data.conn, data1) {
-					continue
-				}
-			}
-		}
-	}()
-}
 
 var clientmap_ *map[string]*Client = &map[string]*Client{}
 
@@ -124,6 +103,14 @@ func Run() {
 				}
 			}
 		}
+
+		wsOnMessage_ = &WsOnMessage{
+			readChan:  make(chan *rwData, 100000), //10W读大军
+			writeChan: make(chan *rwData, 100000), //10W写大军
+		}
+		go handleloop()
+		go writeloop()
+
 		vars.Info("WS启动完成")
 	}
 	if config.Cfg_.Http != "off" {
@@ -133,5 +120,41 @@ func Run() {
 			HttpListenAndServe(port)
 		}
 		vars.Info("Http启动完成")
+	}
+}
+
+func handleloop() {
+	for {
+		//读数据
+		select {
+		case data := <-wsOnMessage_.readChan:
+			if data.conn.IsClose() {
+				continue
+			}
+
+			//解析操作
+			data1 := &EchoPacket{buff: data.data}
+			if !callBack_.OnMessage(data.conn, data1) {
+				continue
+			}
+		}
+	}
+}
+
+func writeloop() {
+	for {
+		//写数据
+		select {
+		case data := <-wsOnMessage_.writeChan:
+			if data.conn.IsClose() {
+				vars.Error("socket已经关闭")
+				continue
+			}
+
+			if err := data.conn.wsConnect.WriteMessage(websocket.BinaryMessage, data.data); err != nil {
+				vars.Error("发送消息出错:", err)
+				continue
+			}
+		}
 	}
 }

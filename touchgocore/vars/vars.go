@@ -37,7 +37,7 @@ func Run(servername string, level string) {
 			Filename:   servername + ".log",
 			MaxSize:    500, // megabytes
 			MaxBackups: 10,
-			MaxAge:     28, //days
+			MaxAge:     30, //days
 		},
 		os.Stdout,
 	}

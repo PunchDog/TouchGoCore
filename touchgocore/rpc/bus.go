@@ -44,9 +44,9 @@ func createBus(maps map[string]string) {
 		jsonthr.Json.Unmarshal([]byte(cmd.Val()), list)
 	}
 
-	list[config.Cfg_.ListenPort] = &connectData{
+	list[httpserver_.port] = &connectData{
 		Ip:         config.Cfg_.Ip,
-		Port:       config.Cfg_.ListenPort,
+		Port:       httpserver_.port,
 		Num:        0,
 		ServerName: config.ServerName_,
 	}
@@ -70,7 +70,7 @@ func removeBus() {
 	} else {
 		panic("未正确取BusId对应的端口信息")
 	}
-	delete(list, config.Cfg_.ListenPort)
+	delete(list, httpserver_.port)
 	if len(list) == 0 {
 		if cmd := redis.HGet(szbusid, "keylist"); cmd.Err() == nil {
 			var maps1 []string = nil

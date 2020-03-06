@@ -35,7 +35,7 @@ func SendMsgByBurdenMin(protocol1 int, protocol2 int, req interface{}, res inter
 			return
 		}
 		ret := new(string)
-		if err := client.client.Call("DefaultMsg.Register", SQRegister{Ip: config.Cfg_.Ip, Port: config.Cfg_.ListenPort, ServerType: config.Cfg_.ServerType}, ret); err != nil || *ret != "OK" {
+		if err := client.client.Call("DefaultMsg.Register", SQRegister{Ip: config.Cfg_.Ip, Port: int(httpserver_.port), ServerType: config.Cfg_.ServerType}, ret); err != nil || *ret != "OK" {
 			client.client.Close()
 			return 0, &util.Error{ErrMsg: "注册超时，创建连接失败"}
 		}

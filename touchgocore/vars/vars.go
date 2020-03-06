@@ -18,12 +18,14 @@ var (
 )
 
 const (
-	LogLevel_Info = iota
+	LogLevel_Off = iota
+	LogLevel_Info
 	LogLevel_Debug
 	LogLevel_Error
 )
 
 var loglevelmap map[string]int = map[string]int{
+	"off":   LogLevel_Off,
 	"info":  LogLevel_Info,
 	"debug": LogLevel_Debug,
 	"error": LogLevel_Error,

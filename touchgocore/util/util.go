@@ -189,10 +189,6 @@ func CheckPort(port string) (err error) {
 		listener, err := net.ListenTCP("tcp", tcpAddress)
 		if err != nil {
 			time.Sleep(time.Duration(100) * time.Millisecond)
-			if i == 3 {
-				return err
-			}
-			continue
 		} else {
 			listener.Close()
 			break

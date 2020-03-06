@@ -17,6 +17,7 @@ var httpserver_ *HttpServer = &HttpServer{
 
 type HttpServer struct {
 	msgClassMap_ map[string]IRpcCallFunctionClass //需要注册的消息结构体
+	port         int
 }
 
 func (this *HttpServer) run() {
@@ -27,8 +28,17 @@ func (this *HttpServer) run() {
 		rpc.Register(c.RpcFunc())
 	}
 
+	this.port = config.Cfg_.ListenPort
+	//查询可以用的端口
+	for {
+		if util.CheckPort(strconv.FormatInt(int64(this.port), 10)) != nil {
+			this.port++
+		}
+		break
+	}
+
 	//添加监听
-	listener, err := net.Listen("tcp", ":"+strconv.FormatInt(int64(config.Cfg_.ListenPort), 10))
+	listener, err := net.Listen("tcp", ":"+strconv.FormatInt(int64(this.port), 10))
 	if err != nil {
 		vars.Error("ListenTCP error:", err)
 		return

@@ -5,5 +5,10 @@
     "busid":1,
     "ip":"127.0.0.1",
     "servertype":"exec",
-    "init_port":7000
+    "init_port":7000,
+    "ws": "off",
+    "http": "off",
+    "lua": "off",
+    "file": "9090",
+    "loglevel": "info"
 }

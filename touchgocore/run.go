@@ -2,6 +2,7 @@ package touchgocore
 
 import (
 	"github.com/TouchGoCore/touchgocore/config"
+	"github.com/TouchGoCore/touchgocore/fileserver"
 	"github.com/TouchGoCore/touchgocore/lua"
 	"github.com/TouchGoCore/touchgocore/rpc"
 	"github.com/TouchGoCore/touchgocore/time"
@@ -12,6 +13,8 @@ import (
 	"strings"
 	"syscall"
 )
+
+var ExitFunc_ func() = nil
 
 //总体开关
 func Run(serverName string, version string) {
@@ -24,7 +27,6 @@ func Run(serverName string, version string) {
 	//启动默认数据
 	conf := map[string]interface{}{
 		"-b": "./bus.json",
-		"-l": "info",
 	}
 
 	//获取附加数据
@@ -47,7 +49,7 @@ func Run(serverName string, version string) {
 	config.Cfg_.Load(conf["-b"].(string))
 
 	//创建日志文件
-	vars.Run(config.ServerName_, conf["-l"].(string))
+	vars.Run(config.ServerName_, config.Cfg_.LogLevel)
 
 	//启动rpc相关
 	rpc.Run()
@@ -62,6 +64,9 @@ func Run(serverName string, version string) {
 	//启动lua脚本
 	lua.Run()
 
+	//启动文件服务
+	fileserver.Run()
+
 	//启动完成
 	vars.Info("启动附加配置：", conf)
 	vars.Info("touchgocore启动完成")
@@ -70,7 +75,10 @@ func Run(serverName string, version string) {
 		chSig := make(chan os.Signal)
 		signal.Notify(chSig, syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
 		vars.Info("Signal: ", <-chSig)
-		rpc.Stop() //关闭通道
+		rpc.Stop()            //关闭通道
+		if ExitFunc_ != nil { //退出时清理工作
+			ExitFunc_()
+		}
 		os.Exit(-1)
 	}()
 }

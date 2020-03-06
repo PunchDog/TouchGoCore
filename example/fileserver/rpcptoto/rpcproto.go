@@ -21,8 +21,8 @@ func (this *RegisterFunc) RpcFunc() interface{} {
 	return &this.p
 }
 
-//rpc协议对应的主协议号
-func Protocol1() int {
+//主协议号
+func (this *RegisterFunc) Protocol1() int {
 	return 1
 }
 

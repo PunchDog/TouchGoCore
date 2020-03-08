@@ -1,3 +1,0 @@
-[submodule "gluamapper"]
-	path = libs/gluamapper
-	url = https://github.com/yuin/gluamapper.git

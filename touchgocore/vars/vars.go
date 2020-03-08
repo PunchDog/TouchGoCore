@@ -2,7 +2,7 @@ package vars
 
 import (
 	"fmt"
-	"gopkg.in/natefinch/lumberjack.v2"
+	"github.com/natefinch/lumberjack"
 	"io"
 	"log"
 	"os"

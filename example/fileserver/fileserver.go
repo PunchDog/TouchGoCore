@@ -17,4 +17,6 @@ func init() {
 
 func main() {
 	touchgocore.Run(ServerName, Version)
+	chSig := make(chan byte, 1)
+	<-chSig
 }

@@ -10,4 +10,5 @@ git clone https://github.com/json-iterator/go.git json-iterator/go
 git clone https://github.com/mitchellh/mapstructure.git mitchellh/mapstructure
 git clone https://github.com/modern-go/reflect2.git modern-go/reflect2
 git clone https://github.com/modern-go/concurrent.git modern-go/concurrent
+git clone https://github.com/natefinch/lumberjack.git natefinch/lumberjack
 cd TouchGoCore

@@ -1,13 +1,13 @@
 package touchgocore
 
 import (
-	"github.com/TouchGoCore/touchgocore/config"
-	"github.com/TouchGoCore/touchgocore/fileserver"
-	"github.com/TouchGoCore/touchgocore/lua"
-	"github.com/TouchGoCore/touchgocore/rpc"
-	"github.com/TouchGoCore/touchgocore/time"
-	"github.com/TouchGoCore/touchgocore/vars"
-	impl "github.com/TouchGoCore/touchgocore/websocket_impl"
+	"github.com/PunchDog/TouchGoCore/touchgocore/config"
+	"github.com/PunchDog/TouchGoCore/touchgocore/fileserver"
+	"github.com/PunchDog/TouchGoCore/touchgocore/lua"
+	"github.com/PunchDog/TouchGoCore/touchgocore/rpc"
+	"github.com/PunchDog/TouchGoCore/touchgocore/time"
+	"github.com/PunchDog/TouchGoCore/touchgocore/vars"
+	impl "github.com/PunchDog/TouchGoCore/touchgocore/websocket_impl"
 	"os"
 	"os/signal"
 	"syscall"

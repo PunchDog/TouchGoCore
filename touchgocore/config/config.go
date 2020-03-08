@@ -3,13 +3,14 @@ package config
 import (
 	"io/ioutil"
 
-	"github.com/TouchGoCore/touchgocore/db"
-	"github.com/TouchGoCore/touchgocore/jsonthr"
-	"github.com/TouchGoCore/touchgocore/vars"
+	"github.com/PunchDog/TouchGoCore/touchgocore/db"
+	"github.com/PunchDog/TouchGoCore/touchgocore/jsonthr"
+	"github.com/PunchDog/TouchGoCore/touchgocore/vars"
 )
 
 type Cfg struct {
 	db.RedisConfig
+	db.DBConfig
 	BusId      int    `json:"busid"`      //通道ID
 	Ip         string `json:"ip"`         //端口所在IP
 	ListenPort int    `json:"init_port"`  //监听端口

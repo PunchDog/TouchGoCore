@@ -2,8 +2,8 @@ package impl
 
 import (
 	"fmt"
-	"github.com/TouchGoCore/touchgocore/util"
-	"github.com/TouchGoCore/touchgocore/vars"
+	"github.com/PunchDog/TouchGoCore/touchgocore/util"
+	"github.com/PunchDog/TouchGoCore/touchgocore/vars"
 	"github.com/golang/protobuf/proto"
 	"github.com/gorilla/websocket"
 	"net/http"
@@ -43,6 +43,9 @@ func InitConnection(port int, wsConn *websocket.Conn, remoteAddr string) (*Conne
 	}
 
 	vars.Info("%s创建连接成功！", remoteAddr)
+	//连接数+1
+	num, _ := redis_.HGet("wsListen", strconv.Itoa(port)).Int()
+	redis_.HSet("wsListen", port, num+1)
 
 	//执行
 	go conn.readLoop()
@@ -95,6 +98,11 @@ func (conn *Connection) Close(desc string) {
 		conn.isClosed = true
 		close(conn.closeChan)
 		callBack_.OnClose(conn)
+
+		//连接数-1
+		num, _ := redis_.HGet("wsListen", strconv.Itoa(conn.enterPort)).Int()
+		redis_.HSet("wsListen", conn.enterPort, num-1)
+
 		if desc != "" {
 			vars.Info(desc)
 			conn.wsConnect.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(10000, desc))

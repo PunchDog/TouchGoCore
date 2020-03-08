@@ -2,9 +2,9 @@ package rpc
 
 import (
 	"fmt"
-	"github.com/TouchGoCore/touchgocore/config"
-	"github.com/TouchGoCore/touchgocore/util"
-	"github.com/TouchGoCore/touchgocore/vars"
+	"github.com/PunchDog/TouchGoCore/touchgocore/config"
+	"github.com/PunchDog/TouchGoCore/touchgocore/util"
+	"github.com/PunchDog/TouchGoCore/touchgocore/vars"
 	"net"
 	"net/rpc"
 	"strconv"

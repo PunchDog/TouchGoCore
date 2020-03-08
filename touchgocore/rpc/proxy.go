@@ -1,7 +1,7 @@
 package rpc
 
 import (
-	"github.com/TouchGoCore/touchgocore/vars"
+	"github.com/PunchDog/TouchGoCore/touchgocore/vars"
 	"net/rpc"
 	"strconv"
 )

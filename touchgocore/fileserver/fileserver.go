@@ -2,8 +2,8 @@ package fileserver
 
 import (
 	"fmt"
-	"github.com/TouchGoCore/touchgocore/config"
-	"github.com/TouchGoCore/touchgocore/vars"
+	"github.com/PunchDog/TouchGoCore/touchgocore/config"
+	"github.com/PunchDog/TouchGoCore/touchgocore/vars"
 	"html/template"
 	"io"
 	"net/http"

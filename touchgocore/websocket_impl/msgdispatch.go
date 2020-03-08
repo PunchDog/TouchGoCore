@@ -1,6 +1,6 @@
 package impl
 
-import "github.com/TouchGoCore/touchgocore/vars"
+import "github.com/PunchDog/TouchGoCore/touchgocore/vars"
 
 var (
 	SMsgDispatch_ SMsgDispatch

@@ -1,8 +1,8 @@
 package lua
 
 import (
-	"github.com/TouchGoCore/touchgocore/config"
-	"github.com/TouchGoCore/touchgocore/vars"
+	"github.com/PunchDog/TouchGoCore/touchgocore/config"
+	"github.com/PunchDog/TouchGoCore/touchgocore/vars"
 	"log"
 
 	"github.com/yuin/gluamapper"

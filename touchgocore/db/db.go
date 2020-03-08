@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/TouchGoCore/touchgocore/util"
-	"github.com/TouchGoCore/touchgocore/vars"
+	"github.com/PunchDog/TouchGoCore/touchgocore/util"
+	"github.com/PunchDog/TouchGoCore/touchgocore/vars"
 	_ "github.com/go-sql-driver/mysql"
 )
 

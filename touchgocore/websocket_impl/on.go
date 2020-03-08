@@ -1,8 +1,10 @@
 package impl
 
 import (
-	"github.com/TouchGoCore/touchgocore/config"
-	"github.com/TouchGoCore/touchgocore/vars"
+	"github.com/PunchDog/TouchGoCore/touchgocore/config"
+	"github.com/PunchDog/TouchGoCore/touchgocore/db"
+	"github.com/PunchDog/TouchGoCore/touchgocore/util"
+	"github.com/PunchDog/TouchGoCore/touchgocore/vars"
 	"github.com/gorilla/websocket"
 	"strconv"
 	"strings"
@@ -80,6 +82,8 @@ func GetWsClientMap() *map[string]*Client {
 	return clientmap_
 }
 
+var redis_ *db.Redis = nil
+
 //启动ws
 func Run() {
 	if config.Cfg_.Ws == "off" && config.Cfg_.Http == "off" {
@@ -87,13 +91,29 @@ func Run() {
 		return
 	}
 
+	//加载redis
+	redis_, err := db.NewRedis(&config.Cfg_.RedisConfig)
+	if err != nil {
+		panic("加载redis错误:" + err.Error())
+	}
+
 	//查询启动或者连接
 	if config.Cfg_.Ws != "off" {
 		szinfo := strings.Split(config.Cfg_.Ws, "|")
 		for _, c := range szinfo {
 			if c[0] == ':' { //这个是创建连接
-				port, _ := strconv.Atoi(c[1:])
-				WsListenAndServe(port)
+				for {
+					//查询端口占用
+					szPort := c[1:]
+					if util.CheckPort(szPort) != nil {
+						continue
+					}
+					port, _ := strconv.Atoi(szPort)
+					WsListenAndServe(port)
+					//设置服务器连接数
+					redis_.HSet("wsListen", port, 0)
+					break
+				}
 			} else if strings.Index(c, "http") == 0 {
 				client := &Client{}
 				if err := client.Connection1(c); err == nil {

@@ -1,8 +1,8 @@
 package rpcptoto
 
 import (
-	"github.com/TouchGoCore/touchgocore/rpc"
-	"github.com/TouchGoCore/touchgocore/vars"
+	"github.com/PunchDog/TouchGoCore/touchgocore/rpc"
+	"github.com/PunchDog/TouchGoCore/touchgocore/vars"
 )
 
 type RegisterFunc struct {

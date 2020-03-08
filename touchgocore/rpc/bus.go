@@ -1,9 +1,9 @@
 package rpc
 
 import (
-	"github.com/TouchGoCore/touchgocore/config"
-	"github.com/TouchGoCore/touchgocore/db"
-	"github.com/TouchGoCore/touchgocore/jsonthr"
+	"github.com/PunchDog/TouchGoCore/touchgocore/config"
+	"github.com/PunchDog/TouchGoCore/touchgocore/db"
+	"github.com/PunchDog/TouchGoCore/touchgocore/jsonthr"
 	"strconv"
 )
 

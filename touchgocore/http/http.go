@@ -3,7 +3,7 @@ package http
 import (
 	"bytes"
 	"fmt"
-	"github.com/TouchGoCore/touchgocore/jsonthr"
+	"github.com/PunchDog/TouchGoCore/touchgocore/jsonthr"
 	"io"
 	"io/ioutil"
 	"log"

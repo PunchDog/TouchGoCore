@@ -126,10 +126,10 @@ func (this *Redis) Get(key string) *redis.StringCmd {
 	return this.redisClient.Get(key)
 }
 
-func (this *Redis) HSet(key, field string, value interface{}) *redis.IntCmd {
+func (this *Redis) HSet(key string, values ...interface{}) *redis.IntCmd {
 	this.RedisLock(key)
 	defer this.RedisUnLock(key)
-	return this.redisClient.HSet(key, field, value)
+	return this.redisClient.HSet(key, values...)
 }
 
 func (this *Redis) HGet(key, field string) *redis.StringCmd {

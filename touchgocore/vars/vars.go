@@ -48,15 +48,17 @@ func Run(servername string, level string) {
 		//启动日志打印线程
 		lock := sync.Mutex{}
 		for {
-			list := []func(){}
-			lock.Lock()
-			list = append(list, log_.printList...)
-			log_.printList = nil
-			lock.Unlock()
-			for _, fn := range list {
-				fn()
+			select {
+			case <-time.After(time.Microsecond*10):
+				list := []func(){}
+				lock.Lock()
+				list = append(list, log_.printList...)
+				log_.printList = nil
+				lock.Unlock()
+				for _, fn := range list {
+					fn()
+				}
 			}
-			time.Sleep(time.Nanosecond * 10)
 		}
 	}()
 	Info("初始化日志模块完成！")

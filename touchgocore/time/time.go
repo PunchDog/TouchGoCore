@@ -1,7 +1,7 @@
 package time
 
 import (
-	"github.com/TouchGoCore/touchgocore/syncmap"
+	"github.com/PunchDog/TouchGoCore/touchgocore/syncmap"
 	"sync"
 	"time"
 )

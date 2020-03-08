@@ -12,8 +12,8 @@ type DefaultMsg struct {
 
 //代理转发
 func (this *DefaultMsg) Proxy(req SQProxy, res *RetBuffer) error {
-	port, err := SendMsg(req.port, req.protocol1, req.protocol2, ReqBuffer{ReqData: req.data, port: httperver_.port}, res)
-	res.prot = port
+	port, err := SendMsg(req.port, req.protocol1, req.protocol2, ReqBuffer{ReqData: req.data, port: httpserver_.port}, res)
+	res.port = port
 	return err
 }
 

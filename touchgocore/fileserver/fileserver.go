@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"github.com/TouchGoCore/touchgocore/config"
 	"github.com/TouchGoCore/touchgocore/vars"
-	"github.com/glog-master"
 	"html/template"
 	"io"
 	"net/http"
@@ -45,7 +44,7 @@ const (
 
 func Run() {
 	if config.Cfg_.File == "off" {
-		glog.Info("不启动文件服务")
+		vars.Info("不启动文件服务")
 		return
 	}
 

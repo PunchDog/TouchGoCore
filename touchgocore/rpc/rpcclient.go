@@ -62,7 +62,7 @@ func SendMsg(port int, protocol1 int, protocol2 int, req interface{}, res interf
 			if msgKey := getMsgKey(szkey); msgKey != "" {
 				client.keyValue[szkey] = &msgKey
 			} else {
-				err = util.CommonError{ErrorMsg: "获取rpc函数错误：" + szkey}
+				err = &util.Error{ErrMsg: "获取rpc函数错误：" + szkey}
 				return
 			}
 		}

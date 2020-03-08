@@ -10,7 +10,6 @@ import (
 	impl "github.com/TouchGoCore/touchgocore/websocket_impl"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 )
 
@@ -24,20 +23,8 @@ func Run(serverName string, version string) {
 		}
 	}()
 
-	//启动默认数据
-	conf := map[string]interface{}{
-		"-b": "./bus.json",
-	}
-
-	//获取附加数据
-	idx := 0
-	for idx < len(os.Args) {
-		if n := strings.Index(os.Args[idx], "-"); n > -1 {
-			conf[os.Args[idx]] = os.Args[idx+1]
-			idx += 2
-		} else {
-			idx++
-		}
+	if len(os.Args) == 1 {
+		panic("启动参数不足")
 	}
 
 	vars.Info("*********************************************")
@@ -46,7 +33,7 @@ func Run(serverName string, version string) {
 	//加载配置
 	vars.Info("加载核心配置")
 	config.ServerName_ = serverName
-	config.Cfg_.Load(conf["-b"].(string))
+	config.Cfg_.Load(os.Args[1])
 
 	//创建日志文件
 	vars.Run(config.ServerName_, config.Cfg_.LogLevel)
@@ -68,7 +55,6 @@ func Run(serverName string, version string) {
 	fileserver.Run()
 
 	//启动完成
-	vars.Info("启动附加配置：", conf)
 	vars.Info("touchgocore启动完成")
 
 	go func() {

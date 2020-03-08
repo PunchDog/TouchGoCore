@@ -56,7 +56,7 @@ func Run(servername string, level string) {
 			for _, fn := range list {
 				fn()
 			}
-			time.Sleep(time.Millisecond * 10)
+			time.Sleep(time.Nanosecond * 10)
 		}
 	}()
 	Info("初始化日志模块完成！")

@@ -1,7 +1,9 @@
 package touchgocore
 
 import (
+	"fmt"
 	"github.com/PunchDog/TouchGoCore/touchgocore/config"
+	"github.com/PunchDog/TouchGoCore/touchgocore/db"
 	"github.com/PunchDog/TouchGoCore/touchgocore/fileserver"
 	"github.com/PunchDog/TouchGoCore/touchgocore/lua"
 	"github.com/PunchDog/TouchGoCore/touchgocore/rpc"
@@ -15,11 +17,11 @@ import (
 
 var ExitFunc_ func() = nil
 
-//总体开关
+//总体开关,此函数需要放在main的最后
 func Run(serverName string, version string) {
 	defer func() {
 		if err := recover(); err != nil {
-			vars.Error("捕获错误:", err)
+			fmt.Sprintf("捕获错误:", err)
 		}
 	}()
 
@@ -27,16 +29,35 @@ func Run(serverName string, version string) {
 		panic("启动参数不足")
 	}
 
+	config.ServerName_ = serverName
+	config.Cfg_.Load(os.Args[1])
+
 	vars.Info("*********************************************")
 	vars.Info("           系统:[%s]版本:[%s]", serverName, version)
 	vars.Info("*********************************************")
 	//加载配置
 	vars.Info("加载核心配置")
-	config.ServerName_ = serverName
-	config.Cfg_.Load(os.Args[1])
 
 	//创建日志文件
 	vars.Run(config.ServerName_, config.Cfg_.LogLevel)
+
+	//检查redis
+	if config.Cfg_.Redis == nil {
+		panic("加载配置出错，没有redis配置")
+	}
+	if _, err := db.NewRedis(config.Cfg_.Redis); err != nil {
+		panic("加载配置出错，没有redis配置:" + err.Error())
+	}
+	vars.Info("加载redis配置成功")
+
+	//检查DB
+	if config.Cfg_.Db != nil {
+		vars.Info("开启DB功能")
+		if _, err := db.NewDbMysql(config.Cfg_.Db); err != nil {
+			panic("加载配置出错，没有db配置:" + err.Error())
+		}
+	}
+	vars.Info("加载DB数据成功")
 
 	//启动rpc相关
 	rpc.Run()
@@ -57,14 +78,14 @@ func Run(serverName string, version string) {
 	//启动完成
 	vars.Info("touchgocore启动完成")
 
-	go func() {
-		chSig := make(chan os.Signal)
-		signal.Notify(chSig, syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
-		vars.Info("Signal: ", <-chSig)
-		rpc.Stop()            //关闭通道
-		if ExitFunc_ != nil { //退出时清理工作
-			ExitFunc_()
-		}
-		os.Exit(-1)
-	}()
+	//go func() {
+	chSig := make(chan os.Signal)
+	signal.Notify(chSig, syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT, syscall.SIGKILL)
+	vars.Info("Signal: ", <-chSig)
+	rpc.Stop()            //关闭通道
+	if ExitFunc_ != nil { //退出时清理工作
+		ExitFunc_()
+	}
+	os.Exit(-1)
+	//}()
 }

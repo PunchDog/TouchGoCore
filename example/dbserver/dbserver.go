@@ -7,7 +7,7 @@ import (
 )
 
 const (
-	ServerName = "file_server"
+	ServerName = "DBServer"
 	Version    = "1.0"
 )
 

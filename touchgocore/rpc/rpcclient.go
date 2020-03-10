@@ -74,7 +74,7 @@ func SendMsg(port int, protocol1 int, protocol2 int, req interface{}, res interf
 
 func send(protocol1 int, protocol2 int, req interface{}, res interface{}, client *Client) (err error) {
 	szkey := fmt.Sprintf("%d-%d", protocol1, protocol2)
-	redis, err := db.NewRedis(&config.Cfg_.RedisConfig)
+	redis, err := db.NewRedis(config.Cfg_.Redis)
 	if err != nil {
 		panic(err)
 	}

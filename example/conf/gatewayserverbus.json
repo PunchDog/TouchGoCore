@@ -1,7 +1,9 @@
 {
-    "redis_host":"127.0.0.1:6379",
-    "redis_password":"",
-    "redis_db":0,
+    "redis": {
+        "redis_host":"127.0.0.1:6379",
+        "redis_password":"",
+        "redis_db":0
+    },
     "busid":2,
     "servertype":"exec",
     "ip":"127.0.0.1",

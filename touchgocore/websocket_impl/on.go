@@ -92,7 +92,7 @@ func Run() {
 	}
 
 	//加载redis
-	redis_, err := db.NewRedis(&config.Cfg_.RedisConfig)
+	redis_, err := db.NewRedis(config.Cfg_.Redis)
 	if err != nil {
 		panic("加载redis错误:" + err.Error())
 	}

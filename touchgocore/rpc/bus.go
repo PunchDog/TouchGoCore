@@ -18,7 +18,7 @@ type connectData struct {
 //生成通道数据
 func createBus(maps map[string]string) {
 	//1、先把映射关系存到redis里
-	redis, err := db.NewRedis(&config.Cfg_.RedisConfig)
+	redis, err := db.NewRedis(config.Cfg_.Redis)
 	if err != nil {
 		panic(err)
 	}
@@ -57,7 +57,7 @@ func createBus(maps map[string]string) {
 //删除通道数据
 func removeBus() {
 	//1、先把映射关系存到redis里
-	redis, err := db.NewRedis(&config.Cfg_.RedisConfig)
+	redis, err := db.NewRedis(config.Cfg_.Redis)
 	if err != nil {
 		panic(err)
 	}
@@ -91,7 +91,7 @@ func removeBus() {
 //获取一个有效的人少的端口(协议号/当前服务器的BusId)
 func getConnectInfo(szKey string) (ip string, port int, sztype string, keyValue string) {
 	//1、先把映射关系存到redis里
-	redis, err := db.NewRedis(&config.Cfg_.RedisConfig)
+	redis, err := db.NewRedis(config.Cfg_.Redis)
 	if err != nil {
 		panic(err)
 	}
@@ -153,7 +153,7 @@ func getConnectInfo(szKey string) (ip string, port int, sztype string, keyValue 
 
 //获取发送协议
 func getMsgKey(szKey string) string {
-	redis, err := db.NewRedis(&config.Cfg_.RedisConfig)
+	redis, err := db.NewRedis(config.Cfg_.Redis)
 	if err != nil {
 		panic(err)
 	}

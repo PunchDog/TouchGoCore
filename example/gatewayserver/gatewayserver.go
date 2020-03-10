@@ -26,6 +26,4 @@ func main() {
 	//} else {
 	//	vars.Error("消息手法出错：", err)
 	//}
-	chsig := make(chan byte)
-	<-chsig
 }

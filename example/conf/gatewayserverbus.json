@@ -4,7 +4,7 @@
         "redis_password":"",
         "redis_db":0
     },
-    "busid":2,
+    "busid":"gateway",
     "servertype":"exec",
     "ip":"127.0.0.1",
     "init_port":7000,

@@ -4,7 +4,7 @@
         "redis_password":"",
         "redis_db":0
     },
-    "busid":1,
+    "busid":"fileserver",
     "ip":"127.0.0.1",
     "servertype":"exec",
     "init_port":7000,

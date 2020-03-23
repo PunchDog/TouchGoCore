@@ -71,7 +71,8 @@ func (this *HttpServer) setBus() {
 //注册服务器监听函数
 func AddServerListen(class IRpcCallFunctionClass) {
 	//插入一个准备注册的消息协议函数
-	httpserver_.msgClassMap_[util.GetClassName(class.RpcFunc())] = class
+	name, _ := util.GetClassName(class.RpcFunc())
+	httpserver_.msgClassMap_[name] = class
 }
 
 //启动监控(协议一级协议,通道ID)

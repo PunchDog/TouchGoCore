@@ -28,8 +28,15 @@ type DBConfigModel struct {
 var MysqlDbMap map[string]*sql.DB
 
 type Condition struct {
-	whereSql string
-	args     []interface{}
+	tableName string //表名
+	cacheKey  string //缓存键值，用于方便数据库缓存淘汰机制
+	order     string //排序设置
+	limit     string
+	group     string
+	whereSql  string
+	args      []interface{}
+	filter    bool
+	values    *map[string](interface{}) //数据对象
 }
 
 // 设置搜索条件
@@ -37,6 +44,8 @@ type Condition struct {
 // ex  判断表达式 可以是 = , >, >=, <, <=, !=
 // val 值, 如果是int或者string则表示等于; 如果是[]int 或者 []string 则表示in查询 其他类型不支持(如果ex不等于"=" 那么仅仅支持int 和 string)
 func (this *Condition) SetFilterEx(key string, ex string, val interface{}) error {
+	this.filter = true
+
 	sql := ""
 	if strings.Index(key, "`") != -1 || strings.Index(key, ".") != -1 {
 		sql += key
@@ -134,6 +143,10 @@ func (this *Condition) SetFilter(key string, val interface{}) *Condition {
 
 func (this *Condition) SetFilterOr(conditions ...*Condition) {
 	for _, condition := range conditions {
+		if this.tableName != condition.tableName && condition.tableName != "" && this.tableName != "" {
+			vars.Error("不是操作同一张表，不能进行条件合并")
+			continue
+		}
 		sql, args := condition.getSql()
 		if len(this.whereSql) == 0 {
 			this.whereSql = "(" + sql + ")"
@@ -148,6 +161,67 @@ func (this *Condition) getSql() (string, []interface{}) {
 	return this.whereSql, this.args
 }
 
+/**
+ * 设置表名
+ */
+func (this *Condition) SetTableName(tableName string) *Condition {
+	if strings.Index(tableName, "`") == -1 && strings.Index(tableName, ".") == -1 && strings.Index(tableName, " ") == -1 {
+		tableName = "`" + tableName + "`"
+	}
+	this.tableName = tableName
+	return this
+}
+
+func (this *Condition) SetCacheKey(cacheKey string) *Condition {
+	this.cacheKey = cacheKey
+	return this
+}
+
+//排序顺序
+func (this *Condition) Order(order string) *Condition {
+	this.order = order
+	return this
+}
+
+//数据分页
+func (this *Condition) Limit(limit ...int) *Condition {
+	tmp := make([]string, len(limit))
+	for i, v := range limit {
+		tmp[i] = strconv.Itoa(v)
+	}
+	this.limit = strings.Join(tmp, ",")
+	return this
+}
+
+//数据分组
+func (this *Condition) Group(field string) *Condition {
+	this.group = field
+	return this
+}
+
+/**
+ * 设置数据对象(需要查询的键值或者更新插入的键值key/value,如果是查询，value不填)
+ */
+func (this *Condition) SetDataMap(data *map[string](interface{})) *Condition {
+	this.values = data
+	return this
+}
+
+/**
+ * 设置数据对象(需要查询的键值或者更新插入的键值key/value,如果是查询，value不填)
+ */
+func (this *Condition) SetDataMapByOne(key string, value interface{}) *Condition {
+	if this.values == nil {
+		this.values = &map[string](interface{}){}
+	}
+	(*this.values)[key] = value
+	return this
+}
+
+/*************************************************************************************************************************************************************************/
+/*************************************************************************************************************************************************************************/
+/*************************************************************************************************************************************************************************/
+
 //返回结果
 type Rows struct {
 	row       *map[string]interface{}
@@ -157,15 +231,15 @@ type Rows struct {
 
 func (this *Rows) Next() error {
 	if this.rows == nil {
-		return &DatabaseError{"返回多个数据才能使用"}
+		return &util.Error{ErrMsg: "返回多个数据才能使用"}
 	}
 	if len(*this.rows) == 0 {
-		return &DatabaseError{"没有查询到数据"}
+		return &util.Error{ErrMsg: "没有查询到数据"}
 	}
 	if this.row != nil {
 		this.row_index++
 		if this.row_index >= len(*this.rows) {
-			return &DatabaseError{"已经是结果最后"}
+			return &util.Error{ErrMsg: "已经是结果最后"}
 		}
 	}
 	this.row = &(*this.rows)[this.row_index]
@@ -207,6 +281,10 @@ func (this *Rows) GetString(key string) string {
 	return ""
 }
 
+/*************************************************************************************************************************************************************************/
+/*************************************************************************************************************************************************************************/
+/*************************************************************************************************************************************************************************/
+
 type DBResult struct {
 	values []map[string]interface{}
 }
@@ -223,25 +301,22 @@ func (this *DBResult) GetAll() *Rows {
 	return &Rows{rows: &this.values}
 }
 
+/*************************************************************************************************************************************************************************/
+/*************************************************************************************************************************************************************************/
+/*************************************************************************************************************************************************************************/
+
 type DbMysql struct {
-	db        *sql.DB                   // 数据库连接对象
-	config    *DBConfigModel            //
-	values    *map[string](interface{}) //数据对象
-	condition *Condition                //条件
-	Result    *DBResult                 //返回结果
-	tableName string                    //表名
-	order     string                    //排序设置
-	limit     string
-	group     string
+	db        *sql.DB        // 数据库连接对象
+	config    *DBConfigModel //
+	condition *Condition     //条件
+	Result    *DBResult      //返回结果
 }
 
 func NewDbMysql(config *DBConfig) (*DbMysql, error) {
 	this := new(DbMysql)
 	configModel := &DBConfigModel{config.Host, config.Username, config.Password, config.Name, 0, config.MaxIdleConns, config.MaxOpenConns}
 	this.config = configModel
-	this.values = nil
 	this.condition = nil
-	this.order = ""
 	return this, this.connect()
 }
 
@@ -317,63 +392,10 @@ func (this *DbMysql) Close() {
 }
 
 /**
- * 设置表名
- */
-func (this *DbMysql) SetTableName(tableName string) *DbMysql {
-	if strings.Index(tableName, "`") == -1 && strings.Index(tableName, ".") == -1 && strings.Index(tableName, " ") == -1 {
-		tableName = "`" + tableName + "`"
-	}
-	this.tableName = tableName
-	this.values = nil
-	return this
-}
-
-/**
- * 设置数据对象(需要查询的键值或者更新插入的键值key/value,如果是查询，value不填)
- */
-func (this *DbMysql) SetDataMap(data *map[string](interface{})) *DbMysql {
-	this.values = data
-	return this
-}
-
-/**
- * 设置数据对象(需要查询的键值或者更新插入的键值key/value,如果是查询，value不填)
- */
-func (this *DbMysql) SetDataMapByOne(key string, value interface{}) *DbMysql {
-	if this.values == nil {
-		this.values = &map[string](interface{}){}
-	}
-	(*this.values)[key] = value
-	return this
-}
-
-/**
  * 设置查询条件
  */
 func (this *DbMysql) SetCondition(condition *Condition) *DbMysql {
 	this.condition = condition
-	return this
-}
-
-//排序顺序
-func (this *DbMysql) Order(order string) *DbMysql {
-	this.order = order
-	return this
-}
-
-//数据分页
-func (this *DbMysql) Limit(limit ...int) *DbMysql {
-	tmp := make([]string, len(limit))
-	for i, v := range limit {
-		tmp[i] = strconv.Itoa(v)
-	}
-	this.limit = strings.Join(tmp, ",")
-	return this
-}
-
-//数据分组
-func (this *DbMysql) Group(field string) *DbMysql {
-	this.group = field
 	return this
 }
 
@@ -388,73 +410,79 @@ const (
 
 //获取查询语句
 func (this *DbMysql) getQueryStatement(etype eQueryType, rowname string) string {
-	strSql := "select * from " + this.tableName
+	if this.condition == nil {
+		panic("没有设置条件，不能查询数据库")
+	}
+	strSql := "select * from " + this.condition.tableName
 	if etype == eQueryType_Normarl {
-		if this.values != nil {
+		if this.condition.values != nil {
 			keys := []string{}
-			for key, _ := range *this.values {
+			for key, _ := range *this.condition.values {
 				keys = append(keys, key)
 			}
-			strSql = "select " + strings.Join(keys, ",") + " from " + this.tableName
+			strSql = "select " + strings.Join(keys, ",") + " from " + this.condition.tableName
 		}
 	} else if etype == eQueryType_Count {
-		strSql = "select count(*) from " + this.tableName
+		strSql = "select count(*) from " + this.condition.tableName
 	} else if etype == eQueryType_Sum {
-		strSql = "select sum(" + rowname + ") from " + this.tableName
+		strSql = "select sum(" + rowname + ") from " + this.condition.tableName
 	} else if etype == eQueryType_Max {
-		strSql = "select max(" + rowname + ") from " + this.tableName
+		strSql = "select max(" + rowname + ") from " + this.condition.tableName
 	}
 
 	var args []interface{}
-	if this.condition != nil {
+	if this.condition.filter {
 		var wheresql string
 		wheresql, args = this.condition.getSql()
 		strSql += " where " + wheresql
 	}
 
-	if this.group != "" {
-		strSql += " group by " + this.group
+	if this.condition.group != "" {
+		strSql += " group by " + this.condition.group
 	}
 
-	if this.order != "" {
-		strSql += " order by " + this.order
+	if this.condition.order != "" {
+		strSql += " order by " + this.condition.order
 	}
-	if this.limit != "" {
-		strSql += " limit " + this.limit
+	if this.condition.limit != "" {
+		strSql += " limit " + this.condition.limit
 	}
 
 	return util.Sprintf(strSql, args...)
 }
 
-//查询
-func (this *DbMysql) Query() string {
-	return this.getQueryStatement(eQueryType_Normarl, "")
+//查询数据
+func (this *DbMysql) Query() (*DBResult, error) {
+	return this.queryExec(this.getQueryStatement(eQueryType_Normarl, ""))
 }
 
-func (this *DbMysql) QueryCount() string {
-	return this.getQueryStatement(eQueryType_Count, "")
+//查询条数
+func (this *DbMysql) QueryCount() (*DBResult, error) {
+	return this.queryExec(this.getQueryStatement(eQueryType_Count, ""))
 }
 
-func (this *DbMysql) QuerySum(rowname string) string {
-	return this.getQueryStatement(eQueryType_Sum, rowname)
+//查询和
+func (this *DbMysql) QuerySum(rowname string) (*DBResult, error) {
+	return this.queryExec(this.getQueryStatement(eQueryType_Sum, rowname))
 }
 
-func (this *DbMysql) QueryMax(rowname string) string {
-	return this.getQueryStatement(eQueryType_Max, rowname)
+//查询最大值
+func (this *DbMysql) QueryMax(rowname string) (*DBResult, error) {
+	return this.queryExec(this.getQueryStatement(eQueryType_Max, rowname))
 }
 
-func (this *DbMysql) QueryExec(strSql string) (*DBResult, error) {
+func (this *DbMysql) queryExec(strSql string) (*DBResult, error) {
 	rows, err := this.db.Query(strSql)
 
 	if err != nil {
 		vars.Error(err.Error())
-		return nil, &DatabaseError{"查询语句出错"}
+		return nil, &util.Error{ErrMsg: "查询语句出错"}
 	}
 	defer rows.Close()
 	cloumns, err := rows.Columns()
 	if err != nil {
 		vars.Error(err.Error())
-		return nil, &DatabaseError{"获取关键字出错"}
+		return nil, &util.Error{ErrMsg: "获取关键字出错"}
 	}
 
 	values := make([]sql.RawBytes, len(cloumns))
@@ -483,14 +511,17 @@ func (this *DbMysql) QueryExec(strSql string) (*DBResult, error) {
 }
 
 //添加
-func (this *DbMysql) Insert() string {
-	if this.values == nil {
-		return "没有要插入的数据"
+func (this *DbMysql) Insert() error {
+	if this.condition == nil {
+		panic("没有设置条件，不能操作数据库")
+	}
+	if this.condition.values == nil {
+		panic("没有要插入的数据")
 	}
 	fields := []string{}
 	values := []string{}
 	exeArgs := []interface{}{}
-	for key, val := range *this.values {
+	for key, val := range *this.condition.values {
 		fields = append(fields, key)
 		switch val.(type) {
 		case string:
@@ -500,19 +531,22 @@ func (this *DbMysql) Insert() string {
 		}
 		exeArgs = append(exeArgs, val)
 	}
-	sql := "insert into " + this.tableName + " (`" + strings.Join(fields, "`,`") + "`) values (" + strings.Join(values, ",") + ")"
-	return util.Sprintf(sql, exeArgs...)
+	sql := "insert into " + this.condition.tableName + " (`" + strings.Join(fields, "`,`") + "`) values (" + strings.Join(values, ",") + ")"
+	return this.exec(util.Sprintf(sql, exeArgs...))
 }
 
 //更新
-func (this *DbMysql) Update() string {
-	if this.values == nil {
-		return "没有要修改的数据"
+func (this *DbMysql) Update() error {
+	if this.condition == nil {
+		panic("没有设置条件，不能操作数据库")
 	}
-	strsql := "update " + this.tableName + " set "
+	if this.condition.values == nil {
+		panic("没有要修改的数据")
+	}
+	strsql := "update " + this.condition.tableName + " set "
 	idx := 0
 	var args []interface{}
-	for key, val := range *this.values {
+	for key, val := range *this.condition.values {
 		if idx != 0 {
 			strsql += ","
 		}
@@ -526,27 +560,28 @@ func (this *DbMysql) Update() string {
 		idx++
 	}
 
-	if this.condition != nil {
+	if this.condition.filter {
 		wheresql, args1 := this.condition.getSql()
 		strsql += " where " + wheresql
 		args = append(args, args1...)
 	}
 
-	return util.Sprintf(strsql, args...)
+	return this.exec(util.Sprintf(strsql, args...))
 }
 
 //删除
-func (this *DbMysql) Del() string {
+func (this *DbMysql) Del() error {
 	if this.condition == nil {
-		return "没有删除条件"
+		panic("没有删除条件")
 	}
 	wheresql, args := this.condition.getSql()
-	sql := "delete from " + this.tableName + " where " + wheresql
-	return util.Sprintf(sql, args...)
+	sql := "delete from " + this.condition.tableName + " where " + wheresql
+	return this.exec(util.Sprintf(sql, args...))
+
 }
 
 //执行
-func (this *DbMysql) Exec(strsql string, args ...interface{}) error {
+func (this *DbMysql) exec(strsql string, args ...interface{}) error {
 	_, err := this.db.Exec(strsql, args...)
 	if err != nil {
 		return err

@@ -4,7 +4,6 @@ import (
 	"github.com/PunchDog/TouchGoCore/touchgocore/config"
 	"github.com/PunchDog/TouchGoCore/touchgocore/db"
 	"github.com/PunchDog/TouchGoCore/touchgocore/jsonthr"
-	"strconv"
 )
 
 //连接信息
@@ -23,24 +22,23 @@ func createBus(maps map[string]string) {
 		panic(err)
 	}
 
-	szbusid := strconv.FormatInt(int64(config.Cfg_.BusId), 10)
 	var maps1 []string = nil
 	//先映射函数找busid
 	for szkey, val := range maps {
-		redis.HSet(szbusid, szkey, val)
-		redis.HSet(szkey, "BusId", szbusid)
+		redis.HSet(config.Cfg_.BusId, szkey, val)
+		redis.HSet(szkey, "BusId", config.Cfg_.BusId)
 		redis.HSet(szkey, "ProtocolServerType", config.Cfg_.ServerType)
 		redis.HSet(szkey, "ServerName", config.ServerName_)
 		maps1 = append(maps1, szkey)
 	}
 	//busid对应的消息列表
 	if d, err := jsonthr.Json.Marshal(maps1); err == nil {
-		redis.HSet(szbusid, "keylist", string(d))
+		redis.HSet(config.Cfg_.BusId, "keylist", string(d))
 	}
 
 	//映射连接信息
 	list := map[int]*connectData{}
-	if cmd := redis.HGet(szbusid, config.Cfg_.ServerType); cmd.Err() == nil {
+	if cmd := redis.HGet(config.Cfg_.BusId, config.Cfg_.ServerType); cmd.Err() == nil {
 		jsonthr.Json.Unmarshal([]byte(cmd.Val()), list)
 	}
 
@@ -51,7 +49,7 @@ func createBus(maps map[string]string) {
 		ServerName: config.ServerName_,
 	}
 	d, _ := jsonthr.Json.Marshal(list)
-	redis.HSet(szbusid, config.Cfg_.ServerType, string(d))
+	redis.HSet(config.Cfg_.BusId, config.Cfg_.ServerType, string(d))
 }
 
 //删除通道数据
@@ -62,29 +60,27 @@ func removeBus() {
 		panic(err)
 	}
 
-	szbusid := strconv.FormatInt(int64(config.Cfg_.BusId), 10)
-
 	list := map[int]*connectData{}
-	if cmd := redis.HGet(szbusid, config.Cfg_.ServerType); cmd.Err() == nil {
+	if cmd := redis.HGet(config.Cfg_.BusId, config.Cfg_.ServerType); cmd.Err() == nil {
 		jsonthr.Json.Unmarshal([]byte(cmd.Val()), list)
 	} else {
 		panic("未正确取BusId对应的端口信息")
 	}
 	delete(list, httpserver_.port)
 	if len(list) == 0 {
-		if cmd := redis.HGet(szbusid, "keylist"); cmd.Err() == nil {
+		if cmd := redis.HGet(config.Cfg_.BusId, "keylist"); cmd.Err() == nil {
 			var maps1 []string = nil
 			jsonthr.Json.Unmarshal([]byte(cmd.Val()), maps1)
 			for _, szkey := range maps1 {
 				redis.Del(szkey)
 			}
-			redis.Del(szbusid)
+			redis.Del(config.Cfg_.BusId)
 		} else {
 			panic("未正确读取BusId对应协议列表:" + cmd.Err().Error())
 		}
 	} else {
 		d, _ := jsonthr.Json.Marshal(list)
-		redis.HSet(szbusid, config.Cfg_.ServerType, string(d))
+		redis.HSet(config.Cfg_.BusId, config.Cfg_.ServerType, string(d))
 	}
 }
 
@@ -101,7 +97,7 @@ func getConnectInfo(szKey string) (ip string, port int, sztype string, keyValue 
 		//查询exec和dll列表
 		//busid不同，取exec列表ip:port,真实服务器类型；budis相同，取与自身真实服务器类型相反的类型列表
 		list := map[int]*connectData{}
-		if szbusid != strconv.FormatInt((int64(config.Cfg_.BusId)), 10) || config.Cfg_.ServerType == "dll" {
+		if szbusid != config.Cfg_.BusId || config.Cfg_.ServerType == "dll" {
 			if jsonthr.Json.Unmarshal([]byte(redis.HGet(szbusid, "exec").Val()), &list) == nil {
 				num := 0
 				//查询一个合适的连接信息

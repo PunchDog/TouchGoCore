@@ -56,8 +56,9 @@ func Run(serverName string, version string) {
 		if _, err := db.NewDbMysql(config.Cfg_.Db); err != nil {
 			panic("加载配置出错，没有db配置:" + err.Error())
 		}
+		db.Run()
+		vars.Info("加载DB数据成功")
 	}
-	vars.Info("加载DB数据成功")
 
 	//启动rpc相关
 	rpc.Run()

@@ -17,11 +17,3 @@ type RedisConfig struct {
 	Password string `json:"redis_password"` //用户密码
 	Db       int    `json:"redis_db"`       //库编号
 }
-
-type DatabaseError struct {
-	strErr string
-}
-
-func (this *DatabaseError) Error() string {
-	return this.strErr
-}

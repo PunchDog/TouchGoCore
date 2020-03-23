@@ -11,7 +11,7 @@ import (
 type Cfg struct {
 	Redis      *db.RedisConfig `json:"redis"`
 	Db         *db.DBConfig    `json:"db"`
-	BusId      int             `json:"busid"`      //通道ID
+	BusId      string          `json:"busid"`      //通道ID
 	Ip         string          `json:"ip"`         //端口所在IP
 	ListenPort int             `json:"init_port"`  //监听端口
 	ServerType string          `json:"servertype"` //服务器注册类型：exec|dll，两种注册类型

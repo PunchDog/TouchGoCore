@@ -5,14 +5,14 @@
         "redis_db":0
     },
     "db":{
-        "db_host": "",
-        "db_username": "",
-        "db_password": "",
-        "db_name": "",
-        "db_max_idle_conns": 0,
-        "db_max_open_conns": 0
+        "db_host": "121.36.15.181:3306",
+        "db_username": "root",
+        "db_password": "123789abcA",
+        "db_name": "neiwangpoker",
+        "db_max_idle_conns": 100,
+        "db_max_open_conns": 500
     },
-    "busid":3,
+    "busid":"dbserver",
     "ip":"127.0.0.1",
     "servertype":"exec",
     "init_port":7000,

@@ -2,6 +2,7 @@ package db
 
 import (
 	"fmt"
+	"github.com/PunchDog/TouchGoCore/touchgocore/util"
 	"strconv"
 	"sync"
 	"time"
@@ -18,9 +19,9 @@ type RedisConfigModel struct {
 }
 
 type Redis struct {
-	redisClient  *redis.Client
-	redisLockCnt *sync.Map
-	config       *RedisConfigModel
+	redisClient *redis.Client
+	LockCnt     *sync.Map
+	config      *RedisConfigModel
 }
 
 func NewRedis(config *RedisConfig) (*Redis, error) {
@@ -31,7 +32,7 @@ func NewRedis(config *RedisConfig) (*Redis, error) {
 }
 
 func (this *Redis) connect() error {
-	this.redisLockCnt = &sync.Map{}
+	this.LockCnt = &sync.Map{}
 	str := this.config.Host + "-" + strconv.Itoa(this.config.Db) + "-" + this.config.Password
 	if this.connectOnly(str) {
 		// 如果同事还有其他协程创建连接成功了
@@ -66,38 +67,28 @@ func (this *Redis) connectOnly(dataSourceName string) bool {
 }
 
 //redis锁
-func (this *Redis) RedisLock(lockkey string) {
-	//if val, ok := this.redisLockCnt.LoadOrStore(lockkey, int32(1)); ok {
-	//	this.redisLockCnt.Store(lockkey, val.(int32)+1)
-	//}
-	//
-	//for {
-	//	select {
-	//	case <-time.After(time.Nanosecond * 10):
-	//		fields, err := this.redisClient.HGet(lockkey, "lock").Result()
-	//		if err != nil {
-	//			break
-	//		}
-	//		if fields == "unlock" {
-	//			break
-	//		}
-	//	}
-	//}
-	//this.redisClient.HSet(lockkey, "lock", "lock")
+func (this *Redis) Lock(lockkey string) {
+	for {
+		select {
+		case <-time.After(time.Nanosecond * 10):
+			//正常加锁
+			if success, _ := this.redisClient.SetNX("lock-"+lockkey, util.GetNowtimeMD5_TouchGoCore(), 10*time.Second).Result(); success {
+				return
+			} else if this.redisClient.TTL("lock-"+lockkey).Val() == -1 { //-2:失效；-1：无过期；
+				this.redisClient.Expire("lock-"+lockkey, 10*time.Second)
+			}
+		}
+	}
 }
 
 //redis解锁
-func (this *Redis) RedisUnLock(lockkey string) {
-	//this.redisClient.HSet(lockkey, "lock", "unlock")
-	//if val, ok := this.redisLockCnt.LoadOrStore(lockkey, int32(0)); ok && val.(int32) > 0 {
-	//	cnt := val.(int32) - 1
-	//	this.redisLockCnt.Store(lockkey, cnt)
-	//}
+func (this *Redis) UnLock(lockkey string) {
+	this.redisClient.Del("lock-" + lockkey)
 }
 
-func (this *Redis) RedisUnLockAndDo(lockkey string, fn func()) {
+func (this *Redis) UnLockAndDo(lockkey string, fn func()) {
 	for {
-		val, ok := this.redisLockCnt.Load(lockkey)
+		val, ok := this.LockCnt.Load(lockkey)
 		if (ok && val.(int32) <= 0) || !ok {
 			fn()
 			return
@@ -115,37 +106,37 @@ func (this *Redis) Close() {
 }
 
 func (this *Redis) Set(key string, value interface{}, expiration time.Duration) *redis.StatusCmd {
-	this.RedisLock(key)
-	defer this.RedisUnLock(key)
+	this.Lock(key)
+	defer this.UnLock(key)
 	return this.redisClient.Set(key, value, expiration)
 }
 
 func (this *Redis) Get(key string) *redis.StringCmd {
-	this.RedisLock(key)
-	defer this.RedisUnLock(key)
+	this.Lock(key)
+	defer this.UnLock(key)
 	return this.redisClient.Get(key)
 }
 
 func (this *Redis) HSet(key string, values ...interface{}) *redis.IntCmd {
-	this.RedisLock(key)
-	defer this.RedisUnLock(key)
+	this.Lock(key)
+	defer this.UnLock(key)
 	return this.redisClient.HSet(key, values...)
 }
 
 func (this *Redis) HGet(key, field string) *redis.StringCmd {
-	this.RedisLock(key)
-	defer this.RedisUnLock(key)
+	this.Lock(key)
+	defer this.UnLock(key)
 	return this.redisClient.HGet(key, field)
 }
 
 func (this *Redis) HDel(key string, fields ...string) *redis.IntCmd {
-	this.RedisLock(key)
-	defer this.RedisUnLock(key)
+	this.Lock(key)
+	defer this.UnLock(key)
 	return this.redisClient.HDel(key, fields...)
 }
 
 func (this *Redis) Del(key ...string) *redis.IntCmd {
-	this.RedisLock("default")
-	defer this.RedisUnLock("default")
+	this.Lock("default")
+	defer this.UnLock("default")
 	return this.redisClient.Del(key...)
 }

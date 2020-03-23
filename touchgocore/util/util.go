@@ -170,12 +170,18 @@ func GetNowtimeMD5_TouchGoCore() string {
 }
 
 //获取类名
-func GetClassName(p interface{}) string {
+func GetClassName(p interface{}) (string, []string) {
 	//神奇的获取类名
 	cla := p
+	tpy := reflect.TypeOf(p)
 	rcvr := reflect.ValueOf(cla)
 	sname := reflect.Indirect(rcvr).Type().Name()
-	return sname
+	methods := []string{}
+	for m := 0; m < tpy.NumMethod(); m++ {
+		method := tpy.Method(m)
+		methods = append(methods, method.Name)
+	}
+	return sname, methods
 }
 
 //检查端口占用

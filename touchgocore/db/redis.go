@@ -2,6 +2,7 @@ package db
 
 import (
 	"fmt"
+	"github.com/PunchDog/TouchGoCore/touchgocore/config"
 	"github.com/PunchDog/TouchGoCore/touchgocore/util"
 	"strconv"
 	"sync"
@@ -24,7 +25,7 @@ type Redis struct {
 	config      *RedisConfigModel
 }
 
-func NewRedis(config *RedisConfig) (*Redis, error) {
+func NewRedis(config *config.RedisConfig) (*Redis, error) {
 	this := new(Redis)
 	configModel := &RedisConfigModel{config.Host, config.Db, config.Password}
 	this.config = configModel

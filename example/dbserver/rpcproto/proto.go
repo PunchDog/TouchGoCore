@@ -1,6 +1,7 @@
 package rpcproto
 
 import (
+	"github.com/PunchDog/TouchGoCore/touchgocore/db"
 	"github.com/PunchDog/TouchGoCore/touchgocore/rpc"
 )
 
@@ -29,12 +30,21 @@ func (this *RegisterFunc) Protocol1() int {
 type DBProto struct {
 }
 
+func operate(req rpc.ReqBuffer, res *rpc.RetBuffer) {
+	obj := new(db.DbOperateObj)
+	obj.SetCondition(req.ReqData.(*db.Condition))
+	ret := db.AddDbEvent(obj)
+	res.RetData = <-ret
+}
+
 //查询数据
 func (this *DBProto) Query(req rpc.ReqBuffer, res *rpc.RetBuffer) error {
+	operate(req, res)
 	return nil
 }
 
 //写数据
 func (this *DBProto) Write(req rpc.ReqBuffer, res *rpc.RetBuffer) error {
+	operate(req, res)
 	return nil
 }

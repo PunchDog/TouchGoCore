@@ -1,4 +1,4 @@
-package db
+package config
 
 /*
 数据库配置结构体

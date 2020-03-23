@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"fmt"
+	"github.com/PunchDog/TouchGoCore/touchgocore/config"
 	"strconv"
 	"strings"
 	"sync"
@@ -27,10 +28,21 @@ type DBConfigModel struct {
 
 var MysqlDbMap map[string]*sql.DB
 
+//操作枚举
+type EDBType int
+
+const (
+	EDBType_Query EDBType = iota + 1
+	EDBType_Insert
+	EDBType_Update
+	EDBType_Delete
+)
+
 type Condition struct {
-	tableName string //表名
-	cacheKey  string //缓存键值，用于方便数据库缓存淘汰机制
-	order     string //排序设置
+	types     EDBType //操作枚举
+	tableName string  //表名
+	cacheKey  string  //缓存键值，用于方便数据库缓存淘汰机制
+	order     string  //排序设置
 	limit     string
 	group     string
 	whereSql  string
@@ -312,7 +324,7 @@ type DbMysql struct {
 	Result    *DBResult      //返回结果
 }
 
-func NewDbMysql(config *DBConfig) (*DbMysql, error) {
+func NewDbMysql(config *config.DBConfig) (*DbMysql, error) {
 	this := new(DbMysql)
 	configModel := &DBConfigModel{config.Host, config.Username, config.Password, config.Name, 0, config.MaxIdleConns, config.MaxOpenConns}
 	this.config = configModel

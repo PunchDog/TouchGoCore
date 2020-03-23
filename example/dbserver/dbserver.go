@@ -1,7 +1,7 @@
 package main
 
 import (
-	"github.com/PunchDog/TouchGoCore/example/fileserver/rpcptoto"
+	"github.com/PunchDog/TouchGoCore/example/dbserver/rpcproto"
 	"github.com/PunchDog/TouchGoCore/touchgocore"
 	"github.com/PunchDog/TouchGoCore/touchgocore/rpc"
 )
@@ -12,7 +12,7 @@ const (
 )
 
 func init() {
-	rpc.AddServerListen(new(rpcptoto.RegisterFunc))
+	rpc.AddServerListen(new(rpcproto.RegisterFunc))
 }
 
 func main() {

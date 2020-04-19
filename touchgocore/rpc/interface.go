@@ -24,11 +24,12 @@ type SQRegister struct {
 }
 
 type ReqBuffer struct {
-	port    int         //要转发的端口号
+	Port    int         //要转发的端口号
+	Mark    interface{} //标记位，用于服务器内操作，通常是玩家ID
 	ReqData interface{} //数据
 }
 
 type RetBuffer struct {
-	port    int         //要转发的端口号
+	Port    int         //要转发的端口号
 	RetData interface{} //数据
 }

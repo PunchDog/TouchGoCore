@@ -23,15 +23,15 @@ var rpcClientMap_ *syncmap.Map = &syncmap.Map{}
 //发送消息(负载低服务器)
 func SendMsgByBurdenMin(protocol1 int, protocol2 int, req interface{}, res interface{}) (port1 int, err error) {
 	szkey := fmt.Sprintf("%d-%d", protocol1, protocol2)
-	ip, port, types, keyValue := getConnectInfo(szkey)
-	if port == 0 {
+	conndata, types, keyValue := getConnectInfo(szkey)
+	if conndata == nil {
 		err = &util.Error{ErrMsg: "查询Bus映射端口出错，没有对应的bus数据"}
 		return
 	}
 	var client *Client = nil
-	if c, ok := rpcClientMap_.Load(port); !ok {
+	if c, ok := rpcClientMap_.Load(conndata.Port); !ok {
 		client = &Client{serverType: types, keyValue: make(map[string]*string)}
-		client.client, err = rpc.Dial("tcp", ip+":"+strconv.FormatInt(int64(port), 10))
+		client.client, err = rpc.Dial("tcp", conndata.Ip+":"+strconv.FormatInt(int64(conndata.Port), 10))
 		if err != nil {
 			return
 		}
@@ -40,13 +40,13 @@ func SendMsgByBurdenMin(protocol1 int, protocol2 int, req interface{}, res inter
 			client.client.Close()
 			return 0, &util.Error{ErrMsg: "注册超时，创建连接失败"}
 		}
-		rpcClientMap_.Store(port, client) //注册成功的，放入map
+		rpcClientMap_.Store(conndata.Port, client) //注册成功的，放入map
 	} else {
 		client = c.(*Client)
 	}
 	client.keyValue[szkey] = new(string)
 	*client.keyValue[szkey] = keyValue
-	port1 = port
+	port1 = conndata.Port
 
 	err = send(protocol1, protocol2, req, res, client)
 	return

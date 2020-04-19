@@ -85,7 +85,7 @@ func removeBus() {
 }
 
 //获取一个有效的人少的端口(协议号/当前服务器的BusId)
-func getConnectInfo(szKey string) (ip string, port int, sztype string, keyValue string) {
+func getConnectInfo(szKey string) (mindata *connectData, sztype string, keyValue string) {
 	//1、先把映射关系存到redis里
 	redis, err := db.NewRedis(config.Cfg_.Redis)
 	if err != nil {
@@ -97,20 +97,24 @@ func getConnectInfo(szKey string) (ip string, port int, sztype string, keyValue 
 		//查询exec和dll列表
 		//busid不同，取exec列表ip:port,真实服务器类型；budis相同，取与自身真实服务器类型相反的类型列表
 		list := map[int]*connectData{}
+		types := "dll"
 		if szbusid != config.Cfg_.BusId || config.Cfg_.ServerType == "dll" {
-			if jsonthr.Json.Unmarshal([]byte(redis.HGet(szbusid, "exec").Val()), &list) == nil {
-				num := 0
-				//查询一个合适的连接信息
-				for _, data := range list {
-					if port == 0 || num < data.Num {
-						ip = data.Ip
-						port = data.Port
-						num = data.Num
-					}
+			types = "exec"
+		}
+		if jsonthr.Json.Unmarshal([]byte(redis.HGet(szbusid, types).Val()), &list) == nil {
+			mindata = nil
+			//查询一个合适的连接信息
+			for _, data := range list {
+				if mindata == nil || mindata.Num < data.Num {
+					mindata = data
 				}
-				//赋予服务器类型
-				keyValue = redis.HGet(szbusid, szKey).Val()
-				sztype = redis.HGet(szKey, "ProtocolServerType").Val()
+			}
+
+			//赋予服务器类型
+			keyValue = redis.HGet(szbusid, szKey).Val()
+			sztype = redis.HGet(szKey, "ProtocolServerType").Val()
+
+			if szbusid != config.Cfg_.BusId || config.Cfg_.ServerType == "dll" {
 				//如果发送消息的是插件服务器，在查询出来的结果后，需要取反
 				if config.Cfg_.ServerType == "dll" {
 					if sztype == "dll" {
@@ -119,27 +123,10 @@ func getConnectInfo(szKey string) (ip string, port int, sztype string, keyValue 
 						sztype = "dll"
 					}
 				}
-				return
-			} else {
-				panic("获取bus数据错误")
 			}
+			return
 		} else {
-			if jsonthr.Json.Unmarshal([]byte(redis.HGet(szbusid, "dll").Val()), list) == nil {
-				num := 0
-				keyName := redis.HGet(szKey, "ServerName").Val()
-				//查询一个合适的连接信息
-				for _, data := range list {
-					if (port == 0 || num < data.Num) && keyName == data.ServerName {
-						ip = data.Ip
-						port = data.Port
-						num = data.Num
-					}
-				}
-
-				keyValue = redis.HGet(szbusid, szKey).Val()
-				sztype = redis.HGet(szKey, "ProtocolServerType").Val()
-				return
-			}
+			panic("获取bus数据错误")
 		}
 	} else {
 		panic("未正确读取协议对应BusId:" + cmd.Err().Error())

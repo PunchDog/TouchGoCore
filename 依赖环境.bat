@@ -11,3 +11,7 @@ git clone https://github.com/mitchellh/mapstructure.git mitchellh/mapstructure
 git clone https://github.com/modern-go/reflect2.git modern-go/reflect2
 git clone https://github.com/modern-go/concurrent.git modern-go/concurrent
 git clone https://github.com/natefinch/lumberjack.git natefinch/lumberjack
+
+git clone https://github.com/bradfitz/gomemcache.git bradfitz/gomemcache
+git clone https://github.com/gomodule/redigo.git gomodule/redigo
+git clone https://github.com/silenceper/wechat.git silenceper/wechat

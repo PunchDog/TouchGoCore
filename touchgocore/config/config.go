@@ -24,7 +24,7 @@ type Cfg struct {
 func (this *Cfg) Load(path string) {
 	file, err := ioutil.ReadFile(path)
 	if err != nil {
-		panic("读取Bus文件出错:" + err.Error())
+		panic("读取启动配置出错:" + err.Error())
 	}
 	vars.Info(string(file))
 	err = jsonthr.Json.Unmarshal(file, &this)
@@ -34,9 +34,10 @@ func (this *Cfg) Load(path string) {
 }
 
 var Cfg_ *Cfg = &Cfg{
-	Ws:   "off",
-	Http: "off",
-	Lua:  "off",
-	File: "off",
+	Ws:       "off",
+	Http:     "off",
+	Lua:      "off",
+	File:     "off",
+	LogLevel: "info",
 }
 var ServerName_ string

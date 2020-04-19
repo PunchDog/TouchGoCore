@@ -19,9 +19,9 @@ var (
 
 const (
 	LogLevel_Off = iota
-	LogLevel_Info
-	LogLevel_Debug
 	LogLevel_Error
+	LogLevel_Debug
+	LogLevel_Info
 )
 
 var loglevelmap map[string]int = map[string]int{
@@ -49,7 +49,7 @@ func Run(servername string, level string) {
 		lock := sync.Mutex{}
 		for {
 			select {
-			case <-time.After(time.Microsecond*10):
+			case <-time.After(time.Microsecond * 10):
 				list := []func(){}
 				lock.Lock()
 				list = append(list, log_.printList...)
@@ -103,7 +103,7 @@ func (this *SLoger) println(file string, level int, v ...interface{}) {
 		format = list
 	}
 
-	if level >= loglevelmap[log_.logLevel] {
+	if level <= loglevelmap[log_.logLevel] {
 		this.log.Println(format)
 	} else {
 		log.Println(format)

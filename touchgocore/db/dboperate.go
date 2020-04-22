@@ -1,10 +1,12 @@
 package db
 
 import (
-	"github.com/PunchDog/TouchGoCore/touchgocore/config"
-	"github.com/PunchDog/TouchGoCore/touchgocore/syncmap"
 	"sync"
 	"time"
+
+	"github.com/PunchDog/TouchGoCore/touchgocore/config"
+	"github.com/PunchDog/TouchGoCore/touchgocore/syncmap"
+	"github.com/PunchDog/TouchGoCore/touchgocore/util"
 )
 
 //接口
@@ -138,13 +140,41 @@ func (this *DbOperateObj) runlock() {
 //虚函数
 func (this *DbOperateObj) Query() interface{} {
 	//查缓存
-	if b := this.cache(nil, EDBType_Query); b != nil {
-		return b.value
+	if b := this.cache(nil, this.GetDbOperateType()); b != nil {
+		data := b.value.(*DBCacheData)
+		return data.value
 	}
 
 	//查DB
 	db, _ := NewDbMysql(config.Cfg_.Db)
-	ret, err := db.SetCondition(this.condition_).Query()
+	var ret *DBResult = nil
+	var err error = nil
+	switch this.GetDbOperateType() {
+	case EDBType_Query:
+		ret, err = db.SetCondition(this.condition_).Query()
+	case EDBType_Query_Count:
+		ret, err = db.SetCondition(this.condition_).QueryCount()
+	case EDBType_Query_Sum:
+		if this.condition_.values == nil {
+			err = &util.Error{ErrMsg: "没有需要SUM的字段"}
+		} else if len(*this.condition_.values) > 0 {
+			err = &util.Error{ErrMsg: "目前只支持单字段SUM"}
+		} else {
+			for k, _ := range *this.condition_.values {
+				ret, err = db.SetCondition(this.condition_).QuerySum(k)
+			}
+		}
+	case EDBType_Query_Max:
+		if this.condition_.values == nil {
+			err = &util.Error{ErrMsg: "没有需要Max的字段"}
+		} else if len(*this.condition_.values) > 0 {
+			err = &util.Error{ErrMsg: "目前只支持单字段Max"}
+		} else {
+			for k, _ := range *this.condition_.values {
+				ret, err = db.SetCondition(this.condition_).QueryMax(k)
+			}
+		}
+	}
 	if err == nil {
 		if ret.Count() == 1 {
 			if this.condition_.cacheKey != "" {
@@ -274,11 +304,10 @@ func Run() {
 func AddDbEvent(idboper IDbOperate) chan interface{} {
 	event := SDBOperate{IDBOper: idboper}
 	event.ChanData = make(chan interface{}, 1)
-	ret := event.ChanData
-	if idboper.GetDbOperateType() == EDBType_Query {
+	if idboper.GetDbOperateType() == EDBType_Query || idboper.GetDbOperateType() == EDBType_Query_Count || idboper.GetDbOperateType() == EDBType_Query_Sum || idboper.GetDbOperateType() == EDBType_Query_Max {
 		dbReadList_ <- event
 	} else {
 		dbWriteList_ <- event
 	}
-	return ret
+	return event.ChanData
 }

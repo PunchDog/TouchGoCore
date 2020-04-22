@@ -3,11 +3,12 @@ package db
 import (
 	"database/sql"
 	"fmt"
-	"github.com/PunchDog/TouchGoCore/touchgocore/config"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/PunchDog/TouchGoCore/touchgocore/config"
 
 	"github.com/PunchDog/TouchGoCore/touchgocore/util"
 	"github.com/PunchDog/TouchGoCore/touchgocore/vars"
@@ -33,6 +34,9 @@ type EDBType int
 
 const (
 	EDBType_Query EDBType = iota + 1
+	EDBType_Query_Count
+	EDBType_Query_Sum
+	EDBType_Query_Max
 	EDBType_Insert
 	EDBType_Update
 	EDBType_Delete

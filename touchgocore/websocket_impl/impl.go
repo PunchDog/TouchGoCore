@@ -2,15 +2,16 @@ package impl
 
 import (
 	"fmt"
-	"github.com/PunchDog/TouchGoCore/touchgocore/util"
-	"github.com/PunchDog/TouchGoCore/touchgocore/vars"
-	"github.com/golang/protobuf/proto"
-	"github.com/gorilla/websocket"
 	"net/http"
 	"net/url"
 	"runtime"
 	"strconv"
 	"strings"
+
+	"github.com/PunchDog/TouchGoCore/touchgocore/util"
+	"github.com/PunchDog/TouchGoCore/touchgocore/vars"
+	"github.com/golang/protobuf/proto"
+	"github.com/gorilla/websocket"
 )
 
 type Connection struct {
@@ -25,6 +26,9 @@ type Connection struct {
 var maxUid int64 = 0
 
 func InitConnection(port int, wsConn *websocket.Conn, remoteAddr string) (*Connection, error) {
+	redis_.Lock("close")
+	defer redis_.UnLock("close")
+
 	maxUid++
 	conn := &Connection{
 		enterPort:  port,
@@ -44,8 +48,8 @@ func InitConnection(port int, wsConn *websocket.Conn, remoteAddr string) (*Conne
 
 	vars.Info("%s创建连接成功！", remoteAddr)
 	//连接数+1
-	num, _ := redis_.HGet("wsListen", strconv.Itoa(port)).Int()
-	redis_.HSet("wsListen", port, num+1)
+	num, _ := redis_.Get().HGet("wsListen", strconv.Itoa(port)).Int()
+	redis_.Get().HSet("wsListen", port, num+1)
 
 	//执行
 	go conn.readLoop()
@@ -91,6 +95,9 @@ func (s *Connection) Write(protocol1 int32, protocol2 int32, buffer []byte) {
 }
 
 func (conn *Connection) Close(desc string) {
+	redis_.Lock("close")
+	defer redis_.UnLock("close")
+
 	// 线程安全，可多次调用
 	conn.wsConnect.Close()
 
@@ -100,8 +107,8 @@ func (conn *Connection) Close(desc string) {
 		callBack_.OnClose(conn)
 
 		//连接数-1
-		num, _ := redis_.HGet("wsListen", strconv.Itoa(conn.enterPort)).Int()
-		redis_.HSet("wsListen", conn.enterPort, num-1)
+		num, _ := redis_.Get().HGet("wsListen", strconv.Itoa(conn.enterPort)).Int()
+		redis_.Get().HSet("wsListen", conn.enterPort, num-1)
 
 		if desc != "" {
 			vars.Info(desc)

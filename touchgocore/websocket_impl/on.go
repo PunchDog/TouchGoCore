@@ -1,13 +1,14 @@
 package impl
 
 import (
+	"strconv"
+	"strings"
+
 	"github.com/PunchDog/TouchGoCore/touchgocore/config"
 	"github.com/PunchDog/TouchGoCore/touchgocore/db"
 	"github.com/PunchDog/TouchGoCore/touchgocore/util"
 	"github.com/PunchDog/TouchGoCore/touchgocore/vars"
 	"github.com/gorilla/websocket"
-	"strconv"
-	"strings"
 )
 
 //这里处理消息，把所有的消息都实行汇总处理
@@ -111,7 +112,7 @@ func Run() {
 					port, _ := strconv.Atoi(szPort)
 					WsListenAndServe(port)
 					//设置服务器连接数
-					redis_.HSet("wsListen", port, 0)
+					redis_.Get().HSet("wsListen", port, 0)
 					break
 				}
 			} else if strings.Index(c, "http") == 0 {

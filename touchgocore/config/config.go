@@ -19,6 +19,8 @@ type Cfg struct {
 	Lua        string       `json:"lua"`        //off不启动，否则就是启动路径lua文件根目录必须有有个init.lua文件，里面提供一个GetFileName函数加载其他lua文件,GetFileName会传入index,返回end结束加载
 	File       string       `json:"file"`       //文件服务，off为不开，端口号就是开启
 	LogLevel   string       `json:"loglevel"`   //日志等级，off为不开,其次为info,debug,error
+	TeamId     string       `json:"teamid"`     //服务器集群ID
+	DllList    []string     `json:"dlllist"`    //自动拉起程序列表(仅对servertype为exec的有效)
 }
 
 func (this *Cfg) Load(path string) {

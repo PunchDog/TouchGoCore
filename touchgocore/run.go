@@ -3,7 +3,9 @@ package touchgocore
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
+	"runtime"
 	"syscall"
 
 	"github.com/PunchDog/TouchGoCore/touchgocore/config"
@@ -85,6 +87,31 @@ func Run(serverName string, version string) {
 
 	//启动完成
 	vars.Info("touchgocore启动完成")
+
+	//启动其他进程
+	if config.Cfg_.ServerType == "exec" {
+		for _, dllpath := range config.Cfg_.DllList {
+
+			//根据不同的操作系统来启动程序
+			path := dllpath
+			switch runtime.GOOS {
+			case "windows":
+				path += ".exe"
+			case "darwin":
+				path = fmt.Sprintf("env GOTRACEBACK=crash nohup %s &", dllpath)
+			case "linux":
+				path = fmt.Sprintf("env GOTRACEBACK=crash nohup %s &", dllpath)
+			}
+
+			cmd := exec.Command(path, os.Args...)
+			_, err := cmd.CombinedOutput()
+			if err != nil {
+				vars.Error("启动附加进程%s失败:%s", dllpath, err)
+				continue
+			}
+			vars.Info("成功启动进程:%s", dllpath)
+		}
+	}
 
 	//go func() {
 	chSig := make(chan os.Signal)

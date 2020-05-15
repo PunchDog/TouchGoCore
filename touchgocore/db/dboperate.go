@@ -17,7 +17,7 @@ type IDbOperate interface {
 	unlock()
 	runlock()
 	Query() interface{}
-	Write() int
+	Write() error
 }
 
 //此函数主要用于更新，所以数据类都必须继承这个函数
@@ -142,6 +142,7 @@ func (this *DbOperateObj) Query() interface{} {
 	//查缓存
 	if b := this.cache(nil, this.GetDbOperateType()); b != nil {
 		data := b.value.(*DBCacheData)
+		data.weight++
 		return data.value
 	}
 
@@ -191,43 +192,53 @@ func (this *DbOperateObj) Query() interface{} {
 	return nil
 }
 
-func (this *DbOperateObj) write() {
+func (this *DbOperateObj) write() error {
 	db, _ := NewDbMysql(config.Cfg_.Db)
 	switch this.GetDbOperateType() {
 	case EDBType_Insert:
-		db.SetCondition(this.condition_).Insert()
+		return db.SetCondition(this.condition_).Insert()
 	case EDBType_Update:
-		db.SetCondition(this.condition_).Update()
+		return db.SetCondition(this.condition_).Update()
 	case EDBType_Delete:
-		db.SetCondition(this.condition_).Del()
+		return db.SetCondition(this.condition_).Del()
 	}
+	return nil
 }
 
 //虚函数
-func (this *DbOperateObj) Write() int {
+func (this *DbOperateObj) Write() error {
+	err := make(chan error, 1)
 	//尝试改内存数据,有缓存的，可以开多线程写，没有缓存的必须单线程
 	if this.cache(&DBCacheData{value: this.condition_.values}, this.GetDbOperateType()) != nil {
-		go this.write()
+		go func() {
+			err <- this.write()
+		}()
 	} else {
-		this.write()
+		err <- this.write()
 	}
-	return 0
+	return <-err
 }
 
 //缓存操作
 func (this *DbOperateObj) cache(new *DBCacheData, op EDBType) *DBCacheData {
 	if this.condition_ != nil {
 		//查询
-		if op == EDBType_Query {
-			if p, ok := cacheData_.Load(this.condition_.cacheKey); ok {
-				return p.(*DBCacheData)
+		if op == EDBType_Query || op == EDBType_Query_Count || op == EDBType_Query_Max || op == EDBType_Query_Sum {
+			if this.condition_.cacheKey != "" {
+				if p, ok := cacheData_.Load(this.condition_.cacheKey); ok {
+					return p.(*DBCacheData)
+				}
 			}
 		} else if op == EDBType_Insert || op == EDBType_Update {
-			p, ok := cacheData_.LoadOrStore(this.condition_.cacheKey, new)
-			if ok {
-				oldp := p.(*DBCacheData)
-				oldp.Update(&new.value)
-				return oldp
+			if this.condition_.cacheKey != "" {
+				new.weight = 6 //初始权重保证缓存半小时
+				p, ok := cacheData_.LoadOrStore(this.condition_.cacheKey, new)
+				if ok {
+					up := p.(*DBCacheData)
+					up.Update(&new.value)
+					up.weight++
+					return up
+				}
 			}
 		} else if op == EDBType_Delete {
 			cacheData_.Delete(this.condition_.cacheKey)
@@ -243,7 +254,7 @@ type SDBOperate struct {
 
 //所有操作的列表
 var dbReadList_ chan SDBOperate = make(chan SDBOperate, 100000)
-var dbWriteList_ chan SDBOperate = make(chan SDBOperate, 10000)
+var dbWriteList_ chan SDBOperate = make(chan SDBOperate, 100000)
 
 //启动操作
 func Run() {
@@ -289,6 +300,7 @@ func Run() {
 					d := value.(*DBCacheData)
 					if (d.weight <= 6 && time.Now().Unix()-d.updateTime < 300) || d.weight > 6 {
 						d.weight--
+						d.updateTime = time.Now().Unix() //刷新时间
 						if d.weight <= 0 {
 							cacheData_.Delete(key)
 						}

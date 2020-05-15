@@ -79,7 +79,7 @@ func send(protocol1 int, protocol2 int, req interface{}, res interface{}, client
 		panic(err)
 	}
 
-	busid := redis.HGet(szkey, "BusId").Val()
+	busid := redis.Get().HGet(szkey, "BusId").Val()
 	if busid != config.Cfg_.BusId {
 		//发送给其他主要服务器的消息
 		switch client.serverType {

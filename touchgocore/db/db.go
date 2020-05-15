@@ -188,8 +188,17 @@ func (this *Condition) SetTableName(tableName string) *Condition {
 	return this
 }
 
-func (this *Condition) SetCacheKey(cacheKey string) *Condition {
-	this.cacheKey = cacheKey
+func (this *Condition) SetCacheKey(cacheKey ...interface{}) *Condition {
+	if len(cacheKey) == 1 {
+		switch cacheKey[0].(type) {
+		case string:
+			this.cacheKey = cacheKey[0].(string)
+		default:
+			this.cacheKey = util.Sprintf("?", cacheKey)
+		}
+	} else {
+		this.cacheKey = util.Sprintf(cacheKey[0].(string), cacheKey[1:])
+	}
 	return this
 }
 

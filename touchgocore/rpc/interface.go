@@ -24,6 +24,7 @@ type SQRegister struct {
 }
 
 type ReqBuffer struct {
+	Ip      string      //IP
 	Port    int         //要转发的端口号
 	Mark    interface{} //标记位，用于服务器内操作，通常是玩家ID
 	ReqData interface{} //数据

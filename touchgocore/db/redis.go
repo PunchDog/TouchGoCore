@@ -2,13 +2,13 @@ package db
 
 import (
 	"fmt"
-	"github.com/PunchDog/TouchGoCore/touchgocore/config"
-	"github.com/PunchDog/TouchGoCore/touchgocore/util"
 	"strconv"
 	"sync"
 	"time"
 
-	"github.com/go-redis/redis"
+	"github.com/PunchDog/TouchGoCore/touchgocore/config"
+	"github.com/PunchDog/TouchGoCore/touchgocore/util"
+	"github.com/go-redis/redis/v7"
 )
 
 var RedisDbMap *sync.Map = &sync.Map{}
@@ -87,16 +87,6 @@ func (this *Redis) UnLock(lockkey string) {
 	this.redisClient.Del("lock-" + lockkey)
 }
 
-func (this *Redis) UnLockAndDo(lockkey string, fn func()) {
-	for {
-		val, ok := this.LockCnt.Load(lockkey)
-		if (ok && val.(int32) <= 0) || !ok {
-			fn()
-			return
-		}
-	}
-}
-
 func (this *Redis) FlushAll() {
 	this.redisClient.FlushAll()
 }
@@ -106,38 +96,6 @@ func (this *Redis) Close() {
 	this.redisClient = nil
 }
 
-func (this *Redis) Set(key string, value interface{}, expiration time.Duration) *redis.StatusCmd {
-	this.Lock(key)
-	defer this.UnLock(key)
-	return this.redisClient.Set(key, value, expiration)
-}
-
-func (this *Redis) Get(key string) *redis.StringCmd {
-	this.Lock(key)
-	defer this.UnLock(key)
-	return this.redisClient.Get(key)
-}
-
-func (this *Redis) HSet(key string, values ...interface{}) *redis.IntCmd {
-	this.Lock(key)
-	defer this.UnLock(key)
-	return this.redisClient.HSet(key, values...)
-}
-
-func (this *Redis) HGet(key, field string) *redis.StringCmd {
-	this.Lock(key)
-	defer this.UnLock(key)
-	return this.redisClient.HGet(key, field)
-}
-
-func (this *Redis) HDel(key string, fields ...string) *redis.IntCmd {
-	this.Lock(key)
-	defer this.UnLock(key)
-	return this.redisClient.HDel(key, fields...)
-}
-
-func (this *Redis) Del(key ...string) *redis.IntCmd {
-	this.Lock("default")
-	defer this.UnLock("default")
-	return this.redisClient.Del(key...)
+func (this *Redis) Get() *redis.Client {
+	return this.redisClient
 }

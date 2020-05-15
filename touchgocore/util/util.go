@@ -2,11 +2,9 @@ package util
 
 import (
 	"crypto/md5"
-	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"io/ioutil"
-	"log"
 	"math/rand"
 	"net"
 	"net/http"
@@ -86,39 +84,6 @@ func TabaoIpAPI(ip string) *IPInfo {
 	return &result
 }
 
-/*
-把查询数据库的结果集转换成map
-*/
-func ResToMap(rows *sql.Rows) map[string]string {
-	data := make(map[string]string)
-	columns, err := rows.Columns()
-	if err != nil {
-		log.Println("获取结果集中列名数组错误:", err)
-	}
-	values := make([]sql.RawBytes, len(columns))
-	scanArgs := make([]interface{}, len(values))
-	for i := range values {
-		scanArgs[i] = &values[i]
-	}
-	for rows.Next() {
-		err = rows.Scan(scanArgs...)
-		if err != nil {
-			log.Println("扫描结果集中参数值错误:", err)
-		}
-		var value string
-		for i, col := range values {
-			if col == nil {
-				value = "NULL"
-			} else {
-				value = string(col)
-			}
-			data[columns[i]] = value
-		}
-
-	}
-	return data
-}
-
 func NextTimeZone(oldTime time.Time) time.Time {
 	//往后调整8个小时//
 	return time.Now().Add(time.Duration(8) * time.Hour)
@@ -127,10 +92,10 @@ func NextTimeZone(oldTime time.Time) time.Time {
 //随机64位
 func RandInt(max int64) int64 {
 	if max == 0 {
-		return 1
+		return 0
 	}
 	rr := rand.New(rand.NewSource(time.Now().UnixNano() * rand.Int63n(9999)))
-	return rr.Int63n(max) + 1
+	return rr.Int63n(max)
 }
 
 //随机范围

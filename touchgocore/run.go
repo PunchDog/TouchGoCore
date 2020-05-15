@@ -2,6 +2,10 @@ package touchgocore
 
 import (
 	"fmt"
+	"os"
+	"os/signal"
+	"syscall"
+
 	"github.com/PunchDog/TouchGoCore/touchgocore/config"
 	"github.com/PunchDog/TouchGoCore/touchgocore/db"
 	"github.com/PunchDog/TouchGoCore/touchgocore/fileserver"
@@ -10,12 +14,10 @@ import (
 	"github.com/PunchDog/TouchGoCore/touchgocore/time"
 	"github.com/PunchDog/TouchGoCore/touchgocore/vars"
 	impl "github.com/PunchDog/TouchGoCore/touchgocore/websocket_impl"
-	"os"
-	"os/signal"
-	"syscall"
 )
 
 var ExitFunc_ func() = nil
+var StartFunc_ func() = nil
 
 //总体开关,此函数需要放在main的最后
 func Run(serverName string, version string) {
@@ -75,6 +77,11 @@ func Run(serverName string, version string) {
 
 	//启动文件服务
 	fileserver.Run()
+
+	//核心加载完了后自己想执行的东西
+	if StartFunc_ != nil {
+		StartFunc_()
+	}
 
 	//启动完成
 	vars.Info("touchgocore启动完成")

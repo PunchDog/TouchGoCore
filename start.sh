@@ -3,7 +3,7 @@ git clone https://github.com/yuin/gluamapper.git ./yuin/gluamapper
 git clone https://github.com/yuin/gopher-lua.git ./yuin/gopher-lua
 git clone https://github.com/go-ini/ini.git ./go-ini/ini
 git clone https://github.com/golang/protobuf.git ./golang/protobuf
-git clone https://github.com/go-redis/redis.git ./go-redis/redis
+git clone https://github.com/go-redis/redis.git ./go-redis/redis/v7
 git clone https://github.com/gorilla/websocket.git ./gorilla/websocket
 git clone https://github.com/go-sql-driver/mysql.git ./go-sql-driver/mysql
 git clone https://github.com/json-iterator/go.git ./json-iterator/go

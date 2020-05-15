@@ -1,0 +1,26 @@
+{
+    "redis": {
+        "redis_host":"127.0.0.1:6379",
+        "redis_password":"",
+        "redis_db":0
+    },
+    "db":{
+        "db_host": "121.36.15.181:3306",
+        "db_username": "root",
+        "db_password": "123789abcA",
+        "db_name": "neiwangpoker",
+        "db_max_idle_conns": 100,
+        "db_max_open_conns": 500
+    },
+    "busid":"dbserver",
+    "ip":"127.0.0.1",
+    "servertype":"exec",
+    "init_port":7000,
+    "ws": ":1234",
+    "http": "off",
+    "lua": "off",
+    "file": "9090",
+    "loglevel": "info",
+    "teamid":"1",
+    "dlllist":[]
+}

@@ -1,19 +1,17 @@
 package lua
 
 import (
-	"github.com/PunchDog/TouchGoCore/touchgocore/config"
 	"github.com/PunchDog/TouchGoCore/touchgocore/vars"
-	"log"
 
-	"github.com/yuin/gluamapper"
 	lua "github.com/yuin/gopher-lua"
 )
 
-type Script struct {
-	gScript   *lua.LState
-	liRetList *RetList
-	//注册lua
-	luaPath *string
+type LuaScript struct {
+	gScript      *lua.LState
+	liRetList    *RetList
+	path         string                     //脚本地址
+	exports      *map[string]lua.LGFunction //全局函数缓存
+	exportsClass *map[interface{}]bool      //导出类缓存
 }
 
 //返回值结果
@@ -50,55 +48,45 @@ func (this *RetList) GetData(index int) *lua.LValue {
 	return this.liRetList[index]
 }
 
-//注册lua回调
-var exports = map[string]lua.LGFunction{
-	"println": println,
-}
-
-func println(L *lua.LState) int {
-	retstr := L.ToString(1)
-	vars.Info(retstr)
-	return 0
-}
-
-//注册函数列表
-func RegisterLuaFunc(funcname string, function lua.LGFunction) bool {
-	if exports[funcname] != nil {
-		return false
-	}
-	exports[funcname] = function
-	return true
-}
-
-//func Loader(L *lua.LState) int {
-//// register functions to the table
-//mod := L.SetFuncs(L.NewTable(), exports)
-//// register other stuff
-//L.SetField(mod, "name", lua.LString("value"))
-//// returns the module
-//L.Push(mod)
-//return 1
-//}
+// func Loader(L *lua.LState) int {
+// 	// register functions to the table
+// 	mod := L.SetFuncs(L.NewTable(), exports)
+// 	// register other stuff
+// 	L.SetField(mod, "name", lua.LString("value"))
+// 	// returns the module
+// 	L.Push(mod)
+// 	return 1
+// }
 
 //初始化lua文件
-func (this *Script) InitLua() {
-	if this.gScript == nil {
-		this.gScript = lua.NewState()
-		this.liRetList = new(RetList)
+func (this *LuaScript) InitLua() {
+	if this.gScript != nil {
+		this.CloseLua()
 	}
 
-	//注册函数
-	for funcname, function := range exports {
+	this.gScript = lua.NewState()
+	this.liRetList = new(RetList)
+
+	//注册全局函数
+	for funcname, function := range *this.exports {
 		this.gScript.SetGlobal(funcname, this.gScript.NewFunction(function)) /* Original lua_setglobal uses stack... */
+	}
+
+	//注册类
+	if this.exportsClass != nil {
+		for class, _ := range *this.exportsClass {
+			newLuaClass(class, this)
+		}
 	}
 }
 
-func (this *Script) CloseLua() {
+func (this *LuaScript) CloseLua() {
 	this.gScript.Close()
+	this.gScript = nil
 }
 
 //读lua文件
-func (this *Script) LoadLua(path string) error {
+func (this *LuaScript) DoFile(path string) error {
 	if err := this.gScript.DoFile(path); err != nil {
 		vars.Error(err)
 		return err
@@ -109,12 +97,12 @@ func (this *Script) LoadLua(path string) error {
 }
 
 //获取的返回数据
-func (this *Script) GetRet(index int) *lua.LValue {
+func (this *LuaScript) GetRet(index int) *lua.LValue {
 	return this.liRetList.GetData(index)
 }
 
 //call lua
-func (this *Script) Call(funcname string, list ...interface{}) bool {
+func (this *LuaScript) Call(funcname string, list ...interface{}) bool {
 	listlen := len(list)
 	fn := lua.P{
 		Fn:      this.gScript.GetGlobal(funcname),
@@ -187,7 +175,7 @@ func (this *Script) Call(funcname string, list ...interface{}) bool {
 		err = this.gScript.PCall(listlen, fn.NRet, fn.Handler)
 	}
 	if err != nil {
-		log.Println("lua调用出错:", err)
+		vars.Error("lua调用出错:", err)
 		return false
 	}
 
@@ -203,43 +191,19 @@ func (this *Script) Call(funcname string, list ...interface{}) bool {
 }
 
 //注册lua功能
-func (this *Script) RegisterLuaFile(path string, isFirst bool) {
-	if isFirst {
-		this.luaPath = &path
-		this.InitLua()
-	}
+func (this *LuaScript) LoadLua(path string) {
+	//初始化指针
+	this.path = path
+	this.InitLua()
 
-	if err := this.LoadLua(path + "/init.lua"); err == nil {
-		for index := 1; ; index++ {
-			if this.Call("GetFileName", index) {
-				pathname := gluamapper.ToGoValue(*this.GetRet(0), gluamapper.Option{}).(string)
-				if pathname != "end" {
-					this.LoadLua(path + "/" + pathname)
-				} else {
-					break
-				}
-			}
-		}
+	//读取脚本文件
+	if err := this.DoFile(path); err != nil {
+		panic(err)
 	}
 }
 
 //重载脚本
-func (this *Script) ReLoadLua() {
+func (this *LuaScript) ReLoadLua() {
 	this.CloseLua()
-	if this.luaPath != nil {
-		this.RegisterLuaFile(*this.luaPath, true)
-	}
-}
-
-var defaultScript *Script = &Script{}
-
-//启动lua
-func Run() {
-	if config.Cfg_.Lua == "off" {
-		vars.Info("不启动lua服务")
-		return
-	}
-
-	defaultScript.RegisterLuaFile(config.Cfg_.Lua, true)
-	vars.Info("启动lua服务成功")
+	this.LoadLua(this.path)
 }

@@ -22,7 +22,7 @@ var rpcClientMap_ *syncmap.Map = &syncmap.Map{}
 
 //发送消息(负载低服务器)
 func SendMsgByBurdenMin(protocol1 int, protocol2 int, req interface{}, res interface{}) (port1 int, err error) {
-	szkey := fmt.Sprintf("%d-%d", protocol1, protocol2)
+	szkey := fmt.Sprintf("%d-%d-%s", protocol1, protocol2, config.Cfg_.TeamId)
 	conndata, types, keyValue := getConnectInfo(szkey)
 	if conndata == nil {
 		err = &util.Error{ErrMsg: "查询Bus映射端口出错，没有对应的bus数据"}
@@ -57,7 +57,7 @@ func SendMsg(port int, protocol1 int, protocol2 int, req interface{}, res interf
 	if c, ok := rpcClientMap_.Load(port); ok {
 		client := c.(*Client)
 		port1 = port
-		szkey := fmt.Sprintf("%d-%d", protocol1, protocol2)
+		szkey := fmt.Sprintf("%d-%d-%s", protocol1, protocol2, config.Cfg_.TeamId)
 		if client.keyValue[szkey] == nil {
 			if msgKey := getMsgKey(szkey); msgKey != "" {
 				client.keyValue[szkey] = &msgKey
@@ -73,7 +73,7 @@ func SendMsg(port int, protocol1 int, protocol2 int, req interface{}, res interf
 }
 
 func send(protocol1 int, protocol2 int, req interface{}, res interface{}, client *Client) (err error) {
-	szkey := fmt.Sprintf("%d-%d", protocol1, protocol2)
+	szkey := fmt.Sprintf("%d-%d-%s", protocol1, protocol2, config.Cfg_.TeamId)
 	redis, err := db.NewRedis(config.Cfg_.Redis)
 	if err != nil {
 		panic(err)

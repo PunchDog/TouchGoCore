@@ -2,12 +2,13 @@ package rpc
 
 import (
 	"fmt"
-	"github.com/PunchDog/TouchGoCore/touchgocore/config"
-	"github.com/PunchDog/TouchGoCore/touchgocore/util"
-	"github.com/PunchDog/TouchGoCore/touchgocore/vars"
 	"net"
 	"net/rpc"
 	"strconv"
+
+	"github.com/PunchDog/TouchGoCore/touchgocore/config"
+	"github.com/PunchDog/TouchGoCore/touchgocore/util"
+	"github.com/PunchDog/TouchGoCore/touchgocore/vars"
 )
 
 //服务器链接注册
@@ -61,7 +62,7 @@ func (this *HttpServer) setBus() {
 	for _, regMsgClass := range this.msgClassMap_ {
 		list := regMsgClass.MsgMap() //生成协议对应值
 		for protocol2, strVal := range list {
-			key := fmt.Sprintf("%d-%d", regMsgClass.Protocol1(), protocol2)
+			key := fmt.Sprintf("%d-%d-%s", regMsgClass.Protocol1(), protocol2, config.Cfg_.TeamId)
 			maps[key] = strVal
 		}
 	}

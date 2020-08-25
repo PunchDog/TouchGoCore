@@ -3,7 +3,6 @@ package util
 import (
 	"crypto/md5"
 	"encoding/hex"
-	"encoding/json"
 	"io/ioutil"
 	"math/rand"
 	"net"
@@ -12,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/PunchDog/TouchGoCore/touchgocore/jsonthr"
 )
 
 /*
@@ -77,7 +78,7 @@ func TabaoIpAPI(ip string) *IPInfo {
 		return nil
 	}
 	var result IPInfo
-	if err := json.Unmarshal(out, &result); err != nil {
+	if err := jsonthr.Json.Unmarshal(out, &result); err != nil {
 		return nil
 	}
 

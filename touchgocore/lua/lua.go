@@ -1,17 +1,20 @@
 package lua
 
 import (
+	"time"
+
 	"github.com/PunchDog/TouchGoCore/touchgocore/vars"
 
 	lua "github.com/yuin/gopher-lua"
 )
 
 type LuaScript struct {
-	gScript      *lua.LState
-	liRetList    *RetList
-	path         string                     //脚本地址
-	exports      *map[string]lua.LGFunction //全局函数缓存
-	exportsClass *map[interface{}]bool      //导出类缓存
+	gScript           *lua.LState
+	liRetList         *RetList
+	path              string                       //脚本地址
+	exports           *map[string]lua.LGFunction   //全局函数缓存
+	exportsClass      *map[ILuaClassInterface]bool //导出类缓存
+	closeLuaClearTick chan byte
 }
 
 //返回值结果
@@ -81,6 +84,7 @@ func (this *LuaScript) InitLua() {
 }
 
 func (this *LuaScript) CloseLua() {
+	this.closeLuaClearTick <- 1 //关闭定时器
 	this.gScript.Close()
 	this.gScript = nil
 }
@@ -200,6 +204,18 @@ func (this *LuaScript) LoadLua(path string) {
 	if err := this.DoFile(path); err != nil {
 		panic(err)
 	}
+
+	//创建定时器,定时垃圾回收
+	go func() {
+		for {
+			select {
+			case <-time.After(time.Minute * 30):
+				this.Call("collectgarbage", lua.LString("collect"))
+			case <-this.closeLuaClearTick:
+				break
+			}
+		}
+	}()
 }
 
 //重载脚本

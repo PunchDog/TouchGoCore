@@ -1,9 +1,11 @@
 package time
 
 import (
-	"github.com/PunchDog/TouchGoCore/touchgocore/syncmap"
 	"sync"
 	"time"
+
+	"github.com/PunchDog/TouchGoCore/touchgocore/syncmap"
+	"github.com/PunchDog/TouchGoCore/touchgocore/vars"
 )
 
 //GetCurrTs return current timestamps
@@ -16,7 +18,6 @@ func GetCurrFormatTime() string {
 }
 
 func ToUTCFormatTime(sec int64) (dateStr string) {
-	//https://www.jb51.net/article/158799.htm
 	now := time.Unix(sec, 0)
 	utc, _ := time.LoadLocation("") //等同于"UTC"
 
@@ -231,4 +232,9 @@ func (this *CTimerManager) Tick() {
 			time.Sleep(time.Millisecond * (100 - used))
 		}
 	}
+}
+
+func Run() {
+	vars.Info("启动计时器")
+	go TimerManager_.Tick()
 }

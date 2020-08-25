@@ -2,6 +2,7 @@ package touchgocore
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -25,7 +26,7 @@ var StartFunc_ func() = nil
 func Run(serverName string, version string) {
 	defer func() {
 		if err := recover(); err != nil {
-			fmt.Sprintf("捕获错误:", err)
+			log.Println("捕获错误:", err)
 		}
 	}()
 
@@ -39,6 +40,10 @@ func Run(serverName string, version string) {
 	vars.Info("*********************************************")
 	vars.Info("           系统:[%s]版本:[%s]", serverName, version)
 	vars.Info("*********************************************")
+
+	//设置核数
+	runtime.GOMAXPROCS(runtime.NumCPU())
+
 	//加载配置
 	vars.Info("加载核心配置")
 
@@ -68,8 +73,7 @@ func Run(serverName string, version string) {
 	rpc.Run()
 
 	//启动timer定时器
-	vars.Info("启动计时器")
-	go time.TimerManager_.Tick()
+	time.Run()
 
 	//启动ws
 	impl.Run()
@@ -113,7 +117,7 @@ func Run(serverName string, version string) {
 		}
 	}
 
-	//go func() {
+	//开阻塞
 	chSig := make(chan os.Signal)
 	signal.Notify(chSig, syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT, syscall.SIGKILL)
 	vars.Info("Signal: ", <-chSig)
@@ -122,5 +126,4 @@ func Run(serverName string, version string) {
 		ExitFunc_()
 	}
 	os.Exit(-1)
-	//}()
 }

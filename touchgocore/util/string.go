@@ -1,7 +1,6 @@
 package util
 
 import (
-	"crypto/md5"
 	"fmt"
 	"math/rand"
 	"strings"
@@ -18,14 +17,6 @@ func RandomStr(length int) string {
 		result = append(result, bytes[r.Intn(len(bytes))])
 	}
 	return string(result)
-}
-
-// MD5Sum 计算 32 位长度的 MD5 sum
-func MD5Sum(txt string) (sum string) {
-	data2 := []byte(txt)
-	has := md5.Sum(data2)
-	md5str1 := fmt.Sprintf("%x", has) //将[]byte转成16进制
-	return md5str1
 }
 
 //格式化，把所有?按格式化数据替换类型

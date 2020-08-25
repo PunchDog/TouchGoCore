@@ -16,10 +16,10 @@ func RegisterLuaFunc(funcname string, function lua.LGFunction) bool {
 }
 
 //注册一个类到默认lua
-func RegisterLuaClass(class interface{}) bool {
+func RegisterLuaClass(class ILuaClassInterface) bool {
 	//初始化一个类初始化
 	if defaultScript.exportsClass == nil {
-		defaultScript.exportsClass = &map[interface{}]bool{}
+		defaultScript.exportsClass = &map[ILuaClassInterface]bool{}
 	}
 	if (*defaultScript.exportsClass)[class] {
 		return false
@@ -29,7 +29,12 @@ func RegisterLuaClass(class interface{}) bool {
 }
 
 //创建一个DIY类型的脚本
-func NewLuaScript(exports *map[string]lua.LGFunction, class *map[interface{}]bool) *LuaScript {
+func NewLuaScript(exports *map[string]lua.LGFunction, class *map[ILuaClassInterface]bool) *LuaScript {
+	if config.Cfg_.Lua == "off" {
+		vars.Info("不启动lua服务")
+		panic("不启动lua服务")
+	}
+
 	script := newScript()
 	if class != nil {
 		script.exportsClass = class
@@ -42,8 +47,7 @@ func NewLuaScript(exports *map[string]lua.LGFunction, class *map[interface{}]boo
 			script.exports = exports
 		}
 	}
-	// script.LoadLua(config.Cfg_.Lua)
-	script.LoadLua("./test.lua")
+	script.LoadLua(config.Cfg_.Lua)
 	return script
 }
 

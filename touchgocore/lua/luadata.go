@@ -1,6 +1,7 @@
 package lua
 
 import (
+	"github.com/PunchDog/TouchGoCore/touchgocore/syncmap"
 	"github.com/PunchDog/TouchGoCore/touchgocore/vars"
 	lua "github.com/yuin/gopher-lua"
 )
@@ -8,15 +9,21 @@ import (
 //默认的lua指针
 var defaultScript *LuaScript = newScript()
 
+//lua产生的类数据
+var defaultLuaDataUid int64 = 0
+var defaultLuaData *syncmap.Map = &syncmap.Map{}
+
 func newScript() *LuaScript {
-	s := &LuaScript{
-		exports: &map[string]lua.LGFunction{},
+	return &LuaScript{
+		exports: &map[string]lua.LGFunction{
+			"info":   info,
+			"debug":  debug,
+			"error":  error1,
+			"dofile": dofile,
+		},
+		exportsClass:      nil,
+		closeLuaClearTick: make(chan byte, 1),
 	}
-	(*s.exports)["info"] = info
-	(*s.exports)["debug"] = debug
-	(*s.exports)["error"] = error1
-	(*s.exports)["dofile"] = dofile
-	return s
 }
 
 //两个默认执行的函数
@@ -39,6 +46,11 @@ func error1(L *lua.LState) int {
 }
 
 func dofile(L *lua.LState) int {
+	// defer func() {
+	// 	if err := recover(); err != nil {
+	// 		log.Println("捕获错误:", err)
+	// 	}
+	// }()
 	retstr := L.ToString(1)
 	if err := L.DoFile(retstr); err != nil {
 		L.Push(lua.LNumber(-1))

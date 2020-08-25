@@ -74,21 +74,22 @@ func (this *Connection) IsClose() bool {
 func (s *Connection) SendMsg(protocol1 int32, protocol2 int32, pb proto.Message) {
 	if !s.IsClose() {
 		data, err := proto.Marshal(pb)
+		len := proto.Size(pb)
 		if err != nil {
 			vars.Error(err.Error())
 		}
 
-		s.Write(protocol1, protocol2, data)
+		s.Write(protocol1, protocol2, data, len)
 	} else {
 		vars.Error("服务器连接还没创建上！！！")
 	}
 }
 
-func (s *Connection) Write(protocol1 int32, protocol2 int32, buffer []byte) {
+func (s *Connection) Write(protocol1 int32, protocol2 int32, buffer []byte, buffLen int) {
 	if s.IsClose() {
 		return
 	}
-	protocol := NewEchoPacket(protocol1, protocol2, buffer)
+	protocol := NewEchoPacket(protocol1, protocol2, buffer, buffLen)
 	select {
 	case wsOnMessage_.writeChan <- &rwData{data: protocol.Serialize(), conn: s}:
 	}
@@ -232,8 +233,8 @@ func (s *Client) SendMsg(protocol1 int32, protocol2 int32, pb proto.Message) {
 	s.conn.SendMsg(protocol1, protocol2, pb)
 }
 
-func (s *Client) Write(protocol1 int32, protocol2 int32, buffer []byte) {
-	s.conn.Write(protocol1, protocol2, buffer)
+func (s *Client) Write(protocol1 int32, protocol2 int32, buffer []byte, bufflen int) {
+	s.conn.Write(protocol1, protocol2, buffer, bufflen)
 }
 
 //主动连接

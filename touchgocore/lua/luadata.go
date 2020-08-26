@@ -1,6 +1,10 @@
 package lua
 
 import (
+	"path/filepath"
+	"strconv"
+	"strings"
+
 	"github.com/PunchDog/TouchGoCore/touchgocore/syncmap"
 	"github.com/PunchDog/TouchGoCore/touchgocore/vars"
 	lua "github.com/yuin/gopher-lua"
@@ -16,10 +20,11 @@ var defaultLuaData *syncmap.Map = &syncmap.Map{}
 func newScript() *LuaScript {
 	return &LuaScript{
 		exports: &map[string]lua.LGFunction{
-			"info":   info,
-			"debug":  debug,
-			"error":  error1,
-			"dofile": dofile,
+			"info":           info,           //打印
+			"debug":          debug,          //打印
+			"error":          error1,         //打印
+			"dofile":         dofile,         //加载lua文件
+			"getpathluafile": getpathluafile, //获取文件夹下所有文件名
 		},
 		exportsClass:      nil,
 		closeLuaClearTick: make(chan byte, 1),
@@ -60,4 +65,29 @@ func dofile(L *lua.LState) int {
 		L.Push(lua.LString("ok"))
 	}
 	return 2
+}
+
+//获取路径下所有文件
+func getpathluafile(L *lua.LState) int {
+	path := L.ToString(1)
+	pathlen := len(path)
+	if path[pathlen-1] != '/' {
+		path = path + "/"
+	}
+	//获取当前目录下的文件或目录名(包含路径)
+	filepathNames, err := filepath.Glob(path + "*")
+	if err != nil {
+		panic(err)
+	}
+
+	//加载所有地图
+	tbl := L.NewTable()
+	for idx, filepath := range filepathNames {
+		if !strings.Contains(filepath, ".lua") {
+			continue
+		}
+		L.SetField(tbl, strconv.FormatInt(int64(idx), 10), lua.LString(filepath))
+	}
+	L.Push(tbl)
+	return 1
 }

@@ -21,6 +21,7 @@ type Cfg struct {
 	LogLevel   string       `json:"loglevel"`   //日志等级，off为不开,其次为info,debug,error
 	TeamId     string       `json:"teamid"`     //服务器集群ID
 	DllList    []string     `json:"dlllist"`    //自动拉起程序列表(仅对servertype为exec的有效)
+	MapPath    string       `json:"mappath"`    //地图配置路径
 }
 
 func (this *Cfg) Load(path string) {
@@ -41,5 +42,6 @@ var Cfg_ *Cfg = &Cfg{
 	Lua:      "off",
 	File:     "off",
 	LogLevel: "info",
+	MapPath:  "off",
 }
 var ServerName_ string

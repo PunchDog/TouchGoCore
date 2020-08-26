@@ -22,5 +22,6 @@
     "file": "9090",
     "loglevel": "info",
     "teamid":"1",
-    "dlllist":[]
+    "dlllist":[],
+    "mappath":"off"
 }

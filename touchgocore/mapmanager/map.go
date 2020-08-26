@@ -1,0 +1,71 @@
+package mapmanager
+
+import (
+	"io/ioutil"
+	"path/filepath"
+
+	"github.com/PunchDog/TouchGoCore/touchgocore/config"
+	"github.com/PunchDog/TouchGoCore/touchgocore/jsonthr"
+	"github.com/PunchDog/TouchGoCore/touchgocore/lua"
+	"github.com/PunchDog/TouchGoCore/touchgocore/vars"
+)
+
+//地图坐标点类
+type MapNode struct {
+	//是否阻挡
+	IsBlock bool `json:"isblock"`
+	//绘制ID
+	ViewID int32 `json:"viewid"`
+	//是否是绘制物左下角起始地
+	IsViewInit bool `json:"isviewinit"`
+	//怪池ID
+	MonsterPoolId int `json:"monsterpoolid"`
+	//传送地 mapid,x,y
+	SendMapData []int `json:"sendmapdata"`
+}
+
+//地图类
+type Map struct {
+	//地图ID
+	MapId int `json:"mapid"`
+	//地图坐标信息
+	Node [][]*MapNode `json:"node"`
+}
+
+func (this *Map) Load(path string) {
+	file, err := ioutil.ReadFile(path)
+	if err != nil {
+		panic("读取启动配置出错:" + err.Error())
+	}
+	vars.Info(string(file))
+	err = jsonthr.Json.Unmarshal(file, &this)
+	if err != nil {
+		panic("解析配置出错:" + path + ":" + err.Error())
+	}
+	if _, ok := MapList_.LoadOrStore(this.MapId, this); ok {
+		panic("加载地图配置出错:" + path + ":已经有相同ID的地图了")
+	}
+}
+
+func Run() {
+	if config.Cfg_.MapPath == "off" {
+		return
+	}
+
+	//获取当前目录下的文件或目录名(包含路径)
+	filepathNames, err := filepath.Glob(config.Cfg_.MapPath + "/*")
+	if err != nil {
+		panic(err)
+	}
+
+	//加载所有地图
+	for _, filepath := range filepathNames {
+		maps := &Map{}
+		maps.Load(filepath)
+	}
+
+	//创建lua NPC类
+	lua.RegisterLuaClass(&Npc{})
+
+	vars.Info("读取地图完成!")
+}

@@ -8,7 +8,7 @@ import (
 )
 
 type ILuaClassInterface interface {
-	AddField() interface{}
+	AddField(id int64) interface{}
 }
 
 type funcToName struct {
@@ -68,6 +68,9 @@ func (this *funcToName) callBack(L *lua.LState) int {
 				args = append(args, reflect.ValueOf(string(L.ToString(i))))
 			case reflect.Bool:
 				args = append(args, reflect.ValueOf(bool(L.ToBool(i))))
+			default:
+				//解析table
+				L.ToTable(i)
 			}
 			z++
 			if z >= NumIn {
@@ -132,8 +135,9 @@ func newLuaClass(class ILuaClassInterface, script *LuaScript) {
 
 		//创建一个new函数
 		script.gScript.SetField(meta, "new", script.gScript.NewFunction(func(L *lua.LState) int {
+			uid := L.ToInt64(2)
 			defaultLuaDataUid++
-			defaultLuaData.LoadOrStore(defaultLuaData, class.AddField()) //尝试插入一份数据
+			defaultLuaData.LoadOrStore(defaultLuaDataUid, class.AddField(uid)) //尝试插入一份数据
 			c := L.NewTable()
 			self := L.CheckTable(1)
 			L.SetMetatable(c, self)

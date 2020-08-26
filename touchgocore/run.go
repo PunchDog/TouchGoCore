@@ -13,6 +13,7 @@ import (
 	"github.com/PunchDog/TouchGoCore/touchgocore/db"
 	"github.com/PunchDog/TouchGoCore/touchgocore/fileserver"
 	"github.com/PunchDog/TouchGoCore/touchgocore/lua"
+	"github.com/PunchDog/TouchGoCore/touchgocore/mapmanager"
 	"github.com/PunchDog/TouchGoCore/touchgocore/rpc"
 	"github.com/PunchDog/TouchGoCore/touchgocore/time"
 	"github.com/PunchDog/TouchGoCore/touchgocore/vars"
@@ -77,6 +78,9 @@ func Run(serverName string, version string) {
 
 	//启动ws
 	impl.Run()
+
+	//读取地图
+	mapmanager.Run()
 
 	//启动lua脚本
 	lua.Run()

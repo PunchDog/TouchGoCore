@@ -2,7 +2,8 @@ package mapmanager
 
 import (
 	"io/ioutil"
-	"path/filepath"
+
+	"github.com/PunchDog/TouchGoCore/touchgocore/util"
 
 	"github.com/PunchDog/TouchGoCore/touchgocore/config"
 	"github.com/PunchDog/TouchGoCore/touchgocore/jsonthr"
@@ -37,7 +38,6 @@ func (this *Map) Load(path string) {
 	if err != nil {
 		panic("读取启动配置出错:" + err.Error())
 	}
-	vars.Info(string(file))
 	err = jsonthr.Json.Unmarshal(file, &this)
 	if err != nil {
 		panic("解析配置出错:" + path + ":" + err.Error())
@@ -45,6 +45,8 @@ func (this *Map) Load(path string) {
 	if _, ok := MapList_.LoadOrStore(this.MapId, this); ok {
 		panic("加载地图配置出错:" + path + ":已经有相同ID的地图了")
 	}
+
+	vars.Info("加载地图 %s 成功!", path)
 }
 
 func Run() {
@@ -52,14 +54,10 @@ func Run() {
 		return
 	}
 
-	//获取当前目录下的文件或目录名(包含路径)
-	filepathNames, err := filepath.Glob(config.Cfg_.MapPath + "/*")
-	if err != nil {
-		panic(err)
-	}
+	pathlist := util.GetPathFile(config.Cfg_.MapPath, nil)
 
 	//加载所有地图
-	for _, filepath := range filepathNames {
+	for _, filepath := range pathlist {
 		maps := &Map{}
 		maps.Load(filepath)
 	}

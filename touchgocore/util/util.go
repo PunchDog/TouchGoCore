@@ -7,6 +7,7 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
+	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
@@ -167,4 +168,39 @@ func CheckPort(port string) (err error) {
 	}
 
 	return nil
+}
+
+//获取路径下文件列表
+func GetPathFile(path string, filter []string) []string {
+	//获取当前目录下的文件或目录名(包含路径)
+	pathlen := len(path)
+	if path[pathlen-1] != '/' {
+		path = path + "/"
+	}
+	//获取当前目录下的文件或目录名(包含路径)
+	filepathNames, err := filepath.Glob(path + "*")
+	if err != nil {
+		panic(err)
+	}
+
+	//过滤带关键字的
+	var strRetList []string = make([]string, 0, len(filepathNames))
+	if filter != nil {
+		for _, path := range filepathNames {
+			bContinue := false
+			for _, f := range filter {
+				if !strings.Contains(path, f) {
+					bContinue = true
+					break
+				}
+			}
+			if !bContinue {
+				strRetList = append(strRetList, path)
+			}
+		}
+	} else {
+		strRetList = filepathNames
+	}
+
+	return strRetList
 }

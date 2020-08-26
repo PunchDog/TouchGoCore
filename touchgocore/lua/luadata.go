@@ -1,9 +1,9 @@
 package lua
 
 import (
-	"path/filepath"
 	"strconv"
-	"strings"
+
+	"github.com/PunchDog/TouchGoCore/touchgocore/util"
 
 	"github.com/PunchDog/TouchGoCore/touchgocore/syncmap"
 	"github.com/PunchDog/TouchGoCore/touchgocore/vars"
@@ -70,22 +70,11 @@ func dofile(L *lua.LState) int {
 //获取路径下所有文件
 func getpathluafile(L *lua.LState) int {
 	path := L.ToString(1)
-	pathlen := len(path)
-	if path[pathlen-1] != '/' {
-		path = path + "/"
-	}
-	//获取当前目录下的文件或目录名(包含路径)
-	filepathNames, err := filepath.Glob(path + "*")
-	if err != nil {
-		panic(err)
-	}
+	pathlist := util.GetPathFile(path, []string{".lua"})
 
 	//加载所有地图
 	tbl := L.NewTable()
-	for idx, filepath := range filepathNames {
-		if !strings.Contains(filepath, ".lua") {
-			continue
-		}
+	for idx, filepath := range pathlist {
 		L.SetField(tbl, strconv.FormatInt(int64(idx), 10), lua.LString(filepath))
 	}
 	L.Push(tbl)

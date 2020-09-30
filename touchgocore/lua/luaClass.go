@@ -3,6 +3,7 @@ package lua
 import (
 	"reflect"
 
+	"github.com/PunchDog/TouchGoCore/touchgocore/syncmap"
 	"github.com/PunchDog/TouchGoCore/touchgocore/vars"
 
 	"github.com/PunchDog/TouchGoCore/touchgocore/util"
@@ -17,7 +18,7 @@ type funcToName struct {
 	name string
 }
 
-//函数默认interface{}类型的number识别为int64
+//函数默认interface{}类型的number识别为int64,返回值是table的话，目前只支持*syncmap.Map,并且key目前只能是string
 func (this *funcToName) callBack(L *lua.LState) int {
 	self := L.CheckTable(1)
 
@@ -79,7 +80,29 @@ func (this *funcToName) callBack(L *lua.LState) int {
 			case lua.LTBool:
 				arg := bool(lua.LVAsBool(luaval))
 				args = append(args, reflect.ValueOf(arg))
-			case lua.LTTable:
+			case lua.LTTable: //这个传入的table比较坑逼，只能支持string,float64两种类型，其他的没法转
+				if ltbl, ok := luaval.(*lua.LTable); ok {
+					arg := &syncmap.Map{}
+					ltbl.ForEach(func(k, v lua.LValue) {
+						var key, val interface{}
+						switch k.Type() {
+						case lua.LTString:
+							key = string(k.(lua.LString))
+						case lua.LTNumber:
+							key = float64(k.(lua.LNumber))
+						}
+						switch v.Type() {
+						case lua.LTString:
+							val = string(v.(lua.LString))
+						case lua.LTNumber:
+							val = float64(v.(lua.LNumber))
+						case lua.LTBool:
+							val = bool(v.(lua.LBool))
+						}
+						arg.Store(key, val)
+					})
+					args = append(args, reflect.ValueOf(arg))
+				}
 			}
 			z++
 			if z >= NumIn {
@@ -94,37 +117,56 @@ func (this *funcToName) callBack(L *lua.LState) int {
 	//填写返回值
 	rescnt := len(resultValues)
 	if rescnt > 0 {
+		//调用的函数
+		retvalfunc := func(val interface{}) (retval lua.LValue) {
+			switch val.(type) {
+			case int:
+				retval = lua.LNumber(val.(int))
+			case int8:
+				retval = lua.LNumber(val.(int8))
+			case int16:
+				retval = lua.LNumber(val.(int16))
+			case int32:
+				retval = lua.LNumber(val.(int32))
+			case uint:
+				retval = lua.LNumber(val.(uint))
+			case uint8:
+				retval = lua.LNumber(val.(uint8))
+			case uint16:
+				retval = lua.LNumber(val.(uint16))
+			case uint32:
+				retval = lua.LNumber(val.(uint32))
+			case int64:
+				retval = lua.LNumber(val.(int64))
+			case uint64:
+				retval = lua.LNumber(val.(uint64))
+			case float32:
+				retval = lua.LNumber(val.(float32))
+			case float64:
+				retval = lua.LNumber(val.(float64))
+			case string:
+				retval = lua.LString(val.(string))
+			case bool:
+				retval = lua.LBool(val.(bool))
+			}
+			return
+		}
 		//调用函数后返回参数
 		for _, iresData := range resultValues {
 			switch iresData.Type().Kind() {
-			case reflect.Int:
-				L.Push(lua.LNumber(iresData.Interface().(int)))
-			case reflect.Int8:
-				L.Push(lua.LNumber(iresData.Interface().(int8)))
-			case reflect.Int16:
-				L.Push(lua.LNumber(iresData.Interface().(int16)))
-			case reflect.Int32:
-				L.Push(lua.LNumber(iresData.Interface().(int32)))
-			case reflect.Uint:
-				L.Push(lua.LNumber(iresData.Interface().(uint)))
-			case reflect.Uint8:
-				L.Push(lua.LNumber(iresData.Interface().(uint8)))
-			case reflect.Uint16:
-				L.Push(lua.LNumber(iresData.Interface().(uint16)))
-			case reflect.Uint32:
-				L.Push(lua.LNumber(iresData.Interface().(uint32)))
-			case reflect.Int64:
-				L.Push(lua.LNumber(iresData.Interface().(int64)))
-			case reflect.Uint64:
-				L.Push(lua.LNumber(iresData.Interface().(uint64)))
-			case reflect.Float32:
-				L.Push(lua.LNumber(iresData.Interface().(float32)))
-			case reflect.Float64:
-				L.Push(lua.LNumber(iresData.Interface().(float64)))
-			case reflect.String:
-				L.Push(lua.LString(iresData.Interface().(string)))
-			case reflect.Bool:
-				L.Push(lua.LBool(iresData.Interface().(bool)))
+			case reflect.Struct: //目前结构体只支持*syncmap.Map类型,并且key只支持string类型
+				switch iresData.Interface().(type) {
+				case *syncmap.Map:
+					mps := iresData.Interface().(*syncmap.Map)
+					tbl := L.NewTable()
+					mps.Range(func(k, v interface{}) bool {
+						L.SetField(tbl, k.(string), retvalfunc(v))
+						return true
+					})
+					L.Push(tbl)
+				}
+			default:
+				L.Push(retvalfunc(iresData.Interface()))
 			}
 		}
 	}

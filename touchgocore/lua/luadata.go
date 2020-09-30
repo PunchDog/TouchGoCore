@@ -80,3 +80,52 @@ func getpathluafile(L *lua.LState) int {
 	L.Push(tbl)
 	return 1
 }
+
+//lua加载的数据存储结构(设计缺陷....)
+type LuaDataObj struct {
+	map_ syncmap.Map //lua初始化存储的数据
+}
+
+//设置一条数据
+func (f *LuaDataObj) SetValue(k string, v int64) {
+	f.map_.Store(k, v)
+}
+
+//查询一条数据
+func (f *LuaDataObj) GetValue(k string) int64 {
+	if d, ok := f.map_.Load(k); ok {
+		return d.(int64)
+	}
+	return 0
+}
+
+//设置一条数据
+func (f *LuaDataObj) SetString(k string, v string) {
+	f.map_.Store(k, v)
+}
+
+//查询一条数据
+func (f *LuaDataObj) GetString(k string) string {
+	if d, ok := f.map_.Load(k); ok {
+		return d.(string)
+	}
+	return ""
+}
+
+//设置一条数据
+func (f *LuaDataObj) SetTable(k string, v *syncmap.Map) {
+	vl := &syncmap.Map{}
+	if v != nil {
+		*vl = *v
+		f.map_.Store(k, vl)
+	}
+}
+
+//查询一条数据
+func (f *LuaDataObj) GetTable(k string) *syncmap.Map {
+	if d, ok := f.map_.Load(k); ok {
+		tbl := d.(*syncmap.Map)
+		return tbl
+	}
+	return nil
+}

@@ -12,6 +12,7 @@ import (
 
 type ILuaClassInterface interface {
 	AddField(id int64) interface{}
+	Delete()
 }
 
 type funcToName struct {
@@ -117,40 +118,6 @@ func (this *funcToName) callBack(L *lua.LState) int {
 	//填写返回值
 	rescnt := len(resultValues)
 	if rescnt > 0 {
-		//调用的函数
-		retvalfunc := func(val interface{}) (retval lua.LValue) {
-			switch val.(type) {
-			case int:
-				retval = lua.LNumber(val.(int))
-			case int8:
-				retval = lua.LNumber(val.(int8))
-			case int16:
-				retval = lua.LNumber(val.(int16))
-			case int32:
-				retval = lua.LNumber(val.(int32))
-			case uint:
-				retval = lua.LNumber(val.(uint))
-			case uint8:
-				retval = lua.LNumber(val.(uint8))
-			case uint16:
-				retval = lua.LNumber(val.(uint16))
-			case uint32:
-				retval = lua.LNumber(val.(uint32))
-			case int64:
-				retval = lua.LNumber(val.(int64))
-			case uint64:
-				retval = lua.LNumber(val.(uint64))
-			case float32:
-				retval = lua.LNumber(val.(float32))
-			case float64:
-				retval = lua.LNumber(val.(float64))
-			case string:
-				retval = lua.LString(val.(string))
-			case bool:
-				retval = lua.LBool(val.(bool))
-			}
-			return
-		}
 		//调用函数后返回参数
 		for _, iresData := range resultValues {
 			switch iresData.Type().Kind() {
@@ -160,13 +127,13 @@ func (this *funcToName) callBack(L *lua.LState) int {
 					mps := iresData.Interface().(*syncmap.Map)
 					tbl := L.NewTable()
 					mps.Range(func(k, v interface{}) bool {
-						L.SetField(tbl, k.(string), retvalfunc(v))
+						L.SetField(tbl, k.(string), toLuaVal(v, L))
 						return true
 					})
 					L.Push(tbl)
 				}
 			default:
-				L.Push(retvalfunc(iresData.Interface()))
+				L.Push(toLuaVal(iresData.Interface(), L))
 			}
 		}
 	}
@@ -219,9 +186,12 @@ func newLuaClass(class ILuaClassInterface, script *LuaScript) {
 		self := L.CheckTable(1)
 		datauid := L.GetField(self, "datauid")
 		uid := int64(datauid.(lua.LNumber))
-		if _, ok := defaultLuaData.Load(uid); !ok {
+		var classfn ILuaClassInterface = nil
+		if d, ok := defaultLuaData.Load(uid); !ok {
+			classfn = d.(ILuaClassInterface)
 			return 0
 		}
+		classfn.Delete()
 		defaultLuaData.Delete(uid)
 		return 0
 	}))

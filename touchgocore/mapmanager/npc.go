@@ -37,6 +37,9 @@ func (this *Npc) AddField(id int64) interface{} {
 	return npc
 }
 
+func (this *Npc) Delete() {
+}
+
 func (this *Npc) SetName(Name string) {
 	this.Name = Name
 }

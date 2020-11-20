@@ -1,6 +1,7 @@
 package lua
 
 import (
+	"github.com/PunchDog/TouchGoCore/touchgocore/syncmap"
 	"time"
 
 	"github.com/PunchDog/TouchGoCore/touchgocore/vars"
@@ -105,6 +106,133 @@ func (this *LuaScript) GetRet(index int) *lua.LValue {
 	return this.liRetList.GetData(index)
 }
 
+//转换函数
+func toLuaVal(val interface{}, l *lua.LState) (arg lua.LValue) {
+	arg = nil
+	switch v := val.(type) {
+	case int:
+		arg = lua.LNumber(v)
+	case int8:
+		arg = lua.LNumber(v)
+	case int16:
+		arg = lua.LNumber(v)
+	case int32:
+		arg = lua.LNumber(v)
+	case int64:
+		arg = lua.LNumber(v)
+	case uint:
+		arg = lua.LNumber(v)
+	case uint8:
+		arg = lua.LNumber(v)
+	case uint16:
+		arg = lua.LNumber(v)
+	case uint32:
+		arg = lua.LNumber(v)
+	case uint64:
+		arg = lua.LNumber(v)
+	case string:
+		arg = lua.LString(v)
+	case bool:
+		arg = lua.LBool(v)
+	case float32:
+		arg = lua.LNumber(v)
+	case float64:
+		arg = lua.LNumber(v)
+	case []interface{}:
+		if l == nil {
+			return
+		}
+		tbl := l.NewTable()
+		for idx, val := range v {
+			l.SetTable(tbl, toLuaVal(idx, l), toLuaVal(val, l))
+		}
+		arg = tbl
+	case map[interface{}]interface{}:
+		if l == nil {
+			return
+		}
+		tbl := l.NewTable()
+		for key, val := range v {
+			l.SetTable(tbl, toLuaVal(key, l), toLuaVal(val, l))
+		}
+		arg = tbl
+	case []int:
+		if l == nil {
+			return
+		}
+		tbl := l.NewTable()
+		for idx, val := range v {
+			l.SetTable(tbl, toLuaVal(idx, l), toLuaVal(val, l))
+		}
+		arg = tbl
+	case []int64:
+		if l == nil {
+			return
+		}
+		tbl := l.NewTable()
+		for idx, val := range v {
+			l.SetTable(tbl, toLuaVal(idx, l), toLuaVal(val, l))
+		}
+		arg = tbl
+	case []string:
+		if l == nil {
+			return
+		}
+		tbl := l.NewTable()
+		for idx, val := range v {
+			l.SetTable(tbl, toLuaVal(idx, l), toLuaVal(val, l))
+		}
+		arg = tbl
+	case map[int64]string:
+		if l == nil {
+			return
+		}
+		tbl := l.NewTable()
+		for key, val := range v {
+			l.SetTable(tbl, toLuaVal(key, l), toLuaVal(val, l))
+		}
+		arg = tbl
+	case map[string]string:
+		if l == nil {
+			return
+		}
+		tbl := l.NewTable()
+		for key, val := range v {
+			l.SetTable(tbl, toLuaVal(key, l), toLuaVal(val, l))
+		}
+		arg = tbl
+	case map[string]int64:
+		if l == nil {
+			return
+		}
+		tbl := l.NewTable()
+		for key, val := range v {
+			l.SetTable(tbl, toLuaVal(key, l), toLuaVal(val, l))
+		}
+		arg = tbl
+	case map[int64]int64:
+		if l == nil {
+			return
+		}
+		tbl := l.NewTable()
+		for key, val := range v {
+			l.SetTable(tbl, toLuaVal(key, l), toLuaVal(val, l))
+		}
+		arg = tbl
+	case *syncmap.Map:
+		if l == nil {
+			return
+		}
+		tbl := l.NewTable()
+		v.Range(func(key, value interface{}) bool {
+			l.SetTable(tbl, toLuaVal(key, l), toLuaVal(val, l))
+			return true
+		})
+		arg = tbl
+	}
+	return
+}
+
 //call lua
 func (this *LuaScript) Call(funcname string, list ...interface{}) bool {
 	listlen := len(list)
@@ -119,60 +247,7 @@ func (this *LuaScript) Call(funcname string, list ...interface{}) bool {
 
 	this.gScript.Push(fn.Fn)
 	for _, val := range list {
-		var arg lua.LValue = nil
-		switch v := val.(type) {
-		case int:
-			arg = lua.LNumber(v)
-		case int8:
-			arg = lua.LNumber(v)
-		case int16:
-			arg = lua.LNumber(v)
-		case int32:
-			arg = lua.LNumber(v)
-		case int64:
-			arg = lua.LNumber(v)
-		case string:
-			arg = lua.LString(v)
-		case bool:
-			arg = lua.LBool(v)
-		case []int:
-			tbl := this.gScript.NewTable()
-			for idx, val := range v {
-				this.gScript.SetTable(tbl, lua.LNumber(idx), lua.LNumber(val))
-			}
-			arg = tbl
-		case []string:
-			tbl := this.gScript.NewTable()
-			for idx, val := range v {
-				this.gScript.SetTable(tbl, lua.LNumber(idx), lua.LString(val))
-			}
-			arg = tbl
-		case map[int]string:
-			tbl := this.gScript.NewTable()
-			for key, val := range v {
-				this.gScript.SetTable(tbl, lua.LNumber(key), lua.LString(val))
-			}
-			arg = tbl
-		case map[string]string:
-			tbl := this.gScript.NewTable()
-			for key, val := range v {
-				this.gScript.SetTable(tbl, lua.LString(key), lua.LString(val))
-			}
-			arg = tbl
-		case map[string]int:
-			tbl := this.gScript.NewTable()
-			for key, val := range v {
-				this.gScript.SetTable(tbl, lua.LString(key), lua.LNumber(val))
-			}
-			arg = tbl
-		case map[int]int:
-			tbl := this.gScript.NewTable()
-			for key, val := range v {
-				this.gScript.SetTable(tbl, lua.LNumber(key), lua.LNumber(val))
-			}
-			arg = tbl
-		}
-		this.gScript.Push(arg)
+		this.gScript.Push(toLuaVal(val, this.gScript))
 	}
 
 	if fn.Protect {
@@ -187,8 +262,8 @@ func (this *LuaScript) Call(funcname string, list ...interface{}) bool {
 	//获取返回数据
 	this.liRetList.Clear()
 	for i := 0; i < nNum; i++ {
-		var data lua.LValue = this.gScript.Get(-1) // returned value
-		this.gScript.Pop(1)                        // remove received value
+		data := this.gScript.Get(-1) // returned value
+		this.gScript.Pop(1)          // remove received value
 		this.liRetList.Push(&data)
 	}
 	return true
@@ -210,7 +285,7 @@ func (this *LuaScript) LoadLua(path string) {
 		for {
 			select {
 			case <-time.After(time.Minute * 30):
-				this.Call("collectgarbage", lua.LString("collect"))
+				this.Call("collectgarbage", toLuaVal("collect", nil))
 			case <-this.closeLuaClearTick:
 				break
 			}

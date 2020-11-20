@@ -120,21 +120,7 @@ func (this *funcToName) callBack(L *lua.LState) int {
 	if rescnt > 0 {
 		//调用函数后返回参数
 		for _, iresData := range resultValues {
-			switch iresData.Type().Kind() {
-			case reflect.Struct: //目前结构体只支持*syncmap.Map类型,并且key只支持string类型
-				switch iresData.Interface().(type) {
-				case *syncmap.Map:
-					mps := iresData.Interface().(*syncmap.Map)
-					tbl := L.NewTable()
-					mps.Range(func(k, v interface{}) bool {
-						L.SetField(tbl, k.(string), toLuaVal(v, L))
-						return true
-					})
-					L.Push(tbl)
-				}
-			default:
-				L.Push(toLuaVal(iresData.Interface(), L))
-			}
+			L.Push(toLuaVal(iresData.Interface(), L))
 		}
 	}
 	return rescnt

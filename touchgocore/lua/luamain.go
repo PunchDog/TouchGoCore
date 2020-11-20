@@ -51,6 +51,11 @@ func NewLuaScript(exports *map[string]lua.LGFunction, class *map[ILuaClassInterf
 	return script
 }
 
+//调用
+func Call(funcname string, list ...interface{}) bool {
+	return defaultScript.Call(funcname, list...)
+}
+
 //启动lua
 func Run() {
 	if config.Cfg_.Lua == "off" {

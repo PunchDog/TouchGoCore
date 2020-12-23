@@ -1,15 +1,19 @@
 package mapmanager
 
 import (
+	"github.com/PunchDog/TouchGoCore/touchgocore/syncmap"
 	"io/ioutil"
 
 	"github.com/PunchDog/TouchGoCore/touchgocore/util"
 
 	"github.com/PunchDog/TouchGoCore/touchgocore/config"
 	"github.com/PunchDog/TouchGoCore/touchgocore/jsonthr"
-	"github.com/PunchDog/TouchGoCore/touchgocore/lua"
+	lua "github.com/PunchDog/TouchGoCore/touchgocore/lua_new"
 	"github.com/PunchDog/TouchGoCore/touchgocore/vars"
 )
+
+//地图数据 id/map
+var MapList_ *syncmap.Map = &syncmap.Map{}
 
 //地图坐标点类
 type MapNode struct {

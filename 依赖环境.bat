@@ -18,3 +18,5 @@ git clone https://github.com/silenceper/wechat.git silenceper/wechat
 
 git clone https://github.com/cespare/xxhash.git cespare/xxhash/v2
 git clone https://github.com/dgryski/go-rendezvous.git dgryski/go-rendezvous
+
+git clone https://github.com/aarzilli/golua.git aarzilli/golua

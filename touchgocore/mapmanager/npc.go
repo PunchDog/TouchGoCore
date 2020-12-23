@@ -1,7 +1,7 @@
 package mapmanager
 
 import (
-	"fmt"
+	lua "github.com/PunchDog/TouchGoCore/touchgocore/lua_new"
 
 	"github.com/PunchDog/TouchGoCore/touchgocore/syncmap"
 )
@@ -16,6 +16,7 @@ type ShopItem struct {
 }
 
 type Npc struct {
+	lua.ILuaClassObject
 	Id        int          //NPCID
 	Name      string       //名字
 	Shape     string       //形象
@@ -31,13 +32,10 @@ func (this *Npc) AddField(id int64) interface{} {
 	npc := &Npc{
 		Id: int(id),
 	}
-	if _, ok := NpcList_.LoadOrStore(this.Id, this); ok {
-		panic(fmt.Sprintf("数据内已经有一个ID为：%d的NPC", this.Id))
-	}
+	//if _, ok := NpcList_.LoadOrStore(this.Id, this); ok {
+	//	panic(fmt.Sprintf("数据内已经有一个ID为：%d的NPC", this.Id))
+	//}
 	return npc
-}
-
-func (this *Npc) Delete() {
 }
 
 func (this *Npc) SetName(Name string) {

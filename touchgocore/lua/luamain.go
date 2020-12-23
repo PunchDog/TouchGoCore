@@ -11,6 +11,7 @@ import (
 
 //lua指针
 var _defaultlua *LuaScript = nil
+var _luaList []*LuaScript = make([]*LuaScript, 0)
 
 //注册用的函数
 var _exports map[string]func(L *lua.State) int
@@ -123,6 +124,7 @@ func NewLuaScript(initluapath string) *LuaScript {
 		}
 	}()
 
+	_luaList = append(_luaList, p)
 	return p
 }
 
@@ -165,4 +167,11 @@ func Run() {
 
 	_defaultlua = NewLuaScript(config.Cfg_.Lua)
 	vars.Info("启动lua服务成功")
+}
+
+//关闭所有的定时器
+func Stop() {
+	for _, lua := range _luaList {
+		lua.Close()
+	}
 }

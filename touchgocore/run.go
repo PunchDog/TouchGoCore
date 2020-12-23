@@ -126,6 +126,7 @@ func Run(serverName string, version string) {
 	signal.Notify(chSig, syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT, syscall.SIGKILL)
 	vars.Info("Signal: ", <-chSig)
 	rpc.Stop()            //关闭通道
+	lua.Stop()            //关闭lua定时器
 	if ExitFunc_ != nil { //退出时清理工作
 		ExitFunc_()
 	}

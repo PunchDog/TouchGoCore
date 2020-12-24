@@ -1,10 +1,9 @@
 package time
 
 import (
-	"sync"
+	"github.com/PunchDog/TouchGoCore/touchgocore/syncmap"
 	"time"
 
-	"github.com/PunchDog/TouchGoCore/touchgocore/syncmap"
 	"github.com/PunchDog/TouchGoCore/touchgocore/vars"
 )
 
@@ -47,194 +46,135 @@ const (
 	eTimerState_Start
 )
 
-const DEFAULT_MAX_OVER_TIME int64 = (86400 * 60)
-
-//时间接口
+//计时器接口
 type ITimer interface {
-	MaxOverTimeOut() bool
-	IsOverTime() bool
-	TimeOut() bool
-	NextTime() bool
-	OverTimer(bool, *CTimerManager)
-
-	Tick()
+	Tick()           //执行
+	over() bool      //完成了
+	nextTime() int64 //切换到下一个时间
+	loopdec()        //次数减一
 }
 
-//时间接口
-type ITimerObj struct {
-	m_NextTime    int64
-	m_OverTime    int64
-	m_LastNum     int
-	m_WaitTime    int64
-	m_MaxOverTime int64
-	m_LoopNum     int
-	m_eTimerState eTimerState //开启状态
-	TickFn        func()
+//原始继承父类
+type TimerObj struct {
+	loop     int   //循环次数
+	steptime int64 //单次循环等待时长
+	maxtime  int64 //会回调的总时长
+	endtime  int64 //结束时间
 }
 
-func (this *ITimerObj) Tick() {
-	this.TickFn()
+func (this *TimerObj) Init(steptime int64) {
+	this.InitAll(steptime, 999999999, 99999999999)
 }
 
-//开始下一个时间节点
-func (this *ITimerObj) NextTime() bool {
-	if this.m_WaitTime == 0 || this.m_MaxOverTime == 0 {
-		return false
-	}
-
-	//时间到了，或者循环次数完了
-	if this.IsOverTime() {
-		return false
-	}
-	this.m_NextTime = time.Now().Unix() + this.m_WaitTime
-	this.m_LastNum--
-	return true
+func (this *TimerObj) InitAll(steptime int64, loop int, maxtime int64) {
+	this.loop = loop
+	this.steptime = steptime
+	this.maxtime = time.Now().UnixNano()/int64(time.Millisecond) + maxtime
 }
 
-//是否到了结束
-func (this *ITimerObj) IsOverTime() bool {
-	if (this.m_LoopNum > 0 && this.m_LastNum == 0) || this.MaxOverTimeOut() {
-		return true
-	}
-	return false
+func (this *TimerObj) Tick() {
 }
 
-//时间到了没
-func (this *ITimerObj) TimeOut() bool {
-	curTime := time.Now().Unix()
-	return this.m_NextTime <= curTime
-}
-func (this *ITimerObj) MaxOverTimeOut() bool {
-	curTime := time.Now().Unix()
-	return this.m_OverTime <= curTime
+func (this *TimerObj) loopdec() {
+	this.loop--
 }
 
-//结束时间计数
-func (this *ITimerObj) OverTimer(isTick bool, pManager *CTimerManager) {
-	if this.m_eTimerState != eTimerState_Start {
-		return
-	}
-
-	this.m_eTimerState = eTimerState_Stop
-
-	if isTick {
-		this.Tick()
-	}
-
-	pManager.DelTimer(this)
+func (this *TimerObj) nextTime() int64 {
+	this.endtime = time.Now().UnixNano()/int64(time.Millisecond) + this.steptime
+	return this.endtime
 }
 
-//设置开关
-func (this *ITimerObj) SetTime(wait_time int64, max_over_time int64, loop_num int) {
-	this.m_WaitTime = wait_time
-	this.m_LoopNum = loop_num
-	this.m_MaxOverTime = max_over_time
-	this.m_eTimerState = eTimerState_Stop
+func (this *TimerObj) over() bool {
+	return this.loop == 0 || this.endtime >= this.maxtime
 }
 
-//开始时间计数
-func (this *ITimerObj) StartTimer(pManager *CTimerManager) {
-	if this.m_eTimerState != eTimerState_Stop {
-		return
-	}
+type TimerManager struct {
+	tickMap   *syncmap.Map //数据存储(nexttime/list)
+	closeTick chan byte    //结束循环
+}
 
-	this.m_LastNum = this.m_LoopNum
-	this.m_OverTime = time.Now().Unix() + this.m_MaxOverTime
-	if this.NextTime() {
-		pManager.AddTimer(this)
-		this.m_eTimerState = eTimerState_Start
+func (this *TimerManager) Close() {
+	if this.closeTick != nil {
+		close(this.closeTick)
+		this.closeTick = nil
 	}
 }
 
-//获取剩余时间
-func (this *ITimerObj) GetLastTime() int64 {
-	if this.MaxOverTimeOut() {
-		return 0
-	}
-
-	if this.m_WaitTime == 0 || this.m_MaxOverTime == 0 {
-		return 0
-	}
-
-	return this.m_NextTime - time.Now().Unix()
-}
-
-//新添加时间管理器
-type CTimerManager struct {
-	timerList *syncmap.Map
-	havedData bool
-	lock      sync.Mutex
-}
-
-var TimerManager_ *CTimerManager = &CTimerManager{
-	timerList: &syncmap.Map{},
-	havedData: false,
-}
-
-//添加数据
-func (this *CTimerManager) AddTimer(timer ITimer) {
-	this.timerList.Store(timer, true)
-	this.havedData = true
-}
-
-//删除数据
-func (this *CTimerManager) DelTimer(timer ITimer) {
-	this.timerList.Delete(timer)
-	this.havedData = bool(this.timerList.Length() > 0)
-}
-
-//开启计时器
-func (this *CTimerManager) Tick() {
+//循环时间
+func (this *TimerManager) tick() {
 	for {
-		if !this.havedData {
-			time.Sleep(time.Millisecond * 10)
-			continue
-		}
-
-		old := time.Now().UnixNano()
-		this.lock.Lock()
-		TimerList := *this.timerList //拷贝计时器数据
-		//清空原来的计时器数据
-		this.timerList = &syncmap.Map{}
-		this.lock.Unlock()
-
-		//检查数据
-		for TimerList.Length() > 0 {
-			//取新的头
-			var pTimer ITimer = nil
-			TimerList.Range(func(k, v interface{}) bool {
-				pTimer = k.(ITimer)
-				TimerList.Delete(k)
-				return false
-			})
-
-			//时间判断
-			if pTimer.MaxOverTimeOut() {
-				pTimer.OverTimer(true, this)
-				continue
-			}
-			if pTimer.TimeOut() {
-				if pTimer.IsOverTime() {
-					pTimer.OverTimer(true, this)
-					continue
-				} else {
-					pTimer.Tick()
-					if !pTimer.NextTime() {
-						continue
+		select {
+		case <-time.After(time.Millisecond):
+			//毫秒级查询
+			key := time.Now().UnixNano() / int64(time.Millisecond)
+			var copylist []ITimer = nil
+			this.tickMap.LoadAndFunction(key, func(l interface{}) {
+				list := l.([]ITimer)
+				llen := len(list)
+				copylist = make([]ITimer, 0, llen)
+				copy(copylist, list)
+			}, true)
+			if copylist != nil {
+				for _, timer := range copylist {
+					if !timer.over() {
+						timer.Tick()
+						timer.loopdec()
+						endtime := timer.nextTime()
+						if !timer.over() {
+							this.AddTimer(timer, endtime)
+						}
 					}
 				}
 			}
-			this.AddTimer(pTimer)
-		}
-		new := time.Now().UnixNano()
-		used := time.Duration(new-old) / time.Millisecond
-		if used < 100 {
-			time.Sleep(time.Millisecond * (100 - used))
+		case <-this.closeTick:
+			return
 		}
 	}
+}
+
+//添加到列表
+func (this *TimerManager) AddTimer(t ITimer, endtime int64) {
+	var list []ITimer = nil
+	if l, ok := this.tickMap.Load(endtime); ok {
+		list = l.([]ITimer)
+	} else {
+		list = make([]ITimer, 0)
+	}
+	list = append(list, t)
+	this.tickMap.Store(endtime, list)
+}
+
+var _timerManager map[*TimerManager]bool = nil
+var _defaultTimerManager *TimerManager = nil
+
+func NewTimerManager() *TimerManager {
+	if _timerManager == nil {
+		_timerManager = make(map[*TimerManager]bool)
+	}
+	mgr := &TimerManager{
+		closeTick: make(chan byte, 1),
+		tickMap:   &syncmap.Map{},
+	}
+	go mgr.tick()
+	_timerManager[mgr] = true
+	return mgr
 }
 
 func Run() {
 	vars.Info("启动计时器")
-	go TimerManager_.Tick()
+	_defaultTimerManager = NewTimerManager()
+}
+
+func Stop() {
+	for mgr, _ := range _timerManager {
+		mgr.Close()
+	}
+	_defaultTimerManager = nil
+	_timerManager = nil
+}
+
+//添加个定时器
+func AddTimer(timer ITimer) {
+	endtime := timer.nextTime()
+	_defaultTimerManager.AddTimer(timer, endtime)
 }

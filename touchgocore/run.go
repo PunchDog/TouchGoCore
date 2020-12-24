@@ -99,13 +99,12 @@ func Run(serverName string, version string) {
 	//启动其他进程
 	if config.Cfg_.ServerType == "exec" {
 		for _, dllpath := range config.Cfg_.DllList {
-
 			//根据不同的操作系统来启动程序
 			path := dllpath
 			switch runtime.GOOS {
 			case "windows":
 				path += ".exe"
-			case "darwin":
+			case "macos":
 				path = fmt.Sprintf("env GOTRACEBACK=crash nohup %s &", dllpath)
 			case "linux":
 				path = fmt.Sprintf("env GOTRACEBACK=crash nohup %s &", dllpath)
@@ -127,6 +126,7 @@ func Run(serverName string, version string) {
 	vars.Info("Signal: ", <-chSig)
 	rpc.Stop()            //关闭通道
 	lua.Stop()            //关闭lua定时器
+	time.Stop()           //关闭定时器
 	if ExitFunc_ != nil { //退出时清理工作
 		ExitFunc_()
 	}

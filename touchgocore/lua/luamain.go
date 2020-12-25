@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"github.com/PunchDog/TouchGoCore/touchgocore/config"
 	"github.com/PunchDog/TouchGoCore/touchgocore/syncmap"
+	"github.com/PunchDog/TouchGoCore/touchgocore/time"
 	"github.com/PunchDog/TouchGoCore/touchgocore/vars"
 	"github.com/aarzilli/golua/lua"
-	"time"
 )
 
 //lua指针
@@ -17,13 +17,33 @@ var _luaList []*LuaScript = make([]*LuaScript, 0)
 var _exports map[string]func(L *lua.State) int
 var _exportsClass map[ILuaClassInterface]bool
 
+type luaTimer struct {
+	time.TimerObj
+	tick      int64
+	luaScript *LuaScript
+}
+
+func (this *luaTimer) Tick() {
+	this.tick++
+	this.luaScript.defaultLuaData.Range(func(key, value interface{}) bool {
+		lua := value.(ILuaClassInterface)
+		lua.Update()
+		return true
+	})
+	//30分钟清理一次lua缓存
+	if this.tick%1800 == 0 {
+		//定时垃圾回收
+		this.luaScript.Call("collectgarbage", "collect")
+	}
+}
+
 type LuaScript struct {
 	l                 *lua.State
 	retList           []interface{} //返回值列表
 	initluapath       string        //初始化脚本地址
-	closeLuaClearTick chan byte
 	defaultLuaData    *syncmap.Map
 	defaultLuaDataUid int64
+	luaTimer          *luaTimer
 }
 
 func (this *LuaScript) Init() {
@@ -43,7 +63,7 @@ func (this *LuaScript) Init() {
 
 func (this *LuaScript) Close() {
 	if this.l != nil {
-		close(this.closeLuaClearTick)
+		this.luaTimer.Delete()
 		this.l.Close()
 		this.l = nil
 	}
@@ -85,7 +105,6 @@ func NewLuaScript(initluapath string) *LuaScript {
 		l:                 nil,
 		retList:           make([]interface{}, 0),
 		initluapath:       initluapath,
-		closeLuaClearTick: make(chan byte, 1),
 		defaultLuaData:    &syncmap.Map{},
 		defaultLuaDataUid: 0,
 	}
@@ -105,25 +124,14 @@ func NewLuaScript(initluapath string) *LuaScript {
 	}
 
 	//创建定时器
-	go func() {
-		for {
-			select {
-			case <-time.After(time.Second):
-				p.defaultLuaData.Range(func(key, value interface{}) bool {
-					lua := value.(ILuaClassInterface)
-					lua.Update()
-					return true
-				})
-			case <-time.After(time.Minute * 30):
-				//定时垃圾回收
-				p.Call("collectgarbage", "collect")
-			case <-p.closeLuaClearTick:
-				//关闭定时器
-				return
-			}
-		}
-	}()
+	p.luaTimer = &luaTimer{
+		tick:      0,
+		luaScript: p,
+	}
+	p.luaTimer.Init(1000)
+	time.AddTimer(p.luaTimer)
 
+	//加入管理列表
 	_luaList = append(_luaList, p)
 	return p
 }

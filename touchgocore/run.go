@@ -70,11 +70,11 @@ func Run(serverName string, version string) {
 		vars.Info("加载DB数据成功")
 	}
 
-	//启动rpc相关
-	rpc.Run()
-
 	//启动timer定时器
 	time.Run()
+
+	//启动rpc相关
+	rpc.Run()
 
 	//启动ws
 	impl.Run()
@@ -126,9 +126,9 @@ func Run(serverName string, version string) {
 	vars.Info("Signal: ", <-chSig)
 	rpc.Stop()            //关闭通道
 	lua.Stop()            //关闭lua定时器
-	time.Stop()           //关闭定时器
 	if ExitFunc_ != nil { //退出时清理工作
 		ExitFunc_()
 	}
+	time.Stop() //关闭定时器
 	os.Exit(-1)
 }

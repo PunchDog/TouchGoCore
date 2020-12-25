@@ -5,12 +5,15 @@ import "sync"
 type Map struct {
 	mp   map[interface{}]interface{} //数据
 	num  int                         //数量
-	lock sync.RWMutex                //读写锁
+	lock sync.Mutex                  //读写锁
 }
 
 func (this *Map) load(k interface{}) (d interface{}, ok bool) {
 	if this.mp != nil {
 		d, ok = this.mp[k]
+		if !ok {
+			d = nil
+		}
 	} else {
 		ok = false
 		d = nil
@@ -44,8 +47,8 @@ func (this *Map) Length() int {
 
 //读取数据
 func (this *Map) Load(k interface{}) (d interface{}, ok bool) {
-	this.lock.RLock()
-	defer this.lock.RUnlock()
+	this.lock.Lock()
+	defer this.lock.Unlock()
 	return this.load(k)
 }
 
@@ -65,8 +68,8 @@ func (this *Map) Delete(k interface{}) {
 
 //循环
 func (this *Map) Range(fn func(k, v interface{}) bool) {
-	this.lock.RLock()
-	defer this.lock.RUnlock()
+	this.lock.Lock()
+	defer this.lock.Unlock()
 	for i, i2 := range this.mp {
 		if !fn(i, i2) {
 			break
@@ -87,16 +90,9 @@ func (this *Map) LoadOrStore(key, value interface{}) (actual interface{}, loaded
 }
 
 //读取并操作
-func (this *Map) LoadAndFunction(k interface{}, fn func(v interface{}), removeval bool) {
-	this.lock.RLock()
-	defer this.lock.RUnlock()
-	actual, loaded := this.load(k)
-	if loaded {
-		fn(actual)
-		if removeval {
-			this.delete(k)
-		}
-	} else {
-		fn(nil)
-	}
+func (this *Map) LoadAndFunction(k interface{}, fn func(v interface{}, stfn func(k, v interface{}), delfn func(k interface{}))) {
+	this.lock.Lock()
+	defer this.lock.Unlock()
+	actual, _ := this.load(k)
+	fn(actual, this.store, this.delete)
 }

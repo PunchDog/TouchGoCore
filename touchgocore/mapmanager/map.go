@@ -1,6 +1,7 @@
 package mapmanager
 
 import (
+	"github.com/PunchDog/TouchGoCore/touchgocore/lua"
 	"github.com/PunchDog/TouchGoCore/touchgocore/syncmap"
 	"io/ioutil"
 
@@ -8,7 +9,6 @@ import (
 
 	"github.com/PunchDog/TouchGoCore/touchgocore/config"
 	"github.com/PunchDog/TouchGoCore/touchgocore/jsonthr"
-	lua "github.com/PunchDog/TouchGoCore/touchgocore/lua_new"
 	"github.com/PunchDog/TouchGoCore/touchgocore/vars"
 )
 

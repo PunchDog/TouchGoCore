@@ -9,8 +9,6 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-	"sync"
-	"time"
 )
 
 var (
@@ -43,21 +41,13 @@ func Run(servername string, level string) {
 	}
 
 	fileAndStdoutWriter := io.MultiWriter(writers...)
-	log_.new(fileAndStdoutWriter, "", log.Ldate|log.Lmicroseconds|log.Lshortfile, level)
+	log_.new(fileAndStdoutWriter, log.Ldate|log.Lmicroseconds|log.Lshortfile, level)
 	go func() {
 		//启动日志打印线程
-		lock := sync.Mutex{}
 		for {
 			select {
-			case <-time.After(time.Microsecond * 10):
-				list := []func(){}
-				lock.Lock()
-				list = append(list, log_.printList...)
-				log_.printList = nil
-				lock.Unlock()
-				for _, fn := range list {
-					fn()
-				}
+			case fn := <-log_.printList:
+				fn()
 			}
 		}
 	}()
@@ -67,12 +57,13 @@ func Run(servername string, level string) {
 type SLoger struct {
 	log       *log.Logger
 	logLevel  string
-	printList []func()
+	printList chan func()
 }
 
-func (this *SLoger) new(out io.Writer, prefix string, flag int, logLevel string) {
+func (this *SLoger) new(out io.Writer, flag int, logLevel string) {
 	this.log = log.New(out, "", flag)
 	this.logLevel = logLevel
+	this.printList = make(chan func(), 10000)
 }
 
 func (this *SLoger) getFile() string {
@@ -112,21 +103,21 @@ func (this *SLoger) println(file string, level int, v ...interface{}) {
 
 func Info(v ...interface{}) {
 	file := log_.getFile()
-	log_.printList = append(log_.printList, func() {
+	log_.printList <- func() {
 		log_.println("【INFO】"+file, LogLevel_Info, v...)
-	})
+	}
 }
 
 func Debug(v ...interface{}) {
 	file := log_.getFile()
-	log_.printList = append(log_.printList, func() {
-		log_.println("【DEBUG】"+file, LogLevel_Debug, v...)
-	})
+	log_.printList <- func() {
+		log_.println("【INFO】"+file, LogLevel_Debug, v...)
+	}
 }
 
 func Error(v ...interface{}) {
 	file := log_.getFile()
-	log_.printList = append(log_.printList, func() {
-		log_.println("【ERROR】"+file, LogLevel_Error, v...)
-	})
+	log_.printList <- func() {
+		log_.println("【INFO】"+file, LogLevel_Error, v...)
+	}
 }

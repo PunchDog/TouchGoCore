@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/PunchDog/TouchGoCore/touchgocore/config"
@@ -14,8 +13,6 @@ import (
 	"github.com/PunchDog/TouchGoCore/touchgocore/vars"
 	_ "github.com/go-sql-driver/mysql"
 )
-
-var connectLock sync.Mutex
 
 type DBConfigModel struct {
 	Host          string
@@ -26,8 +23,6 @@ type DBConfigModel struct {
 	MaxOpenConns  int
 	MaxIdleConns  int
 }
-
-var MysqlDbMap map[string]*sql.DB
 
 //操作枚举
 type EDBType int
@@ -341,9 +336,9 @@ type DbMysql struct {
 	Result    *DBResult      //返回结果
 }
 
-func NewDbMysql(config *config.DBConfig) (*DbMysql, error) {
+func NewDbMysql(config *config.MySqlDBConfig) (*DbMysql, error) {
 	this := new(DbMysql)
-	configModel := &DBConfigModel{config.Host, config.Username, config.Password, config.Name, 0, config.MaxIdleConns, config.MaxOpenConns}
+	configModel := &DBConfigModel{config.Host, config.Username, config.Password, config.DBName, 0, config.MaxIdleConns, config.MaxOpenConns}
 	this.config = configModel
 	this.condition = nil
 	return this, this.connect()
@@ -356,20 +351,8 @@ func (this *DbMysql) GetConfig() *DBConfigModel {
 
 // 数据库连接
 func (this *DbMysql) connect() error {
-	if MysqlDbMap == nil {
-		MysqlDbMap = make(map[string]*sql.DB)
-	}
-
 	// 从配置文件中读取配置信息并初始化连接池(go中含有连接池处理机制)
 	connStr := fmt.Sprintf("%s:%s@tcp(%s)/%s?parseTime=true&loc=Local&charset=utf8", this.config.User, this.config.Password, this.config.Host, this.config.DBName)
-	if this.connectOnly(connStr) {
-		// 如果同事还有其他协程创建连接成功了
-		return nil
-	}
-
-	// 锁住,然后创建连接
-	connectLock.Lock()
-	defer connectLock.Unlock()
 	if this.connectOnly(connStr) {
 		// 如果同事还有其他协程创建连接成功了
 		return nil
@@ -396,7 +379,7 @@ func (this *DbMysql) connect() error {
 		db.SetConnMaxLifetime(time.Second * 2400) //保活10天
 	}
 
-	MysqlDbMap[connStr] = db
+	_DbMap.Store(connStr, db)
 	this.db = db
 	//Log.Println("连接数据库成功")
 	return nil
@@ -404,8 +387,8 @@ func (this *DbMysql) connect() error {
 
 // 使用有已有的连接资源
 func (this *DbMysql) connectOnly(dataSourceName string) bool {
-	if db, ok := MysqlDbMap[dataSourceName]; ok {
-		this.db = db
+	if db, ok := _DbMap.Load(dataSourceName); ok {
+		this.db = db.(*sql.DB)
 		return true
 	}
 	return false

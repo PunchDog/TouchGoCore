@@ -11,8 +11,6 @@ import (
 	"github.com/go-redis/redis/v7"
 )
 
-var RedisDbMap *sync.Map = &sync.Map{}
-
 type RedisConfigModel struct {
 	Host     string
 	Db       int
@@ -54,13 +52,13 @@ func (this *Redis) connect() error {
 	}
 
 	this.redisClient = client
-	RedisDbMap.Store(str, client)
+	_DbMap.Store(str, client)
 	return nil
 }
 
 // 使用有已有的连接资源
 func (this *Redis) connectOnly(dataSourceName string) bool {
-	if v, ok := RedisDbMap.Load(dataSourceName); ok {
+	if v, ok := _DbMap.Load(dataSourceName); ok {
 		this.redisClient = v.(*redis.Client)
 		return true
 	}
@@ -73,7 +71,7 @@ func (this *Redis) Lock(lockkey string) {
 		select {
 		case <-time.After(time.Nanosecond * 10):
 			//正常加锁
-			if success, _ := this.redisClient.SetNX("lock-"+lockkey, util.GetNowtimeMD5_TouchGoCore(), 10*time.Second).Result(); success {
+			if success, _ := this.redisClient.SetNX("lock-"+lockkey, util.GetNowtimeMD5(), 10*time.Second).Result(); success {
 				return
 			} else if this.redisClient.TTL("lock-"+lockkey).Val() == -1 { //-2:失效；-1：无过期；
 				this.redisClient.Expire("lock-"+lockkey, 10*time.Second)

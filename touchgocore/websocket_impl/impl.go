@@ -8,17 +8,19 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/PunchDog/TouchGoCore/touchgocore/syncmap"
 	"github.com/PunchDog/TouchGoCore/touchgocore/util"
 	"github.com/PunchDog/TouchGoCore/touchgocore/vars"
 	"github.com/golang/protobuf/proto"
 	"github.com/gorilla/websocket"
 )
 
+var connectList syncmap.Map
+
 type Connection struct {
 	enterPort  int             //
 	wsConnect  *websocket.Conn //
 	remoteAddr string          //
-	closeChan  chan byte       //
 	isClosed   bool            // 防止closeChan被关闭多次
 	Uid        int64           //全局用唯一ID
 }
@@ -33,7 +35,6 @@ func InitConnection(port int, wsConn *websocket.Conn, remoteAddr string) (*Conne
 	conn := &Connection{
 		enterPort:  port,
 		wsConnect:  wsConn,
-		closeChan:  make(chan byte, 1),
 		isClosed:   false,
 		remoteAddr: "",
 		Uid:        maxUid,
@@ -41,19 +42,20 @@ func InitConnection(port int, wsConn *websocket.Conn, remoteAddr string) (*Conne
 	if remoteAddr != "" {
 		conn.remoteAddr = remoteAddr
 	}
+
 	if !callBack_.OnConnect(conn) {
 		conn.Close("连接初始化失败")
 		return nil, &util.Error{ErrMsg: "连接出错"}
 	}
 
 	vars.Info("%s创建连接成功！", remoteAddr)
+
+	go conn.readLoop()
+
 	//连接数+1
 	num, _ := redis_.Get().HGet("wsListen", strconv.Itoa(port)).Int()
 	redis_.Get().HSet("wsListen", port, num+1)
-
-	//执行
-	go conn.readLoop()
-
+	connectList.Store(conn.Uid, connectList)
 	return conn, nil
 }
 
@@ -79,13 +81,13 @@ func (s *Connection) SendMsg(protocol1 int32, protocol2 int32, pb proto.Message)
 			vars.Error(err.Error())
 		}
 
-		s.Write(protocol1, protocol2, data, len)
+		s.write(protocol1, protocol2, data, len)
 	} else {
 		vars.Error("服务器连接还没创建上！！！")
 	}
 }
 
-func (s *Connection) Write(protocol1 int32, protocol2 int32, buffer []byte, buffLen int) {
+func (s *Connection) write(protocol1 int32, protocol2 int32, buffer []byte, buffLen int) {
 	if s.IsClose() {
 		return
 	}
@@ -99,12 +101,8 @@ func (conn *Connection) Close(desc string) {
 	redis_.Lock("close")
 	defer redis_.UnLock("close")
 
-	// 线程安全，可多次调用
-	conn.wsConnect.Close()
-
 	if !conn.isClosed {
 		conn.isClosed = true
-		close(conn.closeChan)
 		callBack_.OnClose(conn)
 
 		//连接数-1
@@ -116,8 +114,12 @@ func (conn *Connection) Close(desc string) {
 			conn.wsConnect.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(10000, desc))
 		}
 	}
+
+	// 线程安全，可多次调用
+	conn.wsConnect.Close()
 }
 
+//读取数据
 func (conn *Connection) readLoop() {
 	var (
 		data []byte
@@ -126,7 +128,7 @@ func (conn *Connection) readLoop() {
 	defer func() {
 		recover()
 		conn.Close("")
-		runtime.Goexit()
+		runtime.Goexit() //退出子进程
 	}()
 
 	for {
@@ -218,28 +220,8 @@ func WsListenAndServe(port int) {
 	HttpListenAndServe(port)
 }
 
-//客户端
-type Client struct {
-	conn      *Connection
-	closed    bool
-	connected bool
-}
-
-func (this *Client) GetConn() *Connection {
-	return this.conn
-}
-
-func (s *Client) SendMsg(protocol1 int32, protocol2 int32, pb proto.Message) {
-	s.conn.SendMsg(protocol1, protocol2, pb)
-}
-
-func (s *Client) Write(protocol1 int32, protocol2 int32, buffer []byte, bufflen int) {
-	s.conn.Write(protocol1, protocol2, buffer, bufflen)
-}
-
 //主动连接
-func (this *Client) Connection1(ipstring string) error {
-	this.closed = true
+func clientConnection(ipstring string) error {
 	// var addr = flag.String("addr", ipstring, "http service address")
 	u := url.URL{Scheme: "ws", Host: ipstring, Path: "/ws"}
 	c, _, err := websocket.DefaultDialer.Dial(u.String(), nil)
@@ -249,36 +231,13 @@ func (this *Client) Connection1(ipstring string) error {
 			return &util.Error{ErrMsg: "获取连接端口出错"}
 		}
 		port, _ := strconv.Atoi(host[1])
-		if this.conn, err = InitConnection(port, c, ""); err != nil {
-			// this.conn.Close(err.Error())
+		if _, err := InitConnection(port, c, ""); err != nil {
 			return err
 		}
-		this.closed = false
-		this.connected = true
 		vars.Info("connecting to %s", u.String())
 	} else {
 		vars.Error("dial:", err)
 		return err
 	}
 	return nil
-
-}
-
-func (this *Client) Connection(ip string, port int) error {
-	str := ip + ":" + strconv.Itoa(port)
-	return this.Connection1(str)
-}
-
-func (this *Client) Connected() bool {
-	return this.connected
-}
-
-func (this *Client) Close() {
-	this.conn.Close("")
-	this.connected = false
-	this.closed = true
-}
-
-func (this *Client) IsClose() bool {
-	return this.closed
 }

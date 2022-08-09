@@ -11,7 +11,6 @@ import (
 
 	"github.com/PunchDog/TouchGoCore/touchgocore/config"
 	"github.com/PunchDog/TouchGoCore/touchgocore/db"
-	"github.com/PunchDog/TouchGoCore/touchgocore/fileserver"
 	"github.com/PunchDog/TouchGoCore/touchgocore/lua"
 	"github.com/PunchDog/TouchGoCore/touchgocore/mapmanager"
 	"github.com/PunchDog/TouchGoCore/touchgocore/rpc"
@@ -61,13 +60,22 @@ func Run(serverName string, version string) {
 	vars.Info("加载redis配置成功")
 
 	//检查DB
-	if config.Cfg_.Db != nil {
-		vars.Info("开启DB功能")
-		if _, err := db.NewDbMysql(config.Cfg_.Db); err != nil {
-			panic("加载配置出错，没有db配置:" + err.Error())
+	if config.Cfg_.MySql != nil {
+		vars.Info("开启MySqlDB功能")
+		if _, err := db.NewDbMysql(config.Cfg_.MySql); err != nil {
+			panic("加载配置出错:" + err.Error())
 		}
-		db.Run()
-		vars.Info("加载DB数据成功")
+		db.MySqlRun()
+		vars.Info("加载MySql数据成功")
+	}
+
+	//检查DB
+	if config.Cfg_.Mongo != nil {
+		vars.Info("开启Mongo功能")
+		if _, err := db.NewMongoDB(config.Cfg_.Mongo); err != nil {
+			panic("加载配置出错:" + err.Error())
+		}
+		vars.Info("加载Mongo数据成功")
 	}
 
 	//启动timer定时器
@@ -85,16 +93,10 @@ func Run(serverName string, version string) {
 	//启动lua脚本
 	lua.Run()
 
-	//启动文件服务
-	fileserver.Run()
-
 	//核心加载完了后自己想执行的东西
 	if StartFunc_ != nil {
 		StartFunc_()
 	}
-
-	//启动完成
-	vars.Info("touchgocore启动完成")
 
 	//启动其他进程
 	if config.Cfg_.ServerType == "exec" {
@@ -119,6 +121,9 @@ func Run(serverName string, version string) {
 			vars.Info("成功启动进程:%s", dllpath)
 		}
 	}
+
+	//启动完成
+	vars.Info("touchgocore启动完成")
 
 	//开阻塞
 	chSig := make(chan os.Signal)

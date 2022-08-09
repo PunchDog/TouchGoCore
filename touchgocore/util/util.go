@@ -3,6 +3,7 @@ package util
 import (
 	"crypto/md5"
 	"encoding/hex"
+	"fmt"
 	"io/ioutil"
 	"math/rand"
 	"net"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -17,15 +19,38 @@ import (
 	"github.com/PunchDog/TouchGoCore/touchgocore/jsonthr"
 )
 
-/*
-获取IP
-*/
-func GetIp(r *http.Request) string {
-	ip := net.ParseIP(strings.Split(r.RemoteAddr, ":")[0]).String()
-	if ip == "<nil>" {
-		ip = "127.0.0.1"
+// 获取本地内网地址。
+func GetLocalInternalIp() (string, error) {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return "127.0.0.1", err
 	}
-	return ip
+
+	for _, address := range addrs {
+		// 检查ip地址判断是否回环地址
+		if ipnet, ok := address.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
+			if ipnet.IP.To4() != nil {
+				return ipnet.IP.String(), nil
+			}
+		}
+	}
+	return "127.0.0.1", nil
+}
+
+// 获取本地外网地址。
+func GetLocalExternalIp() (string, error) {
+	resp, e := http.Get("http://myexternalip.com/raw")
+	if e != nil {
+		return "127.0.0.1", e
+	}
+	defer resp.Body.Close()
+
+	result, e := ioutil.ReadAll(resp.Body)
+	if e != nil {
+		return "127.0.0.1", e
+	}
+	reg := regexp.MustCompile(`\d+\.\d+\.\d+\.\d+`)
+	return reg.FindString(string(result)), nil
 }
 
 //判断是否是公网ip
@@ -87,11 +112,6 @@ func TabaoIpAPI(ip string) *IPInfo {
 	return &result
 }
 
-func NextTimeZone(oldTime time.Time) time.Time {
-	//往后调整8个小时//
-	return time.Now().Add(time.Duration(8) * time.Hour)
-}
-
 //随机64位
 func RandInt(max int64) int64 {
 	if max == 0 {
@@ -102,12 +122,18 @@ func RandInt(max int64) int64 {
 }
 
 //随机范围
-func RandRange(min int64, max int64) int64 {
-	if max < min {
-		return max
+func RandRange(max int64, min int64) (ret int64) {
+	random := rand.New(rand.NewSource(time.Now().UnixNano()))
+	if max-min == 0 {
+		ret = min
+	} else if max-min > 0 {
+		ret = int64(random.Intn(int(max-min)) + int(min))
+	} else {
+		// max-min < 0
+		min = min + 1
+		ret = int64(random.Intn(int(min-max)) + int(max))
 	}
-	rr := rand.New(rand.NewSource(time.Now().UnixNano() * rand.Int63n(9999)))
-	return rr.Int63n(max-min+1) + min
+	return
 }
 
 // 生成时间戳的函数
@@ -117,13 +143,13 @@ func UTCTime_TouchGoCore() string {
 }
 
 // MD5 实现 :主要是针对 字符串的加密
-func MD5_TouchGoCore(data string) string {
+func MD5(data string) string {
 	h := md5.New()
 	h.Write([]byte(data))
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-func GetTime_TouchGoCore() string {
+func GetTime() string {
 	const shortForm = "2006-01-02 15:04:05"
 	t := time.Now()
 	temp := time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), t.Second(), t.Nanosecond(), time.Local)
@@ -131,10 +157,10 @@ func GetTime_TouchGoCore() string {
 	return str
 }
 
-func GetNowtimeMD5_TouchGoCore() string {
+func GetNowtimeMD5() string {
 	t := time.Now()
 	timestamp := strconv.FormatInt(t.UTC().UnixNano(), 10)
-	return MD5_TouchGoCore(timestamp)
+	return MD5(timestamp)
 }
 
 //获取类名
@@ -222,4 +248,96 @@ func GetPathFile(path string, filter []string) []string {
 	}
 
 	return strRetList
+}
+
+func formatMapKey(values []reflect.Value) string {
+	report := ""
+	v := values
+	if len(values) > 64 {
+		v = values[:64]
+	}
+
+	for _, v := range v {
+		if v.CanInterface() {
+			report += fmt.Sprintf("%v, ", v.Interface())
+		} else if v.Kind() == reflect.Ptr {
+			e := v.Elem()
+			if e.CanInterface() {
+				report += fmt.Sprintf("%v, ", e.Interface())
+			} else {
+				report += fmt.Sprintf("NO SUPPORT, ")
+			}
+		}
+	}
+
+	if len(values) > 64 {
+		report += "..."
+	}
+
+	return report
+}
+
+func formatStruct(s reflect.Value, deep int16) string {
+	var report string
+	if s.Kind() == reflect.Interface {
+		s = s.Elem()
+	}
+	if s.Kind() == reflect.Ptr {
+		s = s.Elem()
+	}
+
+	prefix := ""
+	for strdeep := deep; strdeep >= 0; strdeep-- {
+		prefix += "\t"
+	}
+
+	typeOfT := s.Type()
+	if s.Kind() == reflect.Struct {
+		for i := 0; i < s.NumField(); i++ {
+			f := s.Field(i)
+			if f.Kind() == reflect.Map {
+				report += fmt.Sprintf("%s%s keys: {%v}\n", prefix,
+					typeOfT.Field(i).Name, formatMapKey(f.MapKeys()))
+			} else if (f.Kind() == reflect.Slice) || (f.Kind() == reflect.Array) {
+				report += fmt.Sprintf("%s%s len: %d\n", prefix,
+					typeOfT.Field(i).Name, f.Len())
+			} else if f.Kind() == reflect.Struct {
+				if deep > 1 {
+					report += fmt.Sprintf("%s%s=%v\n", prefix,
+						typeOfT.Field(i).Name, f.Interface())
+				} else {
+					report += fmt.Sprintf("%s%s:\n", prefix, typeOfT.Field(i).Name)
+					report += formatStruct(f, deep+1)
+				}
+			} else if f.Kind() == reflect.Interface {
+				if deep > 1 {
+					report += fmt.Sprintf("%s%s=%v\n", prefix,
+						typeOfT.Field(i).Name, f.Interface())
+				} else {
+					report += fmt.Sprintf("%s%s:\n", prefix, typeOfT.Field(i).Name)
+					report += formatStruct(f, deep+1)
+				}
+			} else if f.CanInterface() {
+				report += fmt.Sprintf("%s%s=%v\n", prefix,
+					typeOfT.Field(i).Name, f.Interface())
+			} else if f.Kind() == reflect.Ptr {
+				e := f.Elem()
+				if f.CanInterface() {
+					report += fmt.Sprintf("%s%s=%v\n", prefix,
+						typeOfT.Field(i).Name, e.Interface())
+				} else {
+					report += fmt.Sprintf("%s%s=NO SUPPORT\n", prefix,
+						typeOfT.Field(i).Name)
+				}
+			}
+		}
+	} else {
+		report += fmt.Sprintf("%s%s=%v\n", prefix,
+			typeOfT.Name(), s.Interface())
+	}
+	return report
+}
+
+func FormatStruct(obj interface{}) string {
+	return formatStruct(reflect.ValueOf(obj), 0)
 }

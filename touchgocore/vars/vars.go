@@ -2,13 +2,14 @@ package vars
 
 import (
 	"fmt"
-	"github.com/natefinch/lumberjack"
 	"io"
 	"log"
 	"os"
 	"runtime"
 	"strconv"
 	"strings"
+
+	"github.com/natefinch/lumberjack"
 )
 
 var (
@@ -111,13 +112,13 @@ func Info(v ...interface{}) {
 func Debug(v ...interface{}) {
 	file := log_.getFile()
 	log_.printList <- func() {
-		log_.println("【INFO】"+file, LogLevel_Debug, v...)
+		log_.println("【DEBUG】"+file, LogLevel_Debug, v...)
 	}
 }
 
 func Error(v ...interface{}) {
 	file := log_.getFile()
 	log_.printList <- func() {
-		log_.println("【INFO】"+file, LogLevel_Error, v...)
+		log_.println("【ERROR】"+file, LogLevel_Error, v...)
 	}
 }

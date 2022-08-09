@@ -4,13 +4,28 @@
         "redis_password":"",
         "redis_db":0
     },
-    "db":{
+    "mysql":{
         "db_host": "121.36.15.181:3306",
         "db_username": "root",
         "db_password": "123789abcA",
         "db_name": "neiwangpoker",
         "db_max_idle_conns": 100,
         "db_max_open_conns": 500
+    },
+    "mongo":{
+        "db_host": "121.36.15.181:27017",
+        "db_username": "",
+        "db_password": "",
+        "db_name": "neiwangpoker",
+        "db_replica_set_name":"",
+        "mongo_up_url":"mongodb://%s:%s@%s/%s",
+        "mongo_url":"mongodb://%s/%s",
+        "init_dbtable_index":[
+            {
+                "table":"user",
+                "index":["id","username"]
+            }
+        ]
     },
     "busid":"dbserver",
     "ip":"127.0.0.1",

@@ -147,7 +147,7 @@ func (this *DbOperateObj) Query() interface{} {
 	}
 
 	//查DB
-	db, _ := NewDbMysql(config.Cfg_.Db)
+	db, _ := NewDbMysql(config.Cfg_.MySql)
 	var ret *DBResult = nil
 	var err error = nil
 	switch this.GetDbOperateType() {
@@ -193,7 +193,7 @@ func (this *DbOperateObj) Query() interface{} {
 }
 
 func (this *DbOperateObj) write() error {
-	db, _ := NewDbMysql(config.Cfg_.Db)
+	db, _ := NewDbMysql(config.Cfg_.MySql)
 	switch this.GetDbOperateType() {
 	case EDBType_Insert:
 		return db.SetCondition(this.condition_).Insert()
@@ -257,7 +257,7 @@ var dbReadList_ chan SDBOperate = make(chan SDBOperate, 100000)
 var dbWriteList_ chan SDBOperate = make(chan SDBOperate, 100000)
 
 //启动操作
-func Run() {
+func MySqlRun() {
 	//读线程
 	go func() {
 		for {

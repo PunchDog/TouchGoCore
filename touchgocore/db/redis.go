@@ -6,8 +6,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/PunchDog/TouchGoCore/touchgocore/config"
-	"github.com/PunchDog/TouchGoCore/touchgocore/util"
+	"touchgocore/config"
+	"touchgocore/util"
+
 	"github.com/go-redis/redis/v7"
 )
 

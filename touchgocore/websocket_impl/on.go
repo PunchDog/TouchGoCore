@@ -4,10 +4,11 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/PunchDog/TouchGoCore/touchgocore/config"
-	"github.com/PunchDog/TouchGoCore/touchgocore/db"
-	"github.com/PunchDog/TouchGoCore/touchgocore/util"
-	"github.com/PunchDog/TouchGoCore/touchgocore/vars"
+	"touchgocore/config"
+	"touchgocore/db"
+	"touchgocore/util"
+	"touchgocore/vars"
+
 	"github.com/gorilla/websocket"
 )
 

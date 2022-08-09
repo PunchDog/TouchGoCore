@@ -1,15 +1,15 @@
 package mapmanager
 
 import (
-	"github.com/PunchDog/TouchGoCore/touchgocore/lua"
-	"github.com/PunchDog/TouchGoCore/touchgocore/syncmap"
 	"io/ioutil"
+	"touchgocore/lua"
+	"touchgocore/syncmap"
 
-	"github.com/PunchDog/TouchGoCore/touchgocore/util"
+	"touchgocore/util"
 
-	"github.com/PunchDog/TouchGoCore/touchgocore/config"
-	"github.com/PunchDog/TouchGoCore/touchgocore/jsonthr"
-	"github.com/PunchDog/TouchGoCore/touchgocore/vars"
+	"touchgocore/config"
+	"touchgocore/jsonthr"
+	"touchgocore/vars"
 )
 
 //地图数据 id/map

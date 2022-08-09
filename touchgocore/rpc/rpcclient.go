@@ -5,10 +5,10 @@ import (
 	"net/rpc"
 	"strconv"
 
-	"github.com/PunchDog/TouchGoCore/touchgocore/config"
-	"github.com/PunchDog/TouchGoCore/touchgocore/db"
-	"github.com/PunchDog/TouchGoCore/touchgocore/syncmap"
-	"github.com/PunchDog/TouchGoCore/touchgocore/util"
+	"touchgocore/config"
+	"touchgocore/db"
+	"touchgocore/syncmap"
+	"touchgocore/util"
 )
 
 type Client struct {

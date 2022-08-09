@@ -4,9 +4,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/PunchDog/TouchGoCore/touchgocore/config"
-	"github.com/PunchDog/TouchGoCore/touchgocore/syncmap"
-	"github.com/PunchDog/TouchGoCore/touchgocore/util"
+	"touchgocore/config"
+	"touchgocore/syncmap"
+	"touchgocore/util"
 )
 
 //接口

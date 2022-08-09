@@ -8,9 +8,10 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/PunchDog/TouchGoCore/touchgocore/syncmap"
-	"github.com/PunchDog/TouchGoCore/touchgocore/util"
-	"github.com/PunchDog/TouchGoCore/touchgocore/vars"
+	"touchgocore/syncmap"
+	"touchgocore/util"
+	"touchgocore/vars"
+
 	"github.com/golang/protobuf/proto"
 	"github.com/gorilla/websocket"
 )

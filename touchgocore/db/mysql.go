@@ -7,10 +7,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/PunchDog/TouchGoCore/touchgocore/config"
+	"touchgocore/config"
 
-	"github.com/PunchDog/TouchGoCore/touchgocore/util"
-	"github.com/PunchDog/TouchGoCore/touchgocore/vars"
+	"touchgocore/util"
+	"touchgocore/vars"
+
 	_ "github.com/go-sql-driver/mysql"
 )
 

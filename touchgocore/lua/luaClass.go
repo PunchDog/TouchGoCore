@@ -1,11 +1,12 @@
 package lua
 
 import (
-	"github.com/PunchDog/TouchGoCore/touchgocore/util"
-	"github.com/PunchDog/TouchGoCore/touchgocore/vars"
-	"github.com/aarzilli/golua/lua"
 	"reflect"
+	"touchgocore/util"
+	"touchgocore/vars"
 	"unsafe"
+
+	"github.com/aarzilli/golua/lua"
 )
 
 //注册类接口

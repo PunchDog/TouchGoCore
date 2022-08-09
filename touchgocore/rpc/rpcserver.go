@@ -6,9 +6,9 @@ import (
 	"net/rpc"
 	"strconv"
 
-	"github.com/PunchDog/TouchGoCore/touchgocore/config"
-	"github.com/PunchDog/TouchGoCore/touchgocore/util"
-	"github.com/PunchDog/TouchGoCore/touchgocore/vars"
+	"touchgocore/config"
+	"touchgocore/util"
+	"touchgocore/vars"
 )
 
 //服务器链接注册

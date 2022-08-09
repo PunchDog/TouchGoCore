@@ -3,7 +3,6 @@ module touchgocore
 go 1.18
 
 require (
-	github.com/PunchDog/TouchGoCore v0.0.0-20201225070640-cd4a0cd0d8bc
 	github.com/aarzilli/golua v0.0.0-20210507130708-11106aa57765
 	github.com/go-ini/ini v1.67.0
 	github.com/go-redis/redis/v7 v7.4.1

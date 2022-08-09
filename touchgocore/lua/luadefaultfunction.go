@@ -1,8 +1,9 @@
 package lua
 
 import (
-	"github.com/PunchDog/TouchGoCore/touchgocore/util"
-	"github.com/PunchDog/TouchGoCore/touchgocore/vars"
+	"touchgocore/util"
+	"touchgocore/vars"
+
 	"github.com/aarzilli/golua/lua"
 )
 

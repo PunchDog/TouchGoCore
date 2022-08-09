@@ -1,9 +1,9 @@
 package rpc
 
 import (
-	"github.com/PunchDog/TouchGoCore/touchgocore/vars"
 	"net/rpc"
 	"strconv"
+	"touchgocore/vars"
 )
 
 //原始转发协议

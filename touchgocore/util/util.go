@@ -16,7 +16,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/PunchDog/TouchGoCore/touchgocore/jsonthr"
+	"touchgocore/jsonthr"
 )
 
 // 获取本地内网地址。

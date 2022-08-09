@@ -1,10 +1,10 @@
 package time
 
 import (
-	"github.com/PunchDog/TouchGoCore/touchgocore/syncmap"
 	"time"
+	"touchgocore/syncmap"
 
-	"github.com/PunchDog/TouchGoCore/touchgocore/vars"
+	"touchgocore/vars"
 )
 
 //GetCurrTs return current timestamps

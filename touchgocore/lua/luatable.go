@@ -1,7 +1,8 @@
 package lua
 
 import (
-	"github.com/PunchDog/TouchGoCore/touchgocore/syncmap"
+	"touchgocore/syncmap"
+
 	"github.com/aarzilli/golua/lua"
 )
 

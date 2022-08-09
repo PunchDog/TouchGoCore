@@ -3,7 +3,6 @@ package util
 import (
 	"bytes"
 	"fmt"
-	"github.com/PunchDog/TouchGoCore/touchgocore/jsonthr"
 	"io"
 	"io/ioutil"
 	"log"
@@ -11,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"time"
+	"touchgocore/jsonthr"
 )
 
 //HTTPGet get 请求

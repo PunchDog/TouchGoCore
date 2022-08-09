@@ -1,9 +1,9 @@
 package mapmanager
 
 import (
-	lua "github.com/PunchDog/TouchGoCore/touchgocore/lua"
+	lua "touchgocore/lua"
 
-	"github.com/PunchDog/TouchGoCore/touchgocore/syncmap"
+	"touchgocore/syncmap"
 )
 
 //商品物品类

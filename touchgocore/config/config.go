@@ -3,8 +3,8 @@ package config
 import (
 	"io/ioutil"
 
-	"github.com/PunchDog/TouchGoCore/touchgocore/jsonthr"
-	"github.com/PunchDog/TouchGoCore/touchgocore/vars"
+	"touchgocore/jsonthr"
+	"touchgocore/vars"
 )
 
 type Cfg struct {

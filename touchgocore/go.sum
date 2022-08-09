@@ -1,7 +1,5 @@
 github.com/BurntSushi/toml v1.2.0 h1:Rt8g24XnyGTyglgET/PRUNlrUeu9F5L+7FilkXfZgs0=
 github.com/BurntSushi/toml v1.2.0/go.mod h1:CxXYINrC8qIiEnFrOxCa7Jy5BFHlXnUU2pbicEuybxQ=
-github.com/PunchDog/TouchGoCore v0.0.0-20201225070640-cd4a0cd0d8bc h1:ZfO4rapwoR+iDoqO5sGY0zZQPqink0b/z6SoaQw6+/8=
-github.com/PunchDog/TouchGoCore v0.0.0-20201225070640-cd4a0cd0d8bc/go.mod h1:vwZfnLHIui0QbkP7XXwzKtPhU1JeQdd43pC66xY9zl0=
 github.com/aarzilli/golua v0.0.0-20210507130708-11106aa57765 h1:N6gB4UCRBZz8twlJbMFiCKj0zX5Et2nFU/LRafT4x80=
 github.com/aarzilli/golua v0.0.0-20210507130708-11106aa57765/go.mod h1:hMjfaJVSqVnxenMlsxrq3Ni+vrm9Hs64tU4M7dhUoO4=
 github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=

@@ -2,10 +2,11 @@ package lua
 
 import (
 	"fmt"
-	"github.com/PunchDog/TouchGoCore/touchgocore/config"
-	"github.com/PunchDog/TouchGoCore/touchgocore/syncmap"
-	"github.com/PunchDog/TouchGoCore/touchgocore/time"
-	"github.com/PunchDog/TouchGoCore/touchgocore/vars"
+	"touchgocore/config"
+	"touchgocore/syncmap"
+	"touchgocore/time"
+	"touchgocore/vars"
+
 	"github.com/aarzilli/golua/lua"
 )
 

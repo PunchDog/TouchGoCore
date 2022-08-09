@@ -9,14 +9,15 @@ import (
 	"runtime"
 	"syscall"
 
-	"github.com/PunchDog/TouchGoCore/touchgocore/config"
-	"github.com/PunchDog/TouchGoCore/touchgocore/db"
-	"github.com/PunchDog/TouchGoCore/touchgocore/lua"
-	"github.com/PunchDog/TouchGoCore/touchgocore/mapmanager"
-	"github.com/PunchDog/TouchGoCore/touchgocore/rpc"
-	"github.com/PunchDog/TouchGoCore/touchgocore/time"
-	"github.com/PunchDog/TouchGoCore/touchgocore/vars"
-	impl "github.com/PunchDog/TouchGoCore/touchgocore/websocket_impl"
+	"touchgocore/config"
+
+	"touchgocore/db"
+	"touchgocore/lua"
+	"touchgocore/mapmanager"
+	"touchgocore/rpc"
+	"touchgocore/time"
+	"touchgocore/vars"
+	impl "touchgocore/websocket_impl"
 )
 
 var ExitFunc_ func() = nil

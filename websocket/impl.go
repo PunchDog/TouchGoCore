@@ -1,10 +1,9 @@
-package impl
+package websocket
 
 import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"runtime"
 	"strconv"
 	"strings"
 
@@ -24,6 +23,7 @@ type Connection struct {
 	remoteAddr string          //
 	isClosed   bool            // 防止closeChan被关闭多次
 	Uid        int64           //全局用唯一ID
+	readChan   chan bool       //读取标志
 }
 
 var maxUid int64 = 0
@@ -39,6 +39,7 @@ func InitConnection(port int, wsConn *websocket.Conn, remoteAddr string) (*Conne
 		isClosed:   false,
 		remoteAddr: "",
 		Uid:        maxUid,
+		readChan:   make(chan bool),
 	}
 	if remoteAddr != "" {
 		conn.remoteAddr = remoteAddr
@@ -92,7 +93,7 @@ func (s *Connection) write(protocol1 int32, protocol2 int32, buffer []byte, buff
 	if s.IsClose() {
 		return
 	}
-	protocol := NewEchoPacket(protocol1, protocol2, buffer, buffLen)
+	protocol := util.NewEchoPacket(protocol1, protocol2, buffer, buffLen)
 	select {
 	case wsOnMessage_.writeChan <- &rwData{data: protocol.Serialize(), conn: s}:
 	}
@@ -104,6 +105,7 @@ func (conn *Connection) Close(desc string) {
 
 	if !conn.isClosed {
 		conn.isClosed = true
+		close(conn.readChan)
 		callBack_.OnClose(conn)
 
 		//连接数-1
@@ -121,27 +123,26 @@ func (conn *Connection) Close(desc string) {
 }
 
 //读取数据
-func (conn *Connection) readLoop() {
+func (conn *Connection) readLoop() chan bool {
 	var (
 		data []byte
 		err  error
 	)
-	defer func() {
-		recover()
-		conn.Close("")
-		runtime.Goexit() //退出子进程
-	}()
+	// defer func() {
+	// 	recover()
+	// 	conn.Close("")
+	// 	runtime.Goexit() //退出子进程
+	// }()
 
-	for {
-		if conn.IsClose() {
-			return
-		}
-		//读数据
-		if _, data, err = conn.wsConnect.ReadMessage(); err != nil {
-			return
-		}
-		wsOnMessage_.readChan <- &rwData{data, conn}
+	if conn.IsClose() {
+		return conn.readChan
 	}
+	//读数据
+	if _, data, err = conn.wsConnect.ReadMessage(); err != nil {
+		return conn.readChan
+	}
+	wsOnMessage_.readChan <- &rwData{data, conn}
+	return conn.readChan
 }
 
 //监听回调列表

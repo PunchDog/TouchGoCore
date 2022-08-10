@@ -136,11 +136,45 @@ func RandRange(max int64, min int64) (ret int64) {
 	return
 }
 
+//时间类型///////////////////////////////////////////////////////////////////////////////////
+//GetCurrTs return current timestamps
+func GetCurrTs() int64 {
+	return time.Now().Unix()
+}
+
+func GetCurrFormatTime() string {
+	return time.Now().Format("2006-01-02 15:04:05")
+}
+
+func ToUTCFormatTime(sec int64) (dateStr string) {
+	now := time.Unix(sec, 0)
+	utc, _ := time.LoadLocation("") //等同于"UTC"
+
+	return now.In(utc).Format("2006-01-02 15:04:05")
+}
+
+func GetWeakDay() int32 {
+	t := time.Now()
+	return int32(t.Weekday())
+}
+
+func UTCToLocalTime(t time.Time) time.Time {
+	_, offset := t.Zone()
+	return time.Unix(t.Unix()+int64(offset), 0)
+}
+
+//是否在同一天
+func GetDiffDay(day1 int64, day2 int64) int {
+	return int((day2 - day1) / 86400)
+}
+
 // 生成时间戳的函数
-func UTCTime_TouchGoCore() string {
+func UTCTime() string {
 	t := time.Now()
 	return strconv.FormatInt(t.UTC().UnixNano(), 10)
 }
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
 
 // MD5 实现 :主要是针对 字符串的加密
 func MD5(data string) string {

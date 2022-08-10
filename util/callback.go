@@ -5,6 +5,11 @@ import (
 	"sync"
 )
 
+const (
+	CallStart string = "StartFunc"
+	CallStop  string = "StopFunc"
+)
+
 var DefaultCallFunc *CallFunction = new(CallFunction)
 
 type CallFunction struct {

@@ -1,27 +1,23 @@
 package touchgocore
 
 import (
-	"fmt"
 	"log"
 	"os"
-	"os/exec"
 	"os/signal"
 	"runtime"
 	"syscall"
 
 	"touchgocore/config"
-
 	"touchgocore/db"
 	"touchgocore/lua"
 	"touchgocore/mapmanager"
-	"touchgocore/rpc"
 	"touchgocore/time"
+	"touchgocore/util"
 	"touchgocore/vars"
-	impl "touchgocore/websocket_impl"
+	"touchgocore/websocket"
 )
 
-var ExitFunc_ func() = nil
-var StartFunc_ func() = nil
+var chSig chan os.Signal
 
 //总体开关,此函数需要放在main的最后
 func Run(serverName string, version string) {
@@ -83,10 +79,10 @@ func Run(serverName string, version string) {
 	time.Run()
 
 	//启动rpc相关
-	rpc.Run()
+	// rpc.Run()
 
 	//启动ws
-	impl.Run()
+	websocket.Run()
 
 	//读取地图
 	mapmanager.Run()
@@ -95,46 +91,72 @@ func Run(serverName string, version string) {
 	lua.Run()
 
 	//核心加载完了后自己想执行的东西
-	if StartFunc_ != nil {
-		StartFunc_()
-	}
+	util.DefaultCallFunc.Do(util.CallStart)
 
-	//启动其他进程
-	if config.Cfg_.ServerType == "exec" {
-		for _, dllpath := range config.Cfg_.DllList {
-			//根据不同的操作系统来启动程序
-			path := dllpath
-			switch runtime.GOOS {
-			case "windows":
-				path += ".exe"
-			case "macos":
-				path = fmt.Sprintf("env GOTRACEBACK=crash nohup %s &", dllpath)
-			case "linux":
-				path = fmt.Sprintf("env GOTRACEBACK=crash nohup %s &", dllpath)
-			}
+	// //启动其他进程
+	// if config.Cfg_.ServerType == "exec" {
+	// 	for _, dllpath := range config.Cfg_.DllList {
+	// 		//根据不同的操作系统来启动程序
+	// 		path := dllpath
+	// 		switch runtime.GOOS {
+	// 		case "windows":
+	// 			path += ".exe"
+	// 		case "macos":
+	// 			path = fmt.Sprintf("env GOTRACEBACK=crash nohup %s &", dllpath)
+	// 		case "linux":
+	// 			path = fmt.Sprintf("env GOTRACEBACK=crash nohup %s &", dllpath)
+	// 		}
 
-			cmd := exec.Command(path, os.Args...)
-			_, err := cmd.CombinedOutput()
-			if err != nil {
-				vars.Error("启动附加进程%s失败:%s", dllpath, err)
-				continue
-			}
-			vars.Info("成功启动进程:%s", dllpath)
-		}
-	}
+	// 		cmd := exec.Command(path, os.Args...)
+	// 		_, err := cmd.CombinedOutput()
+	// 		if err != nil {
+	// 			vars.Error("启动附加进程%s失败:%s", dllpath, err)
+	// 			continue
+	// 		}
+	// 		vars.Info("成功启动进程:%s", dllpath)
+	// 	}
+	// }
 
 	//启动完成
 	vars.Info("touchgocore启动完成")
 
-	//开阻塞
-	chSig := make(chan os.Signal)
-	signal.Notify(chSig, syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT, syscall.SIGKILL)
-	vars.Info("Signal: ", <-chSig)
-	rpc.Stop()            //关闭通道
-	lua.Stop()            //关闭lua定时器
-	if ExitFunc_ != nil { //退出时清理工作
-		ExitFunc_()
+	//进程监控
+	go signalProcHandler()
+
+	//主循环
+	for {
+		if err := loop(); err != nil {
+			break
+		}
 	}
-	time.Stop() //关闭定时器
+}
+
+func loop() (err interface{}) {
+	defer func() {
+		if err = recover(); err != nil {
+			vars.Error(err)
+		}
+	}()
+	select {
+	case <-time.Tick():
+	case <-websocket.Handle():
+	}
+	return nil
+}
+
+func signalProcHandler() {
+	//开阻塞
+	chSig = make(chan os.Signal)
+	signal.Notify(chSig, syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT, syscall.SIGKILL)
+	vars.Info("Signal: ", chSig)
+
+	// rpc.Stop()       //关闭通道
+	lua.Stop()       //关闭lua定时器
+	time.Stop()      //关闭定时器
+	websocket.Stop() //关闭websock
+
+	//退出时清理工作
+	util.DefaultCallFunc.Do(util.CallStop)
+
 	os.Exit(-1)
 }

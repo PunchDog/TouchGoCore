@@ -1,4 +1,4 @@
-package impl
+package websocket
 
 import (
 	"strconv"
@@ -18,11 +18,12 @@ var callBack_ IConnCallback = nil
 //消息数据
 var wsOnMessage_ *WsOnMessage = nil
 var redis_ *db.Redis = nil
+var wsCh chan bool = nil
 
 //这里处理消息，把所有的消息都实行汇总处理
 type IConnCallback interface {
 	OnConnect(*Connection) bool
-	OnMessage(*Connection, *EchoPacket) bool
+	OnMessage(*Connection, *util.EchoPacket) bool
 	OnClose(*Connection)
 }
 
@@ -52,7 +53,7 @@ func (this *defaultCallBack) OnConnect(conn *Connection) bool {
 	return true
 }
 
-func (this *defaultCallBack) OnMessage(conn *Connection, echoPacket *EchoPacket) bool {
+func (this *defaultCallBack) OnMessage(conn *Connection, echoPacket *util.EchoPacket) bool {
 	// body := echoPacket.GetBody()
 	// protocol2 := echoPacket.GetProtocol2()
 	// protocol1 := echoPacket.GetProtocol1()
@@ -77,8 +78,10 @@ type WsOnMessage struct {
 
 //启动ws
 func Run() {
-	if config.Cfg_.Ws == "off" && config.Cfg_.Http == "off" {
-		vars.Info("不启动websocket和http服务")
+	wsCh = make(chan bool)
+
+	if config.Cfg_.Ws == "off" || config.Cfg_.Ws == "" {
+		vars.Info("不启动websocket")
 		return
 	}
 
@@ -117,55 +120,55 @@ func Run() {
 			readChan:  make(chan *rwData, 100000),
 			writeChan: make(chan *rwData, 100000),
 		}
-		go handleloop()
-		go writeLoop()
 
 		vars.Info("WS启动完成")
 	}
 }
 
-func readLoop() {
-	for {
-		connectList.Range(func(k, v interface{}) bool {
-			conn := v.(*Connection)
-			conn.readLoop()
-			return true
-		})
-	}
+func Stop() {
+	close(wsOnMessage_.readChan)
+	close(wsOnMessage_.writeChan)
+	wsOnMessage_ = nil
+	close(wsCh)
 }
 
-func writeLoop() {
-	for {
-		//读数据
-		select {
-		case data := <-wsOnMessage_.writeChan:
-			if data.conn.IsClose() {
-				vars.Error("socket已经关闭")
-				continue
-			}
-
-			if err := data.conn.wsConnect.WriteMessage(websocket.BinaryMessage, data.data); err != nil {
-				vars.Error("发送消息出错:", err)
-				continue
-			}
-		}
+func Handle() chan bool {
+	if wsOnMessage_ == nil {
+		return wsCh
 	}
-}
-
-func handleloop() {
-	for {
-		//读数据
+	//读取数据
+	connectList.Range(func(k, v interface{}) bool {
+		conn := v.(*Connection)
 		select {
-		case data := <-wsOnMessage_.readChan:
-			if data.conn.IsClose() {
-				continue
-			}
-
-			//解析操作
-			data1 := &EchoPacket{buff: data.data}
-			if !callBack_.OnMessage(data.conn, data1) {
-				continue
-			}
+		case <-conn.readLoop():
+		default:
 		}
+		return true
+	})
+
+	//数据操作
+	select {
+	case data := <-wsOnMessage_.readChan:
+		if data.conn.IsClose() {
+			return wsCh
+		}
+
+		//解析操作
+		data1 := util.InitEchoPacket(data.data)
+		if !callBack_.OnMessage(data.conn, data1) {
+			return wsCh
+		}
+	case data := <-wsOnMessage_.writeChan:
+		if data.conn.IsClose() {
+			vars.Error("socket已经关闭")
+			return wsCh
+		}
+
+		if err := data.conn.wsConnect.WriteMessage(websocket.BinaryMessage, data.data); err != nil {
+			vars.Error("发送消息出错:", err)
+			return wsCh
+		}
+	default:
 	}
+	return wsCh
 }

@@ -1,4 +1,4 @@
-package impl
+package util
 
 import (
 	"encoding/binary"
@@ -6,6 +6,10 @@ import (
 
 type EchoPacket struct {
 	buff []byte
+}
+
+func InitEchoPacket(buff []byte) *EchoPacket {
+	return &EchoPacket{buff: buff}
 }
 
 func (this *EchoPacket) Serialize() []byte {
@@ -29,7 +33,7 @@ func (this *EchoPacket) GetBody() []byte {
 }
 
 func NewEchoPacket(protocol1 int32, protocol2 int32, buff []byte, bufflen int) *EchoPacket {
-	p := &EchoPacket{}
+	p := new(EchoPacket)
 	p.buff = make([]byte, 12+bufflen)
 	binary.BigEndian.PutUint32(p.buff[0:4], uint32(bufflen))
 	binary.BigEndian.PutUint32(p.buff[4:8], uint32(protocol2))

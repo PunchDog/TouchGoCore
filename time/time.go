@@ -7,38 +7,13 @@ import (
 	"touchgocore/vars"
 )
 
-//GetCurrTs return current timestamps
-func GetCurrTs() int64 {
-	return time.Now().Unix()
-}
+var timerChannel_ chan ITimer
+var tCh chan bool
 
-func GetCurrFormatTime() string {
-	return time.Now().Format("2006-01-02 15:04:05")
-}
-
-func ToUTCFormatTime(sec int64) (dateStr string) {
-	now := time.Unix(sec, 0)
-	utc, _ := time.LoadLocation("") //等同于"UTC"
-
-	return now.In(utc).Format("2006-01-02 15:04:05")
-}
-
-func GetWeakDay() int32 {
-	t := time.Now()
-	return int32(t.Weekday())
-}
-
-func UTCToLocalTime(t time.Time) time.Time {
-	_, offset := t.Zone()
-	return time.Unix(t.Unix()+int64(offset), 0)
-}
-
-//是否在同一天
-func GetDiffDay(day1 int64, day2 int64) int {
-	return int((day2 - day1) / 86400)
-}
-
-const DEFAULT_LIST_NUM int64 = 1000
+const (
+	DEFAULT_LIST_NUM      int64 = 1000
+	MAX_TIMER_CHANNEL_NUM       = 100000
+)
 
 //计时器接口
 type ITimer interface {
@@ -160,7 +135,9 @@ func (this *TimerManager) tick() {
 			if copylist != nil {
 				for _, timer := range copylist {
 					if !timer.Over() {
-						go timer.Tick() //协成处理，免得占用计时器资源
+						//放到主线程去执行操作
+						timerChannel_ <- timer
+						//计数-
 						timer.LoopDec()
 						endtime := timer.NextTime() % DEFAULT_LIST_NUM
 						if !timer.Over() {
@@ -199,6 +176,7 @@ var _defaultTimerManager *TimerManager = nil
 
 func NewTimerManager() *TimerManager {
 	if _timerManager == nil {
+		timerChannel_ = make(chan ITimer, MAX_TIMER_CHANNEL_NUM)
 		_timerManager = make(map[*TimerManager]bool)
 	}
 	mgr := &TimerManager{
@@ -213,6 +191,7 @@ func NewTimerManager() *TimerManager {
 
 func Run() {
 	vars.Info("启动计时器")
+	tCh = make(chan bool)
 	_defaultTimerManager = NewTimerManager()
 }
 
@@ -220,6 +199,7 @@ func Stop() {
 	for mgr, _ := range _timerManager {
 		mgr.Close()
 	}
+	close(tCh)
 	_defaultTimerManager = nil
 	_timerManager = nil
 }
@@ -228,4 +208,13 @@ func Stop() {
 func AddTimer(timer ITimer) {
 	listkey := timer.NextTime() % DEFAULT_LIST_NUM
 	_defaultTimerManager.AddTimer(timer, listkey)
+}
+
+//主线程调用执行
+func Tick() chan bool {
+	select {
+	case timer := <-timerChannel_:
+		timer.Tick()
+	}
+	return tCh
 }

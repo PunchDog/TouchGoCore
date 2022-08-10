@@ -1,8 +1,9 @@
 package rpcproto
 
 import (
-	"github.com/PunchDog/TouchGoCore/touchgocore/db"
-	"github.com/PunchDog/TouchGoCore/touchgocore/rpc"
+	"touchgocore/db"
+
+	"touchgocore/rpc"
 )
 
 type RegisterFunc struct {

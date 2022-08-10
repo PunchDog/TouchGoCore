@@ -1,8 +1,6 @@
 package main
 
-import (
-	"github.com/PunchDog/TouchGoCore/touchgocore"
-)
+import "touchgocore"
 
 const (
 	Name    = "GateWayServer"

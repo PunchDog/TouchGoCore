@@ -1,9 +1,9 @@
 package main
 
 import (
-	"github.com/PunchDog/TouchGoCore/example/dbserver/rpcproto"
-	"github.com/PunchDog/TouchGoCore/touchgocore"
-	"github.com/PunchDog/TouchGoCore/touchgocore/rpc"
+	"touchgocore"
+	"touchgocore/example/dbserver/rpcproto"
+	"touchgocore/rpc"
 )
 
 const (

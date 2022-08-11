@@ -29,17 +29,17 @@ func error1(L *lua.LState) int {
 	return 0
 }
 
-func dofile(L *lua.LState) int {
-	retstr := L.ToString(1)
-	if err := L.DoFile(retstr); err != nil {
-		L.Push(push(-1, L))
-		L.Push(push(err.Error(), L))
-	} else {
-		L.Push(push(0, L))
-		L.Push(push("ok", L))
-	}
-	return 2
-}
+// func dofile(L *lua.LState) int {
+// 	retstr := L.ToString(1)
+// 	if err := L.DoFile(retstr); err != nil {
+// 		L.Push(push(-1, L))
+// 		L.Push(push(err.Error(), L))
+// 	} else {
+// 		L.Push(push(0, L))
+// 		L.Push(push("ok", L))
+// 	}
+// 	return 2
+// }
 
 //获取路径下所有文件
 func getpathluafile(L *lua.LState) int {

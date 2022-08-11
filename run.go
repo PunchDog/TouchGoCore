@@ -140,6 +140,7 @@ func loop() (err interface{}) {
 	err = nil
 	select {
 	case <-time.Tick():
+	case <-lua.TimeTick():
 	case <-websocket.Handle():
 	case <-chExit:
 		err = &util.Error{ErrMsg: "退出服务器"}

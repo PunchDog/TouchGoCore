@@ -12,6 +12,7 @@ import (
 //lua指针
 var _defaultlua *LuaScript = nil
 var _luaList []*LuaScript = make([]*LuaScript, 0)
+var _luaTimerTick chan func()
 
 //注册用的函数
 var _exports map[string]func(L *lua.LState) int
@@ -27,7 +28,7 @@ func (this *luaTimer) Tick() {
 	this.tick++
 	this.luaScript.defaultLuaData.Range(func(key, value interface{}) bool {
 		lua := value.(ILuaClassInterface)
-		lua.Update()
+		_luaTimerTick <- lua.Update
 		return true
 	})
 	//30分钟清理一次lua缓存
@@ -57,7 +58,7 @@ func (this *LuaScript) Init() {
 	this.l.SetGlobal("info", this.l.NewFunction(info)) /* Original lua_setglobal uses stack... */
 	this.l.SetGlobal("debug", this.l.NewFunction(debug))
 	this.l.SetGlobal("error", this.l.NewFunction(error1))
-	this.l.SetGlobal("dofile", this.l.NewFunction(dofile))
+	// this.l.SetGlobal("dofile", this.l.NewFunction(dofile))
 	this.l.SetGlobal("getpathluafile", this.l.NewFunction(getpathluafile))
 }
 
@@ -180,6 +181,7 @@ func Run() {
 	}
 
 	_defaultlua = NewLuaScript(config.Cfg_.Lua)
+	_luaTimerTick = make(chan func(), 100000)
 	vars.Info("启动lua服务成功")
 }
 
@@ -188,4 +190,14 @@ func Stop() {
 	for _, lua := range _luaList {
 		lua.Close()
 	}
+}
+
+//lua时间操作
+func TimeTick() chan bool {
+	select {
+	case fn := <-_luaTimerTick:
+		fn()
+	default:
+	}
+	return nil
 }

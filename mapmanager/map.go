@@ -68,6 +68,5 @@ func Run() {
 
 	//创建lua NPC类
 	lua.RegisterLuaClass(&Npc{})
-
 	vars.Info("读取地图完成!")
 }

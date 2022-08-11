@@ -155,17 +155,16 @@ func (this *TimerManager) tick() {
 
 //添加到列表
 func (this *TimerManager) AddTimer(t ITimer, listkey int64) {
-	t1 := t.(ITimer)
 	var list []ITimer = nil
 	if l, ok := this.tickMap.Load(listkey); ok {
 		list = l.([]ITimer)
 	} else {
 		list = make([]ITimer, 0)
 	}
-	t1.AddtimerManager(this)
-	if t1.GetUid() == 0 {
+	t.AddtimerManager(this)
+	if t.GetUid() == 0 {
 		this.maxTimerUID++
-		t1.SetUid(this.maxTimerUID)
+		t.SetUid(this.maxTimerUID)
 	}
 	list = append(list, t)
 	this.tickMap.Store(listkey, list)

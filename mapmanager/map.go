@@ -2,7 +2,7 @@ package mapmanager
 
 import (
 	"io/ioutil"
-	lua "touchgocore/lua"
+	lua "touchgocore/gopherlua"
 	"touchgocore/syncmap"
 
 	"touchgocore/util"

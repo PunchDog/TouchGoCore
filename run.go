@@ -9,7 +9,7 @@ import (
 
 	"touchgocore/config"
 	"touchgocore/db"
-	"touchgocore/lua"
+	lua "touchgocore/gopherlua"
 	"touchgocore/mapmanager"
 	"touchgocore/time"
 	"touchgocore/util"
@@ -17,7 +17,7 @@ import (
 	"touchgocore/websocket"
 )
 
-var chSig chan os.Signal
+var chExit chan bool
 
 //总体开关,此函数需要放在main的最后
 func Run(serverName string, version string) {
@@ -137,18 +137,23 @@ func loop() (err interface{}) {
 			vars.Error(err)
 		}
 	}()
+	err = nil
 	select {
 	case <-time.Tick():
 	case <-websocket.Handle():
+	case <-chExit:
+		err = &util.Error{ErrMsg: "退出服务器"}
+	default:
 	}
-	return nil
+	return
 }
 
 func signalProcHandler() {
 	//开阻塞
-	chSig = make(chan os.Signal)
+	chSig := make(chan os.Signal)
 	signal.Notify(chSig, syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT, syscall.SIGKILL)
 	vars.Info("Signal: ", chSig)
+	chExit <- true
 
 	// rpc.Stop()       //关闭通道
 	lua.Stop()       //关闭lua定时器

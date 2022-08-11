@@ -11,6 +11,7 @@ require (
 	github.com/gorilla/websocket v1.5.0
 	github.com/json-iterator/go v1.1.12
 	github.com/natefinch/lumberjack v2.0.0+incompatible
+	github.com/yuin/gopher-lua v0.0.0-20220504180219-658193537a64
 	go.mongodb.org/mongo-driver v1.10.1
 )
 

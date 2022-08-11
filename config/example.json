@@ -36,5 +36,10 @@
     "ws": ":1234",
     "lua": "off",
     "loglevel": "info",
-    "map_path": "off"
+    "map_path": "off",
+    "beegoweb": {
+        "httpport": 1000,
+        "view": "",
+        "static": ""
+    }
 }

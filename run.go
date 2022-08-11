@@ -8,6 +8,7 @@ import (
 	"syscall"
 	"time"
 
+	"touchgocore/beegoweb"
 	"touchgocore/config"
 	"touchgocore/db"
 	lua "touchgocore/gopherlua"
@@ -90,6 +91,9 @@ func Run(serverName string, version string) {
 
 	//启动lua脚本
 	lua.Run()
+
+	//启动beego
+	beegoweb.Run()
 
 	//核心加载完了后自己想执行的东西
 	util.DefaultCallFunc.Do(util.CallStart)

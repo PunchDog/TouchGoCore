@@ -32,3 +32,9 @@ type RedisConfig struct {
 	Password string `json:"redis_password"` //用户密码
 	Db       int    `json:"redis_db"`       //库编号
 }
+
+type BeegoWebConfig struct {
+	HTTPPort  int    `json:"httpport"` //监听端口
+	ViewsPath string `json:"view"`     //网页
+	Static    string `json:"static"`   //文件服
+}

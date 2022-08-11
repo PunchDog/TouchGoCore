@@ -71,13 +71,17 @@ func (self *CallFunction) Do(key interface{}, values ...interface{}) (bret bool)
 			}
 			//检查数据
 			for i := 0; i < method.Type().NumIn(); i++ {
+				in := method.Type().In(i)
 				if args1[i].Kind() == reflect.Invalid {
-					in := method.Type().In(i)
 					if in.Kind() != reflect.Invalid {
 						args1[i] = reflect.New(in)
 					} else {
 						args1[i] = reflect.ValueOf(&Error{ErrMsg: "错误的无效类型"})
 					}
+				} else if args1[i].Kind() != in.Kind() {
+					// old := args1[i]
+					// args1[i] = reflect.New(in)
+					// args1[i].Set(old.Interface())
 				}
 			}
 			l := method.Call(args1)

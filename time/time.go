@@ -8,7 +8,6 @@ import (
 )
 
 var timerChannel_ chan ITimer
-var tCh chan bool
 
 const (
 	DEFAULT_LIST_NUM      int64 = 1000
@@ -190,7 +189,6 @@ func NewTimerManager() *TimerManager {
 
 func Run() {
 	vars.Info("启动计时器")
-	tCh = make(chan bool)
 	_defaultTimerManager = NewTimerManager()
 }
 
@@ -198,7 +196,6 @@ func Stop() {
 	for mgr, _ := range _timerManager {
 		mgr.Close()
 	}
-	close(tCh)
 	_defaultTimerManager = nil
 	_timerManager = nil
 }
@@ -215,5 +212,5 @@ func Tick() chan bool {
 	case timer := <-timerChannel_:
 		timer.Tick()
 	}
-	return tCh
+	return nil
 }

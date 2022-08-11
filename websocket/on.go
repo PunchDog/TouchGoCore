@@ -18,7 +18,6 @@ var callBack_ IConnCallback = nil
 //消息数据
 var wsOnMessage_ *WsOnMessage = nil
 var redis_ *db.Redis = nil
-var wsCh chan bool = nil
 
 //这里处理消息，把所有的消息都实行汇总处理
 type IConnCallback interface {
@@ -78,8 +77,6 @@ type WsOnMessage struct {
 
 //启动ws
 func Run() {
-	wsCh = make(chan bool)
-
 	if config.Cfg_.Ws == "off" || config.Cfg_.Ws == "" {
 		vars.Info("不启动websocket")
 		return
@@ -129,37 +126,36 @@ func Stop() {
 	close(wsOnMessage_.readChan)
 	close(wsOnMessage_.writeChan)
 	wsOnMessage_ = nil
-	close(wsCh)
 }
 
 func Handle() chan bool {
 	if wsOnMessage_ == nil {
-		return wsCh
+		return nil
 	}
 
 	//数据操作
 	select {
 	case data := <-wsOnMessage_.readChan:
 		if data.conn.IsClose() {
-			return wsCh
+			return nil
 		}
 
 		//解析操作
 		data1 := util.InitEchoPacket(data.data)
 		if !callBack_.OnMessage(data.conn, data1) {
-			return wsCh
+			return nil
 		}
 	case data := <-wsOnMessage_.writeChan:
 		if data.conn.IsClose() {
 			vars.Error("socket已经关闭")
-			return wsCh
+			return nil
 		}
 
 		if err := data.conn.wsConnect.WriteMessage(websocket.BinaryMessage, data.data); err != nil {
 			vars.Error("发送消息出错:", err)
-			return wsCh
+			return nil
 		}
 	default:
 	}
-	return wsCh
+	return nil
 }

@@ -6,12 +6,13 @@ import (
 	"os/signal"
 	"runtime"
 	"syscall"
+	"time"
 
 	"touchgocore/config"
 	"touchgocore/db"
 	lua "touchgocore/gopherlua"
 	"touchgocore/mapmanager"
-	"touchgocore/time"
+	time1 "touchgocore/time"
 	"touchgocore/util"
 	"touchgocore/vars"
 	"touchgocore/websocket"
@@ -76,7 +77,7 @@ func Run(serverName string, version string) {
 	}
 
 	//启动timer定时器
-	time.Run()
+	time1.Run()
 
 	//启动rpc相关
 	// rpc.Run()
@@ -128,6 +129,7 @@ func Run(serverName string, version string) {
 		if err := loop(); err != nil {
 			break
 		}
+		<-time.After(time.Nanosecond * 10)
 	}
 }
 
@@ -139,7 +141,7 @@ func loop() (err interface{}) {
 	}()
 	err = nil
 	select {
-	case <-time.Tick():
+	case <-time1.Tick():
 	case <-lua.TimeTick():
 	case <-websocket.Handle():
 	case <-chExit:
@@ -158,7 +160,7 @@ func signalProcHandler() {
 
 	// rpc.Stop()       //关闭通道
 	lua.Stop()       //关闭lua定时器
-	time.Stop()      //关闭定时器
+	time1.Stop()     //关闭定时器
 	websocket.Stop() //关闭websock
 
 	//退出时清理工作

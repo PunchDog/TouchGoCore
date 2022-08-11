@@ -136,15 +136,6 @@ func Handle() chan bool {
 	if wsOnMessage_ == nil {
 		return wsCh
 	}
-	//读取数据
-	connectList.Range(func(k, v interface{}) bool {
-		conn := v.(*Connection)
-		select {
-		case <-conn.readLoop():
-		default:
-		}
-		return true
-	})
 
 	//数据操作
 	select {

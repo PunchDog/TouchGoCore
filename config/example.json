@@ -1,10 +1,10 @@
 {
     "redis": {
-        "redis_host":"127.0.0.1:6379",
-        "redis_password":"",
-        "redis_db":0
+        "redis_host": "127.0.0.1:6379",
+        "redis_password": "",
+        "redis_db": 0
     },
-    "mysql":{
+    "mysql": {
         "db_host": "121.36.15.181:3306",
         "db_username": "root",
         "db_password": "123789abcA",
@@ -12,31 +12,29 @@
         "db_max_idle_conns": 100,
         "db_max_open_conns": 500
     },
-    "mongo":{
+    "mongo": {
         "db_host": "121.36.15.181:27017",
         "db_username": "",
         "db_password": "",
         "db_name": "neiwangpoker",
-        "db_replica_set_name":"",
-        "mongo_up_url":"mongodb://%s:%s@%s/%s",
-        "mongo_url":"mongodb://%s/%s",
-        "init_dbtable_index":[
+        "db_replica_set_name": "",
+        "mongo_up_url": "mongodb://%s:%s@%s/%s",
+        "mongo_url": "mongodb://%s/%s",
+        "init_dbtable_index": [
             {
-                "table":"user",
-                "index":["id","username"]
+                "table": "user",
+                "index": [
+                    "id",
+                    "username"
+                ]
             }
         ]
     },
-    "busid":"dbserver",
-    "ip":"127.0.0.1",
-    "servertype":"exec",
-    "init_port":7000,
+    "ip": "127.0.0.1",
+    "servertype": "exec",
+    "init_port": 7000,
     "ws": ":1234",
-    "http": "off",
     "lua": "off",
-    "file": "9090",
     "loglevel": "info",
-    "teamid":"1",
-    "dlllist":[],
-    "mappath":"off"
+    "map_path": "off"
 }

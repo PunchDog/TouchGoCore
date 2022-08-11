@@ -45,7 +45,13 @@ func (self *CallFunction) GetRet() []reflect.Value {
 }
 
 //使用回调函数
-func (self *CallFunction) Do(key interface{}, values ...interface{}) bool {
+func (self *CallFunction) Do(key interface{}, values ...interface{}) (bret bool) {
+	defer func() {
+		if err := recover(); err != nil {
+			bret = false
+		}
+	}()
+
 	if l, has := self.fn.Load(key); has {
 		fnlist := l.([]interface{})
 		//转化函数参数
@@ -56,13 +62,30 @@ func (self *CallFunction) Do(key interface{}, values ...interface{}) bool {
 		for _, fn := range fnlist {
 			//获取函数
 			method := reflect.ValueOf(fn)
+			method.Type().NumIn()
 			//调用
-			l := method.Call(args)
+			args1 := []reflect.Value{}
+			args1 = append(args1, args...)
+			if len(args1) != method.Type().NumIn() { //去掉多余的数据
+				args1 = args1[0:method.Type().NumIn()]
+			}
+			//检查数据
+			for i := 0; i < method.Type().NumIn(); i++ {
+				if args1[i].Kind() == reflect.Invalid {
+					in := method.Type().In(i)
+					if in.Kind() != reflect.Invalid {
+						args1[i] = reflect.New(in)
+					} else {
+						args1[i] = reflect.ValueOf(&Error{ErrMsg: "错误的无效类型"})
+					}
+				}
+			}
+			l := method.Call(args1)
 			if self.bRet {
 				self.retCh = l
 			}
 		}
-		return true
+		bret = true
 	}
-	return false
+	return
 }

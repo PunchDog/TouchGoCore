@@ -13,7 +13,11 @@ import (
 )
 
 //地图数据 id/map
-var MapList_ *syncmap.Map = &syncmap.Map{}
+var _maplist *syncmap.Map
+
+func init() {
+	_maplist = new(syncmap.Map)
+}
 
 //地图坐标点类
 type MapNode struct {
@@ -35,6 +39,8 @@ type Map struct {
 	MapId int `json:"mapid"`
 	//地图坐标信息
 	Node [][]*MapNode `json:"node"`
+	// NPC列表
+	Npc []*Npc
 }
 
 func (this *Map) Load(path string) {
@@ -46,7 +52,7 @@ func (this *Map) Load(path string) {
 	if err != nil {
 		panic("解析配置出错:" + path + ":" + err.Error())
 	}
-	if _, ok := MapList_.LoadOrStore(this.MapId, this); ok {
+	if _, ok := _maplist.LoadOrStore(this.MapId, this); ok {
 		panic("加载地图配置出错:" + path + ":已经有相同ID的地图了")
 	}
 

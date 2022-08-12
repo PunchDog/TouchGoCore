@@ -22,7 +22,7 @@ type Npc struct {
 	Shape     string       //形象
 	Direction int          //朝向
 	AutoMove  bool         //自动行走
-	MapPoint  [][3]int     //地图点
+	MapPoint  [][2]int     //地图点
 	Shop      *syncmap.Map //商店页面
 	Dialog    *syncmap.Map //聊天数据
 	MapId     int32        //地图ID
@@ -38,6 +38,15 @@ type Npc struct {
 // 	//}
 // 	return npc
 // }
+func (this *Npc) SetMapId(mapId int32) {
+	this.MapId = mapId
+	if m, h := _maplist.Load(mapId); h {
+		maps := m.(*Map)
+		maps.Npc = append(maps.Npc, this)
+	} else {
+		panic("NPC配置在了未知的地图上")
+	}
+}
 
 func (this *Npc) SetName(Name string) {
 	this.Name = Name
@@ -51,8 +60,8 @@ func (this *Npc) SetDirection(Direction int) {
 func (this *Npc) SetAutoMove(AutoMove bool) {
 	this.AutoMove = AutoMove
 }
-func (this *Npc) AddMapPoint(mapid int, x int, y int) {
-	var point [3]int = [3]int{mapid, x, y}
+func (this *Npc) AddMapPoint(x int, y int) {
+	var point [2]int = [2]int{x, y}
 	this.MapPoint = append(this.MapPoint, point)
 }
 

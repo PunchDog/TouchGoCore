@@ -10,12 +10,12 @@ local createnpc = function()
     local Direction = 1
     --是否是自动行动NPC
     local auto = true
-    --地图坐标,三个坐标一组{mapid,mapx,mapy},可以有多个,如果是行动类NPC，同地图自动移动，不同地图飞过去后自动移动
+    --地图坐标,两个坐标一组{mapx,mapy},可以有多个,如果是行动类NPC，同地图自动移动
     local point = {
-        {1000, 100, 100},
-        {1000, 200, 200},
-        {2000, 100, 100},
-        {2000, 200, 200}
+        {100, 100},
+        {200, 200},
+        {100, 100},
+        {200, 200}
     }
     --对话,默认执行最前面一条说话或者对话框,如果带有密语类型，优先判断密语类型
     local dialog = {
@@ -35,7 +35,7 @@ local createnpc = function()
     }
 
     --------------------------------------------------------开始写内存数据--------------------------------------------------
-    local npc = Npc:new(id)--创建NPC类
+    local npc = Npc:new()--创建NPC类
     npc:SetName(name)--设置名字
     npc:SetShape(Shape)--设置形象
     npc:SetDirection(Direction)--设置朝向

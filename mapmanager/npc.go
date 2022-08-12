@@ -28,16 +28,14 @@ type Npc struct {
 	MapId     int32        //地图ID
 }
 
-// //创建一个NPC容器，放入到NPC数据里
-// func (this *Npc) AddField(id int64) interface{} {
-// 	npc := &Npc{
-// 		Id: int(id),
-// 	}
-// 	//if _, ok := NpcList_.LoadOrStore(this.Id, this); ok {
-// 	//	panic(fmt.Sprintf("数据内已经有一个ID为：%d的NPC", this.Id))
-// 	//}
-// 	return npc
-// }
+//创建一个NPC容器，放入到NPC数据里
+func (this *Npc) AddField(id int64) interface{} {
+	npc := &Npc{
+		Id: int(id),
+	}
+
+	return npc
+}
 func (this *Npc) SetMapId(mapId int32) {
 	this.MapId = mapId
 	if m, h := _maplist.Load(mapId); h {

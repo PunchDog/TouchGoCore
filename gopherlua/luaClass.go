@@ -15,7 +15,7 @@ var defaultLuaData *syncmap.Map = &syncmap.Map{}
 
 //注册类接口
 type ILuaClassInterface interface {
-	// AddField(id int64) interface{}
+	AddField(id int64) interface{}
 	Delete()
 	Update()
 }
@@ -24,10 +24,10 @@ type ILuaClassInterface interface {
 type ILuaClassObject struct {
 }
 
-// //创建一个NPC容器，放入到NPC数据里
-// func (this *ILuaClassObject) AddField(id int64) interface{} {
-// 	return nil
-// }
+//创建一个NPC容器，放入到NPC数据里
+func (this *ILuaClassObject) AddField(id int64) interface{} {
+	return nil
+}
 
 func (this *ILuaClassObject) Delete() {
 }
@@ -101,7 +101,7 @@ func (this *metaOperate) callBack(L *lua.LState) int {
 }
 
 //创建一个类注册
-func newLuaClass(class interface{}, script *LuaScript) {
+func newLuaClass(class ILuaClassInterface, script *LuaScript) {
 	//创建函数类(暂时不支持interface{}类型参数和动态参数)
 	//获取类和函数名
 	sname, mnames := util.GetClassName(class)
@@ -112,11 +112,9 @@ func newLuaClass(class interface{}, script *LuaScript) {
 
 	//创建一个new函数
 	script.l.SetField(meta, "new", script.l.NewFunction(func(L *lua.LState) int {
-		// uid := L.ToInt64(2)
+		uid := L.ToInt64(2)
 		defaultLuaDataUid++
-		n := reflect.TypeOf(class)
-		defaultLuaData.LoadOrStore(defaultLuaDataUid, reflect.New(n.Elem()).Interface()) //尝试插入一份数据
-		// defaultLuaData.LoadOrStore(defaultLuaDataUid, class.AddField(uid))               //尝试插入一份数据
+		defaultLuaData.LoadOrStore(defaultLuaDataUid, class.AddField(uid)) //尝试插入一份数据
 		c := L.NewTable()
 		self := L.CheckTable(1)
 		L.SetMetatable(c, self)

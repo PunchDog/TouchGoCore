@@ -5,7 +5,7 @@ local createnpc = function()
     --NPC名字
     local name = "test npc"
     --形象
-    local Shape = "tset001"
+    local Shape = "test001"
     --朝向,8个
     local Direction = 1
     --是否是自动行动NPC
@@ -35,7 +35,7 @@ local createnpc = function()
     }
 
     --------------------------------------------------------开始写内存数据--------------------------------------------------
-    local npc = Npc:new()--创建NPC类
+    local npc = Npc:new(id)--创建NPC类
     npc:SetName(name)--设置名字
     npc:SetShape(Shape)--设置形象
     npc:SetDirection(Direction)--设置朝向

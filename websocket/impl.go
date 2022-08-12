@@ -58,7 +58,7 @@ func InitConnection(port int, wsConn *websocket.Conn, remoteAddr string) (*Conne
 	//连接数+1
 	num, _ := redis_.Get().HGet("wsListen", strconv.Itoa(port)).Int()
 	redis_.Get().HSet("wsListen", port, num+1)
-	connectList.Store(conn.Uid, connectList)
+	connectList.Store(conn.Uid, conn)
 	return conn, nil
 }
 
@@ -117,6 +117,7 @@ func (conn *Connection) Close(desc string) {
 			vars.Info(desc)
 			conn.wsConnect.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(10000, desc))
 		}
+		connectList.Delete(conn.Uid)
 	}
 
 	// 线程安全，可多次调用

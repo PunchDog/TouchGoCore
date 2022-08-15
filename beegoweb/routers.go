@@ -63,7 +63,7 @@ func (self *Controller) CallBack() {
 例：type Test struct{} func TestMethod(*beego.Controller){}
 生成的协议为:/test/testmethod
 */
-func RegisterRouter(class interface{}) {
+func RegisterBeegoRouter(class interface{}) {
 	sname, mnames := util.GetClassName(class)
 	con := &Controller{
 		callClass:           class,

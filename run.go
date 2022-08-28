@@ -36,6 +36,9 @@ func Run(serverName string, version string) {
 	config.ServerName_ = serverName
 	config.Cfg_.Load(os.Args[1])
 
+	//创建日志文件
+	vars.Run(config.ServerName_, config.Cfg_.LogLevel)
+
 	vars.Info("*********************************************")
 	vars.Info("           系统:[%s]版本:[%s]", serverName, version)
 	vars.Info("*********************************************")
@@ -45,9 +48,6 @@ func Run(serverName string, version string) {
 
 	//加载配置
 	vars.Info("加载核心配置")
-
-	//创建日志文件
-	vars.Run(config.ServerName_, config.Cfg_.LogLevel)
 
 	//检查redis
 	if config.Cfg_.Redis == nil {

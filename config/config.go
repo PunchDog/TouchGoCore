@@ -1,12 +1,12 @@
 package config
 
 import (
+	"fmt"
 	"io/ioutil"
 	"os"
 	"path"
 
 	"touchgocore/jsonthr"
-	"touchgocore/vars"
 )
 
 type Cfg struct {
@@ -41,7 +41,7 @@ func (this *Cfg) Load(path string) {
 	if err != nil {
 		panic("读取启动配置出错:" + err.Error())
 	}
-	vars.Info(string(file))
+	fmt.Println(string(file))
 	err = jsonthr.Json.Unmarshal(file, &this)
 	if err != nil {
 		panic("解析配置出错:" + path + ":" + err.Error())

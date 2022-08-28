@@ -66,9 +66,12 @@ func (self *CallFunction) Do(key interface{}, values ...interface{}) (bret bool)
 			//调用
 			args1 := []reflect.Value{}
 			args1 = append(args1, args...)
-			if len(args1) != method.Type().NumIn() { //去掉多余的数据
+			if len(args1) > method.Type().NumIn() { //去掉多余的数据
 				args1 = args1[0:method.Type().NumIn()]
+			} else if len(args1) < method.Type().NumIn() {
+				panic("参数数量小于实际个数")
 			}
+
 			//检查数据
 			for i := 0; i < method.Type().NumIn(); i++ {
 				in := method.Type().In(i)

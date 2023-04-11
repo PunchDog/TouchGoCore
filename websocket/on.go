@@ -12,21 +12,21 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-//执行创建分发消息用
+// 执行创建分发消息用
 var callBack_ IConnCallback = nil
 
-//消息数据
+// 消息数据
 var wsOnMessage_ *WsOnMessage = nil
 var redis_ *db.Redis = nil
 
-//这里处理消息，把所有的消息都实行汇总处理
+// 这里处理消息，把所有的消息都实行汇总处理
 type IConnCallback interface {
 	OnConnect(*Connection) bool
 	OnMessage(*Connection, *util.EchoPacket) bool
 	OnClose(*Connection)
 }
 
-//默认的回调执行
+// 默认的回调执行
 type defaultCallBack struct {
 }
 
@@ -69,13 +69,13 @@ type rwData struct {
 	conn *Connection
 }
 
-//消息处理
+// 消息处理
 type WsOnMessage struct {
 	readChan  chan *rwData //
 	writeChan chan *rwData //
 }
 
-//启动ws
+// 启动ws
 func Run() {
 	if config.Cfg_.Ws == "off" || config.Cfg_.Ws == "" {
 		vars.Info("不启动websocket")
@@ -103,7 +103,7 @@ func Run() {
 					port, _ := strconv.Atoi(szPort)
 					WsListenAndServe(port)
 					//设置服务器连接数
-					redis_.Get().HSet("wsListen", port, 0)
+					redis_.Get().HSet("wsListen", config.Cfg_.Ip+":"+szPort, 0)
 					break
 				}
 			} else if strings.Index(c, "http") == 0 {

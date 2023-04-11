@@ -1,10 +1,12 @@
 {
     "redis": {
+        "说明:":"这里是redis配置(必填)",
         "redis_host": "127.0.0.1:6379",
         "redis_password": "",
         "redis_db": 0
     },
     "mysql": {
+        "说明:":"这里是mysql配置",
         "db_host": "121.36.15.181:3306",
         "db_username": "root",
         "db_password": "123789abcA",
@@ -13,6 +15,7 @@
         "db_max_open_conns": 500
     },
     "mongo": {
+        "说明:":"这里是mongo配置",
         "db_host": "121.36.15.181:27017",
         "db_username": "",
         "db_password": "",
@@ -30,9 +33,8 @@
             }
         ]
     },
+    "这里是基础配置":"",
     "ip": "127.0.0.1",
-    "servertype": "exec",
-    "init_port": 7000,
     "ws": ":1234",
     "lua": "off",
     "loglevel": "info",

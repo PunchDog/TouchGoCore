@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"touchgocore/config"
 	"touchgocore/syncmap"
 	"touchgocore/util"
 	"touchgocore/vars"
@@ -56,8 +57,9 @@ func InitConnection(port int, wsConn *websocket.Conn, remoteAddr string) (*Conne
 	go conn.readLoop()
 
 	//连接数+1
-	num, _ := redis_.Get().HGet("wsListen", strconv.Itoa(port)).Int()
-	redis_.Get().HSet("wsListen", port, num+1)
+	key := config.Cfg_.Ip + ":" + strconv.Itoa(port)
+	num, _ := redis_.Get().HGet("wsListen", key).Int()
+	redis_.Get().HSet("wsListen", key, num+1)
 	connectList.Store(conn.Uid, conn)
 	return conn, nil
 }
@@ -110,8 +112,9 @@ func (conn *Connection) Close(desc string) {
 		callBack_.OnClose(conn)
 
 		//连接数-1
-		num, _ := redis_.Get().HGet("wsListen", strconv.Itoa(conn.enterPort)).Int()
-		redis_.Get().HSet("wsListen", conn.enterPort, num-1)
+		key := config.Cfg_.Ip + ":" + strconv.Itoa(conn.enterPort)
+		num, _ := redis_.Get().HGet("wsListen", key).Int()
+		redis_.Get().HSet("wsListen", key, num-1)
 
 		if desc != "" {
 			vars.Info(desc)
@@ -124,7 +127,7 @@ func (conn *Connection) Close(desc string) {
 	conn.wsConnect.Close()
 }
 
-//读取数据
+// 读取数据
 func (conn *Connection) readLoop() {
 	var (
 		data []byte
@@ -154,10 +157,10 @@ func (conn *Connection) readLoop() {
 	}
 }
 
-//监听回调列表
+// 监听回调列表
 var myserver_ map[int]*http.ServeMux = make(map[int]*http.ServeMux)
 
-//添加监听函数
+// 添加监听函数
 func AddListenFunc(port int, fnSrc string, fn func(w http.ResponseWriter, r *http.Request)) {
 	if myserver_[port] == nil {
 		myserver_[port] = http.NewServeMux()
@@ -165,14 +168,14 @@ func AddListenFunc(port int, fnSrc string, fn func(w http.ResponseWriter, r *htt
 	myserver_[port].HandleFunc(fnSrc, fn)
 }
 
-//http监听
+// http监听
 func HttpListenAndServe(port int) {
 	if myserver_[port] != nil {
 		go http.ListenAndServe(":"+strconv.Itoa(port), myserver_[port])
 	}
 }
 
-//ws监听
+// ws监听
 func WsListenAndServe(port int) {
 	AddListenFunc(port, "/ws", func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
@@ -231,7 +234,7 @@ func WsListenAndServe(port int) {
 	HttpListenAndServe(port)
 }
 
-//主动连接
+// 主动连接
 func clientConnection(ipstring string) error {
 	// var addr = flag.String("addr", ipstring, "http service address")
 	u := url.URL{Scheme: "ws", Host: ipstring, Path: "/ws"}

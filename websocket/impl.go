@@ -84,6 +84,7 @@ func (s *Connection) SendMsg(protocol1 int32, protocol2 int32, pb proto.Message)
 		len := proto.Size(pb)
 		if err != nil {
 			vars.Error(err.Error())
+			return
 		}
 
 		s.write(protocol1, protocol2, data, len)

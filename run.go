@@ -20,8 +20,14 @@ import (
 )
 
 var chExit chan bool
+var chExitOk chan int
 
-//总体开关,此函数需要放在main的最后
+func init() {
+	chExit = make(chan bool)
+	chExitOk = make(chan int)
+}
+
+// 总体开关,此函数需要放在main的最后
 func Run(serverName string, version string) {
 	defer func() {
 		if err := recover(); err != nil {
@@ -141,6 +147,7 @@ func loop() (err interface{}) {
 	defer func() {
 		if err = recover(); err != nil {
 			vars.Error(err)
+			chExitOk <- (-1)
 		}
 	}()
 	err = nil
@@ -150,6 +157,7 @@ func loop() (err interface{}) {
 	case <-websocket.Handle():
 	case <-chExit:
 		err = &util.Error{ErrMsg: "退出服务器"}
+		chExitOk <- (0)
 	default:
 	}
 	return
@@ -170,5 +178,7 @@ func signalProcHandler() {
 	//退出时清理工作
 	util.DefaultCallFunc.Do(util.CallStop)
 
-	os.Exit(-1)
+	exitNum := <-chExitOk
+
+	os.Exit(exitNum)
 }

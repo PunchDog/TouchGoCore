@@ -1,10 +1,11 @@
 package touchgocore
 
 import (
-	"log"
+	"fmt"
 	"os"
 	"os/signal"
 	"runtime"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -12,8 +13,9 @@ import (
 	"touchgocore/config"
 	"touchgocore/db"
 	lua "touchgocore/gopherlua"
+	"touchgocore/ini"
 	"touchgocore/mapmanager"
-	time1 "touchgocore/time"
+	"touchgocore/timelocal"
 	"touchgocore/util"
 	"touchgocore/vars"
 	"touchgocore/websocket"
@@ -21,6 +23,9 @@ import (
 
 var chExit chan bool
 var chExitOk chan int
+
+var DEBUG bool
+var fps int
 
 func init() {
 	chExit = make(chan bool)
@@ -31,23 +36,30 @@ func init() {
 func Run(serverName string, version string) {
 	defer func() {
 		if err := recover(); err != nil {
-			log.Println("捕获错误:", err)
 		}
 	}()
 
-	if len(os.Args) == 1 {
-		panic("启动参数不足")
+	config.ServerName_ = serverName
+	config.Cfg_.Load(serverName)
+
+	//读取INI
+	if p, err := ini.Load(config.GetDefaultFie()); err == nil {
+		DEBUG = p.GetString("GLOBAL", "debug", "false") == "true"
+		fps, _ = strconv.Atoi(p.GetString("GLOBAL", "fps", "120"))
 	}
 
-	config.ServerName_ = serverName
-	config.Cfg_.Load(os.Args[1])
-
 	//创建日志文件
-	vars.Run(config.ServerName_, config.Cfg_.LogLevel)
+	vars.Run(config.GetBasePath()+"/log/"+config.ServerName_, config.Cfg_.LogLevel)
 
-	vars.Info("*********************************************")
-	vars.Info("           系统:[%s]版本:[%s]", serverName, version)
-	vars.Info("*********************************************")
+	centerstr := fmt.Sprintf("**         Service:[%s] Version:[%s]         **", serverName, version)
+	l := len(centerstr)
+	var showsr string
+	for i := 0; i < l; i++ {
+		showsr = showsr + "*"
+	}
+	vars.Info(showsr)
+	vars.Info(centerstr)
+	vars.Info(showsr)
 
 	//设置核数
 	runtime.GOMAXPROCS(runtime.NumCPU())
@@ -57,10 +69,14 @@ func Run(serverName string, version string) {
 
 	//检查redis
 	if config.Cfg_.Redis == nil {
-		panic("加载配置出错，没有redis配置")
+		vars.Error("加载配置出错,没有redis配置")
+		<-time.After(time.Millisecond * 10)
+		panic("加载配置出错,没有redis配置")
 	}
 	if _, err := db.NewRedis(config.Cfg_.Redis); err != nil {
-		panic("加载配置出错，没有redis配置:" + err.Error())
+		vars.Error("加载配置出错,没有redis配置:" + err.Error())
+		<-time.After(time.Millisecond * 10)
+		panic("加载配置出错,没有redis配置:" + err.Error())
 	}
 	vars.Info("加载redis配置成功")
 
@@ -68,7 +84,9 @@ func Run(serverName string, version string) {
 	if config.Cfg_.MySql != nil {
 		vars.Info("开启MySqlDB功能")
 		if _, err := db.NewDbMysql(config.Cfg_.MySql); err != nil {
-			panic("加载配置出错:" + err.Error())
+			vars.Error("加载MySql配置出错:" + err.Error())
+			<-time.After(time.Millisecond * 10)
+			panic("加载MySql配置出错:" + err.Error())
 		}
 		db.MySqlRun()
 		vars.Info("加载MySql数据成功")
@@ -78,13 +96,15 @@ func Run(serverName string, version string) {
 	if config.Cfg_.Mongo != nil {
 		vars.Info("开启Mongo功能")
 		if _, err := db.NewMongoDB(config.Cfg_.Mongo); err != nil {
-			panic("加载配置出错:" + err.Error())
+			vars.Error("加载Mongo配置出错:" + err.Error())
+			<-time.After(time.Millisecond * 10)
+			panic("加载Mongo配置出错:" + err.Error())
 		}
 		vars.Info("加载Mongo数据成功")
 	}
 
 	//启动timer定时器
-	time1.Run()
+	timelocal.Run()
 
 	//启动rpc相关
 	// rpc.Run()
@@ -152,7 +172,7 @@ func loop() (err interface{}) {
 	}()
 	err = nil
 	select {
-	case <-time1.Tick():
+	case <-timelocal.Tick():
 	case <-lua.TimeTick():
 	case <-websocket.Handle():
 	case <-chExit:
@@ -172,7 +192,7 @@ func signalProcHandler() {
 
 	// rpc.Stop()       //关闭通道
 	lua.Stop()       //关闭lua定时器
-	time1.Stop()     //关闭定时器
+	timelocal.Stop() //关闭定时器
 	websocket.Stop() //关闭websock
 
 	//退出时清理工作

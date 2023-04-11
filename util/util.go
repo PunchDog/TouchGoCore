@@ -21,20 +21,15 @@ import (
 
 // 获取本地内网地址。
 func GetLocalInternalIp() (string, error) {
-	addrs, err := net.InterfaceAddrs()
+	conn, err := net.Dial("udp", "8.8.8.8:53")
 	if err != nil {
-		return "127.0.0.1", err
+		fmt.Println(err)
+		return "", err
 	}
-
-	for _, address := range addrs {
-		// 检查ip地址判断是否回环地址
-		if ipnet, ok := address.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
-			if ipnet.IP.To4() != nil {
-				return ipnet.IP.String(), nil
-			}
-		}
-	}
-	return "127.0.0.1", nil
+	localAddr := conn.LocalAddr().(*net.UDPAddr)
+	fmt.Println(localAddr.String())
+	ip := strings.Split(localAddr.String(), ":")[0]
+	return ip, nil
 }
 
 // 获取本地外网地址。
@@ -53,7 +48,7 @@ func GetLocalExternalIp() (string, error) {
 	return reg.FindString(string(result)), nil
 }
 
-//判断是否是公网ip
+// 判断是否是公网ip
 func IsPublicIP(IP net.IP) bool {
 	if IP.IsLoopback() || IP.IsLinkLocalMulticast() || IP.IsLinkLocalUnicast() {
 		return false
@@ -89,7 +84,7 @@ type IPData struct {
 	Isp       string `json:"isp"`
 }
 
-//通过淘宝接口根据公网ip获取国家运营商等信息
+// 通过淘宝接口根据公网ip获取国家运营商等信息
 func TabaoIpAPI(ip string) *IPInfo {
 	url := "http://ip.taobao.com/service/getIpInfo.php?ip="
 	url += ip
@@ -112,7 +107,7 @@ func TabaoIpAPI(ip string) *IPInfo {
 	return &result
 }
 
-//随机64位
+// 随机64位
 func RandInt(max int64) int64 {
 	if max == 0 {
 		return 0
@@ -121,7 +116,7 @@ func RandInt(max int64) int64 {
 	return rr.Int63n(max)
 }
 
-//随机范围
+// 随机范围
 func RandRange(max int64, min int64) (ret int64) {
 	random := rand.New(rand.NewSource(time.Now().UnixNano()))
 	if max-min == 0 {
@@ -136,8 +131,8 @@ func RandRange(max int64, min int64) (ret int64) {
 	return
 }
 
-//时间类型///////////////////////////////////////////////////////////////////////////////////
-//GetCurrTs return current timestamps
+// 时间类型///////////////////////////////////////////////////////////////////////////////////
+// GetCurrTs return current timestamps
 func GetCurrTs() int64 {
 	return time.Now().Unix()
 }
@@ -163,7 +158,7 @@ func UTCToLocalTime(t time.Time) time.Time {
 	return time.Unix(t.Unix()+int64(offset), 0)
 }
 
-//是否在同一天
+// 是否在同一天
 func GetDiffDay(day1 int64, day2 int64) int {
 	return int((day2 - day1) / 86400)
 }
@@ -172,6 +167,14 @@ func GetDiffDay(day1 int64, day2 int64) int {
 func UTCTime() string {
 	t := time.Now()
 	return strconv.FormatInt(t.UTC().UnixNano(), 10)
+}
+
+func GetTime() string {
+	const shortForm = "2006-01-02 15:04:05"
+	t := time.Now()
+	temp := time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), t.Second(), t.Nanosecond(), time.Local)
+	str := temp.Format(shortForm)
+	return str
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
@@ -183,21 +186,13 @@ func MD5(data string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-func GetTime() string {
-	const shortForm = "2006-01-02 15:04:05"
-	t := time.Now()
-	temp := time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), t.Second(), t.Nanosecond(), time.Local)
-	str := temp.Format(shortForm)
-	return str
-}
-
 func GetNowtimeMD5() string {
 	t := time.Now()
 	timestamp := strconv.FormatInt(t.UTC().UnixNano(), 10)
 	return MD5(timestamp)
 }
 
-//获取类名
+// 获取类名
 func GetClassName(p interface{}) (string, []string) {
 	//神奇的获取类名
 	tpy := reflect.TypeOf(p)
@@ -211,7 +206,7 @@ func GetClassName(p interface{}) (string, []string) {
 	return sname, methods
 }
 
-//检查端口占用
+// 检查端口占用
 func CheckPort(port string) (err error) {
 	tcpAddress, err := net.ResolveTCPAddr("tcp4", ":"+port)
 	if err != nil {
@@ -231,7 +226,7 @@ func CheckPort(port string) (err error) {
 	return nil
 }
 
-//获取路径下文件列表
+// 获取路径下文件列表
 func GetPathFile(path string, filter []string) []string {
 	// 判断所给路径是否为文件夹
 	isDir := func(path string) bool {

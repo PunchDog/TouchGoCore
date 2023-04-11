@@ -3,23 +3,23 @@ package gopherlua
 import (
 	"touchgocore/config"
 	"touchgocore/syncmap"
-	"touchgocore/time"
+	"touchgocore/timelocal"
 	"touchgocore/vars"
 
 	lua "github.com/yuin/gopher-lua"
 )
 
-//lua指针
+// lua指针
 var _defaultlua *LuaScript = nil
 var _luaList []*LuaScript = make([]*LuaScript, 0)
 var _luaTimerTick chan func()
 
-//注册用的函数
+// 注册用的函数
 var _exports map[string]func(L *lua.LState) int
 var _exportsClass map[ILuaClassInterface]bool
 
 type luaTimer struct {
-	time.TimerObj
+	timelocal.TimerObj
 	tick      int64
 	luaScript *LuaScript
 }
@@ -70,7 +70,7 @@ func (this *LuaScript) Close() {
 	}
 }
 
-//call lua
+// call lua
 func (this *LuaScript) Call(funcname string, list ...interface{}) bool {
 	listlen := len(list)
 	fn := lua.P{
@@ -106,7 +106,7 @@ func (this *LuaScript) Call(funcname string, list ...interface{}) bool {
 	return true
 }
 
-//创建一个lua指针
+// 创建一个lua指针
 func NewLuaScript(initluapath string) *LuaScript {
 	p := &LuaScript{
 		l:                 nil,
@@ -136,19 +136,19 @@ func NewLuaScript(initluapath string) *LuaScript {
 		luaScript: p,
 	}
 	p.luaTimer.Init(1000)
-	time.AddTimer(p.luaTimer)
+	timelocal.AddTimer(p.luaTimer)
 
 	//加入管理列表
 	_luaList = append(_luaList, p)
 	return p
 }
 
-//调用
+// 调用
 func Call(funcname string, list ...interface{}) bool {
 	return _defaultlua.Call(funcname, list...)
 }
 
-//注册函数列表
+// 注册函数列表
 func RegisterLuaFunc(funcname string, function func(L *lua.LState) int) bool {
 	if _exports == nil {
 		_exports = make(map[string]func(L *lua.LState) int)
@@ -160,7 +160,7 @@ func RegisterLuaFunc(funcname string, function func(L *lua.LState) int) bool {
 	return true
 }
 
-//注册一个类到默认lua
+// 注册一个类到默认lua
 func RegisterLuaClass(class ILuaClassInterface) bool {
 	//初始化一个类初始化
 	if _exportsClass == nil {
@@ -173,7 +173,7 @@ func RegisterLuaClass(class ILuaClassInterface) bool {
 	return true
 }
 
-//启动函数
+// 启动函数
 func Run() {
 	if config.Cfg_.Lua == "off" {
 		vars.Info("不启动lua服务")
@@ -185,14 +185,14 @@ func Run() {
 	vars.Info("启动lua服务成功")
 }
 
-//关闭所有的定时器
+// 关闭所有的定时器
 func Stop() {
 	for _, lua := range _luaList {
 		lua.Close()
 	}
 }
 
-//lua时间操作
+// lua时间操作
 func TimeTick() chan bool {
 	select {
 	case fn := <-_luaTimerTick:

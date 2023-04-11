@@ -12,14 +12,14 @@ import (
 	"touchgocore/vars"
 )
 
-//地图数据 id/map
+// 地图数据 id/map
 var _maplist *syncmap.Map
 
 func init() {
 	_maplist = new(syncmap.Map)
 }
 
-//地图坐标点类
+// 地图坐标点类
 type MapNode struct {
 	//是否阻挡
 	IsBlock bool `json:"isblock"`
@@ -33,7 +33,7 @@ type MapNode struct {
 	SendMapData []int `json:"sendmapdata"`
 }
 
-//地图类
+// 地图类
 type Map struct {
 	//地图ID
 	MapId int `json:"mapid"`

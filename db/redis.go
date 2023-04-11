@@ -66,7 +66,7 @@ func (this *Redis) connectOnly(dataSourceName string) bool {
 	return false
 }
 
-//redis锁
+// redis锁
 func (this *Redis) Lock(lockkey string) {
 	for {
 		select {
@@ -81,7 +81,7 @@ func (this *Redis) Lock(lockkey string) {
 	}
 }
 
-//redis解锁
+// redis解锁
 func (this *Redis) UnLock(lockkey string) {
 	this.redisClient.Del("lock-" + lockkey)
 }

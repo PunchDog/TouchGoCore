@@ -1,4 +1,4 @@
-package time
+package timelocal
 
 import (
 	"time"
@@ -14,7 +14,7 @@ const (
 	MAX_TIMER_CHANNEL_NUM       = 100000
 )
 
-//计时器接口
+// 计时器接口
 type ITimer interface {
 	Tick() //执行
 
@@ -27,7 +27,7 @@ type ITimer interface {
 	SetUid(id int64)                   //
 }
 
-//原始继承父类
+// 原始继承父类
 type TimerObj struct {
 	loop         int           //循环次数
 	steptime     int64         //单次循环等待时长
@@ -37,19 +37,19 @@ type TimerObj struct {
 	uid          int64         //唯一ID
 }
 
-//初始化间隔时间，单位毫秒
+// 初始化间隔时间，单位毫秒
 func (this *TimerObj) Init(steptime int64) {
 	this.InitAll(steptime, 999999999, 99999999999)
 }
 
-//初始化间隔时间，单位毫秒，循环次数，最大结束时间，三个数据皆不能为0
+// 初始化间隔时间，单位毫秒，循环次数，最大结束时间，三个数据皆不能为0
 func (this *TimerObj) InitAll(steptime int64, loop int, maxtime int64) {
 	this.loop = loop
 	this.steptime = steptime
 	this.maxtime = time.Now().UnixNano()/int64(time.Millisecond) + maxtime
 }
 
-//删除定时器节点
+// 删除定时器节点
 func (this *TimerObj) Delete() {
 	if this.timerManager != nil {
 		listkey := this.endtime % DEFAULT_LIST_NUM
@@ -71,7 +71,7 @@ func (this *TimerObj) Delete() {
 	}
 }
 
-//重载用的函数
+// 重载用的函数
 func (this *TimerObj) Tick() {
 }
 
@@ -113,7 +113,7 @@ func (this *TimerManager) Close() {
 	}
 }
 
-//循环时间
+// 循环时间
 func (this *TimerManager) tick() {
 	for {
 		select {
@@ -152,7 +152,7 @@ func (this *TimerManager) tick() {
 	}
 }
 
-//添加到列表
+// 添加到列表
 func (this *TimerManager) AddTimer(t ITimer, listkey int64) {
 	var list []ITimer = nil
 	if l, ok := this.tickMap.Load(listkey); ok {
@@ -200,13 +200,13 @@ func Stop() {
 	_timerManager = nil
 }
 
-//添加个定时器
+// 添加个定时器
 func AddTimer(timer ITimer) {
 	listkey := timer.NextTime() % DEFAULT_LIST_NUM
 	_defaultTimerManager.AddTimer(timer, listkey)
 }
 
-//主线程调用执行
+// 主线程调用执行
 func Tick() chan bool {
 	select {
 	case timer := <-timerChannel_:

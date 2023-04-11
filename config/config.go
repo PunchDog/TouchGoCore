@@ -3,11 +3,12 @@ package config
 import (
 	"fmt"
 	"io/ioutil"
-	"net"
 	"os"
 	"path"
 
+	"touchgocore/ini"
 	"touchgocore/jsonthr"
+	"touchgocore/util"
 )
 
 type Cfg struct {
@@ -33,10 +34,16 @@ func init() {
 
 	if PathExists(_defaultFile) == false {
 		_basePath = path.Join(path.Dir(os.Args[0]), "../../")
+		_defaultFile = path.Join(_basePath, "conf/config.ini")
 	}
 }
 
-func (this *Cfg) Load(path string) {
+func (this *Cfg) Load(cfgname string) {
+	var path string
+	if p, err := ini.Load(_defaultFile); err == nil {
+		path = _basePath + "/conf/" + p.GetString(cfgname, "ini", "")
+	}
+
 	file, err := ioutil.ReadFile(path)
 	if err != nil {
 		panic("读取启动配置出错:" + err.Error())
@@ -48,30 +55,42 @@ func (this *Cfg) Load(path string) {
 	}
 
 	//如果没有填IP，则是获取本地IP
-	if this.Ip == "" {
-		addrs, err := net.InterfaceAddrs()
+	if this.Ip == "" || this.Ip == "127.0.0.1" {
+		// addrs, err := net.InterfaceAddrs()
+		// if err != nil {
+		// 	fmt.Println(err)
+		// 	return
+		// }
+		// for _, addr := range addrs {
+		// 	if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
+		// 		if ipnet.IP.To4() != nil {
+		// 			this.Ip = ipnet.IP.String()
+		// 			fmt.Println(this.Ip)
+		// 		}
+		// 	}
+		// }
+
+		ip, err := util.GetLocalExternalIp()
 		if err != nil {
 			fmt.Println(err)
 			return
 		}
-		for _, addr := range addrs {
-			if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
-				if ipnet.IP.To4() != nil {
-					this.Ip = ipnet.IP.String()
-					fmt.Println(this.Ip)
-				}
-			}
-		}
+		this.Ip = ip
+		fmt.Println(this.Ip)
 	}
 }
 
 var Cfg_ *Cfg = nil
 var ServerName_ string
 var _basePath = path.Join(path.Dir(os.Args[0]), "../")
-var _defaultFile = path.Join(_basePath, "configs/config.ini")
+var _defaultFile = path.Join(_basePath, "conf/config.ini")
 
 func GetBasePath() string {
 	return _basePath
+}
+
+func GetDefaultFie() string {
+	return _defaultFile
 }
 
 func PathExists(path string) bool {

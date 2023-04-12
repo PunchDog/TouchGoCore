@@ -68,7 +68,7 @@ func (this *RpcClient) Go(api string, args interface{}, reply interface{}) {
 	go func() {
 		done := this.client.Go(api, args, reply, nil)
 		if done.Error == nil { //正常消息
-			requestMsg <- done
+			// requestMsg <- done
 		} else { //断线了，先重连试试，不行就删除
 			if err := this.Connect(); err == nil {
 				this.Go(api, args, reply) //客户端重连一次，还不行就删除

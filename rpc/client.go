@@ -2,137 +2,100 @@ package rpc
 
 import (
 	"net/rpc"
+	"touchgocore/syncmap"
 	"touchgocore/vars"
 )
 
-const (
-	MAX_QUEUE_SIZE        = 100000
-	MAX_RPC_MSG_CHAN_SIZE = 128
-)
-
 type RpcClient struct {
-	Addr    string
-	client  *rpc.Client
-	msgQ    chan *rpc.Call
-	OutMsgQ chan *rpc.Call
-	err     chan error
-	die     chan struct{}
-	IsClose bool
+	Addr       string
+	client     *rpc.Client
+	ServerName string //连接的服务器名字
+	ServerId   string //服务器ID
 }
 
 func (this *RpcClient) Connect() error {
-	// if this.client != nil && this.Heartbeat != nil {
-	// 	err := this.Heartbeat(this.client)
-	// 	if err == nil {
-	// 		return nil
-	// 	}
-	// }
-
 	// 释放旧数据
 	if this.client != nil {
 		this.client.Close()
 	}
 	// 建立新连接
-	client, err := rpc.DialHTTP("tcp", this.Addr)
+	client, err := rpc.Dial("tcp", this.Addr)
 
 	vars.Debug("this = %+v", *this)
 
 	if err == nil {
 		this.client = client
-		this.IsClose = false
-		// if this.InitFunc != nil {
-		// 	logger.LogDebug("start RpcClient.InitFunc()")
-		// 	tempInfos := make([]*network_message.HD_BriefInfo, 0)
-		// 	this.InitFunc(true, tempInfos)
-		// }
 	}
 
 	return err
 }
 
-func catchError() {
-	if x := recover(); x != nil {
-		vars.Error("panic, err:%v", x)
-		// helper.BackTrace("rpc client")
-	}
-}
-
-func (this *RpcClient) Init(addr string) error {
+func (this *RpcClient) Init(addr string, servername, serverid string, connect *rpc.Client) error {
 	this.Addr = addr
-	this.msgQ = make(chan *rpc.Call, MAX_RPC_MSG_CHAN_SIZE)
-	this.err = make(chan error, MAX_RPC_MSG_CHAN_SIZE)
-	this.OutMsgQ = make(chan *rpc.Call, MAX_QUEUE_SIZE)
-	this.die = make(chan struct{})
-	this.IsClose = true
+	this.ServerName = servername
+	this.ServerId = serverid
 	vars.Debug("start RpcClient.Init(), value of this = %+v", *this)
-	// 转发消息和收集错误
-	go func(grpc *RpcClient) {
-		defer catchError()
-		for {
-			select {
-			case call, _ := <-grpc.msgQ:
-				if call.Error != nil { // 转发错误
-					grpc.err <- call.Error
-				} // 转发消息
-				grpc.OutMsgQ <- call
-			case err := <-grpc.err:
-				if err != nil {
-					grpc.Connect()
-					vars.Error("rpc err :%v", err)
-				}
-			case <-grpc.die:
-				close(grpc.err)
-				close(grpc.OutMsgQ)
-				grpc.client.Close()
-				close(grpc.msgQ)
-				grpc.IsClose = true
-				return
-			}
+
+	connectok := true
+	var err error = nil
+	if connect == nil {
+		err = this.Connect()
+		if err != nil {
+			connectok = false
 		}
-	}(this)
-	// try connect
-	return this.Connect()
+	} else {
+		this.client = connect
+	}
+
+	if connectok {
+		//保存连接
+		rpcclientmap.LoadAndFunction(servername, func(v interface{}, storefn func(v1 interface{}), delfn func()) {
+			var mp *syncmap.Map
+			if v != nil {
+				mp = v.(*syncmap.Map)
+			} else {
+				mp = new(syncmap.Map)
+			}
+
+			mp.Store(serverid, this)
+			storefn(mp)
+		})
+	}
+	return err
 }
 
 func (this *RpcClient) Go(api string, args interface{}, reply interface{}) {
-	if this.client == nil || this.IsClose {
-		err := this.Connect()
-		if err != nil {
-			// 拨号失败也要返回一个数据防止客户端卡死
-			call := new(rpc.Call)
-			call.ServiceMethod = api
-			call.Args = args
-			call.Reply = reply
-			this.msgQ <- call
-			vars.Error("connect server error, err:%v", err)
-			return
+	go func() {
+		done := this.client.Go(api, args, reply, nil)
+		if done.Error == nil { //正常消息
+			requestMsg <- done
+		} else { //断线了，先重连试试，不行就删除
+			if err := this.Connect(); err == nil {
+				this.Go(api, args, reply) //客户端重连一次，还不行就删除
+				return
+			}
+			this.Close()
 		}
-	}
-	// 收集错误数据
-	this.client.Go(api, args, reply, this.msgQ)
+	}()
 }
 
 func (this *RpcClient) Call(api string, args interface{}, reply interface{}) error {
-	if this.client == nil || this.IsClose {
-		err := this.Connect()
-		if err != nil {
-			// 拨号失败也要返回一个数据防止客户端卡死
-			call := new(rpc.Call)
-			call.ServiceMethod = api
-			call.Args = args
-			call.Reply = reply
-			this.msgQ <- call
-			vars.Error("connect server error, err:%v", err)
-			return err
-		}
-	}
-
-	// 收集错误数据
 	err := this.client.Call(api, args, reply)
-	this.err <- err
+	if err != nil {
+		this.Close()
+	}
 	return err
 }
 
 func (this *RpcClient) Close() {
-	close(this.die)
+	this.client.Close()
+	rpcclientmap.LoadAndFunction(this.ServerName, func(v interface{}, storefn func(v1 interface{}), delfn func()) {
+		if v != nil {
+			mp := v.(*syncmap.Map)
+			mp.Delete(this.ServerId)
+			if mp.Length() == 0 {
+				delfn()
+			}
+		}
+	})
 }

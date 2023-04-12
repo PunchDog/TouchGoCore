@@ -8,6 +8,7 @@ import (
 const (
 	CallStart string = "StartFunc"
 	CallStop  string = "StopFunc"
+	Dispatch  string = "Dispatch"
 )
 
 var DefaultCallFunc *CallFunction = new(CallFunction)
@@ -19,7 +20,7 @@ type CallFunction struct {
 	retWait sync.WaitGroup  //等待器
 }
 
-//注册回调函数
+// 注册回调函数
 func (self *CallFunction) Register(key interface{}, fn interface{}) {
 	var fnlist []interface{} = nil
 	if l, has := self.fn.Load(key); has {
@@ -31,7 +32,7 @@ func (self *CallFunction) Register(key interface{}, fn interface{}) {
 	self.fn.Store(key, fnlist)
 }
 
-//需要取返回值的数据，所以这里需要特殊处理
+// 需要取返回值的数据，所以这里需要特殊处理
 func (self *CallFunction) SetDoRet() {
 	self.retWait.Wait()
 	self.retWait.Add(1)
@@ -44,7 +45,7 @@ func (self *CallFunction) GetRet() []reflect.Value {
 	return self.retCh
 }
 
-//使用回调函数
+// 使用回调函数
 func (self *CallFunction) Do(key interface{}, values ...interface{}) (bret bool) {
 	defer func() {
 		if err := recover(); err != nil {

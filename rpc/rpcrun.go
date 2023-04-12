@@ -2,22 +2,26 @@ package rpc
 
 import (
 	"net"
-	"net/http"
 	"net/rpc"
 	"strconv"
 	"time"
 	"touchgocore/config"
 	"touchgocore/db"
 	"touchgocore/syncmap"
+	"touchgocore/util"
 	"touchgocore/vars"
 )
 
-// 客户端连接(servername/(serverid/conn))
+// 创建客户端连接(servername/(serverid/conn))
 var rpcclientmap *syncmap.Map
+
 var redis_ *db.Redis = nil
+var szListenPort string
+var lisenter net.Listener
 
 func init() {
 	rpcclientmap = new(syncmap.Map)
+	requestMsg = make(chan *rpc.Call, MAX_QUEUE_SIZE)
 }
 
 // 激活Rpc服务器
@@ -35,32 +39,69 @@ func Run() {
 		panic("加载redis错误:" + err.Error())
 	}
 	rpc.Register(new(RpcServer))
-	rpc.HandleHTTP()
-	szPort := strconv.Itoa(config.Cfg_.RpcPort)
-	listen, err := net.Listen("tcp", "0.0.0.0:"+szPort)
-	if nil != err {
-		vars.Error("listen error:", err)
+	//查询一个可以使用的端口生成监听
+	port := config.Cfg_.RpcPort
+	for {
+		szPort := strconv.Itoa(port)
+		if util.CheckPort(szPort) != nil {
+			port++
+			continue
+		}
+		listen, err := net.Listen("tcp", "0.0.0.0:"+szPort)
+		if nil != err {
+			vars.Error("listen error:", err)
+			port++
+			continue
+		}
+
+		lisenter = listen
+
+		//监听
+		go func() {
+			for {
+				conn, err := lisenter.Accept()
+				if err != nil {
+					//断开监听
+					vars.Error("accept error:", err)
+					break
+				}
+				//先创建模板client，获取连接数据
+				clienttemp := rpc.NewClient(conn)
+				reg := new(registerClient)
+				if err = clienttemp.Call(REGISTER_SERVER, nil, reg); err == nil {
+					//创建本地client
+					client := new(RpcClient)
+					client.Init(conn.RemoteAddr().String(), reg.ServerName, reg.ServerId, clienttemp)
+				}
+			}
+		}()
+		//设置redis记录(服务器名字；服务器ID；IP:端口)
+		redis_.Get().HSet(config.ServerName_, strconv.Itoa(config.GetServerID()), config.Cfg_.Ip+":"+szPort)
+		szListenPort = szPort
+		break
 	}
-	go http.Serve(listen, nil)
-	//设置redis记录(服务器名字；服务器ID；IP:端口)
-	redis_.Get().HSet(config.ServerName_, strconv.Itoa(config.GetServerID()), config.Cfg_.Ip+":"+szPort)
 	vars.Info("启动rpc服务成功")
 }
 
 // 停止rpc
 func Stop() {
-	//循环关闭客户端连接
-	rpcclientmap.ClearAll(func(k, v interface{}) bool {
-		clientmap := v.(*syncmap.Map)
-		clientmap.ClearAll(func(k, v interface{}) bool {
-			client := v.(*RpcClient)
-			client.Close()
-			return true
-		})
-		return true
-	})
+	lisenter.Close() //关闭监听
 	//删除监听映射
 	redis_.Get().HDel(config.ServerName_, strconv.Itoa(config.GetServerID()))
+
+	//循环关闭客户端连接
+	closefn := func(mp *syncmap.Map) {
+		mp.ClearAll(func(k, v interface{}) bool {
+			clientmap := v.(*syncmap.Map)
+			clientmap.ClearAll(func(k, v interface{}) bool {
+				client := v.(*RpcClient)
+				client.client.Close()
+				return true
+			})
+			return true
+		})
+	}
+	closefn(rpcclientmap)
 }
 
 // 创建客户端连接
@@ -76,18 +117,7 @@ func GetConn(servername string, serverid int) *RpcClient {
 	cmd := redis_.Get().HGet(servername, szServerID)
 	if addr, err := cmd.Result(); err == nil {
 		conn := new(RpcClient)
-		if err1 := conn.Init(addr); err1 == nil {
-			//保存连接
-			rpcclientmap.LoadAndFunction(servername, func(v interface{}, storefn func(v1 interface{}), delfn func()) {
-				var mp *syncmap.Map
-				if v != nil {
-					mp = v.(*syncmap.Map)
-				} else {
-					mp = new(syncmap.Map)
-				}
-				mp.Store(szServerID, conn)
-				storefn(mp)
-			})
+		if err1 := conn.Init(addr, servername, szServerID, nil); err1 == nil {
 			return conn
 		}
 	}

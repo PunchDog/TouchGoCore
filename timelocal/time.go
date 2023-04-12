@@ -10,8 +10,13 @@ import (
 var timerChannel_ chan ITimer
 
 const (
-	DEFAULT_LIST_NUM      int64 = 1000
-	MAX_TIMER_CHANNEL_NUM       = 100000
+	DEFAULT_LIST_NUM       int64 = 1000
+	MAX_TIMER_CHANNEL_NUM        = 100000
+	NANO_TO_MS                   = 1000000
+	MILLISECONDS_OF_DAY          = 86400000
+	MILLISECONDS_OF_HOUR         = 3600000
+	MILLISECONDS_OF_MINUTE       = 60000
+	MILLISECONDS_OF_SECOND       = 1000
 )
 
 // 计时器接口
@@ -53,9 +58,9 @@ func (this *TimerObj) InitAll(steptime int64, loop int, maxtime int64) {
 func (this *TimerObj) Delete() {
 	if this.timerManager != nil {
 		listkey := this.endtime % DEFAULT_LIST_NUM
-		this.timerManager.tickMap.LoadAndFunction(listkey, func(v interface{}, stfn func(k interface{}, v interface{}), delfn func(k interface{})) {
+		this.timerManager.tickMap.LoadAndFunction(listkey, func(v interface{}, stfn func(v interface{}), delfn func()) {
 			if v == nil {
-				delfn(listkey)
+				delfn()
 				return
 			}
 			list := v.([]ITimer)
@@ -64,7 +69,7 @@ func (this *TimerObj) Delete() {
 					continue
 				}
 				list = append(list[:i], list[i+1:]...)
-				stfn(listkey, list)
+				stfn(list)
 				break
 			}
 		})
@@ -121,15 +126,15 @@ func (this *TimerManager) tick() {
 			//毫秒级查询
 			key := (time.Now().UnixNano() / int64(time.Millisecond)) % DEFAULT_LIST_NUM
 			var copylist []ITimer = nil
-			this.tickMap.LoadAndFunction(key, func(l interface{}, stfn func(k, v interface{}), delfn func(k interface{})) {
-				if l == nil {
+			this.tickMap.LoadAndFunction(key, func(v interface{}, storefn func(v1 interface{}), delfn func()) {
+				if v == nil {
 					return
 				}
-				list := l.([]ITimer)
+				list := v.([]ITimer)
 				llen := len(list)
 				copylist = make([]ITimer, llen, llen)
 				copy(copylist, list)
-				delfn(key)
+				delfn()
 			})
 			if copylist != nil {
 				for _, timer := range copylist {

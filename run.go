@@ -15,6 +15,7 @@ import (
 	lua "touchgocore/gopherlua"
 	"touchgocore/ini"
 	"touchgocore/mapmanager"
+	"touchgocore/rpc"
 	"touchgocore/timelocal"
 	"touchgocore/util"
 	"touchgocore/vars"
@@ -107,7 +108,7 @@ func Run(serverName string, version string) {
 	timelocal.Run()
 
 	//启动rpc相关
-	// rpc.Run()
+	rpc.Run()
 
 	//启动ws
 	websocket.Run()
@@ -190,7 +191,7 @@ func signalProcHandler() {
 	vars.Info("Signal: ", chSig)
 	chExit <- true
 
-	// rpc.Stop()       //关闭通道
+	rpc.Stop()       //关闭通道
 	lua.Stop()       //关闭lua定时器
 	timelocal.Stop() //关闭定时器
 	websocket.Stop() //关闭websock

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"flag"
 	"fmt"
 	"io/ioutil"
 	"os"
@@ -21,6 +22,7 @@ type Cfg struct {
 	LogLevel string          `json:"loglevel"` //日志等级，off为不开,其次为info,debug,error
 	MapPath  string          `json:"map_path"` //地图配置位置
 	BeegoWeb *BeegoWebConfig `json:"beegoweb"` //beegoweb配置
+	RpcPort  int             `json:"rpc_port"` //rpc_port端口，没有则表示不开rpc服务
 }
 
 func init() {
@@ -30,6 +32,7 @@ func init() {
 		LogLevel: "info",
 		MapPath:  "off",
 		Ip:       "",
+		RpcPort:  0,
 	}
 
 	if PathExists(_defaultFile) == false {
@@ -80,10 +83,14 @@ func (this *Cfg) Load(cfgname string) {
 	}
 }
 
-var Cfg_ *Cfg = nil
-var ServerName_ string
-var _basePath = path.Join(path.Dir(os.Args[0]), "../")
-var _defaultFile = path.Join(_basePath, "conf/config.ini")
+var (
+	Cfg_         *Cfg = nil
+	ServerName_  string
+	_basePath    = path.Join(path.Dir(os.Args[0]), "../")
+	_defaultFile = path.Join(_basePath, "conf/config.ini")
+	_defServerId = 1 //TODO 0
+	_serverFlag  = flag.Int("s", _defServerId, "server flag")
+)
 
 func GetBasePath() string {
 	return _basePath
@@ -91,6 +98,10 @@ func GetBasePath() string {
 
 func GetDefaultFie() string {
 	return _defaultFile
+}
+
+func GetServerID() int {
+	return _defServerId
 }
 
 func PathExists(path string) bool {

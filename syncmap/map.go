@@ -5,7 +5,7 @@ import "sync"
 type Map struct {
 	mp   map[interface{}]interface{} //数据
 	num  int                         //数量
-	lock sync.Mutex                  //读写锁
+	lock sync.RWMutex                //读写锁
 }
 
 func (this *Map) load(k interface{}) (d interface{}, ok bool) {
@@ -40,36 +40,51 @@ func (this *Map) delete(k interface{}) {
 	}
 }
 
-//数据长点
+// 数据长点
 func (this *Map) Length() int {
 	return this.num
 }
 
-//读取数据
+// 读取数据
 func (this *Map) Load(k interface{}) (d interface{}, ok bool) {
-	this.lock.Lock()
-	defer this.lock.Unlock()
+	this.lock.RLock()
+	defer this.lock.RUnlock()
 	return this.load(k)
 }
 
-//添加数据
+// 添加数据
 func (this *Map) Store(k, v interface{}) {
 	this.lock.Lock()
 	defer this.lock.Unlock()
 	this.store(k, v)
 }
 
-//删除数据
+// 删除数据
 func (this *Map) Delete(k interface{}) {
 	this.lock.Lock()
 	defer this.lock.Unlock()
 	this.delete(k)
 }
 
-//循环
-func (this *Map) Range(fn func(k, v interface{}) bool) {
+// 清空所有数据（不可以在fn内有对this的Store或者Delete操作）
+func (this *Map) ClearAll(fn func(k, v interface{}) bool) {
 	this.lock.Lock()
 	defer this.lock.Unlock()
+	if fn != nil { //清空数据前，先执行操作
+		for i, i2 := range this.mp {
+			if !fn(i, i2) {
+				break
+			}
+		}
+	}
+	this.mp = make(map[interface{}]interface{})
+	this.num = 0
+}
+
+// 循环（不可以在fn内有对this的Store或者Delete操作）
+func (this *Map) Range(fn func(k, v interface{}) bool) {
+	this.lock.RLock()
+	defer this.lock.RUnlock()
 	for i, i2 := range this.mp {
 		if !fn(i, i2) {
 			break
@@ -77,7 +92,7 @@ func (this *Map) Range(fn func(k, v interface{}) bool) {
 	}
 }
 
-//添加或读取
+// 添加或读取
 func (this *Map) LoadOrStore(key, value interface{}) (actual interface{}, loaded bool) {
 	this.lock.Lock()
 	defer this.lock.Unlock()
@@ -89,10 +104,13 @@ func (this *Map) LoadOrStore(key, value interface{}) (actual interface{}, loaded
 	return
 }
 
-//读取并操作
-func (this *Map) LoadAndFunction(k interface{}, fn func(v interface{}, stfn func(k, v interface{}), delfn func(k interface{}))) {
+// 读取并操作(fn是操作函数,storefn是在这个map中进行插入，key就是LoadAndFunction传入的k,v1是值;delfn是删除LoadAndFunction传入的k)
+func (this *Map) LoadAndFunction(k interface{}, fn func(v interface{}, storefn func(v1 interface{}), delfn func())) {
 	this.lock.Lock()
 	defer this.lock.Unlock()
-	actual, _ := this.load(k)
-	fn(actual, this.store, this.delete)
+	actual, ok := this.load(k)
+	if !ok {
+		actual = nil
+	}
+	fn(actual, func(v1 interface{}) { this.store(k, v1) }, func() { this.delete(k) })
 }

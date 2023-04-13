@@ -17,24 +17,6 @@ type RpcServer struct {
 	sync.RWMutex
 }
 
-// 主要是用来处理MsgQ的
-func Tick() chan bool {
-	// //这里是用来监听rpc应答
-	// call := <-requestMsg
-	// req := call.Args.(*RpcRequest)
-	// if req.Ntf {//因为这里是处理回执的，所以这里不作处理
-	// 	return
-	// }
-
-	// switch req.ConnType {
-	// case "websocket":
-	// 	//把数据转发到websocket模块去
-	// 	// util.DefaultCallFunc.Do()
-	// case "rpc":
-	// }
-	return nil
-}
-
 // 注册用的
 func (self *RpcServer) RegisterClient(args *RpcRequest, reply *registerClient) error {
 	reply.ServerName = config.ServerName_

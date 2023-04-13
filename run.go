@@ -176,7 +176,6 @@ func loop() (err interface{}) {
 	case <-timelocal.Tick():
 	case <-lua.TimeTick():
 	case <-websocket.Handle():
-	case <-rpc.Tick():
 	case <-chExit:
 		err = &util.Error{ErrMsg: "退出服务器"}
 		chExitOk <- (0)

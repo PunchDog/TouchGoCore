@@ -103,23 +103,3 @@ func Stop() {
 	}
 	closefn(rpcclientmap)
 }
-
-// 创建客户端连接
-func GetConn(servername string, serverid int) *RpcClient {
-	szServerID := strconv.Itoa(serverid)
-	//不能连接自己
-	if servername == config.ServerName_ && serverid == config.GetServerID() {
-		vars.Error("rpc不能连接自己:servername-" + servername + " serverid-" + szServerID)
-		<-time.After(time.Nanosecond * 10)
-		panic("rpc不能连接自己:servername-" + servername + " serverid-" + szServerID)
-	}
-
-	cmd := redis_.Get().HGet(servername, szServerID)
-	if addr, err := cmd.Result(); err == nil {
-		conn := new(RpcClient)
-		if err1 := conn.Init(addr, servername, szServerID, nil); err1 == nil {
-			return conn
-		}
-	}
-	return nil
-}

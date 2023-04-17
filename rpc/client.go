@@ -3,6 +3,7 @@ package rpc
 import (
 	"net/rpc"
 	"strconv"
+	"time"
 	"touchgocore/config"
 	"touchgocore/syncmap"
 	"touchgocore/vars"
@@ -11,8 +12,9 @@ import (
 type RpcClient struct {
 	Addr       string
 	client     *rpc.Client
-	ServerName string //连接的服务器名字
-	ServerId   string //服务器ID
+	ServerName string         //连接的服务器名字
+	ServerId   string         //服务器ID
+	done       chan *rpc.Call //客户端数据回复
 }
 
 func (this *RpcClient) Connect() error {
@@ -27,6 +29,7 @@ func (this *RpcClient) Connect() error {
 
 	if err == nil {
 		this.client = client
+		this.done = make(chan *rpc.Call)
 	}
 
 	return err
@@ -66,19 +69,32 @@ func (this *RpcClient) Init(addr string, servername, serverid string, connect *r
 	return err
 }
 
-func (this *RpcClient) Go(api string, args interface{}, reply interface{}) {
-	go func() {
-		done := this.client.Go(api, args, reply, nil)
-		if done.Error == nil { //正常消息
-			// requestMsg <- done
-		} else { //断线了，先重连试试，不行就删除
-			if err := this.Connect(); err == nil {
-				this.Go(api, args, reply) //客户端重连一次，还不行就删除
-				return
+func (this *RpcClient) Tick() {
+	select {
+	case done := <-this.done:
+		if done.Error == nil { //正常返回数据
+			requestMsg <- done
+		} else { //可能断线了，这里循环3次连接，不行就关闭连接
+			connect := false
+			for i := 0; i < 3; i++ {
+				if err := this.Connect(); err != nil {
+					<-time.After(time.Millisecond * 10) //延迟10毫秒
+					continue
+				}
+				connect = true
+				break
 			}
-			this.Close()
+			if connect {
+				this.Go(done.ServiceMethod, done.Args, done.Reply)
+			} else {
+				this.Close()
+			}
 		}
-	}()
+	}
+}
+
+func (this *RpcClient) Go(api string, args interface{}, reply interface{}) {
+	this.client.Go(api, args, reply, this.done)
 }
 
 func (this *RpcClient) Call(api string, args interface{}, reply interface{}) error {
@@ -143,4 +159,14 @@ func getConn(servername string, serverid int) (conn *RpcClient) {
 		}
 	})
 	return
+}
+
+// tick
+func OnTick() chan bool {
+	rpcclientmap.Range(func(k, v interface{}) bool {
+		client := v.(*RpcClient)
+		client.Tick()
+		return true
+	})
+	return nil
 }

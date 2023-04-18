@@ -29,7 +29,7 @@ func (this *RpcClient) Connect() error {
 
 	if err == nil {
 		this.client = client
-		this.done = make(chan *rpc.Call)
+		this.done = make(chan *rpc.Call, MAX_QUEUE_SIZE)
 	}
 
 	return err

@@ -1,10 +1,14 @@
 package rpc
 
 import (
+	"fmt"
 	"net/rpc"
 	"strconv"
-	"sync"
 	"touchgocore/config"
+	"touchgocore/syncmap"
+	"touchgocore/util"
+	"touchgocore/vars"
+	"touchgocore/websocket"
 )
 
 const (
@@ -13,11 +17,24 @@ const (
 
 var requestMsg chan *rpc.Call
 
-type RpcServer struct {
-	sync.RWMutex
+// 判断是否是自己服务器用的协议
+func serverMsgToServerName(protocol1, protocol2 int32, ForwardingIdx int8) (string, int8) {
+	//获取协议所在的链
+	key := fmt.Sprintf("%d-%d", protocol1, protocol2)
+	d := redis_.Get().LIndex(key, int64(ForwardingIdx))
+	if serverName, err := d.Result(); err == nil {
+		maxLen := redis_.Get().LLen(key).Val()
+		return serverName, int8(maxLen)
+	}
+
+	return "", 0
 }
 
-// 注册用的
+type RpcServer struct {
+	// sync.RWMutex
+}
+
+// 服务器反向注册用的
 func (self *RpcServer) RegisterClient(args *RpcRequest, reply *registerClient) error {
 	reply.ServerName = config.ServerName_
 	reply.ServerId = strconv.Itoa(config.GetServerID())
@@ -26,16 +43,48 @@ func (self *RpcServer) RegisterClient(args *RpcRequest, reply *registerClient) e
 
 // 消息广播
 func (self *RpcServer) MsgDispatch(args *RpcRequest, reply *RpcResponse) error {
-	// //查询协议所在的服务器，判断转发
-	// if !args.Ntf {
-	// 	if condition { //如果是本地处理的协议
-	// 		//把数据转发到初始化模块去
-	// 		util.DefaultCallFunc.Do(util.Dispatch, args.Params, args.protocol1, args.protocol2, args.Request)
-	// 	} else {
+	serverName, maxLen := serverMsgToServerName(args.protocol1, args.protocol2, args.ForwardingIdx) //获取协议所在的服务器名字
+	if serverName == "" {
+		vars.Error(fmt.Sprintf("服务器名字获取错误，目前没有协议%d-%d对应的服务器", args.protocol1, args.protocol2))
+		return nil
+	}
 
-	// 	}
-	// } else {
-
-	// }
+	if serverName == config.ServerName_ {
+		if !args.Websocket {
+			//是本地需要处理的消息，这里广播出去
+			util.DefaultCallFunc.Do(util.CallDispatch, args.protocol1, args.protocol2, args.Params, args.Request)
+		} else {
+			if conn := websocket.GetConn(args.ConnUid); conn != nil {
+				conn.SendMsg(args.protocol1, args.protocol2, args.Request)
+			}
+		}
+	} else {
+		if args.ForwardingIdx < maxLen {
+			args.ForwardingIdx++ //转发层级+1，看下次转发到哪,如果已经是最后一层了，那就是往客户端的websocket发展了
+			//不是本服的协议，需要查询协议目的地，转过去
+			conn := GetConn(serverName, args.RemoteServerId)
+			if conn != nil {
+				conn.Go(DISPATCH, args, reply) //消息转发
+			} else {
+				//出错了，获取不到对应的连接
+				reply.Error = -1
+			}
+		}
+	}
 	return nil
+}
+
+/*
+注册协议链,即协议转发几个服务器(Protocol1-Protocol2=>[]string{server1,server2,...})
+其实就是设置协议在哪个服务器里执行
+*/
+func RegiserProtocolServerNameList(mp *syncmap.Map) {
+	//循环插入注册好的跳转结构
+	mp.Range(func(k, v interface{}) bool {
+		list := v.([]string)
+		for _, str := range list {
+			redis_.Get().LPush(k.(string), str)
+		}
+		return true
+	})
 }

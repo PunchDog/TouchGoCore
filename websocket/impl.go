@@ -256,3 +256,10 @@ func clientConnection(ipstring string) error {
 	}
 	return nil
 }
+
+func GetConn(uid int64) *Connection {
+	if d, ok := connectList.Load(uid); ok {
+		return d.(*Connection)
+	}
+	return nil
+}

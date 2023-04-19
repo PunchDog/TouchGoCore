@@ -125,7 +125,20 @@ func (this *IniParser) GetFloat64(section string, key string, fdefault float64) 
 	return value_float
 }
 
-//读取配置
+// 获取所有元素
+func (this *IniParser) GetAll(section string) map[string]string {
+	if this.conf_reader == nil {
+		return nil
+	}
+	s, err := this.conf_reader.GetSection(section)
+	if err != nil {
+		return nil
+	}
+
+	return s.KeysHash()
+}
+
+// 读取配置
 func Load(path string) (p *IniParser, err error) {
 	ini_parser := &IniParser{}
 	if err1 := ini_parser.Load(path); err != nil {

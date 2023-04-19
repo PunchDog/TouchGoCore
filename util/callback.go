@@ -6,10 +6,12 @@ import (
 )
 
 const (
-	CallStart       string = "StartFunc"
-	CallStop        string = "StopFunc"
-	CallDispatch    string = "Dispatch"
-	CallRegisterRpc string = "RegisterRpc"
+	CallStart        string = "StartFunc"
+	CallStop         string = "StopFunc"
+	CallDispatch     string = "Dispatch"
+	CallRegisterRpc  string = "RegisterRpc"
+	CallWebSocketMsg string = "WebSocketMsg"
+	CallRpcMsg       string = "RpcMsg"
 )
 
 var DefaultCallFunc *CallFunction = new(CallFunction)

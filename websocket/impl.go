@@ -263,3 +263,14 @@ func GetConn(uid int64) *Connection {
 	}
 	return nil
 }
+
+// 专门用来接收rpc来的消息的
+func MsgDispatch(uid int64, protocol1 int32, protocol2 int32, pb proto.Message) {
+	if conn := GetConn(uid); conn != nil {
+		conn.SendMsg(protocol1, protocol2, pb)
+	}
+}
+
+func init() {
+	util.DefaultCallFunc.Register(util.CallWebSocketMsg, MsgDispatch)
+}

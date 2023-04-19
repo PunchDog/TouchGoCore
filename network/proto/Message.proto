@@ -1,0 +1,11 @@
+package network.message;
+
+message Head {
+	required int32 protocol1 = 1;
+	optional int32 protocol2 = 2;
+}
+
+message FSMessage {
+	required Head Head = 1;
+	required bytes body = 2;
+}

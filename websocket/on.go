@@ -1,14 +1,18 @@
 package websocket
 
 import (
+	"reflect"
 	"strconv"
 	"strings"
 
 	"touchgocore/config"
 	"touchgocore/db"
+	"touchgocore/network"
+	network_message "touchgocore/network/message"
 	"touchgocore/util"
 	"touchgocore/vars"
 
+	"github.com/golang/protobuf/proto"
 	"github.com/gorilla/websocket"
 )
 
@@ -18,6 +22,10 @@ var callBack_ IConnCallback = nil
 // 消息数据
 var wsOnMessage_ *WsOnMessage = nil
 var redis_ *db.Redis = nil
+
+const (
+	MSG_PACKAGE_NAME = "network.message."
+)
 
 // 这里处理消息，把所有的消息都实行汇总处理
 type IConnCallback interface {
@@ -52,12 +60,30 @@ func (this *defaultCallBack) OnConnect(conn *Connection) bool {
 	return true
 }
 
+// 这就是一个收消息的模板
 func (this *defaultCallBack) OnMessage(conn *Connection, echoPacket *util.EchoPacket) bool {
-	// body := echoPacket.GetBody()
-	// protocol2 := echoPacket.GetProtocol2()
-	// protocol1 := echoPacket.GetProtocol1()
+	body := echoPacket.GetBody()
+	protocol2 := echoPacket.GetProtocol2()
+	protocol1 := echoPacket.GetProtocol1()
 
-	// util.DefaultCallFunc.Do(protocol1, protocol2, conn, body)
+	all := new(network_message.FSMessage)
+	err := proto.Unmarshal(body, all)
+	if err != nil {
+		return false
+	}
+
+	protoName := network.GetProtoName(protocol1, protocol2)
+	msgType := proto.MessageType(MSG_PACKAGE_NAME + protoName)
+	if msgType == nil {
+		return false
+	}
+	msg := reflect.New(msgType.Elem()).Interface().(proto.Message)
+	err = proto.Unmarshal(all.GetBody(), msg)
+	if err != nil {
+		return false
+	}
+	// uid int64, protocol1 int32, protocol2 int32, pb proto.Message, params []interface{}, remoteServerId []int
+	util.DefaultCallFunc.Do(util.CallRpcMsg, conn.Uid, protocol1, 0, msg, nil, nil)
 	return true
 }
 

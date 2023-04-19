@@ -38,7 +38,7 @@ func Run() {
 		<-time.After(time.Nanosecond * 10)
 		panic("加载redis错误:" + err.Error())
 	}
-	rpc.Register(new(RpcServer))                  //默认注册的rpc服务器操作
+	rpc.Register(server)                          //默认注册的rpc服务器操作
 	util.DefaultCallFunc.Do(util.CallRegisterRpc) //告知其他自定义的rpc模块可以注册了
 
 	//查询一个可以使用的端口生成监听

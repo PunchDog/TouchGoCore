@@ -98,9 +98,7 @@ func (s *Connection) write(protocol1 int32, protocol2 int32, buffer []byte, buff
 		return
 	}
 	protocol := util.NewEchoPacket(protocol1, protocol2, buffer, buffLen)
-	select {
-	case wsOnMessage_.writeChan <- &rwData{data: protocol.Serialize(), conn: s}:
-	}
+	wsOnMessage_.writeChan <- &rwData{data: protocol.Serialize(), conn: s}
 }
 
 func (conn *Connection) Close(desc string) {
@@ -265,12 +263,13 @@ func GetConn(uid int64) *Connection {
 }
 
 // 专门用来接收rpc来的消息的
-func MsgDispatch(uid int64, protocol1 int32, protocol2 int32, pb proto.Message) {
+func MsgSend(uid int64, protocol1 int32, protocol2 int32, pb proto.Message) {
 	if conn := GetConn(uid); conn != nil {
 		conn.SendMsg(protocol1, protocol2, pb)
 	}
 }
 
+// 注册发送函数
 func init() {
-	util.DefaultCallFunc.Register(util.CallWebSocketMsg, MsgDispatch)
+	util.DefaultCallFunc.Register(util.CallWebSocketMsg, MsgSend)
 }

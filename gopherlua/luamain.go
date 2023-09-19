@@ -57,14 +57,15 @@ func (this *LuaScript) Init() {
 	//初始化几个主要函数
 	this.l.SetGlobal("info", this.l.NewFunction(info)) /* Original lua_setglobal uses stack... */
 	this.l.SetGlobal("debug", this.l.NewFunction(debug))
+	this.l.SetGlobal("warning", this.l.NewFunction(warning))
 	this.l.SetGlobal("error", this.l.NewFunction(error1))
-	// this.l.SetGlobal("dofile", this.l.NewFunction(dofile))
+	this.l.SetGlobal("dofile", this.l.NewFunction(dofile))
 	this.l.SetGlobal("getpathluafile", this.l.NewFunction(getpathluafile))
+	this.l.SetGlobal("getini", this.l.NewFunction(getini))
 }
 
 func (this *LuaScript) Close() {
 	if this.l != nil {
-		this.luaTimer.Delete()
 		this.l.Close()
 		this.l = nil
 	}
@@ -91,7 +92,7 @@ func (this *LuaScript) Call(funcname string, list ...interface{}) bool {
 		err = this.l.PCall(listlen, fn.NRet, fn.Handler)
 	}
 	if err != nil {
-		vars.Error("lua调用出错:", err)
+		vars.Error("lua调用出错:%s", err)
 		return false
 	}
 
@@ -104,6 +105,11 @@ func (this *LuaScript) Call(funcname string, list ...interface{}) bool {
 		this.liRetList = append(this.liRetList, &data)
 	}
 	return true
+}
+
+// 调用全局返回值
+func (this *LuaScript) Ret() []*lua.LValue {
+	return this.liRetList
 }
 
 // 创建一个lua指针
@@ -146,6 +152,11 @@ func NewLuaScript(initluapath string) *LuaScript {
 // 调用
 func Call(funcname string, list ...interface{}) bool {
 	return _defaultlua.Call(funcname, list...)
+}
+
+// 返回值
+func Ret() []*lua.LValue {
+	return _defaultlua.liRetList
 }
 
 // 注册函数列表

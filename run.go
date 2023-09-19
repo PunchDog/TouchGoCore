@@ -27,6 +27,7 @@ var chExitOk chan int
 
 var DEBUG bool
 var fps int
+var version string
 
 func init() {
 	chExit = make(chan bool)
@@ -34,7 +35,7 @@ func init() {
 }
 
 // 总体开关,此函数需要放在main的最后
-func Run(serverName string, version string) {
+func Run(serverName string) {
 	defer func() {
 		if err := recover(); err != nil {
 		}
@@ -47,12 +48,13 @@ func Run(serverName string, version string) {
 	if p, err := ini.Load(config.GetDefaultFie()); err == nil {
 		DEBUG = p.GetString("GLOBAL", "debug", "false") == "true"
 		fps, _ = strconv.Atoi(p.GetString("GLOBAL", "fps", "120"))
+		version = p.GetString(serverName, "Version", "1.0")
 	}
 
 	//创建日志文件
 	vars.Run(config.GetBasePath()+"/log/"+config.ServerName_, config.Cfg_.LogLevel)
 
-	centerstr := fmt.Sprintf("**         Service:[%s] Version:[%s]         **", serverName, version)
+	centerstr := fmt.Sprintf("*         Service:[%s] Version:[%s]         *", serverName, version)
 	l := len(centerstr)
 	var showsr string
 	for i := 0; i < l; i++ {

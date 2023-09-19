@@ -2,6 +2,7 @@ package ini
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/go-ini/ini"
 )
@@ -149,4 +150,21 @@ func Load(path string) (p *IniParser, err error) {
 	p = ini_parser
 	err = nil
 	return
+}
+
+func LoadConfigByNoSectionName(tpath string) map[string]map[string]string {
+	cfg, err := ini.Load(tpath)
+	if err != nil {
+		fmt.Println("Failed to load configuration file: %v", err)
+		os.Exit(-1)
+	}
+	ret := make(map[string]map[string]string)
+	sectionNamelist := cfg.SectionStrings()
+	for _, sectionName := range sectionNamelist {
+		mp, err := cfg.GetSection(sectionName)
+		if err == nil {
+			ret[sectionName] = mp.KeysHash()
+		}
+	}
+	return ret
 }

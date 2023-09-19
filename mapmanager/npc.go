@@ -6,7 +6,7 @@ import (
 	"touchgocore/syncmap"
 )
 
-//商品物品类
+// 商品物品类
 type ShopItem struct {
 	ItemId         int    //物品ID
 	CostType       int    //购买扣除
@@ -28,12 +28,13 @@ type Npc struct {
 	MapId     int32        //地图ID
 }
 
-//创建一个NPC容器，放入到NPC数据里
-func (this *Npc) AddField(id int64) interface{} {
+// 创建一个NPC容器，放入到NPC数据里
+func (this *Npc) AddField(id int64, lua *lua.LuaScript) interface{} {
 	npc := &Npc{
 		Id: int(id),
 	}
 
+	npc.SetLuaScript(lua)
 	return npc
 }
 func (this *Npc) SetMapId(mapId int32) {

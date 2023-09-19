@@ -20,14 +20,16 @@ const (
 	LogLevel_Off = iota
 	LogLevel_Error
 	LogLevel_Debug
+	LogLevel_Warning
 	LogLevel_Info
 )
 
 var loglevelmap map[string]int = map[string]int{
-	"off":   LogLevel_Off,
-	"info":  LogLevel_Info,
-	"debug": LogLevel_Debug,
-	"error": LogLevel_Error,
+	"off":     LogLevel_Off,
+	"info":    LogLevel_Info,
+	"debug":   LogLevel_Debug,
+	"warning": LogLevel_Warning,
+	"error":   LogLevel_Error,
 }
 
 func Run(servername string, level string) {
@@ -113,6 +115,13 @@ func Debug(v ...interface{}) {
 	file := log_.getFile()
 	log_.printList <- func() {
 		log_.println("【DEBUG】"+file, LogLevel_Debug, v...)
+	}
+}
+
+func Warning(v ...interface{}) {
+	file := log_.getFile()
+	log_.printList <- func() {
+		log_.println("【WARNING】"+file, LogLevel_Debug, v...)
 	}
 }
 

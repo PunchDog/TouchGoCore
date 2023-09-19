@@ -6,8 +6,8 @@ import (
 )
 
 const (
-	CallStart        string = "StartFunc"
-	CallStop         string = "StopFunc"
+	CallStart        string = "StartFunc" //项目启动时加载数据
+	CallStop         string = "StopFunc"  //关闭项目时执行保存之类的
 	CallDispatch     string = "Dispatch"
 	CallRegisterRpc  string = "RegisterRpc"
 	CallWebSocketMsg string = "WebSocketMsg"

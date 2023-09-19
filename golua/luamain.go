@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"touchgocore/config"
 	"touchgocore/syncmap"
+	"touchgocore/timelocal"
 	"touchgocore/vars"
 
 	"github.com/aarzilli/golua/lua"
@@ -11,7 +12,8 @@ import (
 
 // lua指针
 var _defaultlua *LuaScript = nil
-var _luaList []*LuaScript = make([]*LuaScript, 0)
+var _luaList map[int64]*LuaScript = nil
+var _LuaListUid int64 = 0
 
 // 注册用的函数
 var _exports map[string]func(L *lua.State) int
@@ -44,6 +46,7 @@ type LuaScript struct {
 	defaultLuaData    *syncmap.Map
 	defaultLuaDataUid int64
 	luaTimer          *luaTimer
+	Uid               int64
 }
 
 func (this *LuaScript) Init() {
@@ -132,7 +135,8 @@ func NewLuaScript(initluapath string) *LuaScript {
 	timelocal.AddTimer(p.luaTimer)
 
 	//加入管理列表
-	_luaList = append(_luaList, p)
+	_LuaListUid++
+	_luaList[_LuaListUid] = p
 	return p
 }
 
@@ -173,6 +177,7 @@ func Run() {
 		return
 	}
 
+	_luaList = make(map[int64]*LuaScript)
 	_defaultlua = NewLuaScript(config.Cfg_.Lua)
 	vars.Info("启动lua服务成功")
 }

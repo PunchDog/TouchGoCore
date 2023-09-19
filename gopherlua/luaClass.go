@@ -9,47 +9,62 @@ import (
 	lua "github.com/yuin/gopher-lua"
 )
 
-//lua产生的类数据
+// lua产生的类数据
 var defaultLuaDataUid int64 = 0
 var defaultLuaData *syncmap.Map = &syncmap.Map{}
 
-//注册类接口
+// 注册类接口
 type ILuaClassInterface interface {
-	AddField(id int64) interface{}
+	AddField(id int64, lua *LuaScript) interface{}
 	Delete()
 	Update()
 }
 
-//注册类接口基类
 type ILuaClassObject struct {
+	lua *LuaScript
 }
 
-//创建一个NPC容器，放入到NPC数据里
-func (this *ILuaClassObject) AddField(id int64) interface{} {
-	return nil
+func (self *ILuaClassObject) Delete() {
+
 }
 
-func (this *ILuaClassObject) Delete() {
+func (self *ILuaClassObject) Update() {
+
 }
 
-func (this *ILuaClassObject) Update() {
+func (self *ILuaClassObject) SetLuaScript(lua *LuaScript) {
+	self.lua = lua
 }
 
-//////////////////////////////////////////////////////////////////////////////////////////////////////
-//////////////////////////////////////////////////////////////////////////////////////////////////////
-//////////////////////////////////////////////////////////////////////////////////////////////////////
-//注册时存放查询数据的
+// 创建一个多线程调用函数，处理lua脚本创建的多线程
+func (this *ILuaClassObject) MultithreadingCall(funcname string, list ...interface{}) *LuaTable {
+	ch := make(chan *LuaTable, 0)
+	go func() {
+		if this.lua.Call(funcname, list...) {
+			ret := this.lua.Ret()
+			if len(ret) == 1 {
+				ch <- GetTable(*ret[0], nil)
+			}
+		}
+	}()
+	return <-ch
+}
+
+// ////////////////////////////////////////////////////////////////////////////////////////////////////
+// ////////////////////////////////////////////////////////////////////////////////////////////////////
+// ////////////////////////////////////////////////////////////////////////////////////////////////////
+// 注册时存放查询数据的
 type metaUserData struct {
 	uid    int64
 	script *LuaScript
 }
 
-//创建回调函数
+// 创建回调函数
 type metaOperate struct {
 	methodname string
 }
 
-//函数默认interface{}类型的number识别为int64,返回值是table的话，目前只支持*syncmap.Map,并且key目前只能是string
+// 函数默认interface{}类型的number识别为int64,返回值是table的话，目前只支持*syncmap.Map,并且key目前只能是string
 func (this *metaOperate) callBack(L *lua.LState) int {
 	//获取数据
 	self := L.CheckTable(1)
@@ -100,7 +115,7 @@ func (this *metaOperate) callBack(L *lua.LState) int {
 	return rescnt
 }
 
-//创建一个类注册
+// 创建一个类注册
 func newLuaClass(class ILuaClassInterface, script *LuaScript) {
 	//创建函数类(暂时不支持interface{}类型参数和动态参数)
 	//获取类和函数名
@@ -114,7 +129,7 @@ func newLuaClass(class ILuaClassInterface, script *LuaScript) {
 	script.l.SetField(meta, "new", script.l.NewFunction(func(L *lua.LState) int {
 		uid := L.ToInt64(2)
 		defaultLuaDataUid++
-		defaultLuaData.LoadOrStore(defaultLuaDataUid, class.AddField(uid)) //尝试插入一份数据
+		defaultLuaData.LoadOrStore(defaultLuaDataUid, class.AddField(uid, script)) //尝试插入一份数据
 		c := L.NewTable()
 		self := L.CheckTable(1)
 		L.SetMetatable(c, self)
@@ -147,12 +162,12 @@ func newLuaClass(class ILuaClassInterface, script *LuaScript) {
 		datauid := L.GetField(self, "datauid")
 		uid := int64(datauid.(lua.LNumber))
 		var classfn ILuaClassInterface = nil
-		if d, ok := defaultLuaData.Load(uid); !ok {
+		if d, ok := defaultLuaData.Load(uid); ok {
 			classfn = d.(ILuaClassInterface)
+			classfn.Delete()
+			defaultLuaData.Delete(uid)
 			return 0
 		}
-		classfn.Delete()
-		defaultLuaData.Delete(uid)
 		return 0
 	}))
 

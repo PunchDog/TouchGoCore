@@ -194,10 +194,10 @@ func signalProcHandler() {
 	vars.Info("Signal: ", chSig)
 	chExit <- true
 
-	rpc.Stop()       //关闭通道
-	lua.Stop()       //关闭lua定时器
 	timelocal.Stop() //关闭定时器
 	websocket.Stop() //关闭websock
+	lua.Stop()       //关闭lua定时器
+	rpc.Stop()       //关闭通道
 
 	//退出时清理工作
 	util.DefaultCallFunc.Do(util.CallStop)

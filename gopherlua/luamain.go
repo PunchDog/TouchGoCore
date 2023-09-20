@@ -1,6 +1,7 @@
 package gopherlua
 
 import (
+	"sync"
 	"touchgocore/config"
 	"touchgocore/syncmap"
 	"touchgocore/timelocal"
@@ -11,8 +12,10 @@ import (
 
 // lua指针
 var _defaultlua *LuaScript = nil
-var _luaList []*LuaScript = make([]*LuaScript, 0)
+var _luaList map[int64]*LuaScript = nil
 var _luaTimerTick chan func()
+var _LuaScriptUid int64 = 0
+var _LuaLock sync.Mutex
 
 // 注册用的函数
 var _exports map[string]func(L *lua.LState) int
@@ -45,6 +48,7 @@ type LuaScript struct {
 	defaultLuaData    *syncmap.Map
 	defaultLuaDataUid int64
 	luaTimer          *luaTimer
+	Uid               int64
 }
 
 func (this *LuaScript) Init() {
@@ -112,8 +116,22 @@ func (this *LuaScript) Ret() []*lua.LValue {
 	return this.liRetList
 }
 
+func (this *LuaScript) Stop() {
+	_LuaLock.Lock()
+	defer _LuaLock.Unlock()
+	this.Close()
+	delete(_luaList, this.Uid)
+}
+
 // 创建一个lua指针
 func NewLuaScript(initluapath string) *LuaScript {
+	_LuaLock.Lock()
+	defer _LuaLock.Unlock()
+
+	if _LuaScriptUid == -1 {
+		return nil
+	}
+
 	p := &LuaScript{
 		l:                 nil,
 		liRetList:         make([]*lua.LValue, 0),
@@ -145,7 +163,9 @@ func NewLuaScript(initluapath string) *LuaScript {
 	timelocal.AddTimer(p.luaTimer)
 
 	//加入管理列表
-	_luaList = append(_luaList, p)
+	_LuaScriptUid++
+	p.Uid = _LuaScriptUid
+	_luaList[_LuaScriptUid] = p
 	return p
 }
 
@@ -198,9 +218,13 @@ func Run() {
 
 // 关闭所有的定时器
 func Stop() {
+	_LuaLock.Lock()
+	defer _LuaLock.Unlock()
+	_LuaScriptUid = -1 //关闭标志
 	for _, lua := range _luaList {
 		lua.Close()
 	}
+	_luaList = nil
 }
 
 // lua时间操作

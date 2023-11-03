@@ -24,7 +24,6 @@ import (
 
 var chExit chan bool
 var ChClose chan bool
-var chExitOK chan bool
 
 var DEBUG bool
 var fps int
@@ -33,7 +32,6 @@ var version string
 func init() {
 	chExit = make(chan bool)
 	ChClose = make(chan bool)
-	chExitOK = make(chan bool)
 }
 
 // 总体开关,此函数需要放在main的最后
@@ -161,17 +159,18 @@ func Run(serverName string) {
 	go signalProcHandler()
 
 	//主循环
-	go func() {
-		for {
-			if err := loop(); err != nil {
-				vars.Info(err)
-				chExitOK <- true
-				break
-			}
-			<-time.After(time.Nanosecond * 10)
+	aftertime := int64(time.Second) / int64(fps) //按照帧率停顿时间
+	for {
+		be := time.Now().UnixNano()
+		if err := loop(); err != nil {
+			vars.Info(err)
+			break
 		}
-	}()
-	<-chExitOK
+		af := time.Now().UnixNano()
+		if condition := af - be; condition < aftertime {
+			<-time.After(time.Duration(aftertime - condition))
+		}
+	}
 	<-time.After(time.Second * 2)
 }
 

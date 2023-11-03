@@ -2,6 +2,7 @@ package beegoweb
 
 import (
 	"touchgocore/config"
+	"touchgocore/vars"
 
 	"github.com/astaxie/beego"
 )
@@ -11,6 +12,7 @@ func init() {
 
 func Run() {
 	if config.Cfg_.BeegoWeb == nil {
+		vars.Info("不启动BeegoWeb服务")
 		return
 	}
 
@@ -24,4 +26,5 @@ func Run() {
 	} else {
 		beego.SetStaticPath("/state", config.GetBasePath()+"/"+staticDir)
 	}
+	vars.Info("启动BeegoWeb服务成功")
 }

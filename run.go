@@ -38,6 +38,7 @@ func init() {
 func Run(serverName string) {
 	defer func() {
 		if err := recover(); err != nil {
+			fmt.Println(err)
 		}
 	}()
 
@@ -158,12 +159,15 @@ func Run(serverName string) {
 	go signalProcHandler()
 
 	//主循环
-	for {
-		if err := loop(); err != nil {
-			break
+	go func() {
+		for {
+			if err := loop(); err != nil {
+				break
+			}
+			<-time.After(time.Nanosecond * 10)
 		}
-		<-time.After(time.Nanosecond * 10)
-	}
+	}()
+	<-chExitOk
 }
 
 func loop() (err interface{}) {
@@ -181,7 +185,6 @@ func loop() (err interface{}) {
 	case <-rpc.OnTick():
 	case <-chExit:
 		err = &util.Error{ErrMsg: "退出服务器"}
-		chExitOk <- (0)
 	default:
 	}
 	return
@@ -202,7 +205,6 @@ func signalProcHandler() {
 	//退出时清理工作
 	util.DefaultCallFunc.Do(util.CallStop)
 
-	exitNum := <-chExitOk
-
-	os.Exit(exitNum)
+	chExitOk <- 0
+	os.Exit(0)
 }

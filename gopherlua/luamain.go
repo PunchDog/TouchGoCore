@@ -206,7 +206,7 @@ func RegisterLuaClass(class ILuaClassInterface) bool {
 
 // 启动函数
 func Run() {
-	if config.Cfg_.Lua == "off" {
+	if config.Cfg_.Lua == "off" || config.Cfg_.Lua == "" {
 		vars.Info("不启动lua服务")
 		return
 	}

@@ -60,7 +60,7 @@ func (this *Map) Load(path string) {
 }
 
 func Run() {
-	if config.Cfg_.MapPath == "off" {
+	if config.Cfg_.MapPath == "off" || config.Cfg_.MapPath == "" {
 		return
 	}
 

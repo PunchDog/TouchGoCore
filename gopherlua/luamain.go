@@ -218,13 +218,15 @@ func Run() {
 
 // 关闭所有的定时器
 func Stop() {
-	_LuaLock.Lock()
-	defer _LuaLock.Unlock()
-	_LuaScriptUid = -1 //关闭标志
-	for _, lua := range _luaList {
-		lua.Close()
+	if len(_luaList) > 0 {
+		_LuaLock.Lock()
+		defer _LuaLock.Unlock()
+		_LuaScriptUid = -1 //关闭标志
+		for _, lua := range _luaList {
+			lua.Close()
+		}
+		_luaList = nil
 	}
-	_luaList = nil
 }
 
 // lua时间操作

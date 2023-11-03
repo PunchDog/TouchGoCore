@@ -216,6 +216,7 @@ func Tick() chan bool {
 	select {
 	case timer := <-timerChannel_:
 		timer.Tick()
+	default:
 	}
 	return nil
 }

@@ -23,7 +23,7 @@ type Cfg struct {
 	MapPath  string          `json:"map_path"`   //地图配置位置
 	BeegoWeb *BeegoWebConfig `json:"beegoweb"`   //beegoweb配置
 	RpcPort  int             `json:"rpc_port"`   //rpc_port端口，没有则表示不开rpc服务
-	Other    interface{}     `json:"other_data"` //其他配置,需要自行传入想要的数据模型，用SetOtherData函数
+	Other    interface{}     `json:"other_data"` //其他配置,需要自行传入想要的数据模型
 }
 
 func init() {
@@ -40,13 +40,6 @@ func init() {
 	if PathExists(_defaultFile) == false {
 		_basePath = path.Join(path.Dir(os.Args[0]), "../../")
 		_defaultFile = path.Join(_basePath, "conf/config.ini")
-	}
-}
-
-func SetOtherData(otherdata interface{}) {
-	//额外数据的加载数据块
-	if otherdata != nil {
-		Cfg_.Other = otherdata
 	}
 }
 

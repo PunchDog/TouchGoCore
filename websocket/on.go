@@ -149,9 +149,11 @@ func Run() {
 }
 
 func Stop() {
-	close(wsOnMessage_.readChan)
-	close(wsOnMessage_.writeChan)
-	wsOnMessage_ = nil
+	if wsOnMessage_ != nil {
+		close(wsOnMessage_.readChan)
+		close(wsOnMessage_.writeChan)
+		wsOnMessage_ = nil
+	}
 }
 
 func Handle() chan bool {

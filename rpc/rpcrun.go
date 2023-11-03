@@ -87,6 +87,10 @@ func Run() {
 
 // 停止rpc
 func Stop() {
+	if config.Cfg_.RpcPort == 0 {
+		return
+	}
+
 	lisenter.Close() //关闭监听
 	//删除监听映射
 	redis_.Get().HDel(config.ServerName_, strconv.Itoa(config.GetServerID()))

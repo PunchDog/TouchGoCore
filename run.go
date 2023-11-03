@@ -23,7 +23,8 @@ import (
 )
 
 var chExit chan bool
-var chExitOk chan int
+var ChClose chan bool
+var chExitOK chan bool
 
 var DEBUG bool
 var fps int
@@ -31,7 +32,8 @@ var version string
 
 func init() {
 	chExit = make(chan bool)
-	chExitOk = make(chan int)
+	ChClose = make(chan bool)
+	chExitOK = make(chan bool)
 }
 
 // 总体开关,此函数需要放在main的最后
@@ -162,41 +164,41 @@ func Run(serverName string) {
 	go func() {
 		for {
 			if err := loop(); err != nil {
+				vars.Info(err)
+				chExitOK <- true
 				break
 			}
 			<-time.After(time.Nanosecond * 10)
 		}
 	}()
-	<-chExitOk
+	<-chExitOK
+	<-time.After(time.Second * 2)
 }
 
 func loop() (err interface{}) {
 	defer func() {
-		if err = recover(); err != nil {
-			vars.Error(err)
-			chExitOk <- (-1)
+		if err == nil {
+			if err = recover(); err != nil {
+				fmt.Println(err)
+			}
 		}
 	}()
 	err = nil
 	select {
+	case <-chExit:
+		err = &util.Error{ErrMsg: "退出服务器"}
+	case <-ChClose:
+		go closeServer()
 	case <-timelocal.Tick():
 	case <-lua.TimeTick():
 	case <-websocket.Handle():
 	case <-rpc.OnTick():
-	case <-chExit:
-		err = &util.Error{ErrMsg: "退出服务器"}
 	default:
 	}
 	return
 }
 
-func signalProcHandler() {
-	//开阻塞
-	chSig := make(chan os.Signal)
-	signal.Notify(chSig, syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT, syscall.SIGKILL)
-	vars.Info("Signal: ", chSig)
-	chExit <- true
-
+func closeServer() {
 	timelocal.Stop() //关闭定时器
 	websocket.Stop() //关闭websock
 	lua.Stop()       //关闭lua定时器
@@ -204,7 +206,14 @@ func signalProcHandler() {
 
 	//退出时清理工作
 	util.DefaultCallFunc.Do(util.CallStop)
+	chExit <- true
+	vars.Info("关闭完成,退出服务器")
+}
 
-	chExitOk <- 0
-	os.Exit(0)
+func signalProcHandler() {
+	//开阻塞
+	chSig := make(chan os.Signal)
+	signal.Notify(chSig, syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT, syscall.SIGKILL)
+	vars.Info("Signal: ", <-chSig)
+	closeServer()
 }

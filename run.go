@@ -167,7 +167,8 @@ func Run(serverName string) {
 			break
 		}
 		af := time.Now().UnixNano()
-		if condition := af - be; condition < aftertime {
+		condition := af - be
+		if condition < aftertime {
 			<-time.After(time.Duration(aftertime - condition))
 		}
 	}

@@ -37,7 +37,12 @@ func (this *IniParser) GetString(section string, key string, szdefault string) s
 		return szdefault
 	}
 
-	return s.Key(key).String()
+	value := s.Key(key).String()
+	if value == "" {
+		return szdefault
+	}
+
+	return value
 }
 
 func (this *IniParser) GetInt32(section string, key string, idefault int32) int32 {

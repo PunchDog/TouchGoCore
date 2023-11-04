@@ -153,6 +153,7 @@ func (this *TimerManager) tick() {
 		case <-this.closeTick:
 			this.closeTick = nil
 			return
+		default:
 		}
 	}
 }

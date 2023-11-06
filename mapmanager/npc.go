@@ -22,7 +22,7 @@ type Npc struct {
 	Shape     string       //形象
 	Direction int          //朝向
 	AutoMove  bool         //自动行走
-	MapPoint  [][2]int     //地图点
+	MapPoint  [][2]int16   //地图点
 	Shop      *syncmap.Map //商店页面
 	Dialog    *syncmap.Map //聊天数据
 	MapId     int32        //地图ID
@@ -59,8 +59,8 @@ func (this *Npc) SetDirection(Direction int) {
 func (this *Npc) SetAutoMove(AutoMove bool) {
 	this.AutoMove = AutoMove
 }
-func (this *Npc) AddMapPoint(x int, y int) {
-	var point [2]int = [2]int{x, y}
+func (this *Npc) AddMapPoint(x int16, y int16) {
+	var point [2]int16 = [2]int16{x, y}
 	this.MapPoint = append(this.MapPoint, point)
 }
 

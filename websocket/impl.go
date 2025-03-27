@@ -1,6 +1,7 @@
 package websocket
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -49,7 +50,7 @@ func InitConnection(port int, wsConn *websocket.Conn, remoteAddr string) (*Conne
 
 	if !callBack_.OnConnect(conn) {
 		conn.Close("连接初始化失败")
-		return nil, &util.Error{ErrMsg: "连接出错"}
+		return nil, errors.New("连接出错")
 	}
 
 	vars.Info("%s创建连接成功！", remoteAddr)
@@ -241,7 +242,7 @@ func clientConnection(ipstring string) error {
 	if err == nil {
 		host := strings.Split(ipstring, ":")
 		if len(host) != 2 {
-			return &util.Error{ErrMsg: "获取连接端口出错"}
+			return errors.New("获取连接端口出错")
 		}
 		port, _ := strconv.Atoi(host[1])
 		if _, err := InitConnection(port, c, ""); err != nil {

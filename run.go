@@ -1,6 +1,7 @@
 package touchgocore
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -177,16 +178,14 @@ func Run(serverName string) {
 
 func loop() (err interface{}) {
 	defer func() {
-		if err == nil {
-			if err = recover(); err != nil {
-				fmt.Println(err)
-			}
+		if err = recover(); err != nil {
+			fmt.Println(err)
 		}
 	}()
 	err = nil
 	select {
 	case <-chExit:
-		err = &util.Error{ErrMsg: "退出服务器"}
+		err = errors.New("退出服务器")
 	case <-ChClose:
 		go closeServer()
 	case <-timelocal.Tick():

@@ -1,6 +1,7 @@
 package util
 
 import (
+	"errors"
 	"reflect"
 	"sync"
 )
@@ -83,7 +84,7 @@ func (self *CallFunction) Do(key interface{}, values ...interface{}) (bret bool)
 					if in.Kind() != reflect.Invalid {
 						args1[i] = reflect.New(in)
 					} else {
-						args1[i] = reflect.ValueOf(&Error{ErrMsg: "错误的无效类型"})
+						args1[i] = reflect.ValueOf(errors.New("错误的无效类型"))
 					}
 				} else if args1[i].Kind() != in.Kind() {
 					// old := args1[i]

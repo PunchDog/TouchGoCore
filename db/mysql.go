@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -25,7 +26,7 @@ type DBConfigModel struct {
 	MaxIdleConns  int
 }
 
-//操作枚举
+// 操作枚举
 type EDBType int
 
 const (
@@ -198,13 +199,13 @@ func (this *Condition) SetCacheKey(cacheKey ...interface{}) *Condition {
 	return this
 }
 
-//排序顺序
+// 排序顺序
 func (this *Condition) Order(order string) *Condition {
 	this.order = order
 	return this
 }
 
-//数据分页
+// 数据分页
 func (this *Condition) Limit(limit ...int) *Condition {
 	tmp := make([]string, len(limit))
 	for i, v := range limit {
@@ -214,7 +215,7 @@ func (this *Condition) Limit(limit ...int) *Condition {
 	return this
 }
 
-//数据分组
+// 数据分组
 func (this *Condition) Group(field string) *Condition {
 	this.group = field
 	return this
@@ -247,7 +248,7 @@ func (this *Condition) SetDBType(tp EDBType) {
 /*************************************************************************************************************************************************************************/
 /*************************************************************************************************************************************************************************/
 
-//返回结果
+// 返回结果
 type Rows struct {
 	row       *map[string]interface{}
 	rows      *[]map[string]interface{}
@@ -256,15 +257,15 @@ type Rows struct {
 
 func (this *Rows) Next() error {
 	if this.rows == nil {
-		return &util.Error{ErrMsg: "返回多个数据才能使用"}
+		return errors.New("返回多个数据才能使用")
 	}
 	if len(*this.rows) == 0 {
-		return &util.Error{ErrMsg: "没有查询到数据"}
+		return errors.New("没有查询到数据")
 	}
 	if this.row != nil {
 		this.row_index++
 		if this.row_index >= len(*this.rows) {
-			return &util.Error{ErrMsg: "已经是结果最后"}
+			return errors.New("已经是结果最后")
 		}
 	}
 	this.row = &(*this.rows)[this.row_index]
@@ -345,7 +346,7 @@ func NewDbMysql(config *config.MySqlDBConfig) (*DbMysql, error) {
 	return this, this.connect()
 }
 
-//获取配置
+// 获取配置
 func (this *DbMysql) GetConfig() *DBConfigModel {
 	return this.config
 }
@@ -421,7 +422,7 @@ const (
 	eQueryType_Max
 )
 
-//获取查询语句
+// 获取查询语句
 func (this *DbMysql) getQueryStatement(etype eQueryType, rowname string) string {
 	if this.condition == nil {
 		panic("没有设置条件，不能查询数据库")
@@ -464,22 +465,22 @@ func (this *DbMysql) getQueryStatement(etype eQueryType, rowname string) string 
 	return util.Sprintf(strSql, args...)
 }
 
-//查询数据
+// 查询数据
 func (this *DbMysql) Query() (*DBResult, error) {
 	return this.queryExec(this.getQueryStatement(eQueryType_Normarl, ""))
 }
 
-//查询条数
+// 查询条数
 func (this *DbMysql) QueryCount() (*DBResult, error) {
 	return this.queryExec(this.getQueryStatement(eQueryType_Count, ""))
 }
 
-//查询和
+// 查询和
 func (this *DbMysql) QuerySum(rowname string) (*DBResult, error) {
 	return this.queryExec(this.getQueryStatement(eQueryType_Sum, rowname))
 }
 
-//查询最大值
+// 查询最大值
 func (this *DbMysql) QueryMax(rowname string) (*DBResult, error) {
 	return this.queryExec(this.getQueryStatement(eQueryType_Max, rowname))
 }
@@ -489,13 +490,13 @@ func (this *DbMysql) queryExec(strSql string) (*DBResult, error) {
 
 	if err != nil {
 		vars.Error(err.Error())
-		return nil, &util.Error{ErrMsg: "查询语句出错"}
+		return nil, errors.New("查询语句出错")
 	}
 	defer rows.Close()
 	cloumns, err := rows.Columns()
 	if err != nil {
 		vars.Error(err.Error())
-		return nil, &util.Error{ErrMsg: "获取关键字出错"}
+		return nil, errors.New("获取关键字出错")
 	}
 
 	values := make([]sql.RawBytes, len(cloumns))
@@ -523,7 +524,7 @@ func (this *DbMysql) queryExec(strSql string) (*DBResult, error) {
 	return this.Result, nil
 }
 
-//添加
+// 添加
 func (this *DbMysql) Insert() error {
 	if this.condition == nil {
 		panic("没有设置条件，不能操作数据库")
@@ -548,7 +549,7 @@ func (this *DbMysql) Insert() error {
 	return this.exec(util.Sprintf(sql, exeArgs...))
 }
 
-//更新
+// 更新
 func (this *DbMysql) Update() error {
 	if this.condition == nil {
 		panic("没有设置条件，不能操作数据库")
@@ -582,7 +583,7 @@ func (this *DbMysql) Update() error {
 	return this.exec(util.Sprintf(strsql, args...))
 }
 
-//删除
+// 删除
 func (this *DbMysql) Del() error {
 	if this.condition == nil {
 		panic("没有删除条件")
@@ -593,7 +594,7 @@ func (this *DbMysql) Del() error {
 
 }
 
-//执行
+// 执行
 func (this *DbMysql) exec(strsql string, args ...interface{}) error {
 	_, err := this.db.Exec(strsql, args...)
 	if err != nil {

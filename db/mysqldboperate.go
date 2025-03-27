@@ -1,15 +1,15 @@
 package db
 
 import (
+	"errors"
 	"sync"
 	"time"
 
 	"touchgocore/config"
 	"touchgocore/syncmap"
-	"touchgocore/util"
 )
 
-//接口
+// 接口
 type IDbOperate interface {
 	GetDbOperateType() EDBType
 	lock()
@@ -20,7 +20,7 @@ type IDbOperate interface {
 	Write() error
 }
 
-//此函数主要用于更新，所以数据类都必须继承这个函数
+// 此函数主要用于更新，所以数据类都必须继承这个函数
 type DBCacheData struct {
 	value      interface{} // *map[string]interface{}/*[]map[string]interface{}
 	updateTime int64       //更新时间
@@ -43,13 +43,13 @@ func (this *DBCacheData) Update(new interface{}) {
 	}
 }
 
-//缓存文件
+// 缓存文件
 var cacheData_ *syncmap.Map = &syncmap.Map{}
 
-//锁信息
+// 锁信息
 var cacheLock_ *syncmap.Map = &syncmap.Map{}
 
-//父类
+// 父类
 type DbOperateObj struct {
 	condition_ *Condition //操作数据
 }
@@ -64,7 +64,7 @@ func (this *DbOperateObj) GetDbOperateType() EDBType {
 
 var wait *sync.WaitGroup = &sync.WaitGroup{}
 
-//锁
+// 锁
 func (this *DbOperateObj) lock() {
 	//等待所有任务完成
 	wait.Wait()
@@ -137,7 +137,7 @@ func (this *DbOperateObj) runlock() {
 	lock.RUnlock()
 }
 
-//虚函数
+// 虚函数
 func (this *DbOperateObj) Query() interface{} {
 	//查缓存
 	if b := this.cache(nil, this.GetDbOperateType()); b != nil {
@@ -157,9 +157,9 @@ func (this *DbOperateObj) Query() interface{} {
 		ret, err = db.SetCondition(this.condition_).QueryCount()
 	case EDBType_Query_Sum:
 		if this.condition_.values == nil {
-			err = &util.Error{ErrMsg: "没有需要SUM的字段"}
+			err = errors.New("没有需要SUM的字段")
 		} else if len(*this.condition_.values) > 0 {
-			err = &util.Error{ErrMsg: "目前只支持单字段SUM"}
+			err = errors.New("目前只支持单字段SUM")
 		} else {
 			for k, _ := range *this.condition_.values {
 				ret, err = db.SetCondition(this.condition_).QuerySum(k)
@@ -167,9 +167,10 @@ func (this *DbOperateObj) Query() interface{} {
 		}
 	case EDBType_Query_Max:
 		if this.condition_.values == nil {
-			err = &util.Error{ErrMsg: "没有需要Max的字段"}
+			err = errors.New("没有需要Max的字段")
+
 		} else if len(*this.condition_.values) > 0 {
-			err = &util.Error{ErrMsg: "目前只支持单字段Max"}
+			err = errors.New("目前只支持单字段Max")
 		} else {
 			for k, _ := range *this.condition_.values {
 				ret, err = db.SetCondition(this.condition_).QueryMax(k)
@@ -205,7 +206,7 @@ func (this *DbOperateObj) write() error {
 	return nil
 }
 
-//虚函数
+// 虚函数
 func (this *DbOperateObj) Write() error {
 	err := make(chan error, 1)
 	//尝试改内存数据,有缓存的，可以开多线程写，没有缓存的必须单线程
@@ -219,7 +220,7 @@ func (this *DbOperateObj) Write() error {
 	return <-err
 }
 
-//缓存操作
+// 缓存操作
 func (this *DbOperateObj) cache(new *DBCacheData, op EDBType) *DBCacheData {
 	if this.condition_ != nil {
 		//查询
@@ -252,11 +253,11 @@ type SDBOperate struct {
 	IDBOper  IDbOperate
 }
 
-//所有操作的列表
+// 所有操作的列表
 var dbReadList_ chan SDBOperate = make(chan SDBOperate, 100000)
 var dbWriteList_ chan SDBOperate = make(chan SDBOperate, 100000)
 
-//启动操作
+// 启动操作
 func MySqlRun() {
 	//读线程
 	go func() {
@@ -312,7 +313,7 @@ func MySqlRun() {
 	}()
 }
 
-//加入任务列表
+// 加入任务列表
 func AddDbEvent(idboper IDbOperate) chan interface{} {
 	event := SDBOperate{IDBOper: idboper}
 	event.ChanData = make(chan interface{}, 1)

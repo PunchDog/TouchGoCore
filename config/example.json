@@ -45,6 +45,6 @@
     "ip": "127.0.0.1",
     "ws": ":1234",
     "lua": "off",
-    "loglevel": "info",
+    "loglevel": "日志等级，off为不开,其次为INFO,DEBUG,WARN,ERROR",
     "map_path": "off"
 }

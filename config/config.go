@@ -19,7 +19,7 @@ type Cfg struct {
 	Ip       string          `json:"ip"`         //端口所在IP，如果没填，就获取本地内网IP
 	Ws       string          `json:"ws"`         //websocket启动模式:off不启动;:1234启动监听；http://127.0.0.1:1234启动连接，监听和连接可同时存在，用|分割,连接模式必须用http开头
 	Lua      string          `json:"lua"`        //off不启动，填写lua文件的相对路径启动lua
-	LogLevel string          `json:"loglevel"`   //日志等级，off为不开,其次为info,debug,error
+	LogLevel string          `json:"loglevel"`   //日志等级，off为不开,其次为INFO,DEBUG,WARN,ERROR
 	MapPath  string          `json:"map_path"`   //地图配置位置
 	BeegoWeb *BeegoWebConfig `json:"beegoweb"`   //beegoweb配置
 	RpcPort  int             `json:"rpc_port"`   //rpc_port端口，没有则表示不开rpc服务

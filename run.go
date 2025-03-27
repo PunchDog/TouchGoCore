@@ -163,7 +163,7 @@ func Run(serverName string) {
 	for {
 		be := time.Now().UnixNano()
 		if err := loop(); err != nil {
-			vars.Info(err)
+			vars.Error("", err)
 			break
 		}
 		af := time.Now().UnixNano()

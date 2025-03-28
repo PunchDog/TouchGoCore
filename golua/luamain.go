@@ -20,7 +20,7 @@ var _exports map[string]func(L *lua.State) int
 var _exportsClass map[ILuaClassInterface]bool
 
 type luaTimer struct {
-	timelocal.TimerObj
+	timelocal.Timer
 	tick      int64
 	luaScript *LuaScript
 }
@@ -127,11 +127,9 @@ func NewLuaScript(initluapath string) *LuaScript {
 	}
 
 	//创建定时器
-	p.luaTimer = &luaTimer{
-		tick:      0,
-		luaScript: p,
-	}
-	p.luaTimer.Init(1000)
+	p.luaTimer = timelocal.NewTimer(1000, -1, &luaTimer{}).(*luaTimer)
+	p.luaTimer.luaScript = p
+	p.luaTimer.tick = 0
 	timelocal.AddTimer(p.luaTimer)
 
 	//加入管理列表

@@ -1,178 +1,166 @@
 package timelocal
 
 import (
+	"reflect"
+	"sync"
 	"time"
-	"touchgocore/syncmap"
 
+	"touchgocore/util"
 	"touchgocore/vars"
 )
 
+// 时间到了后执行的函数
 var timerChannel_ chan ITimer
 
 const (
-	DEFAULT_LIST_NUM       int64 = 1000
-	MAX_TIMER_CHANNEL_NUM        = 100000
-	NANO_TO_MS                   = 1000000
-	MILLISECONDS_OF_DAY          = 86400000
-	MILLISECONDS_OF_HOUR         = 3600000
-	MILLISECONDS_OF_MINUTE       = 60000
-	MILLISECONDS_OF_SECOND       = 1000
+	MAX_TIMER_CHANNEL_NUM int64 = 100000
+)
+
+const (
+	TIME_TYPE_MS      int8 = iota // 毫秒
+	TIMER_TYPE_SECOND             //秒
+	TIMER_TYPE_MINUTE             //分钟
+	TIMER_TYPE_HOUR               //小时
 )
 
 // 计时器接口
 type ITimer interface {
-	Tick() //执行
-
-	//以下是私有继承类函数，外部不可调用的
-	Over() bool                        //完成了
-	NextTime() int64                   //切换到下一个时间
-	LoopDec()                          //次数减一
-	AddtimerManager(mgr *TimerManager) //
-	GetUid() int64                     //
-	SetUid(id int64)                   //
+	//执行
+	Tick()
+	//从管理器中移除
+	Remove()
+	//获取uid
+	GetUid() int64
+	//获取父类指针
+	GetParent() *Timer
+	//是否还有下一次
+	Next() bool
 }
 
-// 原始继承父类
-type TimerObj struct {
-	loop         int           //循环次数
-	steptime     int64         //单次循环等待时长
-	maxtime      int64         //会回调的总时长
-	endtime      int64         //结束时间
-	timerManager *TimerManager //管理器
-	uid          int64         //唯一ID
+// 计时器父类
+type Timer struct {
+	util.ListNode
+	//唯一id
+	uid int64
+	//下次执行时间
+	nextTime int64
+	//间隔时间
+	interval int64
+	//执行次数
+	count int64
+	//管理器指针
+	mgr *TimerManager
+	//时间类型
+	timeType int8
 }
 
-// 初始化间隔时间，单位毫秒
-func (this *TimerObj) Init(steptime int64) {
-	this.InitAll(steptime, 999999999, 99999999999)
-}
-
-// 初始化间隔时间，单位毫秒，循环次数，最大结束时间，三个数据皆不能为0
-func (this *TimerObj) InitAll(steptime int64, loop int, maxtime int64) {
-	this.loop = loop
-	this.steptime = steptime
-	this.maxtime = time.Now().UnixNano()/int64(time.Millisecond) + maxtime
-}
-
-// 删除定时器节点
-func (this *TimerObj) Delete() {
-	if this.timerManager != nil {
-		listkey := this.endtime % DEFAULT_LIST_NUM
-		this.timerManager.tickMap.LoadAndFunction(listkey, func(v interface{}, stfn func(v interface{}), delfn func()) {
-			if v == nil {
-				delfn()
-				return
-			}
-			list := v.([]ITimer)
-			for i, timer := range list {
-				if timer.GetUid() != this.uid {
-					continue
-				}
-				list = append(list[:i], list[i+1:]...)
-				stfn(list)
-				break
-			}
-		})
+// 从管理器中移除
+func (this *Timer) Delete() {
+	p := this.GetParent()
+	if p == nil {
+		return
 	}
+	this.mgr.wheel[p.timeType].wheelLocks.Lock()
+	defer this.mgr.wheel[p.timeType].wheelLocks.Unlock()
+	this.Remove() //从管理器中移除
 }
 
-// 重载用的函数
-func (this *TimerObj) Tick() {
+// next
+func (this *Timer) Next() bool {
+	//如果次数为-1，则一直执行,如果次数不为-1，则次数减1
+	if this.count != -1 {
+		this.count--
+		if this.count == 0 {
+			return false
+		}
+	}
+
+	//计算下次执行时间
+	this.nextTime = time.Now().UTC().UnixMilli() + this.interval
+	return true
 }
 
-func (this *TimerObj) LoopDec() {
-	this.loop--
-}
-
-func (this *TimerObj) NextTime() int64 {
-	this.endtime = time.Now().UnixNano() / int64(time.Millisecond)
-	this.endtime += this.steptime
-	return this.endtime
-}
-
-func (this *TimerObj) Over() bool {
-	return this.loop == 0 || this.endtime >= this.maxtime
-}
-
-func (this *TimerObj) AddtimerManager(mgr *TimerManager) {
-	this.timerManager = mgr
-}
-
-func (this *TimerObj) GetUid() int64 {
+// 获取uid
+func (this *Timer) GetUid() int64 {
 	return this.uid
 }
 
-func (this *TimerObj) SetUid(id int64) {
-	this.uid = id
+// 获取父类指针
+func (this *Timer) GetParent() *Timer {
+	return this
 }
 
+// 创建一个计时器,count==-1表示一直执行
+func NewTimer(interval int64, count int64, cls ITimer) ITimer {
+	if cls == nil || interval <= 0 {
+		return nil
+	}
+
+	timer := reflect.New(reflect.TypeOf(cls).Elem()).Interface().(ITimer)
+
+	//使用反射创建一个计时器
+	obj := timer.GetParent()
+	if obj == nil {
+		return nil
+	}
+
+	obj.nextTime = time.Now().UTC().UnixMilli() + interval
+	obj.interval = interval
+	obj.count = count
+
+	//根据时间间隔计算时间类型
+	if interval < util.MILLISECONDS_OF_SECOND {
+		obj.timeType = TIME_TYPE_MS
+	} else if interval < util.MILLISECONDS_OF_MINUTE {
+		obj.timeType = TIMER_TYPE_SECOND
+	} else if interval < util.MILLISECONDS_OF_HOUR {
+		obj.timeType = TIMER_TYPE_MINUTE
+	} else {
+		obj.timeType = TIMER_TYPE_HOUR
+	}
+	return timer
+}
+
+// 时间轮
+type TimerWheel struct {
+	//时间轮配置
+	wheelConfig int64
+	//时间轮
+	tickWheel *util.List
+	//时间轮锁
+	wheelLocks *sync.Mutex
+}
+
+// 时间管理器
 type TimerManager struct {
-	tickMap     *syncmap.Map //数据存储(listkey/list)
+	//关闭标志
+	closeTick chan byte
+	//时间轮数据
+	wheel []*TimerWheel
+	//最大uid
 	maxTimerUID int64
-	closeTick   chan byte //结束循环
+}
+
+// 添加个定时器
+func (self *TimerManager) AddTimer(timer ITimer) {
+	p := timer.GetParent()
+	if p == nil {
+		return
+	}
+	self.wheel[p.timeType].wheelLocks.Lock()
+	defer self.wheel[p.timeType].wheelLocks.Unlock()
+
+	p.uid = self.maxTimerUID
+	self.maxTimerUID++
+	p.mgr = self
+	//插入数据中
+	self.wheel[p.timeType].tickWheel.Add(timer.(util.INode))
 }
 
 func (this *TimerManager) Close() {
 	if this.closeTick != nil {
 		close(this.closeTick)
 	}
-}
-
-// 循环时间
-func (this *TimerManager) tick() {
-	for {
-		select {
-		case <-time.After(time.Millisecond):
-			//毫秒级查询
-			key := (time.Now().UnixNano() / int64(time.Millisecond)) % DEFAULT_LIST_NUM
-			var copylist []ITimer = nil
-			this.tickMap.LoadAndFunction(key, func(v interface{}, storefn func(v1 interface{}), delfn func()) {
-				if v == nil {
-					return
-				}
-				list := v.([]ITimer)
-				llen := len(list)
-				copylist = make([]ITimer, llen, llen)
-				copy(copylist, list)
-				delfn()
-			})
-			if copylist != nil {
-				for _, timer := range copylist {
-					if !timer.Over() {
-						//放到主线程去执行操作
-						timerChannel_ <- timer
-						//计数-
-						timer.LoopDec()
-						endtime := timer.NextTime() % DEFAULT_LIST_NUM
-						if !timer.Over() {
-							this.AddTimer(timer, endtime)
-						}
-					}
-				}
-			}
-		case <-this.closeTick:
-			this.closeTick = nil
-			return
-		default:
-		}
-	}
-}
-
-// 添加到列表
-func (this *TimerManager) AddTimer(t ITimer, listkey int64) {
-	var list []ITimer = nil
-	if l, ok := this.tickMap.Load(listkey); ok {
-		list = l.([]ITimer)
-	} else {
-		list = make([]ITimer, 0)
-	}
-	t.AddtimerManager(this)
-	if t.GetUid() == 0 {
-		this.maxTimerUID++
-		t.SetUid(this.maxTimerUID)
-	}
-	list = append(list, t)
-	this.tickMap.Store(listkey, list)
 }
 
 var _timerManager map[*TimerManager]bool = nil
@@ -183,12 +171,46 @@ func NewTimerManager() *TimerManager {
 		timerChannel_ = make(chan ITimer, MAX_TIMER_CHANNEL_NUM)
 		_timerManager = make(map[*TimerManager]bool)
 	}
+
+	// 毫秒/秒/分钟级/小时级/
+	wheelConfig := []int64{1, util.MILLISECONDS_OF_SECOND, util.MILLISECONDS_OF_MINUTE, util.MILLISECONDS_OF_HOUR}
 	mgr := &TimerManager{
 		closeTick:   make(chan byte, 1),
-		tickMap:     &syncmap.Map{},
-		maxTimerUID: 0,
+		maxTimerUID: 1,
 	}
-	go mgr.tick()
+
+	for _, v := range wheelConfig {
+		// 初始化时间轮
+		wheel := &TimerWheel{
+			wheelConfig: v,
+			tickWheel:   util.NewList(),
+			wheelLocks:  &sync.Mutex{},
+		}
+
+		mgr.wheel = append(mgr.wheel, wheel)
+		// 启动一个协程
+		go func(mgr *TimerManager, wheel *TimerWheel) {
+			for {
+				select {
+				case <-mgr.closeTick:
+					return
+				case <-time.After(time.Duration(wheel.wheelConfig) * time.Millisecond):
+					wheel.wheelLocks.Lock()
+					// 遍历链表，查询时间到了的
+					wheel.tickWheel.Range(func(node util.INode) bool {
+						timer := node.(ITimer)
+						if timer.GetParent().nextTime <= time.Now().UTC().UnixMilli() {
+							node.Remove()
+							timerChannel_ <- timer
+						}
+						return true
+					})
+					wheel.wheelLocks.Unlock()
+				}
+			}
+		}(mgr, wheel)
+	}
+
 	_timerManager[mgr] = true
 	return mgr
 }
@@ -202,14 +224,14 @@ func Stop() {
 	for mgr, _ := range _timerManager {
 		mgr.Close()
 	}
+	close(timerChannel_)
 	_defaultTimerManager = nil
 	_timerManager = nil
 }
 
 // 添加个定时器
 func AddTimer(timer ITimer) {
-	listkey := timer.NextTime() % DEFAULT_LIST_NUM
-	_defaultTimerManager.AddTimer(timer, listkey)
+	_defaultTimerManager.AddTimer(timer)
 }
 
 // 主线程调用执行
@@ -217,6 +239,9 @@ func Tick() chan bool {
 	select {
 	case timer := <-timerChannel_:
 		timer.Tick()
+		if b := timer.Next(); b {
+			timer.GetParent().mgr.AddTimer(timer)
+		}
 	default:
 	}
 	return nil

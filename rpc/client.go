@@ -5,7 +5,6 @@ import (
 	"strconv"
 	"time"
 	"touchgocore/config"
-	"touchgocore/syncmap"
 	"touchgocore/vars"
 )
 
@@ -53,18 +52,18 @@ func (this *RpcClient) Init(addr string, servername, serverid string, connect *r
 	}
 
 	if connectok {
-		//保存连接
-		rpcclientmap.LoadAndFunction(servername, func(v interface{}, storefn func(v1 interface{}), delfn func()) {
-			var mp *syncmap.Map
-			if v != nil {
-				mp = v.(*syncmap.Map)
-			} else {
-				mp = new(syncmap.Map)
-			}
+		// //保存连接
+		// rpcclientmap.LoadAndFunction(servername, func(v interface{}, storefn func(v1 interface{}), delfn func()) {
+		// 	var mp *syncmap.Map
+		// 	if v != nil {
+		// 		mp = v.(*syncmap.Map)
+		// 	} else {
+		// 		mp = new(syncmap.Map)
+		// 	}
 
-			mp.Store(serverid, this)
-			storefn(mp)
-		})
+		// 	mp.Store(serverid, this)
+		// 	storefn(mp)
+		// })
 	}
 	return err
 }
@@ -107,15 +106,15 @@ func (this *RpcClient) Call(api string, args interface{}, reply interface{}) err
 
 func (this *RpcClient) Close() {
 	this.client.Close()
-	rpcclientmap.LoadAndFunction(this.ServerName, func(v interface{}, storefn func(v1 interface{}), delfn func()) {
-		if v != nil {
-			mp := v.(*syncmap.Map)
-			mp.Delete(this.ServerId)
-			if mp.Length() == 0 {
-				delfn()
-			}
-		}
-	})
+	// rpcclientmap.LoadAndFunction(this.ServerName, func(v interface{}, storefn func(v1 interface{}), delfn func()) {
+	// 	if v != nil {
+	// 		mp := v.(*syncmap.Map)
+	// 		mp.Delete(this.ServerId)
+	// 		if mp.Length() == 0 {
+	// 			delfn()
+	// 		}
+	// 	}
+	// })
 }
 
 // 获取或者创建客户端连接
@@ -148,16 +147,16 @@ func GetConn(servername string, serverid int) *RpcClient {
 // 获取客户端连接
 func getConn(servername string, serverid int) (conn *RpcClient) {
 	conn = nil
-	//保存连接
-	rpcclientmap.LoadAndFunction(servername, func(v interface{}, storefn func(v1 interface{}), delfn func()) {
-		if v != nil {
-			mp := v.(*syncmap.Map)
-			c, ok := mp.Load(serverid)
-			if ok {
-				conn = c.(*RpcClient)
-			}
-		}
-	})
+	// //保存连接
+	// rpcclientmap.LoadAndFunction(servername, func(v interface{}, storefn func(v1 interface{}), delfn func()) {
+	// 	if v != nil {
+	// 		mp := v.(*syncmap.Map)
+	// 		c, ok := mp.Load(serverid)
+	// 		if ok {
+	// 			conn = c.(*RpcClient)
+	// 		}
+	// 	}
+	// })
 	return
 }
 

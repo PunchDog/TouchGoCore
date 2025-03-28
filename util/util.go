@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"touchgocore/jsonthr"
-	"touchgocore/timelocal"
 	"touchgocore/vars"
 )
 
@@ -136,23 +135,23 @@ func RandRange(max int64, min int64) (ret int64) {
 // 时间类型///////////////////////////////////////////////////////////////////////////////////
 // 返回某个时间的时间戳
 func MS(t time.Time) int64 {
-	return int64(t.UnixNano() / timelocal.NANO_TO_MS)
+	return int64(t.UnixNano() / NANO_TO_MS)
 }
 
 // 返回unix时间戳。
 func CurrentMS() int64 {
-	return int64(time.Now().UnixNano() / timelocal.NANO_TO_MS)
+	return int64(time.Now().UnixNano() / NANO_TO_MS)
 }
 
 // 返回unix时间戳。
 func CurrentS() int64 {
-	return int64(time.Now().UnixNano() / timelocal.NANO_TO_MS / timelocal.MILLISECONDS_OF_SECOND)
+	return int64(time.Now().UnixNano() / NANO_TO_MS / MILLISECONDS_OF_SECOND)
 }
 
 // 毫秒转时间
 func Ms2Time(ms int64) time.Time {
-	sec := ms / timelocal.MILLISECONDS_OF_SECOND
-	nsec := (ms % timelocal.MILLISECONDS_OF_SECOND) * timelocal.NANO_TO_MS
+	sec := ms / MILLISECONDS_OF_SECOND
+	nsec := (ms % MILLISECONDS_OF_SECOND) * NANO_TO_MS
 	return time.Unix(sec, nsec).UTC()
 }
 
@@ -206,13 +205,13 @@ func S2UnixTime(value string) int64 {
 	sec, _ := strconv.Atoi(slices[6])
 	loc, _ := time.LoadLocation("UTC") // use UTC instend of Local
 	t := time.Date(year, time.Month(month), day, hour, min, sec, 0, loc)
-	return int64(t.UnixNano() / timelocal.NANO_TO_MS)
+	return int64(t.UnixNano() / NANO_TO_MS)
 }
 
 // 下一个0点
 func NextMidnight(t int64) int64 {
 	midTime := Time2Midnight(time.Unix(t/1000, t%1000))
-	return midTime.UnixNano()/timelocal.NANO_TO_MS + timelocal.MILLISECONDS_OF_DAY
+	return midTime.UnixNano()/NANO_TO_MS + MILLISECONDS_OF_DAY
 }
 
 // 从一个毫秒时间戳获取下一个准点时间。

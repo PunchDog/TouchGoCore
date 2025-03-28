@@ -197,8 +197,22 @@ func NewTimerManager() *TimerManager {
 		go func(mgr *TimerManager, wheel *TimerWheel) {
 			for {
 				select {
-				case <-mgr.closeTick:
-					return
+				case _, ok := <-mgr.closeTick: //判断关闭：
+					if !ok {
+						close(wheel.addTimerChan)
+						wheel.wheelLocks.Lock()
+						// 遍历链表，关闭全部处理一次
+						wheel.tickWheel.Range(func(node util.INode) bool {
+							timer := node.(ITimer)
+							if timer.GetParent().nextTime <= time.Now().UTC().UnixMilli() {
+								timer.Tick()
+							}
+							return true
+						})
+						wheel.tickWheel.Clear()
+						wheel.wheelLocks.Unlock()
+						return
+					}
 				case timer := <-wheel.addTimerChan:
 					wheel.wheelLocks.Lock()
 					wheel.tickWheel.Add(timer.(util.INode))

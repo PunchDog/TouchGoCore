@@ -78,12 +78,12 @@ func (h *ZapSlogHandler) WithGroup(name string) slog.Handler {
 		newPrefix = h.groupPrefix + newPrefix
 	}
 
-	// 创建新 Handler 并进入 Zap 的命名空间
-	newLogger := zap.L().With(zap.Namespace(name))
+	// 创建新 Handler 并应用分组前缀
 	return &ZapSlogHandler{
-		zapLogger:   newLogger,
+		zapLogger:   h.zapLogger,
 		level:       h.level,
 		groupPrefix: newPrefix,
+		addSource:   h.addSource,
 	}
 }
 
@@ -114,10 +114,11 @@ func createZapCore(name string) zapcore.Core {
 		LevelKey:       "level",
 		NameKey:        "logger",
 		CallerKey:      "caller",
-		MessageKey:     "msg",
+		MessageKey:     "message",
 		StacktraceKey:  "stacktrace",
 		EncodeTime:     zapcore.ISO8601TimeEncoder,
-		EncodeLevel:    zapcore.CapitalLevelEncoder,
+		EncodeLevel:    zapcore.LowercaseLevelEncoder,
+		EncodeCaller:   zapcore.ShortCallerEncoder,
 		EncodeDuration: zapcore.SecondsDurationEncoder,
 	}
 

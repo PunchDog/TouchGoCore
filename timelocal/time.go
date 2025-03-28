@@ -13,7 +13,8 @@ import (
 var timerChannel_ chan ITimer
 
 const (
-	MAX_TIMER_CHANNEL_NUM int64 = 100000
+	MAX_TIMER_CHANNEL_NUM     int64 = 100000
+	MAX_ADD_TIMER_CHANNEL_NUM int64 = 10000
 )
 
 const (
@@ -34,7 +35,7 @@ type ITimer interface {
 	//获取父类指针
 	GetParent() *Timer
 	//是否还有下一次
-	Next() bool
+	next() bool
 }
 
 // 计时器父类
@@ -66,7 +67,7 @@ func (this *Timer) Delete() {
 }
 
 // next
-func (this *Timer) Next() bool {
+func (this *Timer) next() bool {
 	//如果次数为-1，则一直执行,如果次数不为-1，则次数减1
 	if this.count != -1 {
 		this.count--
@@ -129,6 +130,8 @@ type TimerWheel struct {
 	tickWheel *util.List
 	//时间轮锁
 	wheelLocks *sync.Mutex
+	//用于添加的channel
+	addTimerChan chan ITimer
 }
 
 // 时间管理器
@@ -147,14 +150,15 @@ func (self *TimerManager) AddTimer(timer ITimer) {
 	if p == nil {
 		return
 	}
-	self.wheel[p.timeType].wheelLocks.Lock()
-	defer self.wheel[p.timeType].wheelLocks.Unlock()
 
 	p.uid = self.maxTimerUID
 	self.maxTimerUID++
 	p.mgr = self
-	//插入数据中
-	self.wheel[p.timeType].tickWheel.Add(timer.(util.INode))
+
+	//清理已经有的处定时器
+	timer.GetParent().Delete()
+	//添加新的定时器
+	self.wheel[p.timeType].addTimerChan <- timer
 }
 
 func (this *TimerManager) Close() {
@@ -182,9 +186,10 @@ func NewTimerManager() *TimerManager {
 	for _, v := range wheelConfig {
 		// 初始化时间轮
 		wheel := &TimerWheel{
-			wheelConfig: v,
-			tickWheel:   util.NewList(),
-			wheelLocks:  &sync.Mutex{},
+			wheelConfig:  v,
+			tickWheel:    util.NewList(),
+			wheelLocks:   &sync.Mutex{},
+			addTimerChan: make(chan ITimer, MAX_ADD_TIMER_CHANNEL_NUM),
 		}
 
 		mgr.wheel = append(mgr.wheel, wheel)
@@ -194,6 +199,10 @@ func NewTimerManager() *TimerManager {
 				select {
 				case <-mgr.closeTick:
 					return
+				case timer := <-wheel.addTimerChan:
+					wheel.wheelLocks.Lock()
+					wheel.tickWheel.Add(timer.(util.INode))
+					wheel.wheelLocks.Unlock()
 				case <-time.After(time.Duration(wheel.wheelConfig) * time.Millisecond):
 					wheel.wheelLocks.Lock()
 					// 遍历链表，查询时间到了的
@@ -239,7 +248,7 @@ func Tick() chan bool {
 	select {
 	case timer := <-timerChannel_:
 		timer.Tick()
-		if b := timer.Next(); b {
+		if b := timer.next(); b {
 			timer.GetParent().mgr.AddTimer(timer)
 		}
 	default:

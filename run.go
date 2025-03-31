@@ -198,7 +198,6 @@ func loop() (err error) {
 	case <-ChClose:
 		go closeServer()
 	case <-timelocal.Tick():
-	case <-lua.TimeTick():
 	case <-websocket.Handle():
 	case <-rpc.OnTick():
 	default:

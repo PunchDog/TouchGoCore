@@ -13,7 +13,6 @@ import (
 // lua指针
 var _defaultlua *LuaScript = nil
 var _luaList map[int64]*LuaScript = nil
-var _luaTimerTick chan func()
 var _LuaScriptUid int64 = 0
 var _LuaLock sync.Mutex
 
@@ -31,7 +30,7 @@ func (this *luaTimer) Tick() {
 	this.tick++
 	this.luaScript.defaultLuaData.Range(func(key, value interface{}) bool {
 		lua := value.(ILuaClassInterface)
-		_luaTimerTick <- lua.Update
+		lua.Update()
 		return true
 	})
 	//30分钟清理一次lua缓存
@@ -211,7 +210,6 @@ func Run() {
 	}
 
 	_defaultlua = NewLuaScript(config.Cfg_.Lua)
-	_luaTimerTick = make(chan func(), 100000)
 	vars.Info("启动lua服务成功")
 }
 
@@ -226,14 +224,4 @@ func Stop() {
 		}
 		_luaList = nil
 	}
-}
-
-// lua时间操作
-func TimeTick() chan bool {
-	select {
-	case fn := <-_luaTimerTick:
-		fn()
-	default:
-	}
-	return nil
 }

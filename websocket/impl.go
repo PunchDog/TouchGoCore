@@ -32,9 +32,6 @@ type Connection struct {
 var maxUid int64 = 0
 
 func InitConnection(port int, wsConn *websocket.Conn, remoteAddr string) (*Connection, error) {
-	redis_.Lock("close")
-	defer redis_.UnLock("close")
-
 	maxUid++
 	conn := &Connection{
 		enterPort:  port,
@@ -103,9 +100,6 @@ func (s *Connection) write(protocol1 int32, protocol2 int32, buffer []byte, buff
 }
 
 func (conn *Connection) Close(desc string) {
-	redis_.Lock("close")
-	defer redis_.UnLock("close")
-
 	if !conn.isClosed {
 		conn.isClosed = true
 		conn.closeRead <- true

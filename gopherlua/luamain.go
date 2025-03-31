@@ -70,6 +70,7 @@ func (this *LuaScript) Init() {
 
 func (this *LuaScript) Close() {
 	if this.l != nil {
+		this.luaTimer.Remove()
 		this.l.Close()
 		this.l = nil
 	}

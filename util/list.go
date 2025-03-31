@@ -12,7 +12,7 @@ type INode interface {
 	InsertAfter(data interface{}) INode
 	InsertBefore(data interface{}) INode
 	Remove()
-	getNode() *ListNode
+	GetNode() *ListNode
 }
 
 // 实现一个双向链表，支持增删改查
@@ -27,7 +27,7 @@ type ListNode struct {
 }
 
 // 获取节点
-func (this *ListNode) getNode() *ListNode {
+func (this *ListNode) GetNode() *ListNode {
 	return this
 }
 
@@ -46,7 +46,7 @@ func (this *ListNode) new() INode {
 		return nil
 	}
 	newNode := reflect.New(reflect.TypeOf(this.cls).Elem()).Interface().(INode)
-	newnode := newNode.getNode()
+	newnode := newNode.GetNode()
 	if newnode == nil {
 		return nil
 	}
@@ -62,7 +62,7 @@ func (this *ListNode) InsertAfter(data interface{}) (newNode INode) {
 		}
 	}()
 	newNode = this.new()
-	newnode := newNode.getNode()
+	newnode := newNode.GetNode()
 	newnode.id = this.list.getMaxId()
 	newnode.pre = this
 	newnode.next = this.next
@@ -72,7 +72,7 @@ func (this *ListNode) InsertAfter(data interface{}) (newNode INode) {
 	if this.next == nil {
 		this.list.tail = newNode
 	} else {
-		this.next.getNode().pre = newNode
+		this.next.GetNode().pre = newNode
 	}
 	this.next = newNode
 	this.list.len++
@@ -88,7 +88,7 @@ func (this *ListNode) InsertBefore(data interface{}) (newNode INode) {
 		}
 	}()
 	newNode = this.new()
-	newnode := newNode.getNode()
+	newnode := newNode.GetNode()
 	newnode.id = this.list.getMaxId()
 	newnode.pre = this.pre
 	newnode.next = this
@@ -98,7 +98,7 @@ func (this *ListNode) InsertBefore(data interface{}) (newNode INode) {
 	if this.pre == nil {
 		this.list.head = newNode
 	} else {
-		this.pre.getNode().next = newNode
+		this.pre.GetNode().next = newNode
 	}
 	this.pre = newNode
 	this.list.len++
@@ -121,12 +121,12 @@ func (this *ListNode) Remove() {
 	if this.pre == nil {
 		this.list.head = this.next
 	} else {
-		this.pre.getNode().next = this.next
+		this.pre.GetNode().next = this.next
 	}
 	if this.next == nil {
 		this.list.tail = this.pre
 	} else {
-		this.next.getNode().pre = this.pre
+		this.next.GetNode().pre = this.pre
 	}
 	this.list.len--
 	this.list = nil
@@ -180,7 +180,7 @@ func (this *List) AddNew(data interface{}, cls INode) INode {
 		newnode = reflect.New(reflect.TypeOf(cls).Elem()).Interface().(INode)
 	}
 
-	obj := newnode.getNode()
+	obj := newnode.GetNode()
 	if obj == nil {
 		return nil
 	}
@@ -207,9 +207,9 @@ func (this *List) Add(node INode) (bret bool) {
 		return
 	}
 	//删除老的链接
-	node.Remove()
+	node.GetNode().Remove()
 
-	obj := node.getNode()
+	obj := node.GetNode()
 	if obj == nil {
 		bret = false
 		return
@@ -229,8 +229,8 @@ func (this *List) Add(node INode) (bret bool) {
 		this.head = node
 		this.tail = node
 	} else {
-		this.tail.getNode().next = node
-		node.getNode().pre = this.tail
+		this.tail.GetNode().next = node
+		node.GetNode().pre = this.tail
 		this.tail = node
 	}
 	this.len++
@@ -266,7 +266,7 @@ func (this *List) Range(f func(INode) bool) {
 		if condition := f(node); !condition {
 			break
 		}
-		node = node.getNode().next
+		node = node.GetNode().next
 	}
 }
 

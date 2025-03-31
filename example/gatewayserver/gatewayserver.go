@@ -1,6 +1,8 @@
 package main
 
-import "touchgocore"
+import (
+	"touchgocore"
+)
 
 const (
 	Name = "GateWayServer"
@@ -8,7 +10,6 @@ const (
 
 // 初始化一些数据
 func init() {
-
 }
 
 func main() {

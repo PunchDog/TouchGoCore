@@ -1,13 +1,14 @@
 {
     "redis": {
-        "redis_host":"127.0.0.1:6379",
-        "redis_password":"",
-        "redis_db":0
+        "redis_host": "192.168.3.16:6379",
+        "redis_password": "",
+        "redis_db": 0
     },
-    "busid":"gateway",
-    "servertype":"exec",
-    "ip":"127.0.0.1",
-    "init_port":7000,
+    "busid": "gateway",
+    "servertype": "exec",
+    "ip": "127.0.0.1",
+    "init_port": 7000,
     "ws": ":1234",
-    "http": "off"
+    "http": "off",
+    "log_level": "debug"
 }

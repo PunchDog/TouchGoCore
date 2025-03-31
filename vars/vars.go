@@ -107,7 +107,7 @@ func NewZapSlogHandler(zapLogger *zap.Logger, level slog.Level) *ZapSlogHandler 
 	}
 }
 
-func createZapCore(name string) zapcore.Core {
+func createZapCore(path, logname string) zapcore.Core {
 	// 配置Encoder（JSON格式）
 	encoderCfg := zapcore.EncoderConfig{
 		TimeKey:        "time",
@@ -123,7 +123,9 @@ func createZapCore(name string) zapcore.Core {
 	}
 
 	// 输出到文件和控制台（双写）
-	file, _ := os.OpenFile(name, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	os.MkdirAll(path, os.ModePerm) //如果path目录不存在则创建
+	path += "/" + logname + ".log"
+	file, _ := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
 	multiWriter := zapcore.NewMultiWriteSyncer(zapcore.AddSync(os.Stdout), zapcore.AddSync(file))
 
 	return zapcore.NewCore(
@@ -134,8 +136,8 @@ func createZapCore(name string) zapcore.Core {
 }
 
 // 全局初始化
-func Run(name string, szlevel string) {
-	core := createZapCore(name)
+func Run(path, logname, szlevel string) {
+	core := createZapCore(path, logname)
 	zapLogger := zap.New(core, zap.AddCaller(), zap.AddCallerSkip(1))
 	var level slog.Level = slog.LevelDebug
 	level.UnmarshalText([]byte(szlevel))

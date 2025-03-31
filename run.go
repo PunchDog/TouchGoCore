@@ -54,7 +54,7 @@ func Run(serverName string) {
 	}
 
 	//创建日志文件
-	vars.Run(config.GetBasePath()+"/log/"+config.ServerName_+".log", config.Cfg_.LogLevel)
+	vars.Run(config.GetBasePath()+"/log/", config.ServerName_, config.Cfg_.LogLevel)
 
 	centerstr := fmt.Sprintf("*         Service:[%s] Version:[%s]         *", serverName, version)
 	l := len(centerstr)
@@ -73,17 +73,18 @@ func Run(serverName string) {
 	vars.Info("加载核心配置")
 
 	//检查redis
-	if config.Cfg_.Redis == nil {
+	if config.Cfg_.Redis != nil {
+		if _, err := db.NewRedis(config.Cfg_.Redis); err != nil {
+			vars.Error("加载配置出错,没有redis配置:" + err.Error())
+			<-time.After(time.Millisecond * 10)
+			panic("加载配置出错,没有redis配置:" + err.Error())
+		}
+		vars.Info("加载redis配置成功")
+	} else {
 		vars.Error("加载配置出错,没有redis配置")
 		<-time.After(time.Millisecond * 10)
 		panic("加载配置出错,没有redis配置")
 	}
-	if _, err := db.NewRedis(config.Cfg_.Redis); err != nil {
-		vars.Error("加载配置出错,没有redis配置:" + err.Error())
-		<-time.After(time.Millisecond * 10)
-		panic("加载配置出错,没有redis配置:" + err.Error())
-	}
-	vars.Info("加载redis配置成功")
 
 	//检查DB
 	if config.Cfg_.MySql != nil {
@@ -164,7 +165,7 @@ func Run(serverName string) {
 	for {
 		be := time.Now().UnixNano()
 		if err := loop(); err != nil {
-			vars.Error("", err)
+			vars.Error(err.Error())
 			break
 		}
 		af := time.Now().UnixNano()
@@ -176,10 +177,18 @@ func Run(serverName string) {
 	<-time.After(time.Second * 2)
 }
 
-func loop() (err interface{}) {
+func loop() (err error) {
 	defer func() {
-		if err = recover(); err != nil {
-			fmt.Println(err)
+		if r := recover(); err != nil {
+			// 类型断言转换
+			switch v := r.(type) {
+			case string:
+				err = errors.New(v) // 字符串转为 error
+			case error:
+				err = v // 直接使用 error 类型
+			default:
+				err = fmt.Errorf("unexpected panic: %v", v) // 其他类型包装为 error
+			}
 		}
 	}()
 	err = nil
@@ -198,9 +207,9 @@ func loop() (err interface{}) {
 }
 
 func closeServer() {
+	lua.Stop()       //关闭lua定时器
 	timelocal.Stop() //关闭定时器
 	websocket.Stop() //关闭websock
-	lua.Stop()       //关闭lua定时器
 	rpc.Stop()       //关闭通道
 
 	//退出时清理工作

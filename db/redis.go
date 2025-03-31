@@ -4,10 +4,8 @@ import (
 	"fmt"
 	"strconv"
 	"sync"
-	"time"
 
 	"touchgocore/config"
-	"touchgocore/util"
 
 	"github.com/go-redis/redis/v7"
 )
@@ -64,26 +62,6 @@ func (this *Redis) connectOnly(dataSourceName string) bool {
 		return true
 	}
 	return false
-}
-
-// redis锁
-func (this *Redis) Lock(lockkey string) {
-	for {
-		select {
-		case <-time.After(time.Nanosecond * 10):
-			//正常加锁
-			if success, _ := this.redisClient.SetNX("lock-"+lockkey, util.GetNowtimeMD5(), 10*time.Second).Result(); success {
-				return
-			} else if this.redisClient.TTL("lock-"+lockkey).Val() == -1 { //-2:失效；-1：无过期；
-				this.redisClient.Expire("lock-"+lockkey, 10*time.Second)
-			}
-		}
-	}
-}
-
-// redis解锁
-func (this *Redis) UnLock(lockkey string) {
-	this.redisClient.Del("lock-" + lockkey)
 }
 
 func (this *Redis) FlushAll() {

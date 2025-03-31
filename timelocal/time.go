@@ -56,14 +56,14 @@ type Timer struct {
 }
 
 // 从管理器中移除
-func (this *Timer) Delete() {
+func (this *Timer) Remove() {
 	p := this.GetParent()
 	if p == nil {
 		return
 	}
 	this.mgr.wheel[p.timeType].wheelLocks.Lock()
 	defer this.mgr.wheel[p.timeType].wheelLocks.Unlock()
-	this.Remove() //从管理器中移除
+	this.ListNode.Remove() //从管理器中移除
 }
 
 // next
@@ -156,7 +156,7 @@ func (self *TimerManager) AddTimer(timer ITimer) {
 	p.mgr = self
 
 	//清理已经有的处定时器
-	timer.GetParent().Delete()
+	timer.Remove()
 	//添加新的定时器
 	self.wheel[p.timeType].addTimerChan <- timer
 }
@@ -223,7 +223,7 @@ func NewTimerManager() *TimerManager {
 					wheel.tickWheel.Range(func(node util.INode) bool {
 						timer := node.(ITimer)
 						if timer.GetParent().nextTime <= time.Now().UTC().UnixMilli() {
-							node.Remove()
+							node.GetNode().Remove()
 							timerChannel_ <- timer
 						}
 						return true

@@ -257,12 +257,6 @@ func MD5(data string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-func GetNowtimeMD5() string {
-	t := time.Now()
-	timestamp := strconv.FormatInt(t.UTC().UnixNano(), 10)
-	return MD5(timestamp)
-}
-
 // 获取类名
 func GetClassName(p interface{}) (string, []string) {
 	//神奇的获取类名
@@ -442,26 +436,35 @@ func FormatStruct(obj interface{}) string {
 	return formatStruct(reflect.ValueOf(obj), 0)
 }
 
-type Int32List []int32
-
-func (s Int32List) Len() int {
-	return len(s)
-}
-func (s Int32List) Swap(i, j int) {
-	s[i], s[j] = s[j], s[i]
-}
-func (s Int32List) Less(i, j int) bool {
-	return s[i] < s[j]
+// 定义数值类型约束（包含所有整型和浮点型）
+type Numeric interface {
+	~int | ~int8 | ~int16 | ~int32 | ~int64 |
+		~uint | ~uint8 | ~uint16 | ~uint32 | ~uint64 |
+		~float32 | ~float64
 }
 
-type Int64List []int64
+// 数字类排序，从小到大
+type NumberSortLess[T Numeric] []T
 
-func (s Int64List) Len() int {
-	return len(s)
+func (this NumberSortLess[T]) Len() int {
+	return len(this)
 }
-func (s Int64List) Swap(i, j int) {
-	s[i], s[j] = s[j], s[i]
+func (this NumberSortLess[T]) Less(i, j int) bool {
+	return this[i] < this[j] // 直接比较数值
 }
-func (s Int64List) Less(i, j int) bool {
-	return s[i] < s[j]
+func (this NumberSortLess[T]) Swap(i, j int) {
+	this[i], this[j] = this[j], this[i]
+}
+
+// 数字类排序，从大到小
+type NumberSortDesc[T Numeric] []T
+
+func (this NumberSortDesc[T]) Len() int {
+	return len(this)
+}
+func (this NumberSortDesc[T]) Less(i, j int) bool {
+	return this[i] > this[j] // 直接比较数值
+}
+func (this NumberSortDesc[T]) Swap(i, j int) {
+	this[i], this[j] = this[j], this[i]
 }

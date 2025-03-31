@@ -16,3 +16,5 @@
 vendor
 pkg/
 bin/
+example/log/*.log
+example/*/*_debug_*

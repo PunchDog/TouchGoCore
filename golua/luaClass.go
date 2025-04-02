@@ -11,18 +11,13 @@ import (
 
 // 注册类接口
 type ILuaClassInterface interface {
-	AddField(id int64) interface{}
+	Init(id int64, luascript *LuaScript)
 	Delete()
 	Update()
 }
 
 // 注册类接口基类
 type ILuaClassObject struct {
-}
-
-// 创建一个NPC容器，放入到NPC数据里
-func (this *ILuaClassObject) AddField(id int64) interface{} {
-	return nil
 }
 
 func (this *ILuaClassObject) Delete() {
@@ -135,7 +130,9 @@ func newLuaClass(class ILuaClassInterface, script *LuaScript) {
 	sname, mnamelist := util.GetClassName(class)
 	//创建类函数
 	createclass := func(l *lua.State) int {
-		script.defaultLuaData.Store(script.defaultLuaDataUid, class.AddField(script.defaultLuaDataUid))
+		cls := reflect.New(reflect.TypeOf(class).Elem()).Interface().(ILuaClassInterface)
+		cls.Init(script.defaultLuaDataUid, script)
+		script.defaultLuaData.Store(script.defaultLuaDataUid, cls)
 		meta := &metaUserData{
 			uid:    script.defaultLuaDataUid,
 			script: script,

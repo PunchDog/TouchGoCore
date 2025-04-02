@@ -13,7 +13,7 @@ import (
 	"touchgocore/beegoweb"
 	"touchgocore/config"
 	"touchgocore/db"
-	lua "touchgocore/gopherlua"
+	lua "touchgocore/golua"
 	"touchgocore/ini"
 	"touchgocore/mapmanager"
 	"touchgocore/util"

@@ -1,8 +1,7 @@
 package mapmanager
 
 import (
-	lua "touchgocore/gopherlua"
-
+	lua "touchgocore/golua"
 	"touchgocore/syncmap"
 )
 
@@ -29,13 +28,8 @@ type Npc struct {
 }
 
 // 创建一个NPC容器，放入到NPC数据里
-func (this *Npc) AddField(id int64, lua *lua.LuaScript) interface{} {
-	npc := &Npc{
-		Id: int(id),
-	}
-
-	npc.SetLuaScript(lua)
-	return npc
+func (this *Npc) Init(id int64, lua *lua.LuaScript) {
+	// npc.SetLuaScript(lua)
 }
 func (this *Npc) SetMapId(mapId int32) {
 	this.MapId = mapId

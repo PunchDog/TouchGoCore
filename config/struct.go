@@ -38,3 +38,12 @@ type BeegoWebConfig struct {
 	ViewsPath string `json:"view"`     //网页
 	Static    string `json:"static"`   //文件服
 }
+
+type WebsocketConfig struct {
+	//监听配置,多个端口用|分割
+	Port string `json:"port"`
+	//外网地址
+	URL string `json:"url"`
+	//内网地址
+	InURL string `json:"inurl"`
+}

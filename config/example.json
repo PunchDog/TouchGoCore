@@ -42,7 +42,12 @@
     "这里是基础配置": "",
     "rpc_port说明": "rpc_port是监听端口,如果不填,则不开rpc服务;rpc_port只是一个初始端口,正式端口会循环查找,直到一个可以用的",
     "rpc_port": 7000,
-    "ws": "作为服务器监听配置,多个端口用|分割",
+    "ws": {
+        "说明:": "这里是websocket配置,作为服务器监听配置,多个端口用|分割",
+        "port": "8000|8001|8002",
+        "url": "ws",
+        "inurl": "inws"
+    },
     "lua": "off",
     "loglevel": "日志等级，off为不开,其次为INFO,DEBUG,WARN,ERROR",
     "map_path": "off"

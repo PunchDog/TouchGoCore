@@ -28,7 +28,7 @@ func RegisterCall(call1 ICall) {
 }
 
 func Run() {
-	if config.Cfg_.Ws == "off" {
+	if config.Cfg_.Ws == nil || call == nil {
 		return
 	}
 	closeCh = make(chan bool)
@@ -36,7 +36,7 @@ func Run() {
 	clientpool = util.NewPoolMgr()
 
 	//启动监听
-	list := strings.Split(config.Cfg_.Ws, "|")
+	list := strings.Split(config.Cfg_.Ws.Port, "|")
 	for _, szp := range list {
 		port, _ := strconv.Atoi(szp)
 		if port == 0 {

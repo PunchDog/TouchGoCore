@@ -100,5 +100,6 @@ func ListenAndServe(port int) error {
 		err <- server.ListenAndServe()
 	}()
 	serverList = append(serverList, server)
+	//将服务器名字注册到redis中
 	return <-err
 }

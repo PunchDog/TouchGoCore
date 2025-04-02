@@ -1,6 +1,7 @@
 package lua
 
 import (
+	"fmt"
 	"reflect"
 	"touchgocore/util"
 	"touchgocore/vars"
@@ -68,32 +69,18 @@ func (this *metaOperate) callBack(L *lua.State) int {
 				arg := method.Type().In(z)
 				val := L.ToNumber(i)
 				switch arg.Kind() {
-				case reflect.Int:
-					args = append(args, reflect.ValueOf(int(val)))
-				case reflect.Int8:
-					args = append(args, reflect.ValueOf(int8(val)))
-				case reflect.Int16:
-					args = append(args, reflect.ValueOf(int16(val)))
-				case reflect.Int32:
-					args = append(args, reflect.ValueOf(int32(val)))
-				case reflect.Uint:
-					args = append(args, reflect.ValueOf(uint(val)))
-				case reflect.Uint8:
-					args = append(args, reflect.ValueOf(uint8(val)))
-				case reflect.Uint16:
-					args = append(args, reflect.ValueOf(uint16(val)))
-				case reflect.Uint32:
-					args = append(args, reflect.ValueOf(uint32(val)))
-				case reflect.Int64:
-					args = append(args, reflect.ValueOf(int64(val)))
-				case reflect.Uint64:
-					args = append(args, reflect.ValueOf(uint64(val)))
-				case reflect.Float32:
-					args = append(args, reflect.ValueOf(float32(val)))
-				case reflect.Float64:
-					args = append(args, reflect.ValueOf(float64(val)))
+				case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+					args = append(args, reflect.ValueOf(util.ConvertToKind(val, arg.Kind())))
+				case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+					args = append(args, reflect.ValueOf(util.ConvertToKind(val, arg.Kind())))
+				case reflect.Float32, reflect.Float64:
+					args = append(args, reflect.ValueOf(util.ConvertToKind(val, arg.Kind())))
 				case reflect.Interface:
-					args = append(args, reflect.ValueOf(float64(val)))
+					args = append(args, reflect.ValueOf(val))
+				default:
+					vars.Error(fmt.Sprintf("LUA回调%s接收到不支持的参数类型:%s",
+						this.methodname, arg.Kind().String()))
+					return 0
 				}
 			} else {
 				args = append(args, reflect.ValueOf(pop(L, i)))
@@ -105,18 +92,16 @@ func (this *metaOperate) callBack(L *lua.State) int {
 		}
 	}
 
-	//调用原始函数
+	// 调用原始函数
 	resultValues := method.Call(args)
 
-	//填写返回值
+	// 处理返回值
 	rescnt := len(resultValues)
-	if rescnt > 0 {
-		//调用函数后返回参数
-		for _, iresData := range resultValues {
-			if !push(L, iresData.Interface()) {
-				vars.Error("处理lua返回数据出错")
-				return 0
-			}
+	for _, result := range resultValues {
+		if !push(L, result.Interface()) {
+			vars.Error(fmt.Sprintf("LUA回调函数%s返回类型处理失败,类型:%T 值：%v",
+				this.methodname, result.Interface(), result.Interface()))
+			return 0
 		}
 	}
 	return rescnt
@@ -162,13 +147,18 @@ func newLuaClass(class ILuaClassInterface, script *LuaScript) {
 
 	script.l.NewMetaTable(sname)
 
-	script.l.PushString("__gc")
-	script.l.PushGoFunction(destoryclass)
-	script.l.SetTable(-3)
+	// 注册元方法
+	registerMetaMethod := func(methodName string, fn func(*lua.State) int) {
+		script.l.PushString(methodName)
+		script.l.PushGoFunction(fn)
+		script.l.SetTable(-3)
+	}
 
-	script.l.PushString("__index")
-	script.l.PushValue(-2)
-	script.l.SetTable(-3)
+	registerMetaMethod("__gc", destoryclass)
+	registerMetaMethod("__index", func(L *lua.State) int {
+		L.PushValue(-2)
+		return 1
+	})
 
 	//循环注册函数
 	for _, mname := range mnamelist {

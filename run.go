@@ -16,8 +16,6 @@ import (
 	lua "touchgocore/gopherlua"
 	"touchgocore/ini"
 	"touchgocore/mapmanager"
-	"touchgocore/rpc"
-	"touchgocore/timelocal"
 	"touchgocore/util"
 	"touchgocore/vars"
 	"touchgocore/websocket"
@@ -25,10 +23,6 @@ import (
 
 var chExit chan bool
 var ChClose chan bool
-
-var DEBUG bool
-var fps int
-var version string
 
 func init() {
 	chExit = make(chan bool)
@@ -48,15 +42,15 @@ func Run(serverName string) {
 
 	//读取INI
 	if p, err := ini.Load(config.GetDefaultFie()); err == nil {
-		DEBUG = p.GetString("GLOBAL", "debug", "false") == "true"
-		fps, _ = strconv.Atoi(p.GetString("GLOBAL", "fps", "120"))
-		version = p.GetString(serverName, "Version", "1.0")
+		util.DEBUG = p.GetString("GLOBAL", "debug", "false") == "true"
+		util.Fps, _ = strconv.Atoi(p.GetString("GLOBAL", "fps", "120"))
+		util.Version = p.GetString(serverName, "Version", "1.0")
 	}
 
 	//创建日志文件
 	vars.Run(config.GetBasePath()+"/log/", config.ServerName_, config.Cfg_.LogLevel)
 
-	centerstr := fmt.Sprintf("*         Service:[%s] Version:[%s]         *", serverName, version)
+	centerstr := fmt.Sprintf("*         Service:[%s] Version:[%s]         *", serverName, util.Version)
 	l := len(centerstr)
 	var showsr string
 	for i := 0; i < l; i++ {
@@ -110,10 +104,7 @@ func Run(serverName string) {
 	}
 
 	//启动timer定时器
-	timelocal.Run()
-
-	//启动rpc相关
-	rpc.Run()
+	util.TimeRun()
 
 	//启动ws
 	websocket.Run()
@@ -161,7 +152,7 @@ func Run(serverName string) {
 	go signalProcHandler()
 
 	//主循环
-	aftertime := int64(time.Second) / int64(fps) //按照帧率停顿时间
+	aftertime := int64(time.Second) / int64(util.Fps) //按照帧率停顿时间
 	for {
 		be := time.Now().UnixNano()
 		if err := loop(); err != nil {
@@ -171,7 +162,7 @@ func Run(serverName string) {
 		af := time.Now().UnixNano()
 		condition := af - be
 		if condition < aftertime {
-			<-time.After(time.Duration(aftertime - condition))
+			// <-time.After(time.Duration(aftertime - condition))
 		}
 	}
 	<-time.After(time.Second * 2)
@@ -197,9 +188,8 @@ func loop() (err error) {
 		err = errors.New("退出服务器")
 	case <-ChClose:
 		go closeServer()
-	case <-timelocal.Tick():
-	case <-websocket.Handle():
-	case <-rpc.OnTick():
+	case <-util.TimeTick(): //定时器处理
+	case <-websocket.Tick(): //websocket处理
 	default:
 	}
 	return
@@ -207,9 +197,8 @@ func loop() (err error) {
 
 func closeServer() {
 	lua.Stop()       //关闭lua定时器
-	timelocal.Stop() //关闭定时器
+	util.TimeStop()  //关闭定时器
 	websocket.Stop() //关闭websock
-	rpc.Stop()       //关闭通道
 
 	//退出时清理工作
 	util.DefaultCallFunc.Do(util.CallStop)

@@ -2,6 +2,8 @@ package util
 
 import (
 	"reflect"
+	"sync"
+	"time"
 	"touchgocore/vars"
 )
 
@@ -143,7 +145,6 @@ type List struct {
 	head         INode   //头节点
 	tail         INode   //尾节点
 	len          int     //长度
-	maxId        int64   //最大id
 	rangeDelList []INode //删除列表
 	dellock      bool    //删除锁
 }
@@ -151,18 +152,26 @@ type List struct {
 // 创建一个链表
 func NewList() *List {
 	return &List{
-		head:  nil,
-		tail:  nil,
-		len:   0,
-		maxId: 1,
+		head: nil,
+		tail: nil,
+		len:  0,
 	}
 }
 
+var maxId int64 = 0
+var mux sync.Mutex
+
 // 获取一个ID，并且maxId++
 func (this *List) getMaxId() int64 {
-	id := this.maxId
-	this.maxId++
-	return id
+	mux.Lock()
+	defer mux.Unlock()
+
+	if maxId == 0 || maxId > time.Now().UnixNano()+1 {
+		maxId = time.Now().UnixNano() + 1
+	} else {
+		maxId++
+	}
+	return maxId
 }
 
 // 长度
@@ -236,6 +245,16 @@ func (this *List) Add(node INode) (bret bool) {
 	this.len++
 	bret = true
 	return
+}
+
+// 获取头节点
+func (this *List) Head() INode {
+	return this.head
+}
+
+// 获取尾节点
+func (this *List) Tail() INode {
+	return this.tail
 }
 
 // 获取一个节点

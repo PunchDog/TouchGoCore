@@ -1,7 +1,7 @@
 github.com/BurntSushi/toml v0.3.1/go.mod h1:xHWCNGjB5oqiDr8zfno3MHue2Ht5sIBksp03qcyfWMU=
 github.com/Knetic/govaluate v3.0.0+incompatible/go.mod h1:r7JcOSlj0wfOMncg0iLm8Leh48TZaKVeNIfJntJ2wa0=
-github.com/aarzilli/golua v0.0.0-20210507130708-11106aa57765 h1:N6gB4UCRBZz8twlJbMFiCKj0zX5Et2nFU/LRafT4x80=
-github.com/aarzilli/golua v0.0.0-20210507130708-11106aa57765/go.mod h1:hMjfaJVSqVnxenMlsxrq3Ni+vrm9Hs64tU4M7dhUoO4=
+github.com/aarzilli/golua v0.0.0-20250217091409-248753f411c4 h1:gW5i3FQAMcbkNgo/A87gCKAbBMalAO8BlPIMo9Gk2Ow=
+github.com/aarzilli/golua v0.0.0-20250217091409-248753f411c4/go.mod h1:hMjfaJVSqVnxenMlsxrq3Ni+vrm9Hs64tU4M7dhUoO4=
 github.com/alecthomas/template v0.0.0-20160405071501-a0175ee3bccc/go.mod h1:LOuyumcjzFXgccqObfd/Ljyb9UuFJ6TxHnclSeseNhc=
 github.com/alecthomas/template v0.0.0-20190718012654-fb15b899a751/go.mod h1:LOuyumcjzFXgccqObfd/Ljyb9UuFJ6TxHnclSeseNhc=
 github.com/alecthomas/units v0.0.0-20151022065526-2efee857e7cf/go.mod h1:ybxpYRFXyAe+OPACYpWeL0wqObRcbAqCMya13uyzqw0=

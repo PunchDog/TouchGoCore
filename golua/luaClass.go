@@ -9,18 +9,18 @@ import (
 	"github.com/aarzilli/golua/lua"
 )
 
-//注册类接口
+// 注册类接口
 type ILuaClassInterface interface {
 	AddField(id int64) interface{}
 	Delete()
 	Update()
 }
 
-//注册类接口基类
+// 注册类接口基类
 type ILuaClassObject struct {
 }
 
-//创建一个NPC容器，放入到NPC数据里
+// 创建一个NPC容器，放入到NPC数据里
 func (this *ILuaClassObject) AddField(id int64) interface{} {
 	return nil
 }
@@ -31,21 +31,21 @@ func (this *ILuaClassObject) Delete() {
 func (this *ILuaClassObject) Update() {
 }
 
-//////////////////////////////////////////////////////////////////////////////////////////////////////
-//////////////////////////////////////////////////////////////////////////////////////////////////////
-//////////////////////////////////////////////////////////////////////////////////////////////////////
-//注册时存放查询数据的
+// ////////////////////////////////////////////////////////////////////////////////////////////////////
+// ////////////////////////////////////////////////////////////////////////////////////////////////////
+// ////////////////////////////////////////////////////////////////////////////////////////////////////
+// 注册时存放查询数据的
 type metaUserData struct {
 	uid    int64
 	script *LuaScript
 }
 
-//创建回调函数
+// 创建回调函数
 type metaOperate struct {
 	methodname string
 }
 
-//函数默认interface{}类型的number识别为int64,返回值是table的话，目前只支持*syncmap.Map,并且key目前只能是string
+// 函数默认interface{}类型的number识别为int64,返回值是table的话，目前只支持*syncmap.Map,并且key目前只能是string
 func (this *metaOperate) callBack(L *lua.State) int {
 	//数据函数
 	var pData (**metaUserData) = (**metaUserData)(L.ToUserdata(1))
@@ -127,7 +127,7 @@ func (this *metaOperate) callBack(L *lua.State) int {
 	return rescnt
 }
 
-//创建一个类注册
+// 创建一个类注册
 func newLuaClass(class ILuaClassInterface, script *LuaScript) {
 	script.defaultLuaDataUid++
 	//创建函数类(暂时不支持interface{}类型参数和动态参数)

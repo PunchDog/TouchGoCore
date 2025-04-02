@@ -4,7 +4,7 @@ import (
 	"sync"
 	"touchgocore/config"
 	"touchgocore/syncmap"
-	"touchgocore/timelocal"
+	"touchgocore/util"
 	"touchgocore/vars"
 
 	lua "github.com/yuin/gopher-lua"
@@ -21,7 +21,7 @@ var _exports map[string]func(L *lua.LState) int
 var _exportsClass map[ILuaClassInterface]bool
 
 type luaTimer struct {
-	timelocal.Timer
+	util.Timer
 	tick      int64
 	luaScript *LuaScript
 }
@@ -155,10 +155,10 @@ func NewLuaScript(initluapath string) *LuaScript {
 	}
 
 	//创建定时器
-	p.luaTimer = timelocal.NewTimer(1000, -1, &luaTimer{}).(*luaTimer)
+	p.luaTimer = util.NewTimer(1000, -1, &luaTimer{}).(*luaTimer)
 	p.luaTimer.luaScript = p
 	p.luaTimer.tick = 0
-	timelocal.AddTimer(p.luaTimer)
+	util.AddTimer(p.luaTimer)
 
 	//加入管理列表
 	_LuaScriptUid++

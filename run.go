@@ -118,6 +118,8 @@ func Run(serverName string) {
 	//启动beego
 	beegoweb.Run()
 
+	// 启动gRPC服务
+
 	//核心加载完了后自己想执行的东西
 	util.DefaultCallFunc.Do(util.CallStart)
 

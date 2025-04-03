@@ -146,8 +146,8 @@ func (c *Client) SendMsg(msg ...any) {
 					Head: &network_message.Head{
 						Protocol1: proto.Int32(msg[0].(int32)),
 						Protocol2: proto.Int32(msg[1].(int32)),
+						Cmd:       proto.String(string(fnname)),
 					},
-					Cmd:  proto.String(string(fnname)),
 					Body: data,
 				}
 				data, err = proto.Marshal(pb)

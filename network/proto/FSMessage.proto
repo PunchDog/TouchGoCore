@@ -2,12 +2,12 @@ package network.message;
 option go_package = "touchgocore/network/message"; // 替换为实际的路径
 
 message Head {
-	required int32 protocol1 = 1;
+	optional int32 protocol1 = 1;
 	optional int32 protocol2 = 2;
+	optional string cmd = 3;
 }
 
 message FSMessage {
 	required Head head = 1;
-	required string cmd = 2;
-	required bytes body = 3;
+	required bytes body = 2;
 }

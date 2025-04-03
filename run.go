@@ -16,6 +16,7 @@ import (
 	lua "touchgocore/golua"
 	"touchgocore/ini"
 	"touchgocore/mapmanager"
+	"touchgocore/rpc"
 	"touchgocore/util"
 	"touchgocore/vars"
 	"touchgocore/websocket"
@@ -119,6 +120,7 @@ func Run(serverName string) {
 	beegoweb.Run()
 
 	// 启动gRPC服务
+	rpc.StartGrpcServer()
 
 	//核心加载完了后自己想执行的东西
 	util.DefaultCallFunc.Do(util.CallStart)

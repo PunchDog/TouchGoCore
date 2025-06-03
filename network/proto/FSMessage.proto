@@ -1,6 +1,8 @@
 package network.message;
 option go_package = "touchgocore/network/message"; // 替换为实际的路径
 
+import "message.proto"; // 导入生成的 .proto 文件
+
 message Head {
 	required int32 protocol1 = 1;
 	optional int32 protocol2 = 2;

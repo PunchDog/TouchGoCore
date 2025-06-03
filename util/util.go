@@ -468,3 +468,30 @@ func (this NumberSortDesc[T]) Less(i, j int) bool {
 func (this NumberSortDesc[T]) Swap(i, j int) {
 	this[i], this[j] = this[j], this[i]
 }
+
+func getNumber[T any](v string) T {
+	var d T
+	switch any(d).(type) {
+	case uint8, uint16, uint32, uint64, int, int8, int16, int32, int64:
+		num, _ := strconv.ParseInt(v, 10, 64)
+		val := reflect.ValueOf(num).Convert(reflect.ValueOf(d).Type())
+		reflect.ValueOf(&d).Elem().Set(val)
+	case float32, float64:
+		num, _ := strconv.ParseFloat(v, 10)
+		val := reflect.ValueOf(num).Convert(reflect.ValueOf(d).Type())
+		reflect.ValueOf(&d).Elem().Set(val)
+	}
+	return d
+}
+
+// 字符串转数字数组
+func String2NumberArray[T any](str string, sep string) []T {
+	strs := strings.Split(str, ",")
+	ret := make([]T, 0)
+	if len(strs) > 0 {
+		for _, str := range strs {
+			ret = append(ret, getNumber[T](str))
+		}
+	}
+	return ret
+}

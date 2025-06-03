@@ -22,7 +22,7 @@ type Cfg struct {
 	LogLevel string           `json:"log_level"`  //日志等级，off为不开,其次为INFO,DEBUG,WARN,ERROR
 	MapPath  string           `json:"map_path"`   //地图配置位置
 	BeegoWeb *BeegoWebConfig  `json:"beegoweb"`   //beegoweb配置
-	RpcPort  int              `json:"rpc_port"`   //rpc_port端口，没有则表示不开rpc服务
+	RpcPort  *RpcConfig       `json:"rpc_port"`   //rpc_port端口，没有则表示不开rpc服务
 	Other    interface{}      `json:"other_data"` //其他配置,需要自行传入想要的数据模型
 }
 
@@ -33,7 +33,7 @@ func init() {
 		LogLevel: "info",
 		MapPath:  "off",
 		Ip:       "",
-		RpcPort:  0,
+		RpcPort:  nil,
 		Other:    nil,
 	}
 

@@ -1,0 +1,5 @@
+package network.message;
+option go_package = "touchgocore/network/message"; // 替换为实际的路径
+
+enum Cmd {
+}

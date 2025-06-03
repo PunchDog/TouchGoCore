@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"runtime"
 	"time"
-	network_message "touchgocore/network/message"
 	"touchgocore/syncmap"
 	"touchgocore/util"
 	"touchgocore/vars"
@@ -134,23 +133,8 @@ func (c *Client) SendMsg(msg ...any) {
 		} else if l == 3 {
 			//使用的是protobuf,传入数据cmd1,cmd2,protomessage
 			if v, ok := msg[2].(proto.Message); ok {
-				//通过proto的函数获取v的函数名
-				fnname := proto.MessageName(v)
-				//使用proto的函数打包数据
-				data, err := proto.Marshal(v)
-				if err != nil {
-					vars.Error("打包数据失败:", err)
-					return
-				}
-				pb := &network_message.FSMessage{
-					Head: &network_message.Head{
-						Protocol1: proto.Int32(msg[0].(int32)),
-						Protocol2: proto.Int32(msg[1].(int32)),
-					},
-					Cmd:  proto.String(string(fnname)),
-					Body: data,
-				}
-				data, err = proto.Marshal(pb)
+				pb := util.NewFSMessage(msg[0].(int32), msg[1].(int32), v)
+				data, err := proto.Marshal(pb)
 				if err != nil {
 					vars.Error("打包数据失败:", err)
 					return

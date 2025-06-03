@@ -5,11 +5,8 @@ import (
 	"strconv"
 	"strings"
 	"touchgocore/config"
-	"touchgocore/network/message"
 	"touchgocore/util"
 	"touchgocore/vars"
-
-	"google.golang.org/protobuf/proto"
 )
 
 var (
@@ -75,9 +72,10 @@ func Tick() chan bool {
 	case read_msg := <-msgQueue:
 		// 	处理消息队列
 		if c, h := clientmap.Load(read_msg.uid); h {
-			pb := &message.FSMessage{}
-			proto.Unmarshal(read_msg.data, pb)
-			call.OnMessage(c.(*Client), pb)
+			msg1 := util.PasreFSMessage(read_msg.data)
+			if msg1 != nil {
+				call.OnMessage(c.(*Client), msg1)
+			}
 		}
 	}
 	return nil

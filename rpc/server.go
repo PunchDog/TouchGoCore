@@ -57,7 +57,12 @@ func StartGrpcServer(port int) {
 		return
 	}
 
-	s := grpc.NewServer()
+	opt := []grpc.ServerOption{
+		grpc.MaxRecvMsgSize(1024 * 1024 * 10),
+		grpc.MaxSendMsgSize(1024 * 1024 * 10),
+	}
+
+	s := grpc.NewServer(opt...)
 	message.RegisterGrpcServer(s, &RpcServer{})
 
 	vars.Info("gRPC服务启动成功,端口:%d", port)

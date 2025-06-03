@@ -71,7 +71,12 @@ func NewRpcClient(servername, addr string) *RpcClient {
 		rpcClient_ = make(map[string]*RpcClient)
 	}
 
-	conn, err := grpc.NewClient(addr)
+	opt := []grpc.DialOption{
+		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(1024 * 1024 * 10)),
+		grpc.WithDefaultCallOptions(grpc.MaxCallSendMsgSize(1024 * 1024 * 10)),
+	}
+
+	conn, err := grpc.NewClient(addr, opt...)
 	if err != nil {
 		return nil
 	}

@@ -38,6 +38,40 @@ type ITimer interface {
 	GetParent() *Timer
 	//是否还有下一次
 	next() bool
+	//添加自己的指针
+	addMe(ITimer)
+	remove(cleanPool bool)
+}
+
+// timer内存池
+type TimerPool struct {
+	//内存池
+	pool map[reflect.Type]*sync.Pool
+}
+
+func (self *TimerPool) Get(cls ITimer) ITimer {
+	tp := reflect.TypeOf(cls).Elem()
+	if _, ok := self.pool[tp]; !ok {
+		pool := &sync.Pool{
+			New: func() interface{} {
+				return reflect.New(tp).Interface().(ITimer)
+			},
+		}
+		self.pool[tp] = pool
+	}
+	return self.pool[tp].Get().(ITimer)
+}
+
+func (self *TimerPool) Put(cls ITimer) {
+	tp := reflect.TypeOf(cls).Elem()
+	if _, ok := self.pool[tp]; !ok {
+		return
+	}
+	self.pool[tp].Put(cls)
+}
+
+var _timerPool = &TimerPool{
+	pool: make(map[reflect.Type]*sync.Pool),
 }
 
 // 计时器父类
@@ -55,10 +89,16 @@ type Timer struct {
 	mgr *TimerManager
 	//管理器时间指针
 	wheel *TimerWheel
+	//本体
+	self ITimer
+}
+
+func (this *Timer) addMe(t ITimer) {
+	this.self = t
 }
 
 // 从管理器中移除
-func (this *Timer) Remove() {
+func (this *Timer) remove(cleanPool bool) {
 	p := this.GetParent()
 	if p == nil {
 		return
@@ -68,6 +108,14 @@ func (this *Timer) Remove() {
 		defer this.wheel.wheelLocks.Unlock()
 	}
 	this.ListNode.Remove() //从管理器中移除
+
+	if cleanPool {
+		_timerPool.Put(this.self)
+	}
+}
+
+func (this *Timer) Remove() {
+	this.remove(true)
 }
 
 // next
@@ -130,7 +178,7 @@ func NewTimer(interval int64, count int64, cls ITimer) ITimer {
 		return nil
 	}
 
-	timer := reflect.New(reflect.TypeOf(cls).Elem()).Interface().(ITimer)
+	timer := _timerPool.Get(cls)
 
 	//使用反射创建一个计时器
 	obj := timer.GetParent()
@@ -182,7 +230,7 @@ func (self *TimerManager) AddTimer(timer ITimer) {
 	p.mgr = self
 
 	//清理已经有的处定时器
-	timer.Remove()
+	timer.remove(false)
 	//添加新的定时器
 	self.wheel[p.Type()].addTimerChan <- timer
 }
@@ -305,60 +353,38 @@ func TimeTick() chan bool {
 }
 
 // 时间类型///////////////////////////////////////////////////////////////////////////////////
-// 返回某个时间的时间戳
-func MS(t time.Time) int64 {
-	return int64(t.UnixNano() / NANO_TO_MS)
-}
-
 // 返回unix时间戳。
 func CurrentMS() int64 {
-	return int64(time.Now().UnixNano() / NANO_TO_MS)
+	return time.Now().UnixMilli()
 }
 
 // 返回unix时间戳。
 func CurrentS() int64 {
-	return int64(time.Now().UnixNano() / NANO_TO_MS / MILLISECONDS_OF_SECOND)
-}
-
-// 毫秒转时间
-func Ms2Time(ms int64) time.Time {
-	sec := ms / MILLISECONDS_OF_SECOND
-	nsec := (ms % MILLISECONDS_OF_SECOND) * NANO_TO_MS
-	return time.Unix(sec, nsec).UTC()
-}
-
-// 秒转时间
-func S2Time(sec int64) time.Time {
-	return time.Unix(sec, 0).UTC()
+	return time.Now().Unix()
 }
 
 // 毫秒转时间字符串
 func Ms2StrTime(ms int64) string {
-	msTime := Ms2Time(ms)
+	msTime := time.UnixMilli(ms)
 	return msTime.Format("2006-01-02 15:04:05")
 }
 
 // 秒转时间字符串
 func S2StrTime(sec int64) string {
-	msTime := S2Time(sec)
+	msTime := time.Unix(sec, 0)
 	return msTime.Format("2006-01-02 15:04:05")
 }
 
 // 这个时间对应的0点
 func Time2Midnight(t time.Time) time.Time {
 	year, month, day := t.Date()
-	return time.Date(year, month, day, 0, 0, 0, 0, time.UTC)
+	return time.Date(year, month, day, 0, 0, 0, 0, time.Local)
 }
 
 // 从一个毫秒时间戳获得当前时区的本日凌晨时间。
 func Ms2Midnight(t int64) time.Time {
 	midTime := Time2Midnight(time.Unix(t/1000, t%1000))
 	return midTime
-}
-
-// 今天0点时间戳
-func CurMidnight() int64 {
-	return MS(Time2Midnight(time.Now()))
 }
 
 // 字符串时间转换时间戳 date format: "2006-01-02 13:04:00"
@@ -375,24 +401,23 @@ func S2UnixTime(value string) int64 {
 	hour, _ := strconv.Atoi(slices[4])
 	min, _ := strconv.Atoi(slices[5])
 	sec, _ := strconv.Atoi(slices[6])
-	loc, _ := time.LoadLocation("UTC") // use UTC instend of Local
-	t := time.Date(year, time.Month(month), day, hour, min, sec, 0, loc)
-	return int64(t.UnixNano() / NANO_TO_MS)
+	t := time.Date(year, time.Month(month), day, hour, min, sec, 0, time.Local)
+	return t.UnixMilli()
 }
 
 // 下一个0点
 func NextMidnight(t int64) int64 {
-	midTime := Time2Midnight(time.Unix(t/1000, t%1000))
-	return midTime.UnixNano()/NANO_TO_MS + MILLISECONDS_OF_DAY
+	midTime := Time2Midnight(time.UnixMilli(t))
+	return midTime.UnixMilli() + MILLISECONDS_OF_DAY
 }
 
 // 从一个毫秒时间戳获取下一个准点时间。
 func NextHour(t int64) int64 {
-	t1 := time.Unix(t/1000, t%1000)
+	t1 := time.UnixMilli(t)
 	year, month, day := t1.Date()
 	hour, _, _ := t1.Clock()
 	t2 := time.Date(year, month, day, hour+1, 0, 0, 0, t1.Location())
-	return t2.UnixNano() / 1e6
+	return t2.UnixMilli()
 }
 
 // 同一个星期
@@ -400,8 +425,8 @@ func InSameWeek(t1, t2 int64) bool {
 	if t1 == 0 || t2 == 0 {
 		return false
 	}
-	y1, w1 := time.Unix(t1, 0).ISOWeek()
-	y2, w2 := time.Unix(t2, 0).ISOWeek()
+	y1, w1 := time.UnixMilli(t1).ISOWeek()
+	y2, w2 := time.UnixMilli(t2).ISOWeek()
 	return y1 == y2 && w1 == w2
 }
 
@@ -410,14 +435,16 @@ func InSameMonth(t1, t2 int64) bool {
 	if t1 == 0 || t2 == 0 {
 		return false
 	}
-	y1, m1, _ := time.Unix(t1, 0).Date()
-	y2, m2, _ := time.Unix(t2, 0).Date()
+	y1, m1, _ := time.UnixMilli(t1).Date()
+	y2, m2, _ := time.UnixMilli(t2).Date()
 	return y1 == y2 && m1 == m2
 }
 
 // 是否在同一天
-func GetDiffDay(day1 int64, day2 int64) int {
-	return int((day2 - day1) / 86400)
+func GetDiffDay(day1 int64, day2 int64) bool {
+	tm1 := time.UnixMilli(day1)
+	tm2 := time.UnixMilli(day2)
+	return tm1.Year() == tm2.Year() && tm1.Month() == tm2.Month() && tm1.Day() == tm2.Day()
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////

@@ -2,6 +2,8 @@ package util
 
 import (
 	"reflect"
+	"regexp"
+	"strconv"
 	"sync"
 	"time"
 
@@ -301,3 +303,121 @@ func TimeTick() chan bool {
 	}
 	return nil
 }
+
+// 时间类型///////////////////////////////////////////////////////////////////////////////////
+// 返回某个时间的时间戳
+func MS(t time.Time) int64 {
+	return int64(t.UnixNano() / NANO_TO_MS)
+}
+
+// 返回unix时间戳。
+func CurrentMS() int64 {
+	return int64(time.Now().UnixNano() / NANO_TO_MS)
+}
+
+// 返回unix时间戳。
+func CurrentS() int64 {
+	return int64(time.Now().UnixNano() / NANO_TO_MS / MILLISECONDS_OF_SECOND)
+}
+
+// 毫秒转时间
+func Ms2Time(ms int64) time.Time {
+	sec := ms / MILLISECONDS_OF_SECOND
+	nsec := (ms % MILLISECONDS_OF_SECOND) * NANO_TO_MS
+	return time.Unix(sec, nsec).UTC()
+}
+
+// 秒转时间
+func S2Time(sec int64) time.Time {
+	return time.Unix(sec, 0).UTC()
+}
+
+// 毫秒转时间字符串
+func Ms2StrTime(ms int64) string {
+	msTime := Ms2Time(ms)
+	return msTime.Format("2006-01-02 15:04:05")
+}
+
+// 秒转时间字符串
+func S2StrTime(sec int64) string {
+	msTime := S2Time(sec)
+	return msTime.Format("2006-01-02 15:04:05")
+}
+
+// 这个时间对应的0点
+func Time2Midnight(t time.Time) time.Time {
+	year, month, day := t.Date()
+	return time.Date(year, month, day, 0, 0, 0, 0, time.UTC)
+}
+
+// 从一个毫秒时间戳获得当前时区的本日凌晨时间。
+func Ms2Midnight(t int64) time.Time {
+	midTime := Time2Midnight(time.Unix(t/1000, t%1000))
+	return midTime
+}
+
+// 今天0点时间戳
+func CurMidnight() int64 {
+	return MS(Time2Midnight(time.Now()))
+}
+
+// 字符串时间转换时间戳 date format: "2006-01-02 13:04:00"
+func S2UnixTime(value string) int64 {
+	re := regexp.MustCompile(`([\d]+)-([\d]+)-([\d]+) ([\d]+):([\d]+):([\d]+)`)
+	slices := re.FindStringSubmatch(value)
+	if slices == nil || len(slices) != 7 {
+		vars.Error("time[%s] format error, expect format: 2006-01-02 13:04:00...", value)
+		return 0
+	}
+	year, _ := strconv.Atoi(slices[1])
+	month, _ := strconv.Atoi(slices[2])
+	day, _ := strconv.Atoi(slices[3])
+	hour, _ := strconv.Atoi(slices[4])
+	min, _ := strconv.Atoi(slices[5])
+	sec, _ := strconv.Atoi(slices[6])
+	loc, _ := time.LoadLocation("UTC") // use UTC instend of Local
+	t := time.Date(year, time.Month(month), day, hour, min, sec, 0, loc)
+	return int64(t.UnixNano() / NANO_TO_MS)
+}
+
+// 下一个0点
+func NextMidnight(t int64) int64 {
+	midTime := Time2Midnight(time.Unix(t/1000, t%1000))
+	return midTime.UnixNano()/NANO_TO_MS + MILLISECONDS_OF_DAY
+}
+
+// 从一个毫秒时间戳获取下一个准点时间。
+func NextHour(t int64) int64 {
+	t1 := time.Unix(t/1000, t%1000)
+	year, month, day := t1.Date()
+	hour, _, _ := t1.Clock()
+	t2 := time.Date(year, month, day, hour+1, 0, 0, 0, t1.Location())
+	return t2.UnixNano() / 1e6
+}
+
+// 同一个星期
+func InSameWeek(t1, t2 int64) bool {
+	if t1 == 0 || t2 == 0 {
+		return false
+	}
+	y1, w1 := time.Unix(t1, 0).ISOWeek()
+	y2, w2 := time.Unix(t2, 0).ISOWeek()
+	return y1 == y2 && w1 == w2
+}
+
+// 同一个月
+func InSameMonth(t1, t2 int64) bool {
+	if t1 == 0 || t2 == 0 {
+		return false
+	}
+	y1, m1, _ := time.Unix(t1, 0).Date()
+	y2, m2, _ := time.Unix(t2, 0).Date()
+	return y1 == y2 && m1 == m2
+}
+
+// 是否在同一天
+func GetDiffDay(day1 int64, day2 int64) int {
+	return int((day2 - day1) / 86400)
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////

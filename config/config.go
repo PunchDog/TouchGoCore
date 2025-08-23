@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io/ioutil"
@@ -8,8 +9,6 @@ import (
 	"path"
 
 	"touchgocore/ini"
-	"touchgocore/jsonthr"
-	"touchgocore/util"
 )
 
 type Cfg struct {
@@ -55,34 +54,9 @@ func (this *Cfg) Load(cfgname string) {
 	}
 	fmt.Println(string(file))
 
-	err = jsonthr.Json.Unmarshal(file, &this)
+	err = json.Unmarshal(file, &this)
 	if err != nil {
 		panic("解析配置出错:" + path + ":" + err.Error())
-	}
-
-	//如果没有填IP，则是获取本地IP
-	if this.Ip == "" || this.Ip == "127.0.0.1" {
-		// addrs, err := net.InterfaceAddrs()
-		// if err != nil {
-		// 	fmt.Println(err)
-		// 	return
-		// }
-		// for _, addr := range addrs {
-		// 	if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
-		// 		if ipnet.IP.To4() != nil {
-		// 			this.Ip = ipnet.IP.String()
-		// 			fmt.Println(this.Ip)
-		// 		}
-		// 	}
-		// }
-
-		ip, err := util.GetLocalExternalIp()
-		if err != nil {
-			fmt.Println(err)
-			return
-		}
-		this.Ip = ip
-		fmt.Println(this.Ip)
 	}
 }
 

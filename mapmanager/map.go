@@ -1,6 +1,7 @@
 package mapmanager
 
 import (
+	"encoding/json"
 	"io/ioutil"
 	lua "touchgocore/golua"
 	"touchgocore/syncmap"
@@ -8,7 +9,6 @@ import (
 	"touchgocore/util"
 
 	"touchgocore/config"
-	"touchgocore/jsonthr"
 	"touchgocore/vars"
 )
 
@@ -48,7 +48,7 @@ func (this *Map) Load(path string) {
 	if err != nil {
 		panic("读取启动配置出错:" + err.Error())
 	}
-	err = jsonthr.Json.Unmarshal(file, &this)
+	err = json.Unmarshal(file, &this)
 	if err != nil {
 		panic("解析配置出错:" + path + ":" + err.Error())
 	}

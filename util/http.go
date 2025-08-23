@@ -2,6 +2,7 @@ package util
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -10,10 +11,9 @@ import (
 	"net/http"
 	"os"
 	"time"
-	"touchgocore/jsonthr"
 )
 
-//HTTPGet get 请求
+// HTTPGet get 请求
 func HTTPGet(uri string) ([]byte, error) {
 	response, err := http.Get(uri)
 	if err != nil {
@@ -27,7 +27,7 @@ func HTTPGet(uri string) ([]byte, error) {
 	return ioutil.ReadAll(response.Body)
 }
 
-//post
+// post
 func HttpPost(uri string, data string) ([]byte, error) {
 	response, err := http.Post(uri, "application/x-www-form-urlencoded;charset=utf-8", bytes.NewBuffer([]byte(data)))
 	if err != nil {
@@ -46,7 +46,7 @@ func HttpPost(uri string, data string) ([]byte, error) {
 // url:请求地址，data:POST请求提交的数据,contentType:请求体格式，如：application/json
 // content:请求放回的内容
 func HttpPostByContentType(url string, data interface{}, contentType string) (content string) {
-	jsonStr, err := jsonthr.Json.Marshal(data)
+	jsonStr, err := json.Marshal(data)
 	if err != nil {
 		fmt.Println(err)
 	}
@@ -73,7 +73,7 @@ func HttpPostByContentType(url string, data interface{}, contentType string) (co
 }
 
 func PostJSONAuth(url string, data interface{}, user string, password string) ([]byte, error) {
-	jsonStr, err := jsonthr.Json.Marshal(data)
+	jsonStr, err := json.Marshal(data)
 	if err != nil {
 		fmt.Println(err)
 	}
@@ -97,9 +97,9 @@ func PostJSONAuth(url string, data interface{}, user string, password string) ([
 	return ioutil.ReadAll(resp.Body)
 }
 
-//PostJSON post json 数据请求
+// PostJSON post json 数据请求
 func PostJSON(uri string, obj interface{}) ([]byte, error) {
-	jsonData, err := jsonthr.Json.Marshal(obj)
+	jsonData, err := json.Marshal(obj)
 	if err != nil {
 		return nil, err
 	}
@@ -117,7 +117,7 @@ func PostJSON(uri string, obj interface{}) ([]byte, error) {
 	return ioutil.ReadAll(response.Body)
 }
 
-//PostFile 上传文件
+// PostFile 上传文件
 func PostFile(fieldname, filename, uri string) ([]byte, error) {
 	fields := []MultipartFormField{
 		{
@@ -129,7 +129,7 @@ func PostFile(fieldname, filename, uri string) ([]byte, error) {
 	return PostMultipartForm(fields, uri)
 }
 
-//MultipartFormField 保存文件或其他字段信息
+// MultipartFormField 保存文件或其他字段信息
 type MultipartFormField struct {
 	IsFile    bool
 	Fieldname string
@@ -137,7 +137,7 @@ type MultipartFormField struct {
 	Filename  string
 }
 
-//PostMultipartForm 上传文件或其他多个字段
+// PostMultipartForm 上传文件或其他多个字段
 func PostMultipartForm(fields []MultipartFormField, uri string) (respBody []byte, err error) {
 	bodyBuf := &bytes.Buffer{}
 	bodyWriter := multipart.NewWriter(bodyBuf)

@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-//RandomStr 随机生成字符串
+// RandomStr 随机生成字符串
 func RandomStr(length int) string {
 	str := "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
 	bytes := []byte(str)
@@ -19,27 +19,39 @@ func RandomStr(length int) string {
 	return string(result)
 }
 
-//格式化，把所有?按格式化数据替换类型
+// 格式化，把所有?按格式化数据替换类型
 func Sprintf(format string, a ...interface{}) string {
-	s := format
-	theOne := 0
-	idx := strings.Index(s, "?")
-	for idx != -1 {
-		if theOne >= len(a) {
-			break
-		}
-		switch a[theOne].(type) {
+	var builder strings.Builder
+	buf := make([]interface{}, 0, len(a))
+	pattern := []byte(format)
+	argIndex := 0
+
+	// 预处理参数类型
+	types := make([]string, len(a))
+	for i, v := range a {
+		switch v.(type) {
 		case string:
-			s = strings.Replace(s, "?", "%s", 1)
-		case float32:
-			s = strings.Replace(s, "?", "%f", 1)
-		case float64:
-			s = strings.Replace(s, "?", "%f", 1)
+			types[i] = "%s"
+		case time.Time:
+			types[i] = "%s"
+			a[i] = v.(time.Time).Format("2006-01-02 15:04:05")
+		case float32, float64:
+			types[i] = "%f"
 		default:
-			s = strings.Replace(s, "?", "%d", 1)
+			types[i] = "%d"
 		}
-		theOne++
-		idx = strings.Index(s, "?")
 	}
-	return fmt.Sprintf(s, a...)
+
+	// 单次遍历构建格式字符串
+	for i := 0; i < len(pattern); i++ {
+		if pattern[i] == '?' && argIndex < len(types) {
+			builder.WriteString(types[argIndex])
+			buf = append(buf, a[argIndex])
+			argIndex++
+		} else {
+			builder.WriteByte(pattern[i])
+		}
+	}
+
+	return fmt.Sprintf(builder.String(), buf...)
 }

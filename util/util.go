@@ -276,7 +276,7 @@ func (this NumberSortDesc[T]) Swap(i, j int) {
 func getNumber[T any](v string) T {
 	var d T
 	switch any(d).(type) {
-	case uint8, uint16, uint32, uint64, int, int8, int16, int32, int64:
+	case uint, uint8, uint16, uint32, uint64, int, int8, int16, int32, int64:
 		num, _ := strconv.ParseInt(v, 10, 64)
 		val := reflect.ValueOf(num).Convert(reflect.ValueOf(d).Type())
 		reflect.ValueOf(&d).Elem().Set(val)

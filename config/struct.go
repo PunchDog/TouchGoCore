@@ -54,3 +54,12 @@ type RpcConfig struct {
 	//外网地址
 	ClientAddr string `json:"client_addr"`
 }
+
+// telegram配置
+type TelegramConfig struct {
+	BotToken        string            `json:"bot_token"`
+	GameUrl         string            `json:"game_url"`
+	GameBannerUrl   string            `json:"game_banner_url"`
+	GameDescription string            `json:"game_description"`
+	GameToShort     map[string]string `json:"game_to_short"`
+}

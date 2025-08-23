@@ -17,6 +17,7 @@ import (
 	"touchgocore/ini"
 	"touchgocore/mapmanager"
 	"touchgocore/rpc"
+	"touchgocore/telegram"
 	"touchgocore/util"
 	"touchgocore/vars"
 	"touchgocore/websocket"
@@ -122,6 +123,9 @@ func Run(serverName string) {
 	// 启动gRPC服务
 	rpc.Run()
 
+	//启动telegram
+	telegram.TelegramStart()
+
 	//核心加载完了后自己想执行的东西
 	util.DefaultCallFunc.Do(util.CallStart)
 
@@ -204,6 +208,7 @@ func closeServer() {
 	util.TimeStop()  //关闭定时器
 	websocket.Stop() //关闭websock
 	rpc.Stop()       //关闭gRPC
+	telegram.TelegramStop()
 
 	//退出时清理工作
 	util.DefaultCallFunc.Do(util.CallStop)

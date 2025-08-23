@@ -60,6 +60,10 @@ func Run() {
 }
 
 func Stop() {
+	if config.Cfg_.Ws == nil || call == nil {
+		return
+	}
+
 	close(closeCh)
 }
 

@@ -12,6 +12,7 @@ const (
 	CallDispatch     string = "Dispatch"
 	CallWebSocketMsg string = "WebSocketMsg"
 	CallRpcMsg       string = "RpcMsg"
+	CallTelegramMsg  string = "TelegramMsg"
 )
 
 var DefaultCallFunc *CallFunction = new(CallFunction)

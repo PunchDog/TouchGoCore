@@ -1,13 +1,14 @@
 package lua
 
 import (
+	"reflect"
 	"touchgocore/util"
 	"touchgocore/vars"
 
 	"github.com/aarzilli/golua/lua"
 )
 
-//两个默认执行的函数
+// 两个默认执行的函数
 func info(L *lua.State) int {
 	retstr := L.ToString(1)
 	vars.Info(retstr)
@@ -38,7 +39,7 @@ func dofile(L *lua.State) int {
 	return 2
 }
 
-//获取路径下所有文件
+// 获取路径下所有文件
 func getpathluafile(L *lua.State) int {
 	path := L.ToString(1)
 	pathlist := util.GetPathFile(path, []string{".lua"})
@@ -49,31 +50,16 @@ func getpathluafile(L *lua.State) int {
 	return 1
 }
 
-//转换压数据
+// 转换压数据
 func push(L *lua.State, val interface{}) bool {
 	switch val.(type) {
 	case string:
 		L.PushString(val.(string))
-	case int8:
-		L.PushInteger(int64(val.(int8)))
-	case uint8:
-		L.PushInteger(int64(val.(uint8)))
-	case int16:
-		L.PushInteger(int64(val.(int16)))
-	case uint16:
-		L.PushInteger(int64(val.(uint16)))
-	case int32:
-		L.PushInteger(int64(val.(int32)))
-	case uint32:
-		L.PushInteger(int64(val.(uint32)))
-	case int64:
-		L.PushInteger(int64(val.(int64)))
-	case uint64:
-		L.PushInteger(int64(val.(uint64)))
-	case int:
-		L.PushInteger(int64(val.(int)))
-	case uint:
-		L.PushInteger(int64(val.(uint)))
+	case uint, uint8, uint16, uint32, uint64, int, int8, int16, int32, int64:
+		d := int64(0)
+		val1 := reflect.ValueOf(val).Convert(reflect.ValueOf(d).Type())
+		reflect.ValueOf(&d).Elem().Set(val1)
+		L.PushInteger(d)
 	case bool:
 		L.PushBoolean(val.(bool))
 	case float32:
@@ -94,7 +80,7 @@ func push(L *lua.State, val interface{}) bool {
 	return true
 }
 
-//获取数据函数
+// 获取数据函数
 func pop(L *lua.State, idx int) interface{} {
 	var ret interface{} = nil
 	//根据数据类型转换

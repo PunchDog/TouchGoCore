@@ -112,6 +112,9 @@ func (c *Client) Close(reason string) {
 		close(c.msgChan)
 		c.wsConnect = nil
 		clientmap.Delete(c.Uid)
+		c.wsConnect = nil
+		c.remoteAddr = ""
+		c.Uid = 0
 		clientpool.Put(c)
 		vars.Info(fmt.Sprintf("%s 连接关闭，原因：%s", c.remoteAddr, reason))
 	}

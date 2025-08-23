@@ -290,7 +290,7 @@ func getNumber[T any](v string) T {
 
 // 字符串转数字数组
 func String2NumberArray[T any](str string, sep string) []T {
-	strs := strings.Split(str, ",")
+	strs := strings.Split(str, sep)
 	ret := make([]T, 0)
 	if len(strs) > 0 {
 		for _, str := range strs {

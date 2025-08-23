@@ -76,16 +76,18 @@ func StartGrpcServer(port int) {
 func Run() {
 	service_ = make([]*grpc.Server, 0)
 	if config.Cfg_.RpcPort != nil {
-		portlist := util.String2NumberArray[int](config.Cfg_.RpcPort.Port, "|")
-		// 启动gRPC服务
-		for _, port := range portlist {
-			StartGrpcServer(port)
+		if config.Cfg_.RpcPort.Port != nil {
+			portlist := util.String2NumberArray[int](*config.Cfg_.RpcPort.Port, "|")
+			// 启动gRPC服务
+			for _, port := range portlist {
+				StartGrpcServer(port)
+			}
 		}
 
 		//启动客户端连接
-		if config.Cfg_.RpcPort.ClientAddr != "" {
+		if config.Cfg_.RpcPort.ClientAddr != nil {
 			// 初始化客户端存根
-			addrs := strings.Split(config.Cfg_.RpcPort.ClientAddr, "||")
+			addrs := strings.Split(*config.Cfg_.RpcPort.ClientAddr, "||")
 			for _, addr := range addrs {
 				d := strings.Split(addr, "|")
 				if len(d) == 2 {

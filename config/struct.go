@@ -50,9 +50,9 @@ type WebsocketConfig struct {
 
 type RpcConfig struct {
 	//监听配置,多个端口用|分割
-	Port string `json:"port"`
+	Port *string `json:"port"`
 	//外网地址
-	ClientAddr string `json:"client_addr"`
+	ClientAddr *string `json:"client_addr"`
 }
 
 // telegram配置

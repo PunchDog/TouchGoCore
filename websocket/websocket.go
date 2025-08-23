@@ -4,15 +4,22 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"touchgocore/config"
 	"touchgocore/util"
 	"touchgocore/vars"
 )
 
+const (
+	MAX_WRITE_BUFFER_SIZE = 10240
+	MAX_READ_BUFFER_SIZE  = 102400
+)
+
 var (
-	closeCh  chan bool          = nil
-	msgQueue chan *msgQueueType = nil
-	call     ICall              = nil
+	closeCh    chan bool          = nil
+	msgQueue   chan *msgQueueType = nil
+	call       ICall              = nil
+	clientpool *sync.Pool         = nil
 )
 
 type msgQueueType struct {
@@ -29,8 +36,12 @@ func Run() {
 		return
 	}
 	closeCh = make(chan bool)
-	msgQueue = make(chan *msgQueueType, 102400)
-	clientpool = util.NewPoolMgr()
+	msgQueue = make(chan *msgQueueType, MAX_READ_BUFFER_SIZE)
+	clientpool = &sync.Pool{
+		New: func() interface{} {
+			return &Client{}
+		},
+	}
 
 	//启动监听
 	list := strings.Split(config.Cfg_.Ws.Port, "|")

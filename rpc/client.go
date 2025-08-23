@@ -11,6 +11,10 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+const (
+	MAX_MSG_SIZE = 1024 * 1024 * 10
+)
+
 var (
 	// RpcClient rpc客户端
 	rpcClient_ map[string]*RpcClient
@@ -72,8 +76,8 @@ func NewRpcClient(servername, addr string) *RpcClient {
 	}
 
 	opt := []grpc.DialOption{
-		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(1024 * 1024 * 10)),
-		grpc.WithDefaultCallOptions(grpc.MaxCallSendMsgSize(1024 * 1024 * 10)),
+		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(MAX_MSG_SIZE)),
+		grpc.WithDefaultCallOptions(grpc.MaxCallSendMsgSize(MAX_MSG_SIZE)),
 	}
 
 	conn, err := grpc.NewClient(addr, opt...)

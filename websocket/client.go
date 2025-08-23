@@ -14,18 +14,16 @@ import (
 )
 
 var max_uid int64 = 0
-var clientpool *util.PoolManager = nil
 var clientmap syncmap.Map
 
 // 客户端
 // 修改Client结构体定义
 type Client struct {
-	util.PoolNode //内存池节点
-	wsConnect     *websocket.Conn
-	remoteAddr    string
-	closeCh       chan bool
-	msgChan       chan []byte
-	Uid           int64
+	wsConnect  *websocket.Conn
+	remoteAddr string
+	closeCh    chan bool
+	msgChan    chan []byte
+	Uid        int64
 }
 
 // 新增带重试机制的WebSocket连接方法
@@ -39,7 +37,7 @@ func (c *Client) connectionDial(url string) error {
 			c.wsConnect = wsConn
 			c.remoteAddr = url
 			c.closeCh = make(chan bool, 1)
-			c.msgChan = make(chan []byte, 10240)
+			c.msgChan = make(chan []byte, MAX_WRITE_BUFFER_SIZE)
 
 			return nil
 		}
@@ -114,6 +112,7 @@ func (c *Client) Close(reason string) {
 		close(c.msgChan)
 		c.wsConnect = nil
 		clientmap.Delete(c.Uid)
+		clientpool.Put(c)
 		vars.Info(fmt.Sprintf("%s 连接关闭，原因：%s", c.remoteAddr, reason))
 	}
 }
@@ -156,18 +155,18 @@ func NewClient(connType interface{}, remoteAddr string) (*Client, error) {
 
 	var client *Client = nil
 	if clientpool != nil {
-		client = clientpool.Get(&Client{}).(*Client)
+		client = clientpool.Get().(*Client)
 		if client == nil {
 			return nil, errors.New("内存池获取失败")
 		}
 		client.Uid = max_uid
 		client.remoteAddr = remoteAddr
 		client.closeCh = make(chan bool, 1)
-		client.msgChan = make(chan []byte, 10240)
+		client.msgChan = make(chan []byte, MAX_WRITE_BUFFER_SIZE)
 	} else {
 		client = &Client{
 			closeCh:    make(chan bool, 1),
-			msgChan:    make(chan []byte, 10240),
+			msgChan:    make(chan []byte, MAX_WRITE_BUFFER_SIZE),
 			Uid:        max_uid,
 			remoteAddr: remoteAddr,
 		}

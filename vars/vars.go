@@ -2,13 +2,18 @@ package vars
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"runtime"
+	"strings"
+	"time"
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
+
+var logpath string
 
 // ZapSlogHandler 实现 slog.Handler
 type ZapSlogHandler struct {
@@ -31,17 +36,6 @@ func (h *ZapSlogHandler) Handle(_ context.Context, r slog.Record) error {
 		fields = append(fields, zap.Any(attr.Key, attr.Value.Any()))
 		return true
 	})
-
-	// 添加调用位置信息
-	if h.addSource && r.PC != 0 {
-		fs := runtime.CallersFrames([]uintptr{r.PC})
-		if frame, _ := fs.Next(); frame.File != "" {
-			fields = append(fields,
-				zap.String("file", frame.File),
-				zap.Int("line", frame.Line),
-			)
-		}
-	}
 
 	// 调用Zap写入日志
 	switch r.Level {
@@ -107,7 +101,29 @@ func NewZapSlogHandler(zapLogger *zap.Logger, level slog.Level) *ZapSlogHandler 
 	}
 }
 
+func callerEncoder(caller zapcore.EntryCaller, enc zapcore.PrimitiveArrayEncoder) {
+	workdir, _ := os.Getwd()
+	//workdir中的\\都转化为/
+	workdir = strings.ReplaceAll(workdir, "\\", "/")
+	for i := 2; ; i++ {
+		// 获取调用函数的文件名和行号
+		_, file, line, ok := runtime.Caller(i)
+		if !ok {
+			file = "???"
+			line = 0
+		}
+		file = strings.ReplaceAll(file, "\\", "/")
+		//如果file没有包含workdir,就跳过
+		condition := !strings.HasPrefix(file, workdir)
+		if condition {
+			continue
+		}
+		enc.AppendString(fmt.Sprintf("%s:%d", file, line))
+		break
+	}
+}
 func createZapCore(path, logname string) zapcore.Core {
+	logpath = path
 	// 配置Encoder（JSON格式）
 	encoderCfg := zapcore.EncoderConfig{
 		TimeKey:        "time",
@@ -116,9 +132,9 @@ func createZapCore(path, logname string) zapcore.Core {
 		CallerKey:      "caller",
 		MessageKey:     "message",
 		StacktraceKey:  "stacktrace",
-		EncodeTime:     zapcore.ISO8601TimeEncoder,
+		EncodeTime:     zapcore.TimeEncoderOfLayout(time.DateTime),
 		EncodeLevel:    zapcore.LowercaseLevelEncoder,
-		EncodeCaller:   zapcore.ShortCallerEncoder,
+		EncodeCaller:   callerEncoder,
 		EncodeDuration: zapcore.SecondsDurationEncoder,
 	}
 
@@ -137,6 +153,8 @@ func createZapCore(path, logname string) zapcore.Core {
 
 // 全局初始化
 func Run(path, logname, szlevel string) {
+	//szlevel转换成大写
+	szlevel = strings.ToUpper(szlevel)
 	core := createZapCore(path, logname)
 	zapLogger := zap.New(core, zap.AddCaller(), zap.AddCallerSkip(1))
 	var level slog.Level = slog.LevelDebug

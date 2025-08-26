@@ -58,8 +58,8 @@ func StartGrpcServer(port int) {
 	}
 
 	opt := []grpc.ServerOption{
-		grpc.MaxRecvMsgSize(1024 * 1024 * 10),
-		grpc.MaxSendMsgSize(1024 * 1024 * 10),
+		grpc.MaxRecvMsgSize(MAX_MSG_SIZE),
+		grpc.MaxSendMsgSize(MAX_MSG_SIZE),
 	}
 
 	s := grpc.NewServer(opt...)

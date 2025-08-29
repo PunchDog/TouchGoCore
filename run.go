@@ -27,8 +27,8 @@ var chExit chan bool
 var ChClose chan bool
 
 func init() {
-	chExit = make(chan bool)
-	ChClose = make(chan bool)
+	chExit = make(chan bool, 1)
+	ChClose = make(chan bool, 1)
 }
 
 // 总体开关,此函数需要放在main的最后
@@ -178,18 +178,11 @@ func Run(serverName string) {
 
 func loop() (err error) {
 	defer func() {
-		if r := recover(); err != nil {
-			// 类型断言转换
-			switch v := r.(type) {
-			case string:
-				err = errors.New(v) // 字符串转为 error
-			case error:
-				err = v // 直接使用 error 类型
-			default:
-				err = fmt.Errorf("unexpected panic: %v", v) // 其他类型包装为 error
-			}
+		if r := recover(); r != nil {
+			err = r.(error)
 		}
 	}()
+
 	err = nil
 	select {
 	case <-chExit:
@@ -212,13 +205,13 @@ func closeServer() {
 
 	//退出时清理工作
 	util.DefaultCallFunc.Do(util.CallStop)
-	chExit <- true
 	vars.Info("关闭完成,退出服务器")
+	chExit <- true
 }
 
 func signalProcHandler() {
 	//开阻塞
-	chSig := make(chan os.Signal)
+	chSig := make(chan os.Signal, 1)
 	signal.Notify(chSig, syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT, syscall.SIGKILL)
 	vars.Info("Signal: ", <-chSig)
 	closeServer()

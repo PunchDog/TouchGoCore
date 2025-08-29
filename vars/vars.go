@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path"
 	"runtime"
 	"strings"
 	"time"
@@ -152,10 +153,11 @@ func createZapCore(path, logname string) zapcore.Core {
 }
 
 // 全局初始化
-func Run(path, logname, szlevel string) {
+func Run(path1, logname, szlevel string) {
 	//szlevel转换成大写
 	szlevel = strings.ToUpper(szlevel)
-	core := createZapCore(path+"/logs/", logname)
+	path1 = path.Join(path1, "/logs/")
+	core := createZapCore(path1, logname)
 	zapLogger := zap.New(core, zap.AddCaller(), zap.AddCallerSkip(1))
 	var level slog.Level = slog.LevelDebug
 	level.UnmarshalText([]byte(szlevel))

@@ -46,12 +46,12 @@ func init() {
 }
 
 func (this *Cfg) Load(cfgname string) {
-	var path string
+	var path1 string
 	if p, err := ini.Load(_defaultFile); err == nil {
-		path = _basePath + "/conf/" + p.GetString(cfgname, "ini", "")
+		path1 = path.Join(_basePath, "/conf/", p.GetString(cfgname, "ini", ""))
 	}
 
-	file, err := ioutil.ReadFile(path)
+	file, err := ioutil.ReadFile(path1)
 	if err != nil {
 		panic("读取启动配置出错:" + err.Error())
 	}
@@ -59,7 +59,7 @@ func (this *Cfg) Load(cfgname string) {
 
 	err = json.Unmarshal(file, &this)
 	if err != nil {
-		panic("解析配置出错:" + path + ":" + err.Error())
+		panic("解析配置出错:" + path1 + ":" + err.Error())
 	}
 }
 

@@ -33,6 +33,7 @@ func (h *ZapSlogHandler) Enabled(_ context.Context, level slog.Level) bool {
 func (h *ZapSlogHandler) Handle(_ context.Context, r slog.Record) error {
 	// 转换字段为Zap格式（避免反射）
 	fields := make([]zap.Field, 0, r.NumAttrs())
+	fields = append(fields, zap.Any("PID", os.Getegid()))
 	r.Attrs(func(attr slog.Attr) bool {
 		fields = append(fields, zap.Any(attr.Key, attr.Value.Any()))
 		return true

@@ -155,7 +155,7 @@ func createZapCore(path, logname string) zapcore.Core {
 func Run(path, logname, szlevel string) {
 	//szlevel转换成大写
 	szlevel = strings.ToUpper(szlevel)
-	core := createZapCore(path, logname)
+	core := createZapCore(path+"/logs/", logname)
 	zapLogger := zap.New(core, zap.AddCaller(), zap.AddCallerSkip(1))
 	var level slog.Level = slog.LevelDebug
 	level.UnmarshalText([]byte(szlevel))

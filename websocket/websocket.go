@@ -2,8 +2,6 @@ package websocket
 
 import (
 	"fmt"
-	"strconv"
-	"strings"
 	"sync"
 	"touchgocore/config"
 	"touchgocore/util"
@@ -44,12 +42,7 @@ func Run() {
 	}
 
 	//启动监听
-	list := strings.Split(config.Cfg_.Ws.Port, "|")
-	for _, szp := range list {
-		port, _ := strconv.Atoi(szp)
-		if port == 0 {
-			continue
-		}
+	for _, port := range config.Cfg_.Ws.Port {
 		err := ListenAndServe(port)
 		if err != nil {
 			vars.Error(fmt.Sprintf("websocket服务启动端口%d监听失败:%s", port, err.Error()))

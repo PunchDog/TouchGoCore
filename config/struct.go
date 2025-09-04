@@ -41,7 +41,7 @@ type BeegoWebConfig struct {
 
 type WebsocketConfig struct {
 	//监听配置,多个端口用|分割
-	Port string `json:"port"`
+	Port []int `json:"port"`
 	//外网地址
 	URL string `json:"url"`
 	//内网地址

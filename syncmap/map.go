@@ -17,12 +17,7 @@ func (this *Map) Length() int {
 
 // 添加数据
 func (this *Map) Store(k, v interface{}) {
-	this.lock.Lock()
-	defer this.lock.Unlock()
-	if _, h := this.Load(k); !h {
-		this.num++
-	}
-	this.Map.Store(k, v)
+	this.LoadOrStore(k, v)
 }
 
 // 删除数据
@@ -39,12 +34,11 @@ func (this *Map) Delete(k interface{}) {
 func (this *Map) ClearAll(fn func(k, v interface{}) bool) {
 	this.lock.Lock()
 	defer this.lock.Unlock()
-	this.Map.Range(func(k, v interface{}) bool {
-		if fn != nil {
-			fn(k, v)
-		}
-		return true
-	})
+	if fn != nil {
+		this.Map.Range(func(k, v interface{}) bool {
+			return fn(k, v)
+		})
+	}
 	this.num = 0
 	this.Map = sync.Map{}
 }

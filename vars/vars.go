@@ -153,6 +153,11 @@ func createZapCore(path, logname string) zapcore.Core {
 	)
 }
 
+// 初始化使用
+func init() {
+	Run("./", "default", "debug")
+}
+
 // 全局初始化
 func Run(path1, logname, szlevel string) {
 	//szlevel转换成大写

@@ -2,10 +2,9 @@ package rpc
 
 import (
 	"fmt"
+	"io"
 	"net"
 	"strconv"
-	"strings"
-	"touchgocore/config"
 	"touchgocore/network/message"
 	"touchgocore/util"
 	"touchgocore/vars"
@@ -15,7 +14,8 @@ import (
 )
 
 var (
-	service_ []*grpc.Server = nil
+	service_           []*grpc.Server = nil
+	nametoclientstream map[string]message.Grpc_MsgServer
 )
 
 type RpcServer struct {
@@ -24,30 +24,33 @@ type RpcServer struct {
 
 func (s *RpcServer) Msg(stream message.Grpc_MsgServer) error {
 	for {
-		req, err := stream.Recv()
+		msg, err := stream.Recv()
+		if err == io.EOF {
+			vars.Info("gRPC连接关闭,客户端主动断开连接")
+			break
+		}
+
 		if err != nil {
 			vars.Error(fmt.Sprintf("接收gRPC消息错误: %v", err))
 			return err
 		}
 
 		// 处理请求逻辑
-		go func(msg *message.FSMessage, stream message.Grpc_MsgServer) {
-			// 处理请求逻辑
-			req := util.PasreFSMessage(req)
-			util.DefaultCallFunc.SetDoRet()
-			key := fmt.Sprintf("%s:%d:%d", util.CallRpcMsg, msg.GetHead().GetProtocol1(), msg.GetHead().GetProtocol2())
-			bret := util.DefaultCallFunc.Do(key, req)
-			res := util.DefaultCallFunc.GetRet()
-			if bret {
-				rsp := util.NewFSMessage(msg.GetHead().GetProtocol1(), msg.GetHead().GetProtocol2(), res[0].Interface().(proto.Message))
-				if err := stream.Send(rsp); err != nil {
-					vars.Error("发送gRPC响应错误: %v", err)
-				}
-			} else {
-				vars.Error("处理gRPC请求错误,协议号:%d:%d", msg.GetHead().GetProtocol1(), msg.GetHead().GetProtocol2())
+		req := util.PasreFSMessage(msg)
+		util.DefaultCallFunc.SetDoRet()
+		key := fmt.Sprintf("%s:%d:%d", util.CallRpcMsg, msg.GetHead().GetProtocol1(), msg.GetHead().GetProtocol2())
+		bret := util.DefaultCallFunc.Do(key, req)
+		res := util.DefaultCallFunc.GetRet()
+		if bret {
+			rsp := util.NewFSMessage(msg.GetHead().GetProtocol1(), msg.GetHead().GetProtocol2(), res[0].Interface().(proto.Message))
+			if err := stream.Send(rsp); err != nil {
+				vars.Error("发送gRPC响应错误: %v", err)
 			}
-		}(req, stream)
+		} else {
+			vars.Error("处理gRPC请求错误,协议号:%d:%d", msg.GetHead().GetProtocol1(), msg.GetHead().GetProtocol2())
+		}
 	}
+	return nil
 }
 
 func StartGrpcServer(port int) {
@@ -71,42 +74,4 @@ func StartGrpcServer(port int) {
 	}
 	service_ = append(service_, s)
 	vars.Info("gRPC服务启动成功,端口:%d", port)
-}
-
-func Run() {
-	service_ = make([]*grpc.Server, 0)
-	if config.Cfg_.RpcPort != nil {
-		if config.Cfg_.RpcPort.Port != nil {
-			portlist := util.String2NumberArray[int](*config.Cfg_.RpcPort.Port, "|")
-			// 启动gRPC服务
-			for _, port := range portlist {
-				StartGrpcServer(port)
-			}
-		}
-
-		//启动客户端连接
-		if config.Cfg_.RpcPort.ClientAddr != nil {
-			// 初始化客户端存根
-			addrs := strings.Split(*config.Cfg_.RpcPort.ClientAddr, "||")
-			for _, addr := range addrs {
-				d := strings.Split(addr, "|")
-				if len(d) == 2 {
-					servername := d[0]
-					addr1 := d[1]
-					NewRpcClient(servername, addr1)
-				}
-			}
-		}
-		vars.Info("gRPC服务启动成功")
-	}
-}
-
-func Stop() {
-	for _, v := range service_ {
-		v.Stop()
-	}
-
-	for _, v := range rpcClient_ {
-		v.conn.Close()
-	}
 }

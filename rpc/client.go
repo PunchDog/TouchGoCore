@@ -8,11 +8,8 @@ import (
 	"touchgocore/vars"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/proto"
-)
-
-const (
-	MAX_MSG_SIZE = 1024 * 1024 * 10
 )
 
 var (
@@ -21,7 +18,7 @@ var (
 )
 
 type RpcClient struct {
-	client message.GrpcClient
+	util.Timer
 	// 连接
 	addr string
 	//对应的服务器名
@@ -32,10 +29,28 @@ type RpcClient struct {
 	conn *grpc.ClientConn
 }
 
+func (c *RpcClient) Tick() {
+	//断线重连，链接上了就从计时器里移除
+	conn, err := newClient(c.addr)
+	if err != nil {
+		return
+	}
+	c.conn = conn
+	c.connStatus = true
+	c.Remove()
+}
+
 func (c *RpcClient) SendMsg(protocol1, protocol2 int32, pb proto.Message, callfunc func(pb1 proto.Message)) {
-	msg, err := c.client.Msg(context.Background())
+	//客户端context创建
+	// 客户端发送流式请求时附加元数据
+	md := metadata.Pairs("client-name", c.serverName)
+	ctx := metadata.NewOutgoingContext(context.Background(), md)
+
+	client := message.NewGrpcClient(c.conn)
+	msg, err := client.Msg(ctx)
 	if err != nil {
 		c.connStatus = false
+		util.AddTimer(c)
 		return
 	}
 
@@ -44,6 +59,7 @@ func (c *RpcClient) SendMsg(protocol1, protocol2 int32, pb proto.Message, callfu
 	if err != nil {
 		//连接断开
 		c.connStatus = false
+		util.AddTimer(c)
 		return
 	}
 
@@ -70,11 +86,7 @@ func (c *RpcClient) SendMsg(protocol1, protocol2 int32, pb proto.Message, callfu
 	}
 }
 
-func NewRpcClient(servername, addr string) *RpcClient {
-	if rpcClient_ == nil {
-		rpcClient_ = make(map[string]*RpcClient)
-	}
-
+func newClient(addr string) (*grpc.ClientConn, error) {
 	opt := []grpc.DialOption{
 		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(MAX_MSG_SIZE)),
 		grpc.WithDefaultCallOptions(grpc.MaxCallSendMsgSize(MAX_MSG_SIZE)),
@@ -82,15 +94,27 @@ func NewRpcClient(servername, addr string) *RpcClient {
 
 	conn, err := grpc.NewClient(addr, opt...)
 	if err != nil {
-		return nil
+		return nil, err
+	}
+	return conn, nil
+}
+
+func NewRpcClient(servername, addr string) *RpcClient {
+	if rpcClient_ == nil {
+		rpcClient_ = make(map[string]*RpcClient)
 	}
 
-	client := &RpcClient{
-		client:     message.NewGrpcClient(conn),
-		addr:       addr,
-		serverName: servername,
-		connStatus: true,
-		conn:       conn,
+	//创建一个带计时器的客户端指针
+	client := util.NewTimer(1000, -1, &RpcClient{}).(*RpcClient)
+	client.addr = addr
+	client.serverName = servername
+	conn, err := newClient(addr)
+	if err == nil {
+		client.connStatus = true
+		client.conn = conn
+	} else { //一直保持监听保证连接
+		client.connStatus = false
+		util.AddTimer(client)
 	}
 
 	rpcClient_[servername] = client

@@ -42,15 +42,17 @@
     "这里是基础配置": "",
     "rpc_port": {
         "rpc_port说明": "rpc_port是监听端口,如果不填,则不开rpc服务",
-        "port": [
-            7000,
-            7001,
-            7002
-        ],
-        "client_addr说明": "作为客户端创建连接",
-        "client_addr": [
+        "server说明": "作为服务器监听端口",
+        "server": [
             {
-                "servername": "gateserver",
+                "name": "gateserver",
+                "port": 7000
+            }
+        ],
+        "client说明": "作为客户端创建连接",
+        "client": [
+            {
+                "name": "gateserver",
                 "addr": "http://127.0.0.1:7000"
             }
         ]

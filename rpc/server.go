@@ -15,12 +15,14 @@ import (
 )
 
 var (
-	service_ []*grpc.Server = nil
+	service_ map[string]*RpcServer = nil
 )
 
 type RpcServer struct {
 	message.UnimplementedGrpcServer
 	nametoclientstream map[string]message.Grpc_MsgServer
+	name               string
+	service            *grpc.Server
 }
 
 func (s *RpcServer) Msg(stream message.Grpc_MsgServer) error {
@@ -70,10 +72,8 @@ func (s *RpcServer) Msg(stream message.Grpc_MsgServer) error {
 		bret := util.DefaultCallFunc.Do(key, req)
 		res := util.DefaultCallFunc.GetRet()
 		if bret {
-			rsp := util.NewFSMessage(msg.GetHead().GetProtocol1(), msg.GetHead().GetProtocol2(), res[0].Interface().(proto.Message))
-			if err := stream.Send(rsp); err != nil {
-				vars.Error("发送gRPC响应错误: %v", err)
-			}
+			rsp := res[0].Interface().(proto.Message)
+			s.Send(clientNameKey, msg.GetHead().GetProtocol1(), msg.GetHead().GetProtocol2(), rsp)
 		} else {
 			vars.Error("处理gRPC请求错误,协议号:%d:%d", msg.GetHead().GetProtocol1(), msg.GetHead().GetProtocol2())
 		}
@@ -81,7 +81,16 @@ func (s *RpcServer) Msg(stream message.Grpc_MsgServer) error {
 	return nil
 }
 
-func StartGrpcServer(port int) {
+func (s *RpcServer) Send(name string, pb1, pb2 int32, pb proto.Message) {
+	rsp := util.NewFSMessage(pb1, pb2, pb)
+	if st, h := s.nametoclientstream[name]; h {
+		if err := st.Send(rsp); err != nil {
+			vars.Error("发送gRPC响应错误: %v", err)
+		}
+	}
+}
+
+func StartGrpcServer(name string, port int) {
 	lis, err := net.Listen("tcp", "[::]:"+strconv.Itoa(port))
 	if err != nil {
 		vars.Error("gRPC监听失败: %v", err)
@@ -94,12 +103,21 @@ func StartGrpcServer(port int) {
 	}
 
 	s := grpc.NewServer(opt...)
-	message.RegisterGrpcServer(s, &RpcServer{})
+	service := &RpcServer{
+		name:               name,
+		nametoclientstream: make(map[string]message.Grpc_MsgServer),
+		service:            s,
+	}
+	message.RegisterGrpcServer(service.service, service)
 
 	vars.Info("gRPC服务启动成功,端口:%d", port)
 	if err := s.Serve(lis); err != nil {
 		vars.Error("gRPC服务启动失败: %v", err)
 	}
-	service_ = append(service_, s)
+
+	if service_ == nil {
+		service_ = make(map[string]*RpcServer)
+	}
+	service_[name] = service
 	vars.Info("gRPC服务启动成功,端口:%d", port)
 }

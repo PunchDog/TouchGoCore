@@ -10,28 +10,56 @@ import (
 	"touchgocore/vars"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/proto"
 )
 
 var (
-	service_           []*grpc.Server = nil
-	nametoclientstream map[string]message.Grpc_MsgServer
+	service_ []*grpc.Server = nil
 )
 
 type RpcServer struct {
 	message.UnimplementedGrpcServer
+	nametoclientstream map[string]message.Grpc_MsgServer
 }
 
 func (s *RpcServer) Msg(stream message.Grpc_MsgServer) error {
+	md, ok := metadata.FromIncomingContext(stream.Context())
+	if !ok {
+		vars.Error("gRPC连接错误,没有元数据")
+		return nil
+	}
+	//获取元数据
+	clientName := md.Get("client-name")
+	if len(clientName) == 0 {
+		vars.Error("gRPC连接错误,没有客户端名称")
+		return nil
+	}
+	if clientName[0] == "" {
+		vars.Error("gRPC连接错误,没有客户端名称")
+		return nil
+	}
+	// 客户端名称作为key
+	clientNameKey := clientName[0]
+	// 存储客户端stream
+	if s.nametoclientstream == nil {
+		s.nametoclientstream = make(map[string]message.Grpc_MsgServer)
+	}
+	s.nametoclientstream[clientNameKey] = stream
+
 	for {
 		msg, err := stream.Recv()
 		if err == io.EOF {
 			vars.Info("gRPC连接关闭,客户端主动断开连接")
+			// 移除客户端stream
+			delete(s.nametoclientstream, clientNameKey)
 			break
 		}
 
 		if err != nil {
 			vars.Error(fmt.Sprintf("接收gRPC消息错误: %v", err))
+			// 移除客户端stream
+			delete(s.nametoclientstream, clientNameKey)
 			return err
 		}
 

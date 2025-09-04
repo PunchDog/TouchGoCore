@@ -41,10 +41,19 @@
     },
     "这里是基础配置": "",
     "rpc_port": {
-        "rpc_port说明": "rpc_port是监听端口,如果不填,则不开rpc服务;,多个端口用|分割:7000|7001|7002",
-        "port": "7000",
-        "client_addr说明": "作为客户端连接，服务器名|地址，多个地址用||分割",
-        "client_addr": "gateserver|http://127.0.0.1:7000||gateserver|http://127.0.0.1:7001||gateserver|http://127.0.0.1:7002"
+        "rpc_port说明": "rpc_port是监听端口,如果不填,则不开rpc服务",
+        "port": [
+            7000,
+            7001,
+            7002
+        ],
+        "client_addr说明": "作为客户端创建连接",
+        "client_addr": [
+            {
+                "servername": "gateserver",
+                "addr": "http://127.0.0.1:7000"
+            }
+        ]
     },
     "ws": {
         "说明:": "这里是websocket配置,作为服务器监听配置,多个端口用|分割",
@@ -53,6 +62,6 @@
         "inurl": "inws"
     },
     "lua": "off",
-    "loglevel": "日志等级，off为不开,其次为INFO,DEBUG,WARN,ERROR",
+    "loglevel": "日志等级,off为不开,其次为INFO,DEBUG,WARN,ERROR",
     "map_path": "off"
 }

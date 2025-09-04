@@ -48,11 +48,16 @@ type WebsocketConfig struct {
 	InURL string `json:"inurl"`
 }
 
+type RpcClientAddr struct {
+	ServerName string `json:"servername"`
+	Addr       string `json:"addr"`
+}
+
 type RpcConfig struct {
 	//监听配置,多个端口用|分割
-	Port *string `json:"port"`
+	Port []int `json:"port"`
 	//外网地址
-	ClientAddr *string `json:"client_addr"`
+	ClientAddr []*RpcClientAddr `json:"client_addr"`
 }
 
 // telegram配置

@@ -150,14 +150,18 @@ func TelegramStart() {
 	//创建机器人消息监听
 	go func() {
 		for update := range updates {
-			_, ok := <-closeCh
-			if !ok {
-				return
-			}
-			if update.Message != nil {
-				handleMessage(bot, update.Message)
-			} else if update.CallbackQuery != nil {
-				handleCallback(bot, update.CallbackQuery)
+			select {
+			case _, ok := <-closeCh:
+				if !ok {
+					timer.Remove() //删除定时器
+					return
+				}
+			default:
+				if update.Message != nil {
+					handleMessage(bot, update.Message)
+				} else if update.CallbackQuery != nil {
+					handleCallback(bot, update.CallbackQuery)
+				}
 			}
 		}
 	}()

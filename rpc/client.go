@@ -8,6 +8,7 @@ import (
 	"touchgocore/vars"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/proto"
 )
@@ -88,6 +89,7 @@ func (c *RpcClient) SendMsg(protocol1, protocol2 int32, pb proto.Message, callfu
 
 func newClient(addr string) (*grpc.ClientConn, error) {
 	opt := []grpc.DialOption{
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(MAX_MSG_SIZE)),
 		grpc.WithDefaultCallOptions(grpc.MaxCallSendMsgSize(MAX_MSG_SIZE)),
 	}

@@ -7,15 +7,21 @@ import (
 	"strings"
 	"touchgocore/vars"
 
+	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"google.golang.org/protobuf/proto"
+)
+
+const (
+	UPGRADER_READ_BUFFER_SIZE  = 1024 * 1024 * 10
+	UPGRADER_WRITE_BUFFER_SIZE = 1024 * 1024 * 10
 )
 
 var (
 	serverList []*http.Server = make([]*http.Server, 0)
 	upgrader                  = websocket.Upgrader{
-		ReadBufferSize:  0,
-		WriteBufferSize: 0,
+		ReadBufferSize:  UPGRADER_READ_BUFFER_SIZE,
+		WriteBufferSize: UPGRADER_WRITE_BUFFER_SIZE,
 		CheckOrigin: func(r *http.Request) bool {
 			return true
 		},
@@ -49,8 +55,8 @@ func getClientIP(r *http.Request) string {
 
 // 监听端口
 func ListenAndServe(port int) error {
-	var myserver = http.NewServeMux()
-	myserver.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+	r := gin.Default()
+	r.GET("/ws", func(c *gin.Context) {
 		defer func() {
 			if err := recover(); err != nil {
 				vars.Error("", err.(error))
@@ -62,44 +68,30 @@ func ListenAndServe(port int) error {
 		)
 		// 完成ws协议的握手操作
 		// Upgrade:websocket
-		if wsConn, err = upgrader.Upgrade(w, r, nil); err != nil {
+		if wsConn, err = upgrader.Upgrade(c.Writer, c.Request, nil); err != nil {
 			vars.Error("路径/ws链接错误", err)
-			http.NotFound(w, r)
+			http.NotFound(c.Writer, c.Request)
 			return
 		}
 
-		_, err = NewClient(wsConn, getClientIP(r))
+		_, err = NewClient(wsConn, getClientIP(c.Request))
 		if err != nil {
 			vars.Error("", err)
 			return
 		}
 	})
-	// myserver.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-	// 	defer func() {
-	// 		if err := recover(); err != nil {
-	// 			vars.Error("异常捕获:", err)
-
-	// 		}
-	// 	}()
-	// 	if _, err := upgrader.Upgrade(w, r, nil); err != nil {
-	// 		vars.Error("链接/失败:", err)
-	// 		return
-	// 	} else {
-	// 		vars.Info("链接/成功:")
-	// 	}
-	// })
 
 	//websocket实现ipv6
 	server := &http.Server{
 		Addr:    "[::]:" + strconv.Itoa(port),
-		Handler: myserver,
+		Handler: r,
 	}
 
-	err := make(chan error, 1)
-	go func() {
-		err <- server.ListenAndServe()
+	errChan := make(chan error, 1)
+	go func() { //异步启动
+		errChan <- server.ListenAndServe()
 	}()
 	serverList = append(serverList, server)
 	//将服务器名字注册到redis中
-	return <-err
+	return <-errChan
 }

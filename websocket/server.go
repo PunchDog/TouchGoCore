@@ -49,7 +49,11 @@ func getClientIP(r *http.Request) string {
 		return realIP
 	}
 	// 最后从TCP连接获取（可能为代理IP）
-	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+	ip, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		vars.Error("获取客户端IP失败", err)
+		ip = "127.0.0.1"
+	}
 	return ip
 }
 

@@ -1,3 +1,5 @@
+//go:build lua54
+
 package lua
 
 import (

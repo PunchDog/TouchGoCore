@@ -1,3 +1,5 @@
+//go:build lua54
+
 package mapmanager
 
 import (
@@ -59,7 +61,7 @@ func (this *Map) Load(path string) {
 	vars.Info("加载地图 %s 成功!", path)
 }
 
-func Run() {
+func RunMap() {
 	if config.Cfg_.MapPath == "off" || config.Cfg_.MapPath == "" {
 		return
 	}
@@ -75,4 +77,8 @@ func Run() {
 	//创建lua NPC类
 	lua.RegisterLuaClass(&Npc{})
 	vars.Info("读取地图完成!")
+}
+
+func init() {
+	util.DefaultCallFunc.Register("RunMap", RunMap)
 }

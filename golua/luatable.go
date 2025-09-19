@@ -1,3 +1,5 @@
+//go:build lua54
+
 package lua
 
 import (
@@ -6,7 +8,7 @@ import (
 	"github.com/aarzilli/golua/lua"
 )
 
-//添加table用的临时函数,目前只支持几种类型,data只接受string和int64类型的列表或map
+// 添加table用的临时函数,目前只支持几种类型,data只接受string和int64类型的列表或map
 func newTable(data interface{}) *LuaTable {
 	tbl := &LuaTable{}
 	//如果有数据传入，就给table写入数据
@@ -66,7 +68,7 @@ func newTable(data interface{}) *LuaTable {
 	return tbl
 }
 
-//解析table数据
+// 解析table数据
 func getTable(L *lua.State, idx int) *LuaTable {
 	if L.IsTable(idx) {
 		tbl := newTable(nil)
@@ -86,12 +88,12 @@ type LuaTable struct {
 	tbl *syncmap.Map
 }
 
-//是否有数据
+// 是否有数据
 func (this *LuaTable) HaveData() bool {
 	return this.tbl != nil && this.tbl.Length() > 0
 }
 
-//给列表压数据
+// 给列表压数据
 func (this *LuaTable) AddListData(val interface{}) {
 	if this.tbl == nil {
 		this.tbl = &syncmap.Map{}
@@ -99,7 +101,7 @@ func (this *LuaTable) AddListData(val interface{}) {
 	this.SetTableData(this.tbl.Length()+1, val)
 }
 
-//给map压数据
+// 给map压数据
 func (this *LuaTable) SetTableData(key, val interface{}) {
 	if this.tbl == nil {
 		this.tbl = &syncmap.Map{}
@@ -107,7 +109,7 @@ func (this *LuaTable) SetTableData(key, val interface{}) {
 	this.tbl.Store(key, val)
 }
 
-//给lua压数据
+// 给lua压数据
 func (this *LuaTable) PushTable(L *lua.State) bool {
 	//没数据，不能压表
 	if !this.HaveData() {
@@ -133,7 +135,7 @@ func (this *LuaTable) PushTable(L *lua.State) bool {
 	return false
 }
 
-//新增一个luatable数据块
+// 新增一个luatable数据块
 func (this *LuaTable) AddTableData(key interface{}) *LuaTable {
 	if this.tbl == nil {
 		this.tbl = &syncmap.Map{}

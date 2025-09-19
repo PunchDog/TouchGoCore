@@ -1,3 +1,5 @@
+//go:build lua54
+
 package lua
 
 import (
@@ -169,7 +171,7 @@ func RegisterLuaClass(class ILuaClassInterface) bool {
 }
 
 // 启动函数
-func Run() {
+func RunLua() {
 	if config.Cfg_.Lua == "off" {
 		vars.Info("不启动lua服务")
 		return
@@ -181,8 +183,13 @@ func Run() {
 }
 
 // 关闭所有的定时器
-func Stop() {
+func StopLua() {
 	for _, lua := range _luaList {
 		lua.Close()
 	}
+}
+
+func init() {
+	util.DefaultCallFunc.Register("RunLua", RunLua)
+	util.DefaultCallFunc.Register("StopLua", StopLua)
 }

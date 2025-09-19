@@ -158,8 +158,15 @@ func init() {
 	Run("./", "default", "debug")
 }
 
+var off bool = false
+
 // 全局初始化
 func Run(path1, logname, szlevel string) {
+	if szlevel == "off" {
+		off = true
+		return
+	}
+
 	//szlevel转换成大写
 	szlevel = strings.ToUpper(szlevel)
 	path1 = path.Join(path1, "/logs/")
@@ -173,17 +180,33 @@ func Run(path1, logname, szlevel string) {
 }
 
 func Debug(msg string, args ...any) {
+	if off {
+		fmt.Printf("[debug]"+msg+"\n", args...)
+		return
+	}
 	slog.Debug(msg, args...)
 }
 
 func Info(msg string, args ...any) {
+	if off {
+		fmt.Printf("[info]"+msg+"\n", args...)
+		return
+	}
 	slog.Info(msg, args...)
 }
 
 func Warning(msg string, args ...any) {
+	if off {
+		fmt.Printf("[warning]"+msg+"\n", args...)
+		return
+	}
 	slog.Warn(msg, args...)
 }
 
 func Error(msg string, args ...any) {
+	if off {
+		fmt.Printf("[error]"+msg+"\n", args...)
+		return
+	}
 	slog.Error(msg, args...)
 }

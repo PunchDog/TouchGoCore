@@ -68,6 +68,6 @@
         "inurl": "inws"
     },
     "lua": "off",
-    "loglevel": "日志等级,off为不开,其次为INFO,DEBUG,WARN,ERROR",
+    "log_level": "日志等级,off为不开,其次为INFO,DEBUG,WARN,ERROR",
     "map_path": "off"
 }

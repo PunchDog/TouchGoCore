@@ -2,6 +2,7 @@ package main
 
 import (
 	"touchgocore"
+	"touchgocore/websocket"
 )
 
 const (
@@ -13,6 +14,7 @@ func init() {
 }
 
 func main() {
+	websocket.RegisterCall(&Msg{})
 	//启动插件
 	touchgocore.Run(Name)
 }

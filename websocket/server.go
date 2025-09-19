@@ -29,8 +29,11 @@ var (
 )
 
 type ICall interface {
+	// 创建连接时的处理
 	OnConnect(client *Client) bool
+	//收到消息时的处理
 	OnMessage(client *Client, message proto.Message)
+	// 关闭连接时的处理
 	OnClose(client *Client)
 }
 
@@ -91,11 +94,10 @@ func ListenAndServe(port int) error {
 		Handler: r,
 	}
 
-	errChan := make(chan error, 1)
 	go func() { //异步启动
-		errChan <- server.ListenAndServe()
+		server.ListenAndServe()
 	}()
 	serverList = append(serverList, server)
 	//将服务器名字注册到redis中
-	return <-errChan
+	return nil
 }

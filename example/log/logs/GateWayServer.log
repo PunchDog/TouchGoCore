@@ -1,0 +1,39 @@
+{"level":"info","time":"2025-09-19 21:38:28","caller":"D:/TouchGoCore/example/gatewayserver/gatewayserver.go:17","message":"*********************************************************","PID":-1}
+{"level":"info","time":"2025-09-19 21:38:28","caller":"D:/TouchGoCore/example/gatewayserver/gatewayserver.go:17","message":"*         Service:[GateWayServer] Version:[1.0]         *","PID":-1}
+{"level":"info","time":"2025-09-19 21:38:28","caller":"D:/TouchGoCore/example/gatewayserver/gatewayserver.go:17","message":"*********************************************************","PID":-1}
+{"level":"info","time":"2025-09-19 21:38:45","caller":"D:/TouchGoCore/example/gatewayserver/gatewayserver.go:17","message":"加载核心配置","PID":-1}
+{"level":"info","time":"2025-09-19 21:40:36","caller":"D:/TouchGoCore/example/gatewayserver/gatewayserver.go:17","message":"*********************************************************","PID":4012}
+{"level":"info","time":"2025-09-19 21:40:36","caller":"D:/TouchGoCore/example/gatewayserver/gatewayserver.go:17","message":"*         Service:[GateWayServer] Version:[1.0]         *","PID":4012}
+{"level":"info","time":"2025-09-19 21:40:36","caller":"D:/TouchGoCore/example/gatewayserver/gatewayserver.go:17","message":"*********************************************************","PID":4012}
+{"level":"info","time":"2025-09-19 21:40:42","caller":"D:/TouchGoCore/example/gatewayserver/gatewayserver.go:17","message":"加载核心配置","PID":4012}
+{"level":"error","time":"2025-09-19 21:40:55","caller":"D:/TouchGoCore/example/gatewayserver/gatewayserver.go:17","message":"加载配置出错,没有redis配置:dial tcp 192.168.3.16:6379: i/o timeout","PID":4012}
+{"level":"info","time":"2025-09-19 22:16:42","caller":"D:/TouchGoCore/example/gatewayserver/gatewayserver.go:17","message":"*********************************************************","PID":26840}
+{"level":"info","time":"2025-09-19 22:16:42","caller":"D:/TouchGoCore/example/gatewayserver/gatewayserver.go:17","message":"*         Service:[GateWayServer] Version:[1.0]         *","PID":26840}
+{"level":"info","time":"2025-09-19 22:16:42","caller":"D:/TouchGoCore/example/gatewayserver/gatewayserver.go:17","message":"*********************************************************","PID":26840}
+{"level":"info","time":"2025-09-19 22:16:44","caller":"D:/TouchGoCore/example/gatewayserver/gatewayserver.go:17","message":"加载核心配置","PID":26840}
+{"level":"error","time":"2025-09-19 22:16:45","caller":"D:/TouchGoCore/example/gatewayserver/gatewayserver.go:17","message":"加载配置出错,没有redis配置:DENIED Redis is running in protected mode because protected mode is enabled and no password is set for the default user. In this mode connections are only accepted from the loopback interface. If you want to connect from external computers to Redis you may adopt one of the following solutions: 1) Just disable protected mode sending the command 'CONFIG SET protected-mode no' from the loopback interface by connecting to Redis from the same host the server is running, however MAKE SURE Redis is not publicly accessible from internet if you do so. Use CONFIG REWRITE to make this change permanent. 2) Alternatively you can just disable the protected mode by editing the Redis configuration file, and setting the protected mode option to 'no', and then restarting the server. 3) If you started the server manually just for testing, restart it with the '--protected-mode no' option. 4) Set up an authentication password for the default user. NOTE: You only need to do one of the above things in order for the server to start accepting connections from the outside.","PID":26840}
+{"level":"info","time":"2025-09-19 22:18:08","caller":"D:/TouchGoCore/example/gatewayserver/gatewayserver.go:17","message":"*********************************************************","PID":24360}
+{"level":"info","time":"2025-09-19 22:18:08","caller":"D:/TouchGoCore/example/gatewayserver/gatewayserver.go:17","message":"*         Service:[GateWayServer] Version:[1.0]         *","PID":24360}
+{"level":"info","time":"2025-09-19 22:18:08","caller":"D:/TouchGoCore/example/gatewayserver/gatewayserver.go:17","message":"*********************************************************","PID":24360}
+{"level":"info","time":"2025-09-19 22:18:09","caller":"D:/TouchGoCore/example/gatewayserver/gatewayserver.go:17","message":"加载核心配置","PID":24360}
+{"level":"info","time":"2025-09-19 22:21:12","caller":"D:/TouchGoCore/example/gatewayserver/gatewayserver.go:17","message":"*********************************************************","PID":24596}
+{"level":"info","time":"2025-09-19 22:21:12","caller":"D:/TouchGoCore/example/gatewayserver/gatewayserver.go:17","message":"*         Service:[GateWayServer] Version:[1.0]         *","PID":24596}
+{"level":"info","time":"2025-09-19 22:21:12","caller":"D:/TouchGoCore/example/gatewayserver/gatewayserver.go:17","message":"*********************************************************","PID":24596}
+{"level":"info","time":"2025-09-19 22:21:13","caller":"D:/TouchGoCore/example/gatewayserver/gatewayserver.go:17","message":"加载核心配置","PID":24596}
+{"level":"info","time":"2025-09-19 22:21:15","caller":"D:/TouchGoCore/example/gatewayserver/gatewayserver.go:17","message":"加载redis配置成功","PID":24596}
+{"level":"info","time":"2025-09-19 22:21:19","caller":"D:/TouchGoCore/example/gatewayserver/gatewayserver.go:17","message":"启动计时器","PID":24596}
+{"level":"info","time":"2025-09-19 22:21:22","caller":"D:/TouchGoCore/example/gatewayserver/gatewayserver.go:17","message":"不启动lua服务","PID":24596}
+{"level":"error","time":"2025-09-19 22:21:22","caller":"D:/TouchGoCore/example/gatewayserver/gatewayserver.go:17","message":"web服务未开启","PID":24596}
+{"level":"info","time":"2025-09-19 22:21:33","caller":"D:/TouchGoCore/example/gatewayserver/gatewayserver.go:17","message":"touchgocore启动完成","PID":24596}
+{"level":"info","time":"2025-09-19 22:25:20","caller":"D:/TouchGoCore/example/gatewayserver/gatewayserver.go:19","message":"*********************************************************","PID":17648}
+{"level":"info","time":"2025-09-19 22:25:20","caller":"D:/TouchGoCore/example/gatewayserver/gatewayserver.go:19","message":"*         Service:[GateWayServer] Version:[1.0]         *","PID":17648}
+{"level":"info","time":"2025-09-19 22:25:20","caller":"D:/TouchGoCore/example/gatewayserver/gatewayserver.go:19","message":"*********************************************************","PID":17648}
+{"level":"info","time":"2025-09-19 22:25:27","caller":"D:/TouchGoCore/example/gatewayserver/gatewayserver.go:19","message":"加载核心配置","PID":17648}
+{"level":"info","time":"2025-09-19 22:25:27","caller":"D:/TouchGoCore/example/gatewayserver/gatewayserver.go:19","message":"加载redis配置成功","PID":17648}
+{"level":"info","time":"2025-09-19 22:25:27","caller":"D:/TouchGoCore/example/gatewayserver/gatewayserver.go:19","message":"启动计时器","PID":17648}
+{"level":"info","time":"2025-09-19 22:26:36","caller":"D:/TouchGoCore/example/gatewayserver/gatewayserver.go:19","message":"*********************************************************","PID":4324}
+{"level":"info","time":"2025-09-19 22:26:36","caller":"D:/TouchGoCore/example/gatewayserver/gatewayserver.go:19","message":"*         Service:[GateWayServer] Version:[1.0]         *","PID":4324}
+{"level":"info","time":"2025-09-19 22:26:36","caller":"D:/TouchGoCore/example/gatewayserver/gatewayserver.go:19","message":"*********************************************************","PID":4324}
+{"level":"info","time":"2025-09-19 22:26:36","caller":"D:/TouchGoCore/example/gatewayserver/gatewayserver.go:19","message":"加载核心配置","PID":4324}
+{"level":"info","time":"2025-09-19 22:26:36","caller":"D:/TouchGoCore/example/gatewayserver/gatewayserver.go:19","message":"加载redis配置成功","PID":4324}
+{"level":"info","time":"2025-09-19 22:26:36","caller":"D:/TouchGoCore/example/gatewayserver/gatewayserver.go:19","message":"启动计时器","PID":4324}

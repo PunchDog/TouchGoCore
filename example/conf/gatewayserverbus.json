@@ -1,7 +1,7 @@
 {
     "redis": {
-        "redis_host": "192.168.3.16:6379",
-        "redis_password": "",
+        "redis_host": "127.0.0.1:6379",
+        "redis_password": "123456",
         "redis_db": 0
     },
     "ws": {

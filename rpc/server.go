@@ -90,7 +90,7 @@ func (s *RpcServer) Send(name string, pb1, pb2 int32, pb proto.Message) {
 	}
 }
 
-func StartGrpcServer(name string, port int) {
+func StartGrpcServer(name, ip string, port int) {
 	lis, err := net.Listen("tcp", "[::]:"+strconv.Itoa(port))
 	if err != nil {
 		vars.Error("gRPC监听失败: %v", err)
@@ -110,10 +110,14 @@ func StartGrpcServer(name string, port int) {
 	}
 	message.RegisterGrpcServer(service.service, service)
 
-	vars.Info("gRPC服务启动成功,端口:%d", port)
-	if err := s.Serve(lis); err != nil {
-		vars.Error("gRPC服务启动失败: %v", err)
-	}
+	go func(s *RpcServer) {
+		//启动监听
+		if err := s.service.Serve(lis); err != nil {
+			vars.Error("gRPC服务启动失败: %v", err)
+			delete(service_, s.name)
+			return
+		}
+	}(service)
 
 	if service_ == nil {
 		service_ = make(map[string]*RpcServer)

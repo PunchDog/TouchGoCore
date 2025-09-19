@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/go-ini/ini"
+	ini "gopkg.in/ini.v1"
 )
 
 type IniParser struct {

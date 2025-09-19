@@ -57,7 +57,7 @@ type RpcAddr struct {
 type RpcConfig struct {
 	//监听配置,多个端口用|分割
 	Server []*RpcAddr `json:"server"`
-	//外网地址
+	//客户端配置
 	Client []*RpcAddr `json:"client"`
 }
 

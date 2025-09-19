@@ -3,6 +3,7 @@ package rpc
 import (
 	"context"
 	"reflect"
+	"strconv"
 	"touchgocore/network/message"
 	"touchgocore/util"
 	"touchgocore/vars"
@@ -22,6 +23,8 @@ type RpcClient struct {
 	util.Timer
 	// 连接
 	addr string
+	//端口
+	port int
 	//对应的服务器名
 	serverName string
 	// 连接状态
@@ -101,7 +104,7 @@ func newClient(addr string) (*grpc.ClientConn, error) {
 	return conn, nil
 }
 
-func NewRpcClient(servername, addr string) *RpcClient {
+func NewRpcClient(servername, addr string, port int) *RpcClient {
 	if rpcClient_ == nil {
 		rpcClient_ = make(map[string]*RpcClient)
 	}
@@ -109,8 +112,9 @@ func NewRpcClient(servername, addr string) *RpcClient {
 	//创建一个带计时器的客户端指针
 	client := util.NewTimer(1000, -1, &RpcClient{}).(*RpcClient)
 	client.addr = addr
+	client.port = port
 	client.serverName = servername
-	conn, err := newClient(addr)
+	conn, err := newClient(addr + ":" + strconv.Itoa(port))
 	if err == nil {
 		client.connStatus = true
 		client.conn = conn

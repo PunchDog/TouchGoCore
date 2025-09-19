@@ -14,13 +14,12 @@ func Run() {
 		//启动服务器监听
 		// 启动gRPC服务
 		for _, v := range config.Cfg_.RpcPort.Server {
-			StartGrpcServer(v.Name, v.Port)
+			StartGrpcServer(v.Name, v.Addr, v.Port)
 		}
 
 		//启动客户端连接
-		// 初始化客户端连接
 		for _, v := range config.Cfg_.RpcPort.Client {
-			NewRpcClient(v.Name, v.Addr)
+			NewRpcClient(v.Name, v.Addr, v.Port)
 		}
 		vars.Info("gRPC服务启动成功")
 	}
@@ -34,4 +33,8 @@ func Stop() {
 	for _, v := range rpcClient_ {
 		v.conn.Close()
 	}
+}
+
+func SendMsg() {
+
 }

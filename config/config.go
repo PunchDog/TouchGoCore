@@ -20,7 +20,7 @@ type Cfg struct {
 	Lua      string           `json:"lua"`       //off不启动，填写lua文件的相对路径启动lua
 	LogLevel string           `json:"log_level"` //日志等级，off为不开,其次为INFO,DEBUG,WARN,ERROR
 	MapPath  string           `json:"map_path"`  //地图配置位置
-	BeegoWeb *BeegoWebConfig  `json:"beegoweb"`  //beegoweb配置
+	Web      *WebConfig       `json:"web"`       //web配置
 	RpcPort  *RpcConfig       `json:"rpc_port"`  //rpc_port端口，没有则表示不开rpc服务
 	Telegram *TelegramConfig  `json:"telegram"`  //telegram配置
 	//其他配置
@@ -68,8 +68,7 @@ var (
 	ServerName_  string
 	_basePath    = path.Join(path.Dir(os.Args[0]), "../")
 	_defaultFile = path.Join(_basePath, "conf/config.ini")
-	_defServerId = 1 //TODO 0
-	_serverFlag  = flag.Int("s", _defServerId, "server flag")
+	_defServerId = flag.String("s", "default", "server flag") //默认服务器ID
 )
 
 func GetBasePath() string {
@@ -80,8 +79,8 @@ func GetDefaultFie() string {
 	return _defaultFile
 }
 
-func GetServerID() int {
-	return _defServerId
+func GetServerID() string {
+	return *_defServerId
 }
 
 func PathExists(path string) bool {

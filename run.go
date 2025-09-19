@@ -10,9 +10,9 @@ import (
 	"syscall"
 	"time"
 
-	"touchgocore/beegoweb"
 	"touchgocore/config"
 	"touchgocore/db"
+	"touchgocore/gin"
 	lua "touchgocore/golua"
 	"touchgocore/ini"
 	"touchgocore/mapmanager"
@@ -117,8 +117,8 @@ func Run(serverName string) {
 	//启动lua脚本
 	lua.Run()
 
-	//启动beego
-	beegoweb.Run()
+	//启动gin
+	gin.Run()
 
 	// 启动gRPC服务
 	rpc.Run()

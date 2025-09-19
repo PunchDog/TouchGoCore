@@ -33,11 +33,10 @@
             }
         ]
     },
-    "beegoweb": {
-        "说明": "这是一个beegoweb框架使用的配置",
+    "web": {
+        "说明": "这是一个web框架使用的配置",
         "httpport": 1000,
-        "view": "",
-        "static": ""
+        "static": "文件夹路径"
     },
     "这里是基础配置": "",
     "rpc_port": {

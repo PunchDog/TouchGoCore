@@ -4,6 +4,11 @@
         "redis_password": "",
         "redis_db": 0
     },
+    "ws": {
+        "port": [
+            7000
+        ]
+    },
     "http": "off",
     "log_level": "debug"
 }

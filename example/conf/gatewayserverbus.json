@@ -6,7 +6,10 @@
     },
     "ws": {
         "port": [
-            7000
+            {
+                "port": 8000,
+                "callbackclassname": "GateMsg"
+            }
         ]
     },
     "http": "off",

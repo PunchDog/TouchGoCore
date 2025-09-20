@@ -2,10 +2,14 @@ package websocket
 
 import (
 	"fmt"
+	"reflect"
 	"sync"
 	"touchgocore/config"
+	"touchgocore/syncmap"
 	"touchgocore/util"
 	"touchgocore/vars"
+
+	"google.golang.org/protobuf/proto"
 )
 
 const (
@@ -16,8 +20,8 @@ const (
 var (
 	closeCh    chan bool          = nil
 	msgQueue   chan *msgQueueType = nil
-	call       ICall              = nil
 	clientpool *sync.Pool         = nil
+	clientcall syncmap.Map
 )
 
 type msgQueueType struct {
@@ -25,27 +29,50 @@ type msgQueueType struct {
 	data []byte
 }
 
-func RegisterCall(call1 ICall) {
-	call = call1
+type defaultCall struct {
+}
+
+func (this *defaultCall) OnConnect(client *Client) bool {
+	vars.Info("defaultCall OnConnect")
+	return true
+}
+
+func (this *defaultCall) OnMessage(client *Client, msg proto.Message) {
+	vars.Info("defaultCall OnMessage")
+}
+
+func (this *defaultCall) OnClose(client *Client) {
+	vars.Info("defaultCall OnClose")
+}
+
+func RegisterCall(className string, factoryFunc ICall) {
+	clientcall.Store(className, sync.Pool{
+		New: func() interface{} {
+			newCall := reflect.New(reflect.TypeOf(factoryFunc)).Interface().(ICall)
+			return newCall
+		},
+	})
 }
 
 func Run() {
-	if config.Cfg_.Ws == nil || call == nil {
+	if config.Cfg_.Ws == nil {
 		return
 	}
 	closeCh = make(chan bool)
 	msgQueue = make(chan *msgQueueType, MAX_READ_BUFFER_SIZE)
 	clientpool = &sync.Pool{
 		New: func() interface{} {
-			return &Client{}
+			return &Client{
+				ICall: nil,
+			}
 		},
 	}
 
 	//启动监听
 	for _, port := range config.Cfg_.Ws.Port {
-		err := ListenAndServe(port)
+		err := ListenAndServe(port.Port, port.CallbackClassName)
 		if err != nil {
-			vars.Error(fmt.Sprintf("websocket服务启动端口%d监听失败:%s", port, err.Error()))
+			vars.Error(fmt.Sprintf("websocket服务启动端口%d监听失败:%s", port.Port, err.Error()))
 			continue
 		}
 	}
@@ -53,7 +80,7 @@ func Run() {
 }
 
 func Stop() {
-	if config.Cfg_.Ws == nil || call == nil {
+	if config.Cfg_.Ws == nil {
 		return
 	}
 
@@ -80,9 +107,10 @@ func Tick() chan bool {
 	case read_msg := <-msgQueue:
 		// 	处理消息队列
 		if c, h := clientmap.Load(read_msg.uid); h {
-			msg1 := util.PasreFSMessage(read_msg.data)
-			if msg1 != nil {
-				call.OnMessage(c.(*Client), msg1)
+			pbmsg := util.PasreFSMessage(read_msg.data)
+			if pbmsg != nil {
+				client := c.(*Client)
+				client.OnMessage(client, pbmsg)
 			}
 		}
 	}

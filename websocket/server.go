@@ -61,8 +61,15 @@ func getClientIP(r *http.Request) string {
 }
 
 // 监听端口
-func ListenAndServe(port int) error {
+func ListenAndServe(port int, className string) error {
 	r := gin.Default()
+	
+	// 使用中间件将className存储到gin.Context中
+	r.Use(func(c *gin.Context) {
+		c.Set("className", className)
+		c.Next()
+	})
+	
 	r.GET("/ws", func(c *gin.Context) {
 		defer func() {
 			if err := recover(); err != nil {
@@ -81,7 +88,14 @@ func ListenAndServe(port int) error {
 			return
 		}
 
-		_, err = NewClient(wsConn, getClientIP(c.Request))
+		// 从gin.Context中获取className
+		classNameFromContext, exists := c.Get("className")
+		if !exists {
+			classNameFromContext = className // 如果不存在，使用传入的className
+		}
+		classNameStr := classNameFromContext.(string)
+		
+		_, err = NewClient(wsConn, getClientIP(c.Request), classNameStr)
 		if err != nil {
 			vars.Error("", err)
 			return

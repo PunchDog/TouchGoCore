@@ -2,6 +2,7 @@ package touchgocore
 
 import (
 	"errors"
+	"flag"
 	"fmt"
 	"os"
 	"os/signal"
@@ -38,6 +39,9 @@ func Run(serverName string) {
 			fmt.Println(err)
 		}
 	}()
+
+	//解析命令行参数
+	flag.Parse()
 
 	config.ServerName_ = serverName
 	config.Cfg_.Load(serverName)

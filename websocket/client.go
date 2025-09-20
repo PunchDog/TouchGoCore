@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
+	"sync"
 	"time"
 	"touchgocore/syncmap"
 	"touchgocore/util"
@@ -19,11 +20,13 @@ var clientmap syncmap.Map
 // 客户端
 // 修改Client结构体定义
 type Client struct {
+	ICall
 	wsConnect  *websocket.Conn
 	remoteAddr string
 	closeCh    chan bool
 	msgChan    chan []byte
 	Uid        int64
+	iCallName  string
 }
 
 // 新增带重试机制的WebSocket连接方法
@@ -106,7 +109,7 @@ func (c *Client) Connected() bool {
 
 func (c *Client) Close(reason string) {
 	if c.Connected() {
-		call.OnClose(c)
+		c.OnClose(c)
 		close(c.closeCh)
 		c.wsConnect.Close()
 		close(c.msgChan)
@@ -115,7 +118,17 @@ func (c *Client) Close(reason string) {
 		c.wsConnect = nil
 		c.remoteAddr = ""
 		c.Uid = 0
-		clientpool.Put(c)
+		if clientpool != nil {
+			v, ok := clientcall.Load(c.iCallName)
+			if ok {
+				icallpool := v.(sync.Pool)
+				icallpool.Put(c.ICall)
+			} else {
+				vars.Error("未找到类名对应的ICall接口实现: %s", c.iCallName)
+			}
+			c.ICall = nil
+			clientpool.Put(c)
+		}
 		vars.Info(fmt.Sprintf("%s 连接关闭，原因：%s", c.remoteAddr, reason))
 	}
 }
@@ -149,7 +162,7 @@ func (c *Client) SendMsg(msg ...any) {
 }
 
 // 修改InitConnection为NewClient
-func NewClient(connType interface{}, remoteAddr string) (*Client, error) {
+func NewClient(connType interface{}, remoteAddr string, className string) (*Client, error) {
 	if max_uid == 0 || max_uid > time.Now().UnixNano()+1 {
 		max_uid = time.Now().UnixNano() + 1
 	} else {
@@ -157,23 +170,30 @@ func NewClient(connType interface{}, remoteAddr string) (*Client, error) {
 	}
 
 	var client *Client = nil
+	var err error = nil
 	if clientpool != nil {
 		client = clientpool.Get().(*Client)
 		if client == nil {
 			return nil, errors.New("内存池获取失败")
 		}
-		client.Uid = max_uid
-		client.remoteAddr = remoteAddr
-		client.closeCh = make(chan bool, 1)
-		client.msgChan = make(chan []byte, MAX_WRITE_BUFFER_SIZE)
 	} else {
-		client = &Client{
-			closeCh:    make(chan bool, 1),
-			msgChan:    make(chan []byte, MAX_WRITE_BUFFER_SIZE),
-			Uid:        max_uid,
-			remoteAddr: remoteAddr,
-		}
+		client = &Client{}
 	}
+
+	client.Uid = max_uid
+	client.remoteAddr = remoteAddr
+	client.closeCh = make(chan bool, 1)
+	client.msgChan = make(chan []byte, MAX_WRITE_BUFFER_SIZE)
+	client.iCallName = className
+
+	defer func() {
+		if err != nil {
+			if client != nil && clientpool != nil {
+				client.ICall = nil
+				clientpool.Put(client)
+			}
+		}
+	}()
 
 	switch v := connType.(type) {
 	case string: // 客户端主动连接模式
@@ -187,8 +207,26 @@ func NewClient(connType interface{}, remoteAddr string) (*Client, error) {
 	}
 
 	client.remoteAddr = remoteAddr
+	//使用反射创建ICall接口
+	if className != "" {
+		if v, h := clientcall.Load(className); h {
+			icallpool := v.(sync.Pool)
+			icall := icallpool.Get()
+			if icall == nil {
+				vars.Error("内存池获取失败: %s", className)
+				return nil, errors.New("内存池获取失败")
+			}
+			client.ICall = icall.(ICall)
+		} else {
+			vars.Error("未找到类名对应的ICall接口实现: %s", className)
+			return nil, errors.New("未找到类名对应的ICall接口实现")
+		}
+	} else {
+		//使用默认的
+		client.ICall = &defaultCall{}
+	}
 
-	if !call.OnConnect(client) {
+	if !client.OnConnect(client) {
 		client.Close("连接初始化失败")
 		return nil, errors.New("连接回调验证失败")
 	}

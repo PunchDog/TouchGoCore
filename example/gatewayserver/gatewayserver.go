@@ -14,7 +14,7 @@ func init() {
 }
 
 func main() {
-	websocket.RegisterCall(&Msg{})
+	websocket.RegisterCall("GateMsg", &GateMsg{})
 	//启动插件
 	touchgocore.Run(Name)
 }

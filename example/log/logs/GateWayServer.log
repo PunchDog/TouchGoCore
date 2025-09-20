@@ -37,3 +37,13 @@
 {"level":"info","time":"2025-09-19 22:26:36","caller":"D:/TouchGoCore/example/gatewayserver/gatewayserver.go:19","message":"加载核心配置","PID":4324}
 {"level":"info","time":"2025-09-19 22:26:36","caller":"D:/TouchGoCore/example/gatewayserver/gatewayserver.go:19","message":"加载redis配置成功","PID":4324}
 {"level":"info","time":"2025-09-19 22:26:36","caller":"D:/TouchGoCore/example/gatewayserver/gatewayserver.go:19","message":"启动计时器","PID":4324}
+{"level":"info","time":"2025-09-20 10:09:48","caller":"D:/TouchGoCore/example/gatewayserver/gatewayserver.go:19","message":"*********************************************************","PID":7836}
+{"level":"info","time":"2025-09-20 10:09:48","caller":"D:/TouchGoCore/example/gatewayserver/gatewayserver.go:19","message":"*         Service:[GateWayServer] Version:[1.0]         *","PID":7836}
+{"level":"info","time":"2025-09-20 10:09:48","caller":"D:/TouchGoCore/example/gatewayserver/gatewayserver.go:19","message":"*********************************************************","PID":7836}
+{"level":"info","time":"2025-09-20 10:09:48","caller":"D:/TouchGoCore/example/gatewayserver/gatewayserver.go:19","message":"加载核心配置","PID":7836}
+{"level":"info","time":"2025-09-20 10:09:48","caller":"D:/TouchGoCore/example/gatewayserver/gatewayserver.go:19","message":"加载redis配置成功","PID":7836}
+{"level":"info","time":"2025-09-20 10:09:48","caller":"D:/TouchGoCore/example/gatewayserver/gatewayserver.go:19","message":"启动计时器","PID":7836}
+{"level":"info","time":"2025-09-20 10:10:38","caller":"D:/TouchGoCore/example/gatewayserver/gatewayserver.go:19","message":"websocket服务启动","PID":7836}
+{"level":"info","time":"2025-09-20 10:10:38","caller":"D:/TouchGoCore/example/gatewayserver/gatewayserver.go:19","message":"不启动lua服务","PID":7836}
+{"level":"error","time":"2025-09-20 10:10:38","caller":"D:/TouchGoCore/example/gatewayserver/gatewayserver.go:19","message":"web服务未开启","PID":7836}
+{"level":"info","time":"2025-09-20 10:10:38","caller":"D:/TouchGoCore/example/gatewayserver/gatewayserver.go:19","message":"touchgocore启动完成","PID":7836}

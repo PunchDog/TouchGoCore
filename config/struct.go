@@ -38,9 +38,15 @@ type WebConfig struct {
 	Static   *string `json:"static"`   //文件服
 }
 
+type WebsocketPort struct {
+	//连接的端口
+	Port int `json:"port"`
+	//端口对应的回调类名
+	CallbackClassName string `json:"callbackclassname"`
+}
 type WebsocketConfig struct {
 	//监听配置,多个端口用|分割
-	Port []int `json:"port"`
+	Port []*WebsocketPort `json:"port"`
 	//外网地址
 	URL string `json:"url"`
 	//内网地址

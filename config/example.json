@@ -62,7 +62,11 @@
     "ws": {
         "说明:": "这里是websocket配置,作为服务器监听配置,多个端口用|分割",
         "port": [
-            8000
+            {
+                "port": 8000,
+                "callbackclassname说明": "端口对应的回调类的名字例：GateMsg,对应实现代码应为type GateMsg struct{websocket.ICall}，情具体实现ICall接口需要的函数",
+                "callbackclassname": "GateMsg"
+            }
         ],
         "url": "ws",
         "inurl": "inws"

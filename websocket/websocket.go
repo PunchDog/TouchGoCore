@@ -48,7 +48,7 @@ func (this *defaultCall) OnClose(client *Client) {
 func RegisterCall(className string, factoryFunc ICall) {
 	clientcall.Store(className, sync.Pool{
 		New: func() interface{} {
-			newCall := reflect.New(reflect.TypeOf(factoryFunc)).Interface().(ICall)
+			newCall := reflect.New(reflect.TypeOf(factoryFunc).Elem()).Interface().(ICall)
 			return newCall
 		},
 	})

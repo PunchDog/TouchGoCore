@@ -232,7 +232,7 @@ func NewClient(connType interface{}, remoteAddr string, className string) (*Clie
 	}
 
 	clientmap.Store(client.Uid, client)
-	vars.Info(fmt.Sprintf("%s 连接建立成功", client.remoteAddr))
+	// vars.Info("%s 连接建立成功", client.remoteAddr)
 	go client.readLoop()
 	go client.handleLoop()
 	return client, nil

@@ -11,24 +11,32 @@ import (
 )
 
 // 跳跃表最大层数
-const SKIPLIST_MAXLEVEL = 32
+const SkipListMaxLevel = 32
 
 // 随机概率
-const SKIPLIST_P = 0.25
+const SkipListProbability = 0.25
 
+// RankInfo 排名信息结构体
 type RankInfo struct {
-	Id        int64
-	Val       int64
+	ID        int64
+	Value     int64
 	Rank      int32
 	Timestamp int64
 }
 
-func less(a, b int64) bool {
+// 比较函数，用于降序排序
+func compareDesc(a, b int64) bool {
 	return a > b
 }
 
-func (info1 *RankInfo) cmp(info2 *RankInfo) int {
-	if info1.Id == info2.Id {
+// 比较函数，用于跳跃表的降序排序（值大的在前面）
+func less(a, b int64) bool {
+	return a < b
+}
+
+// Compare 比较两个RankInfo对象
+func (info1 *RankInfo) Compare(info2 *RankInfo) int {
+	if info1.ID == info2.ID {
 		return 0
 	}
 	if info1.Timestamp < info2.Timestamp {
@@ -36,47 +44,50 @@ func (info1 *RankInfo) cmp(info2 *RankInfo) int {
 	} else if info1.Timestamp > info2.Timestamp {
 		return 1
 	}
-	if info1.Id < info2.Id {
+	if info1.ID < info2.ID {
 		return -1
-	} else if info1.Id > info2.Id {
+	} else if info1.ID > info2.ID {
 		return 1
 	}
 	return 0
 }
 
-type skiplistlevel struct {
-	Forward *Skiplistnode
+// SkipListLevel 跳跃表层结构
+type SkipListLevel struct {
+	Forward *SkipListNode
 	Span    int32
 }
 
-type Skiplistnode struct {
+// SkipListNode 跳跃表节点
+type SkipListNode struct {
 	Key   int64
-	Val   *RankInfo
-	Level []skiplistlevel
+	Value *RankInfo
+	Level []SkipListLevel
 }
 
-type Skiplist struct {
-	Header *Skiplistnode
-	Tail   *Skiplistnode
+// SkipList 跳跃表结构
+type SkipList struct {
+	Header *SkipListNode
+	Tail   *SkipListNode
 	Length int32
 	Level  int32
 }
 
-func newSkiplistnode(level int32, key int64, val *RankInfo) *Skiplistnode {
-	node := new(Skiplistnode)
+func newSkipListNode(level int32, key int64, val *RankInfo) *SkipListNode {
+	node := new(SkipListNode)
 	node.Key = key
-	node.Val = val
-	node.Level = make([]skiplistlevel, level)
+	node.Value = val
+	node.Level = make([]SkipListLevel, level)
 	for i := level - 1; i >= 0; i-- {
 		node.Level[i].Forward = nil
 	}
 	return node
 }
 
-func newSkiplist() *Skiplist {
-	sl := new(Skiplist)
-	sl.Header = newSkiplistnode(SKIPLIST_MAXLEVEL, -1, nil)
-	for i := 0; i < SKIPLIST_MAXLEVEL; i++ {
+func newSkipList() *SkipList {
+	sl := new(SkipList)
+	sl.Header = newSkipListNode(SkipListMaxLevel, -1, nil)
+	for i := 0; i < SkipListMaxLevel; i++ {
 		sl.Header.Level[i].Forward = nil
 		sl.Header.Level[i].Span = 0
 	}
@@ -88,15 +99,15 @@ func newSkiplist() *Skiplist {
 func randomLevel() int32 {
 	lvl := int32(1)
 	rand.Seed(time.Now().UnixNano())
-	for rand.Float32() < SKIPLIST_P && lvl < SKIPLIST_MAXLEVEL {
+	for rand.Float32() < SkipListProbability && lvl < SkipListMaxLevel {
 		lvl++
 	}
 	return lvl
 }
 
-func (sl *Skiplist) insert(key int64, val *RankInfo) {
-	var update [SKIPLIST_MAXLEVEL]*Skiplistnode
-	var rank [SKIPLIST_MAXLEVEL]int32
+func (sl *SkipList) insert(key int64, val *RankInfo) {
+	var update [SkipListMaxLevel]*SkipListNode
+	var rank [SkipListMaxLevel]int32
 	x := sl.Header
 	for i := sl.Level - 1; i >= 0; i-- {
 		if i == sl.Level-1 {
@@ -107,7 +118,7 @@ func (sl *Skiplist) insert(key int64, val *RankInfo) {
 		for x.Level[i].Forward != nil &&
 			(less(x.Level[i].Forward.Key, key) ||
 				(x.Level[i].Forward.Key == key &&
-					x.Level[i].Forward.Val.cmp(val) < 0)) {
+					x.Level[i].Forward.Value.Compare(val) < 0)) {
 			rank[i] += x.Level[i].Span
 			x = x.Level[i].Forward
 		}
@@ -124,7 +135,7 @@ func (sl *Skiplist) insert(key int64, val *RankInfo) {
 		sl.Level = level
 	}
 
-	x = newSkiplistnode(level, key, val)
+	x = newSkipListNode(level, key, val)
 	for i := int32(0); i < level; i++ {
 		x.Level[i].Forward = update[i].Level[i].Forward
 		update[i].Level[i].Forward = x
@@ -139,20 +150,20 @@ func (sl *Skiplist) insert(key int64, val *RankInfo) {
 	sl.Length++
 }
 
-func (sl *Skiplist) remove(key int64, val *RankInfo) bool {
-	var update [SKIPLIST_MAXLEVEL]*Skiplistnode
+func (sl *SkipList) remove(key int64, val *RankInfo) bool {
+	var update [SkipListMaxLevel]*SkipListNode
 	x := sl.Header
 	for i := sl.Level - 1; i >= 0; i-- {
 		for x.Level[i].Forward != nil &&
 			(less(x.Level[i].Forward.Key, key) ||
 				(x.Level[i].Forward.Key == key &&
-					x.Level[i].Forward.Val.cmp(val) < 0)) {
+					x.Level[i].Forward.Value.Compare(val) < 0)) {
 			x = x.Level[i].Forward
 		}
 		update[i] = x
 	}
 	x = x.Level[0].Forward
-	if x != nil && x.Key == key && x.Val.cmp(val) == 0 {
+	if x != nil && x.Key == key && x.Value.Compare(val) == 0 {
 		// delete node
 		for i := int32(0); i < sl.Level; i++ {
 			if update[i].Level[i].Forward == x {
@@ -172,42 +183,40 @@ func (sl *Skiplist) remove(key int64, val *RankInfo) bool {
 	return false
 }
 
-func (sl *Skiplist) search(key int64, val *RankInfo) bool {
+func (sl *SkipList) search(key int64, val *RankInfo) bool {
 	x := sl.Header
 	for i := sl.Level - 1; i >= 0; i-- {
 		for x.Level[i].Forward != nil &&
 			(less(x.Level[i].Forward.Key, key) ||
 				(x.Level[i].Forward.Key == key &&
-					x.Level[i].Forward.Val.cmp(val) < 0)) {
-			//x.Level[i].Forward.Val.(int) < val.(int))) {
+					x.Level[i].Forward.Value.Compare(val) < 0)) {
 			x = x.Level[i].Forward
 		}
 	}
 	x = x.Level[0].Forward
-	return x != nil && x.Key == key && x.Val.cmp(val) == 0
+	return x != nil && x.Key == key && x.Value.Compare(val) == 0
 }
 
-func (sl *Skiplist) rank(key int64, val *RankInfo) int32 {
+func (sl *SkipList) rank(key int64, val *RankInfo) int32 {
 	rank := int32(0)
 	x := sl.Header
 	for i := sl.Level - 1; i >= 0; i-- {
 		for x.Level[i].Forward != nil &&
 			(less(x.Level[i].Forward.Key, key) ||
 				(x.Level[i].Forward.Key == key &&
-					x.Level[i].Forward.Val.cmp(val) < 0)) {
-			//x.Level[i].Forward.Val.(int) < val.(int))) {
+					x.Level[i].Forward.Value.Compare(val) < 0)) {
 			rank += x.Level[i].Span
 			x = x.Level[i].Forward
 		}
 	}
 	x = x.Level[0].Forward
-	if x != nil && x.Key == key && x.Val.cmp(val) == 0 {
+	if x != nil && x.Key == key && x.Value.Compare(val) == 0 {
 		return rank
 	}
 	return -1
 }
 
-func (sl *Skiplist) searchByRank(rank int32) (int64, *RankInfo) {
+func (sl *SkipList) searchByRank(rank int32) (int64, *RankInfo) {
 	visited := int32(0)
 	x := sl.Header
 	for i := sl.Level - 1; i >= 0; i-- {
@@ -216,13 +225,13 @@ func (sl *Skiplist) searchByRank(rank int32) (int64, *RankInfo) {
 			x = x.Level[i].Forward
 		}
 		if visited == rank {
-			return x.Key, x.Val
+			return x.Key, x.Value
 		}
 	}
 	return -1, nil
 }
 
-func (sl *Skiplist) getFirstByRank(rank int32) *Skiplistnode {
+func (sl *SkipList) getFirstByRank(rank int32) *SkipListNode {
 	visited := int32(0)
 	x := sl.Header
 	for i := sl.Level - 1; i >= 0; i-- {
@@ -239,15 +248,15 @@ func (sl *Skiplist) getFirstByRank(rank int32) *Skiplistnode {
 
 func copyValue(v *RankInfo) *RankInfo {
 	val := &RankInfo{
-		Id:        v.Id,
-		Val:       v.Val,
+		ID:        v.ID,
+		Value:     v.Value,
 		Rank:      v.Rank,
 		Timestamp: v.Timestamp,
 	}
 	return val
 }
 
-func (sl *Skiplist) searchByRankRange(min, max int32) []*RankInfo {
+func (sl *SkipList) searchByRankRange(min, max int32) []*RankInfo {
 	res := make([]*RankInfo, 0)
 	st := sl.getFirstByRank(min)
 	if st == nil {
@@ -256,30 +265,30 @@ func (sl *Skiplist) searchByRankRange(min, max int32) []*RankInfo {
 
 	rank := min
 	for i := st; rank <= max && i != nil; i = i.Level[0].Forward {
-		i.Val.Rank = rank
-		val := copyValue(i.Val)
+		i.Value.Rank = rank
+		val := copyValue(i.Value)
 		res = append(res, val)
 		rank++
 	}
 	return res
 }
 
-func (sl *Skiplist) foreach(do func(int64, interface{})) {
+func (sl *SkipList) foreach(do func(int64, interface{})) {
 	x := sl.Header
 	for i := x.Level[0].Forward; i != nil; i = i.Level[0].Forward {
-		do(i.Key, i.Val)
+		do(i.Key, i.Value)
 	}
 }
 
 type RankTree struct {
-	Sl *Skiplist
+	Sl *SkipList
 	//EntryMapping map[int64]*RankInfo
 	EntryMapping sync.Map
 }
 
 func NewRankTree() *RankTree {
 	rt := new(RankTree)
-	rt.Sl = newSkiplist()
+	rt.Sl = newSkipList()
 	//rt.EntryMapping = make(map[int64]*RankInfo)
 	return rt
 }
@@ -290,19 +299,19 @@ func (rt *RankTree) AddRankInfo(uid int64, val int64, timestamp int64) {
 	//if info = rt.EntryMapping[uid]; info != nil {
 	if tempV, has := rt.EntryMapping.Load(uid); has {
 		info = tempV.(*RankInfo)
-		if info.Val == val {
+		if info.Value == val {
 			return
 		}
-		rt.Sl.remove(info.Val, info)
-		info.Val = val
+		rt.Sl.remove(info.Value, info)
+		info.Value = val
 		info.Timestamp = timestamp
 	} else {
 		info = new(RankInfo)
-		info.Id = uid
-		info.Val = val
+		info.ID = uid
+		info.Value = val
 		info.Timestamp = timestamp
 	}
-	rt.Sl.insert(info.Val, info)
+	rt.Sl.insert(info.Value, info)
 	//rt.EntryMapping[uid] = info
 	rt.EntryMapping.Store(uid, info)
 }
@@ -312,7 +321,7 @@ func (rt *RankTree) RemoveRankInfo(uid int64) bool {
 	//if info := rt.EntryMapping[uid]; info != nil {
 	if tempV, has := rt.EntryMapping.Load(uid); has {
 		info := tempV.(*RankInfo)
-		rt.Sl.remove(info.Val, info)
+		rt.Sl.remove(info.Value, info)
 		//delete(rt.EntryMapping, uid)
 		rt.EntryMapping.Delete(uid)
 		return true
@@ -321,7 +330,7 @@ func (rt *RankTree) RemoveRankInfo(uid int64) bool {
 }
 
 // 更新排名信息
-//TODO 名字去掉
+// TODO 名字去掉
 func (rt *RankTree) UpdateRankInfo(uid int64, val int64, timestamp int64) {
 	// if info := rt.EntryMapping[uid]; info == nil || info.Val != val {
 	// 	rt.RemoveRankInfo(uid)
@@ -331,7 +340,7 @@ func (rt *RankTree) UpdateRankInfo(uid int64, val int64, timestamp int64) {
 	tempV, has := rt.EntryMapping.Load(uid)
 	if has {
 		info := tempV.(*RankInfo)
-		if info.Val == val {
+		if info.Value == val {
 			return
 		}
 	}
@@ -350,7 +359,7 @@ func (rt *RankTree) QueryRankInfo(uid int64) *RankInfo {
 	} else {
 		return nil
 	}
-	info.Rank = rt.Sl.rank(info.Val, info) + 1
+	info.Rank = rt.Sl.rank(info.Value, info) + 1
 	return info
 }
 
@@ -377,7 +386,7 @@ func (rt *RankTree) QueryByRank(rank int32) *RankInfo {
 	return val
 }
 
-//获取排名长度
+// 获取排名长度
 func (rt *RankTree) RankLength() int32 {
 	return rt.Sl.Length
 }
@@ -435,7 +444,7 @@ type DbRankInfo struct {
 
 var (
 	RTS      map[int64]*RankTree
-	rts_lock sync.RWMutex
+	RTSLock sync.RWMutex
 )
 
 // 从dump加载排名模块
@@ -457,14 +466,14 @@ func LoadRankTrees(infos []DbRankInfo) map[int64]*RankTree {
 // dump排名模块
 func saveRankTrees(rts map[int64]*RankTree) []DbRankInfo {
 	infos := make([]DbRankInfo, 0)
-	rts_lock.RLock()
+	RTSLock.RLock()
 	for Type, rt := range rts {
 		rt.EntryMapping.Range(func(key, tempV interface{}) bool {
 			entry := tempV.(*RankInfo)
 			info := DbRankInfo{
 				Type:      Type,
-				Id:        entry.Id,
-				Val:       entry.Val,
+				Id:        entry.ID,
+				Val:       entry.Value,
 				Timestamp: entry.Timestamp,
 			}
 			infos = append(infos, info)
@@ -480,7 +489,7 @@ func saveRankTrees(rts map[int64]*RankTree) []DbRankInfo {
 		// 	infos = append(infos, info)
 		// }
 	}
-	rts_lock.RUnlock()
+	RTSLock.RUnlock()
 	return infos
 }
 
@@ -505,7 +514,7 @@ func GetRankTree(rtype int64) *RankTree {
 	return rt
 }
 
-//获取所有的排行榜
+// 获取所有的排行榜
 func GetAllRankTree() *map[int64]*RankTree {
 	return &RTS
 }

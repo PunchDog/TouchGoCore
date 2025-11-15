@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path"
 	"runtime"
 	"strconv"
 	"syscall"
@@ -54,7 +55,7 @@ func Run(serverName string) {
 	}
 
 	//创建日志文件
-	vars.Run(config.GetBasePath()+"/log/", config.ServerName_, config.Cfg_.LogLevel)
+	vars.Run(path.Join(config.GetBasePath(), "/log"), config.ServerName_, config.Cfg_.LogLevel)
 
 	centerstr := fmt.Sprintf("*         Service:[%s] Version:[%s]         *", serverName, util.Version)
 	l := len(centerstr)

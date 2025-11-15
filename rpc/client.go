@@ -110,7 +110,13 @@ func NewRpcClient(servername, addr string, port int) *RpcClient {
 	}
 
 	//创建一个带计时器的客户端指针
-	client := util.NewTimer(1000, -1, &RpcClient{}).(*RpcClient)
+	// client := util.NewTimer(1000, -1, &RpcClient{}).(*RpcClient)
+	c, err := util.NewTimer(1000, -1, &RpcClient{})
+	if err != nil {
+		vars.Error("创建客户端失败:", err)
+		return nil
+	}
+	client := c.(*RpcClient)
 	client.addr = addr
 	client.port = port
 	client.serverName = servername

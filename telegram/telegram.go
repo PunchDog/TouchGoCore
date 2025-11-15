@@ -143,7 +143,12 @@ func TelegramStart() {
 	closeCh = make(chan any)
 
 	//创建定时器,每1分钟发送一次心跳
-	timer := util.NewTimer(60*1000, -1, &telegramTimer{}).(*telegramTimer)
+	t, err := util.NewTimer(60*1000, -1, &telegramTimer{})
+	if err != nil {
+		vars.Error("telegram timer error", err)
+		return
+	}
+	timer := t.(*telegramTimer)
 	timer.bot = bot
 	util.AddTimer(timer)
 

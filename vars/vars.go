@@ -2,44 +2,110 @@ package vars
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"path"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
 
-var logpath string
+// 错误定义
+var (
+	ErrLoggerNotInitialized  = errors.New("logger not initialized")
+	ErrInvalidLogLevel       = errors.New("invalid log level")
+	ErrFileCreateFailed      = errors.New("failed to create log file")
+	ErrDirectoryCreateFailed = errors.New("failed to create log directory")
+)
 
-// ZapSlogHandler 实现 slog.Handler
-type ZapSlogHandler struct {
-	zapLogger   *zap.Logger
-	level       *slog.LevelVar // 动态日志级别
-	addSource   bool           // 是否记录调用位置
-	groupPrefix string         // 存储当前分组路径（如 "parent.child."）
+// 日志级别枚举
+const (
+	LogLevelDebug = "debug"
+	LogLevelInfo  = "info"
+	LogLevelWarn  = "warn"
+	LogLevelError = "error"
+	LogLevelOff   = "off"
+)
+
+// LogConfig 日志配置结构
+// 使用结构体封装配置，提高可维护性
+type LogConfig struct {
+	LogPath  string // 日志文件路径
+	LogName  string // 日志文件名（不含扩展名）
+	LogLevel string // 日志级别
+	MaxSize  int64  // 日志文件最大大小（MB）
+	MaxAge   int    // 日志文件最大保留天数
+	Compress bool   // 是否压缩旧日志
+	Stdout   bool   // 是否输出到标准输出
 }
 
-// Enabled 检查级别是否启用
+// DefaultConfig 默认配置
+func DefaultConfig() LogConfig {
+	return LogConfig{
+		LogPath:  "./logs",
+		LogName:  "default",
+		LogLevel: LogLevelDebug,
+		MaxSize:  100, // 100MB
+		MaxAge:   30,  // 30天
+		Compress: true,
+		Stdout:   true,
+	}
+}
+
+// LoggerManager 日志管理器
+type LoggerManager struct {
+	config    LogConfig
+	logger    *slog.Logger
+	zapLogger *zap.Logger
+	file      *os.File
+	isEnabled bool
+	mu        sync.RWMutex
+}
+
+// ZapSlogHandler 优化后的日志处理器
+type ZapSlogHandler struct {
+	zapLogger   *zap.Logger
+	level       *slog.LevelVar
+	addSource   bool
+	groupPrefix string
+	pid         int // 进程ID缓存
+}
+
+// NewZapSlogHandler 创建日志处理器
+func NewZapSlogHandler(zapLogger *zap.Logger, level slog.Level) *ZapSlogHandler {
+	lv := &slog.LevelVar{}
+	lv.Set(level)
+
+	return &ZapSlogHandler{
+		zapLogger: zapLogger.WithOptions(zap.AddCallerSkip(1)),
+		level:     lv,
+		addSource: true,
+		pid:       os.Getpid(), // 缓存进程ID
+	}
+}
+
+// Enabled 检查日志级别是否启用
 func (h *ZapSlogHandler) Enabled(_ context.Context, level slog.Level) bool {
 	return level >= h.level.Level()
 }
 
-// Handle 核心日志处理逻辑
+// Handle 处理日志记录
 func (h *ZapSlogHandler) Handle(_ context.Context, r slog.Record) error {
-	// 转换字段为Zap格式（避免反射）
-	fields := make([]zap.Field, 0, r.NumAttrs())
-	fields = append(fields, zap.Any("PID", os.Getpid()))
+	fields := make([]zap.Field, 0, r.NumAttrs()+1) // 预分配容量
+	fields = append(fields, zap.Int("PID", h.pid)) // 使用缓存
+
 	r.Attrs(func(attr slog.Attr) bool {
 		fields = append(fields, zap.Any(attr.Key, attr.Value.Any()))
 		return true
 	})
 
-	// 调用Zap写入日志
+	// 使用更高效的switch语句
 	switch r.Level {
 	case slog.LevelDebug:
 		h.zapLogger.Debug(r.Message, fields...)
@@ -50,40 +116,47 @@ func (h *ZapSlogHandler) Handle(_ context.Context, r slog.Record) error {
 	case slog.LevelError:
 		h.zapLogger.Error(r.Message, fields...)
 	}
+
 	return nil
 }
 
-// WithAttrs 创建子Logger（继承字段）
+// WithAttrs 创建带属性的子处理器
 func (h *ZapSlogHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	if len(attrs) == 0 {
+		return h // 空属性直接返回
+	}
+
 	newZapLogger := h.zapLogger.With(h.slogAttrsToZapFields(attrs)...)
 	return &ZapSlogHandler{
-		zapLogger: newZapLogger,
-		level:     h.level,
-		addSource: h.addSource,
+		zapLogger:   newZapLogger,
+		level:       h.level,
+		addSource:   h.addSource,
+		groupPrefix: h.groupPrefix,
+		pid:         h.pid,
 	}
 }
 
+// WithGroup 创建分组处理器
 func (h *ZapSlogHandler) WithGroup(name string) slog.Handler {
 	if name == "" {
-		return h // 空分组无操作
+		return h
 	}
 
-	// 拼接新的分组前缀
 	newPrefix := name + "."
 	if h.groupPrefix != "" {
 		newPrefix = h.groupPrefix + newPrefix
 	}
 
-	// 创建新 Handler 并应用分组前缀
 	return &ZapSlogHandler{
 		zapLogger:   h.zapLogger,
 		level:       h.level,
 		groupPrefix: newPrefix,
 		addSource:   h.addSource,
+		pid:         h.pid,
 	}
 }
 
-// 辅助方法：转换slog字段到Zap格式
+// slogAttrsToZapFields 转换属性字段
 func (h *ZapSlogHandler) slogAttrsToZapFields(attrs []slog.Attr) []zap.Field {
 	fields := make([]zap.Field, len(attrs))
 	for i, attr := range attrs {
@@ -92,46 +165,58 @@ func (h *ZapSlogHandler) slogAttrsToZapFields(attrs []slog.Attr) []zap.Field {
 	return fields
 }
 
-// NewZapSlogHandler 创建 Handler
-func NewZapSlogHandler(zapLogger *zap.Logger, level slog.Level) *ZapSlogHandler {
-	lv := &slog.LevelVar{}
-	lv.Set(level)
-	return &ZapSlogHandler{
-		zapLogger: zapLogger.WithOptions(zap.AddCallerSkip(1)), // 修正调用层级
-		level:     lv,
-		addSource: true,
-	}
-}
-
+// callerEncoder 优化后的调用位置编码器
 func callerEncoder(caller zapcore.EntryCaller, enc zapcore.PrimitiveArrayEncoder) {
-	workdir, _ := os.Getwd()
-	//workdir中的\\都转化为/
+	workdir, err := os.Getwd()
+	if err != nil {
+		enc.AppendString("unknown:0")
+		return
+	}
+
 	workdir = strings.ReplaceAll(workdir, "\\", "/")
-	for i := 2; ; i++ {
-		// 获取调用函数的文件名和行号
+
+	// 限制最大调用深度，避免无限循环
+	for i := 2; i < 10; i++ {
 		_, file, line, ok := runtime.Caller(i)
 		if !ok {
-			file = "???"
-			line = 0
+			break
 		}
+
 		file = strings.ReplaceAll(file, "\\", "/")
-		//如果file没有包含workdir,就跳过
-		condition := !strings.HasPrefix(file, workdir)
-		if condition {
+		if !strings.HasPrefix(file, workdir) {
 			continue
 		}
+
 		enc.AppendString(fmt.Sprintf("%s:%d", file, line))
-		break
+		return
 	}
+
+	enc.AppendString("unknown:0")
 }
-func createZapCore(path, logname string) zapcore.Core {
-	logpath = path
-	// 配置Encoder（JSON格式）
+
+// createZapCore 创建Zap核心配置
+func createZapCore(cfg LogConfig) (zapcore.Core, *os.File, error) {
+	// 创建日志目录
+	if err := os.MkdirAll(cfg.LogPath, 0755); err != nil {
+		return nil, nil, fmt.Errorf("%w: %v", ErrDirectoryCreateFailed, err)
+	}
+
+	// 配置文件路径
+	filePath := path.Join(cfg.LogPath, cfg.LogName+".log")
+
+	// 打开日志文件
+	file, err := os.OpenFile(filePath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		return nil, nil, fmt.Errorf("%w: %v", ErrFileCreateFailed, err)
+	}
+
+	// 配置编码器
 	encoderCfg := zapcore.EncoderConfig{
 		TimeKey:        "time",
 		LevelKey:       "level",
 		NameKey:        "logger",
 		CallerKey:      "caller",
+		FunctionKey:    "function",
 		MessageKey:     "message",
 		StacktraceKey:  "stacktrace",
 		EncodeTime:     zapcore.TimeEncoderOfLayout(time.DateTime),
@@ -140,73 +225,253 @@ func createZapCore(path, logname string) zapcore.Core {
 		EncodeDuration: zapcore.SecondsDurationEncoder,
 	}
 
-	// 输出到文件和控制台（双写）
-	os.MkdirAll(path, os.ModePerm) //如果path目录不存在则创建
-	path += "/" + logname + ".log"
-	file, _ := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
-	multiWriter := zapcore.NewMultiWriteSyncer(zapcore.AddSync(os.Stdout), zapcore.AddSync(file))
+	// 创建输出器
+	var writers []zapcore.WriteSyncer
+	if cfg.Stdout {
+		writers = append(writers, zapcore.AddSync(os.Stdout))
+	}
+	writers = append(writers, zapcore.AddSync(file))
 
-	return zapcore.NewCore(
+	multiWriter := zapcore.NewMultiWriteSyncer(writers...)
+
+	// 设置日志级别
+	zapLevel := zap.DebugLevel
+	switch strings.ToUpper(cfg.LogLevel) {
+	case "DEBUG":
+		zapLevel = zap.DebugLevel
+	case "INFO":
+		zapLevel = zap.InfoLevel
+	case "WARN":
+		zapLevel = zap.WarnLevel
+	case "ERROR":
+		zapLevel = zap.ErrorLevel
+	}
+
+	core := zapcore.NewCore(
 		zapcore.NewJSONEncoder(encoderCfg),
 		multiWriter,
-		zap.NewAtomicLevelAt(zap.DebugLevel),
+		zap.NewAtomicLevelAt(zapLevel),
 	)
+
+	return core, file, nil
 }
 
-// 初始化使用
-func init() {
-	Run("./", "default", "debug")
-}
+// 全局变量（使用单例模式）
+var (
+	globalLogger *LoggerManager
+	once         sync.Once
+)
 
-var off bool = false
-
-// 全局初始化
-func Run(path1, logname, szlevel string) {
-	if szlevel == "off" {
-		off = true
-		return
+// NewLoggerManager 创建新的日志管理器
+func NewLoggerManager(cfg LogConfig) (*LoggerManager, error) {
+	manager := &LoggerManager{
+		config: cfg,
 	}
 
-	//szlevel转换成大写
-	szlevel = strings.ToUpper(szlevel)
-	path1 = path.Join(path1, "/logs/")
-	core := createZapCore(path1, logname)
-	zapLogger := zap.New(core, zap.AddCaller(), zap.AddCallerSkip(1))
-	var level slog.Level = slog.LevelDebug
-	level.UnmarshalText([]byte(szlevel))
-	handler := NewZapSlogHandler(zapLogger, level)
-	slogger_ := slog.New(handler)
-	slog.SetDefault(slogger_)
+	if err := manager.init(); err != nil {
+		return nil, err
+	}
+
+	return manager, nil
 }
 
+// init 初始化日志管理器
+func (lm *LoggerManager) init() error {
+	lm.mu.Lock()
+	defer lm.mu.Unlock()
+
+	// 检查日志级别
+	if strings.EqualFold(lm.config.LogLevel, LogLevelOff) {
+		lm.isEnabled = false
+		return nil
+	}
+
+	// 创建Zap核心
+	core, file, err := createZapCore(lm.config)
+	if err != nil {
+		return err
+	}
+
+	lm.file = file
+	lm.zapLogger = zap.New(core, zap.AddCaller(), zap.AddCallerSkip(1))
+
+	// 转换日志级别
+	var slogLevel slog.Level
+	if err := slogLevel.UnmarshalText([]byte(lm.config.LogLevel)); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidLogLevel, err)
+	}
+
+	// 创建Slog处理器
+	handler := NewZapSlogHandler(lm.zapLogger, slogLevel)
+	lm.logger = slog.New(handler)
+	lm.isEnabled = true
+
+	return nil
+}
+
+// Close 关闭日志管理器
+func (lm *LoggerManager) Close() error {
+	lm.mu.Lock()
+	defer lm.mu.Unlock()
+
+	if lm.zapLogger != nil {
+		_ = lm.zapLogger.Sync()
+	}
+
+	if lm.file != nil {
+		if err := lm.file.Close(); err != nil {
+			return err
+		}
+		lm.file = nil
+	}
+
+	lm.logger = nil
+	lm.zapLogger = nil
+	lm.isEnabled = false
+
+	return nil
+}
+
+// GetLogger 获取当前日志器
+func (lm *LoggerManager) GetLogger() *slog.Logger {
+	lm.mu.RLock()
+	defer lm.mu.RUnlock()
+
+	if !lm.isEnabled || lm.logger == nil {
+		// 返回一个简单的控制台日志器作为fallback
+		return slog.Default()
+	}
+
+	return lm.logger
+}
+
+// SetLevel 动态设置日志级别
+func (lm *LoggerManager) SetLevel(level string) error {
+	lm.mu.Lock()
+	defer lm.mu.Unlock()
+
+	if strings.EqualFold(level, LogLevelOff) {
+		lm.isEnabled = false
+		return nil
+	}
+
+	var slogLevel slog.Level
+	if err := slogLevel.UnmarshalText([]byte(level)); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidLogLevel, err)
+	}
+
+	// 重新初始化日志器
+	lm.config.LogLevel = level
+	if err := lm.init(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// IsEnabled 检查日志是否启用
+func (lm *LoggerManager) IsEnabled() bool {
+	lm.mu.RLock()
+	defer lm.mu.RUnlock()
+
+	return lm.isEnabled
+}
+
+// 全局函数（向后兼容）
+func Run(path, name, level string) {
+	cfg := DefaultConfig()
+	cfg.LogLevel = level
+	cfg.LogPath = path
+	cfg.LogName = name
+	Initialize(cfg)
+}
+
+// Initialize 初始化全局日志器
+func Initialize(cfg LogConfig) error {
+	var initErr error
+	once.Do(func() {
+		globalLogger, initErr = NewLoggerManager(cfg)
+		if initErr == nil && globalLogger.IsEnabled() {
+			slog.SetDefault(globalLogger.GetLogger())
+		}
+	})
+
+	return initErr
+}
+
+// InitializeWithDefaults 使用默认配置初始化
+func InitializeWithDefaults() error {
+	return Initialize(DefaultConfig())
+}
+
+// Shutdown 关闭全局日志器
+func Shutdown() error {
+	if globalLogger == nil {
+		return nil
+	}
+
+	return globalLogger.Close()
+}
+
+// Debug 调试级别日志
 func Debug(msg string, args ...any) {
-	if off {
-		fmt.Printf("[debug]"+msg+"\n", args...)
-		return
-	}
-	slog.Debug(msg, args...)
+	logWithLevel(slog.LevelDebug, msg, args...)
 }
 
+// Info 信息级别日志
 func Info(msg string, args ...any) {
-	if off {
-		fmt.Printf("[info]"+msg+"\n", args...)
-		return
-	}
-	slog.Info(msg, args...)
+	logWithLevel(slog.LevelInfo, msg, args...)
 }
 
-func Warning(msg string, args ...any) {
-	if off {
-		fmt.Printf("[warning]"+msg+"\n", args...)
-		return
-	}
-	slog.Warn(msg, args...)
+// Warn 警告级别日志
+func Warn(msg string, args ...any) {
+	logWithLevel(slog.LevelWarn, msg, args...)
 }
 
+// Error 错误级别日志
 func Error(msg string, args ...any) {
-	if off {
-		fmt.Printf("[error]"+msg+"\n", args...)
+	logWithLevel(slog.LevelError, msg, args...)
+}
+
+// logWithLevel 统一的日志记录函数
+func logWithLevel(level slog.Level, msg string, args ...any) {
+	if globalLogger == nil || !globalLogger.IsEnabled() {
+		// 使用简单的fmt输出作为fallback
+		logSimple(level, msg, args...)
 		return
 	}
-	slog.Error(msg, args...)
+
+	logger := globalLogger.GetLogger()
+
+	switch level {
+	case slog.LevelDebug:
+		logger.Debug(msg, args...)
+	case slog.LevelInfo:
+		logger.Info(msg, args...)
+	case slog.LevelWarn:
+		logger.Warn(msg, args...)
+	case slog.LevelError:
+		logger.Error(msg, args...)
+	}
+}
+
+// logSimple 简单的日志输出（用于未初始化时）
+func logSimple(level slog.Level, msg string, args ...any) {
+	levelStr := "[INFO]"
+	switch level {
+	case slog.LevelDebug:
+		levelStr = "[DEBUG]"
+	case slog.LevelWarn:
+		levelStr = "[WARN]"
+	case slog.LevelError:
+		levelStr = "[ERROR]"
+	}
+
+	fmt.Printf("%s %s\n", levelStr, fmt.Sprintf(msg, args...))
+}
+
+// 初始化函数（默认使用默认配置）
+func init() {
+	// 默认初始化，但允许后续重新配置
+	// _ = InitializeWithDefaults()
 }

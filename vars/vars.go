@@ -424,7 +424,7 @@ func Info(msg string, args ...any) {
 }
 
 // Warn 警告级别日志
-func Warn(msg string, args ...any) {
+func Warning(msg string, args ...any) {
 	logWithLevel(slog.LevelWarn, msg, args...)
 }
 

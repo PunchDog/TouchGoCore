@@ -45,6 +45,31 @@ type LogConfig struct {
 	Stdout   bool   // 是否输出到标准输出
 }
 
+// Validate 验证配置有效性
+func (cfg *LogConfig) Validate() error {
+	if cfg.MaxSize <= 0 {
+		return fmt.Errorf("MaxSize must be positive, got %d", cfg.MaxSize)
+	}
+	if cfg.MaxAge < 0 {
+		return fmt.Errorf("MaxAge cannot be negative, got %d", cfg.MaxAge)
+	}
+	
+	// 验证日志级别
+	validLevels := map[string]bool{
+		LogLevelDebug: true,
+		LogLevelInfo:  true,
+		LogLevelWarn:  true,
+		LogLevelError: true,
+		LogLevelOff:   true,
+	}
+	
+	if !validLevels[strings.ToLower(cfg.LogLevel)] {
+		return fmt.Errorf("invalid log level: %s", cfg.LogLevel)
+	}
+	
+	return nil
+}
+
 // DefaultConfig 默认配置
 func DefaultConfig() LogConfig {
 	return LogConfig{
@@ -95,9 +120,28 @@ func (h *ZapSlogHandler) Enabled(_ context.Context, level slog.Level) bool {
 	return level >= h.level.Level()
 }
 
+// 字段池，减少内存分配
+var fieldPool = sync.Pool{
+	New: func() interface{} {
+		return make([]zap.Field, 0, 8) // 预分配合理容量
+	},
+}
+
 // Handle 处理日志记录
 func (h *ZapSlogHandler) Handle(_ context.Context, r slog.Record) error {
-	fields := make([]zap.Field, 0, r.NumAttrs()+1) // 预分配容量
+	// 从对象池获取字段切片
+	fields := fieldPool.Get().([]zap.Field)
+	defer func() {
+		// 重置并放回对象池
+		fields = fields[:0]
+		fieldPool.Put(fields)
+	}()
+	
+	// 预分配足够容量
+	if cap(fields) < r.NumAttrs()+1 {
+		fields = make([]zap.Field, 0, r.NumAttrs()+1)
+	}
+	
 	fields = append(fields, zap.Int("PID", h.pid)) // 使用缓存
 
 	r.Attrs(func(attr slog.Attr) bool {
@@ -165,15 +209,31 @@ func (h *ZapSlogHandler) slogAttrsToZapFields(attrs []slog.Attr) []zap.Field {
 	return fields
 }
 
+// 工作目录缓存
+var (
+	cachedWorkdir     string
+	workdirOnce       sync.Once
+	workdirInitError  error
+)
+
+// getWorkdir 获取缓存的工目录
+func getWorkdir() (string, error) {
+	workdirOnce.Do(func() {
+		cachedWorkdir, workdirInitError = os.Getwd()
+		if cachedWorkdir != "" {
+			cachedWorkdir = strings.ReplaceAll(cachedWorkdir, "\\", "/")
+		}
+	})
+	return cachedWorkdir, workdirInitError
+}
+
 // callerEncoder 优化后的调用位置编码器
 func callerEncoder(caller zapcore.EntryCaller, enc zapcore.PrimitiveArrayEncoder) {
-	workdir, err := os.Getwd()
+	workdir, err := getWorkdir()
 	if err != nil {
 		enc.AppendString("unknown:0")
 		return
 	}
-
-	workdir = strings.ReplaceAll(workdir, "\\", "/")
 
 	// 限制最大调用深度，避免无限循环
 	for i := 2; i < 10; i++ {
@@ -264,6 +324,11 @@ var (
 
 // NewLoggerManager 创建新的日志管理器
 func NewLoggerManager(cfg LogConfig) (*LoggerManager, error) {
+	// 验证配置
+	if err := cfg.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid log config: %w", err)
+	}
+	
 	manager := &LoggerManager{
 		config: cfg,
 	}

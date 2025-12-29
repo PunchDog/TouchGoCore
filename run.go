@@ -9,6 +9,7 @@ import (
 	"path"
 	"runtime"
 	"strconv"
+	"sync"
 	"syscall"
 	"time"
 
@@ -17,7 +18,6 @@ import (
 	"touchgocore/gin"
 	lua "touchgocore/golua"
 	"touchgocore/ini"
-	"touchgocore/mapmanager"
 	"touchgocore/rpc"
 	"touchgocore/telegram"
 	"touchgocore/util"
@@ -26,11 +26,9 @@ import (
 )
 
 var chExit chan bool
-var ChClose chan bool
 
 func init() {
 	chExit = make(chan bool, 1)
-	ChClose = make(chan bool, 1)
 }
 
 // 总体开关,此函数需要放在main的最后
@@ -116,8 +114,8 @@ func Run(serverName string) {
 	//启动ws
 	websocket.Run()
 
-	//读取地图
-	mapmanager.Run()
+	// //读取地图
+	// mapmanager.Run()
 
 	//启动lua脚本
 	lua.Run()
@@ -166,19 +164,17 @@ func Run(serverName string) {
 
 	//主循环
 	aftertime := int64(time.Second) / int64(util.Fps) //按照帧率停顿时间
+	timer := time.NewTimer(time.Duration(aftertime) * time.Millisecond)
 	for {
-		be := time.Now().UnixNano()
-		if err := loop(); err != nil {
-			vars.Error(err.Error())
-			break
-		}
-		af := time.Now().UnixNano()
-		condition := af - be
-		if condition < aftertime {
-			// <-time.After(time.Duration(aftertime - condition))
+		select {
+		case <-timer.C:
+			if err := loop(); err != nil {
+				vars.Error(err.Error())
+				break
+			}
+		case <-websocket.Tick(): //websocket处理
 		}
 	}
-	<-time.After(time.Second * 2)
 }
 
 func loop() (err error) {
@@ -192,10 +188,7 @@ func loop() (err error) {
 	select {
 	case <-chExit:
 		err = errors.New("退出服务器")
-	case <-ChClose:
-		go closeServer()
 	case <-util.TimeTick(): //定时器处理
-	case <-websocket.Tick(): //websocket处理
 	default:
 	}
 	return
@@ -210,6 +203,7 @@ func closeServer() {
 
 	//退出时清理工作
 	util.DefaultCallFunc.Do(util.CallStop)
+
 	vars.Info("关闭完成,退出服务器")
 	chExit <- true
 }
@@ -219,5 +213,11 @@ func signalProcHandler() {
 	chSig := make(chan os.Signal, 1)
 	signal.Notify(chSig, syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT, syscall.SIGKILL)
 	vars.Info("Signal: ", <-chSig)
-	closeServer()
+	wg := sync.WaitGroup{}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		closeServer()
+	}()
+	wg.Wait()
 }

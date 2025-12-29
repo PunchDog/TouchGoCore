@@ -18,6 +18,7 @@ import (
 	"touchgocore/gin"
 	lua "touchgocore/golua"
 	"touchgocore/ini"
+	"touchgocore/localtimer"
 	"touchgocore/rpc"
 	"touchgocore/telegram"
 	"touchgocore/util"
@@ -109,7 +110,7 @@ func Run(serverName string) {
 	}
 
 	//启动timer定时器
-	util.TimeRun()
+	localtimer.Run()
 
 	//启动ws
 	websocket.Run()
@@ -188,17 +189,17 @@ func loop() (err error) {
 	select {
 	case <-chExit:
 		err = errors.New("退出服务器")
-	case <-util.TimeTick(): //定时器处理
+	case <-localtimer.TimeTick(): //定时器处理
 	default:
 	}
 	return
 }
 
 func closeServer() {
-	lua.Stop()       //关闭lua定时器
-	util.TimeStop()  //关闭定时器
-	websocket.Stop() //关闭websock
-	rpc.Stop()       //关闭gRPC
+	lua.Stop()            //关闭lua定时器
+	localtimer.TimeStop() //关闭定时器
+	websocket.Stop()      //关闭websock
+	rpc.Stop()            //关闭gRPC
 	telegram.TelegramStop()
 
 	//退出时清理工作

@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"touchgocore/config"
+	"touchgocore/localtimer"
 	"touchgocore/util"
 	"touchgocore/vars"
 
@@ -113,7 +114,7 @@ func handleCallback(bot *tgbotapi.BotAPI, callback *tgbotapi.CallbackQuery) {
 var closeCh chan any
 
 type telegramTimer struct {
-	util.Timer
+	localtimer.Timer
 	bot *tgbotapi.BotAPI
 }
 
@@ -143,14 +144,14 @@ func TelegramStart() {
 	closeCh = make(chan any)
 
 	//创建定时器,每1分钟发送一次心跳
-	t, err := util.NewTimer(60*1000, -1, &telegramTimer{})
+	t, err := localtimer.NewTimer(60*1000, -1, &telegramTimer{})
 	if err != nil {
 		vars.Error("telegram timer error", err)
 		return
 	}
 	timer := t.(*telegramTimer)
 	timer.bot = bot
-	util.AddTimer(timer)
+	localtimer.AddTimer(timer)
 
 	//创建机器人消息监听
 	go func() {

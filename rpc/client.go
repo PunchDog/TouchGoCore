@@ -4,6 +4,7 @@ import (
 	"context"
 	"reflect"
 	"strconv"
+	"touchgocore/localtimer"
 	"touchgocore/network/message"
 	"touchgocore/util"
 	"touchgocore/vars"
@@ -20,7 +21,7 @@ var (
 )
 
 type RpcClient struct {
-	util.Timer
+	localtimer.Timer
 	// 连接
 	addr string
 	//端口
@@ -54,7 +55,7 @@ func (c *RpcClient) SendMsg(protocol1, protocol2 int32, pb proto.Message, callfu
 	msg, err := client.Msg(ctx)
 	if err != nil {
 		c.connStatus = false
-		util.AddTimer(c)
+		localtimer.AddTimer(c)
 		return
 	}
 
@@ -63,7 +64,7 @@ func (c *RpcClient) SendMsg(protocol1, protocol2 int32, pb proto.Message, callfu
 	if err != nil {
 		//连接断开
 		c.connStatus = false
-		util.AddTimer(c)
+		localtimer.AddTimer(c)
 		return
 	}
 
@@ -111,7 +112,7 @@ func NewRpcClient(servername, addr string, port int) *RpcClient {
 
 	//创建一个带计时器的客户端指针
 	// client := util.NewTimer(1000, -1, &RpcClient{}).(*RpcClient)
-	c, err := util.NewTimer(1000, -1, &RpcClient{})
+	c, err := localtimer.NewTimer(1000, -1, &RpcClient{})
 	if err != nil {
 		vars.Error("创建客户端失败:", err)
 		return nil
@@ -126,7 +127,7 @@ func NewRpcClient(servername, addr string, port int) *RpcClient {
 		client.conn = conn
 	} else { //一直保持监听保证连接
 		client.connStatus = false
-		util.AddTimer(client)
+		localtimer.AddTimer(client)
 	}
 
 	rpcClient_[servername] = client

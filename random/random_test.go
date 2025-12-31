@@ -34,29 +34,12 @@ func BenchmarkMonteCarlo_NextInt64(b *testing.B) {
 	}
 }
 
-func BenchmarkSystemRandom_NextInt64(b *testing.B) {
-	seed := int64(12345)
-	sr := NewSystemRandom(&seed)
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		sr.nextInt64()
-	}
-}
-
 // 测试 Random 包装器的性能
 func BenchmarkRandom_NextInt64(b *testing.B) {
 	r := New(12345)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		r.NextInt64()
-	}
-}
-
-// 测试全局随机数生成器性能
-func BenchmarkGlobalNextInt64(b *testing.B) {
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		NextInt64()
 	}
 }
 

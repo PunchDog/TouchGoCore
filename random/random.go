@@ -1,9 +1,6 @@
 package random
 
-import (
-	"sync"
-	"touchgocore/vars"
-)
+import "sync/atomic"
 
 const (
 	N               = 312
@@ -27,13 +24,14 @@ const (
 
 type MersenneTwister struct {
 	mt    [N]uint64
-	index int64
+	index int32
 	seed  *int64
-	lock  sync.Mutex
 }
 
 func NewMersenneTwister(seed *int64) *MersenneTwister {
-	ret := &MersenneTwister{seed: seed}
+	ret := &MersenneTwister{
+		seed: seed,
+	}
 	ret.resetMersenneTwister()
 	return ret
 }
@@ -46,8 +44,7 @@ func (mt *MersenneTwister) resetMersenneTwister() {
 	}
 
 	mt.index = 0
-	cnt := mt.nextInt64()&0x7 + 2
-	for i := 0; i < int(cnt)*N; i++ {
+	for i := 0; i < N; i++ {
 		mt.nextInt64()
 	}
 }
@@ -61,28 +58,22 @@ func (mt *MersenneTwister) twist() {
 		}
 		mt.mt[i] = mt.mt[(i+M)%N] ^ xA
 	}
-	mt.index = 0
+	atomic.StoreInt32(&mt.index, 0)
 }
 
 func (mt *MersenneTwister) nextInt64() int64 {
-	mt.lock.Lock()
-	defer func() {
-		mt.lock.Unlock()
-		if err := recover(); err != nil {
-			vars.Error("随机数生成失败:%s", err.(error))
-		}
-	}()
-	if mt.index >= N {
+	idx := atomic.AddInt32(&mt.index, 1) - 1
+	if idx >= N {
 		mt.twist()
+		idx = 0
 	}
 
-	y := &mt.mt[mt.index]
+	y := &mt.mt[idx]
 	*y ^= *y >> U
 	*y ^= (*y << S) & B
 	*y ^= (*y << T) & C
 	*y ^= *y >> L
 
-	mt.index++
 	*mt.seed += int64(*y & 0xffff)
 	return int64(*y & 0x7fffffffffffffff)
 }

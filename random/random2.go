@@ -75,10 +75,10 @@ func (s *MonteCarlo) nextInt64() int64 {
 			vars.Error("随机数生成失败:%s", err.(error))
 		}
 	}()
-	s.tick++
-	if s.tick%500 == 0 {
-		s.init()
-	}
+	// atomic.AddInt64(&s.tick, 1)
+	// if s.tick%500 == 0 {
+	// 	s.init()
+	// }
 	s.nextTime = (s.nextTime*s.p + s.q) % s.M
 	*s.seed += s.nextTime & 0xffff
 	return int64(s.nextTime & 0x7fffffffffffffff)

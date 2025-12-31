@@ -84,5 +84,5 @@ func (mt *MersenneTwister) nextInt64() int64 {
 
 	mt.index++
 	*mt.seed += int64(*y & 0xffff)
-	return int64(*y)
+	return int64(*y & 0x7fffffffffffffff)
 }

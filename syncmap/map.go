@@ -22,11 +22,11 @@ func (this *Map) Store(k, v interface{}) {
 
 // 删除数据
 func (this *Map) Delete(k interface{}) {
-	this.lock.Lock()
-	defer this.lock.Unlock()
 	if _, h := this.Load(k); h {
+		this.lock.Lock()
 		this.Map.Delete(k)
 		this.num--
+		this.lock.Unlock()
 	}
 }
 
@@ -45,11 +45,11 @@ func (this *Map) ClearAll(fn func(k, v interface{}) bool) {
 
 // 添加或读取
 func (this *Map) LoadOrStore(key, value interface{}) (actual interface{}, loaded bool) {
-	this.lock.Lock()
-	defer this.lock.Unlock()
 	actual, loaded = this.Map.LoadOrStore(key, value)
 	if !loaded {
+		this.lock.Lock()
 		this.num++
+		this.lock.Unlock()
 	}
 	return
 }

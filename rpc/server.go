@@ -6,6 +6,7 @@ import (
 	"net"
 	"strconv"
 	"touchgocore/network/message"
+	"touchgocore/syncmap"
 	"touchgocore/util"
 	"touchgocore/vars"
 
@@ -18,11 +19,21 @@ var (
 	service_ map[string]*RpcServer = nil
 )
 
+type msginfo struct {
+	req           proto.Message
+	clientNameKey string
+	protol1       int32
+	protol2       int32
+}
+
 type RpcServer struct {
 	message.UnimplementedGrpcServer
-	nametoclientstream map[string]message.Grpc_MsgServer
+	nametoclientstream syncmap.Map
 	name               string
 	service            *grpc.Server
+	readchannel        chan *msginfo
+	handlechannel      chan *msginfo
+	done               chan struct{}
 }
 
 func (s *RpcServer) Msg(stream message.Grpc_MsgServer) error {
@@ -35,59 +46,100 @@ func (s *RpcServer) Msg(stream message.Grpc_MsgServer) error {
 	clientName := md.Get("client-name")
 	if len(clientName) == 0 {
 		vars.Error("gRPC连接错误,没有客户端名称")
-		return nil
+		return fmt.Errorf("gRPC连接错误: 没有客户端名称")
 	}
 	if clientName[0] == "" {
 		vars.Error("gRPC连接错误,没有客户端名称")
-		return nil
+		return fmt.Errorf("gRPC连接错误: 没有客户端名称")
 	}
 	// 客户端名称作为key
 	clientNameKey := clientName[0]
 	// 存储客户端stream
-	if s.nametoclientstream == nil {
-		s.nametoclientstream = make(map[string]message.Grpc_MsgServer)
-	}
-	s.nametoclientstream[clientNameKey] = stream
+	s.nametoclientstream.Store(clientNameKey, stream)
 
 	for {
 		msg, err := stream.Recv()
 		if err == io.EOF {
 			vars.Info("gRPC连接关闭,客户端主动断开连接")
 			// 移除客户端stream
-			delete(s.nametoclientstream, clientNameKey)
+			s.nametoclientstream.Delete(clientNameKey)
 			break
 		}
 
 		if err != nil {
 			vars.Error(fmt.Sprintf("接收gRPC消息错误: %v", err))
 			// 移除客户端stream
-			delete(s.nametoclientstream, clientNameKey)
+			s.nametoclientstream.Delete(clientNameKey)
 			return err
 		}
 
-		// 处理请求逻辑
-		req := util.PasreFSMessage(msg)
-		util.DefaultCallFunc.SetDoRet()
-		key := fmt.Sprintf("%s:%d:%d", util.CallRpcMsg, msg.GetHead().GetProtocol1(), msg.GetHead().GetProtocol2())
-		bret := util.DefaultCallFunc.Do(key, req)
-		res := util.DefaultCallFunc.GetRet()
-		if bret {
-			rsp := res[0].Interface().(proto.Message)
-			s.Send(clientNameKey, msg.GetHead().GetProtocol1(), msg.GetHead().GetProtocol2(), rsp)
-		} else {
-			vars.Error("处理gRPC请求错误,协议号:%d:%d", msg.GetHead().GetProtocol1(), msg.GetHead().GetProtocol2())
+		s.readchannel <- &msginfo{
+			req:           msg,
+			clientNameKey: clientNameKey,
+			protol1:       msg.GetHead().GetProtocol1(),
+			protol2:       msg.GetHead().GetProtocol2(),
 		}
 	}
 	return nil
 }
 
-func (s *RpcServer) Send(name string, pb1, pb2 int32, pb proto.Message) {
+// 发送消息
+func (s *RpcServer) Send(name string, pb1, pb2 int32, pb proto.Message) error {
 	rsp := util.NewFSMessage(pb1, pb2, pb)
-	if st, h := s.nametoclientstream[name]; h {
+	if st1, h := s.nametoclientstream.Load(name); h {
+		st := st1.(message.Grpc_MsgServer)
 		if err := st.Send(rsp); err != nil {
-			vars.Error("发送gRPC响应错误: %v", err)
+			return fmt.Errorf("发送gRPC响应错误: %v", err)
 		}
 	}
+	return nil
+}
+
+// 解析数据
+func (s *RpcServer) readChanel() {
+	for {
+		select {
+		case <-s.done:
+			return
+		case msg := <-s.readchannel:
+			req := util.PasreFSMessage(msg.req)
+			if req != nil {
+				s.handlechannel <- &msginfo{
+					req:           req,
+					clientNameKey: msg.clientNameKey,
+					protol1:       msg.protol1,
+					protol2:       msg.protol2,
+				}
+			}
+		}
+	}
+}
+
+// 操作数据
+func (s *RpcServer) handleChanel() {
+	for {
+		select {
+		case <-s.done:
+			return
+		case msg := <-s.handlechannel:
+			util.DefaultCallFunc.SetDoRet()
+			key := fmt.Sprintf("%s:%d:%d", util.CallRpcMsg, msg.protol1, msg.protol2)
+			bret := util.DefaultCallFunc.Do(key, msg)
+			res := util.DefaultCallFunc.GetRet()
+			if bret {
+				rsp := res[0].Interface().(proto.Message)
+				s.Send(msg.clientNameKey, msg.protol1, msg.protol2, rsp)
+			} else {
+				vars.Error("处理gRPC请求错误,协议号:%d:%d", msg.protol1, msg.protol2)
+			}
+		}
+	}
+}
+
+// 关闭服务
+func (s *RpcServer) Stop() {
+	close(s.done)
+	s.service.Stop()
 }
 
 func StartGrpcServer(name, ip string, port int) {
@@ -104,10 +156,13 @@ func StartGrpcServer(name, ip string, port int) {
 
 	s := grpc.NewServer(opt...)
 	service := &RpcServer{
-		name:               name,
-		nametoclientstream: make(map[string]message.Grpc_MsgServer),
-		service:            s,
+		name:          name,
+		service:       s,
+		readchannel:   make(chan *msginfo, MAX_CHANNEL_SIZE),
+		handlechannel: make(chan *msginfo, MAX_CHANNEL_SIZE),
+		done:          make(chan struct{}),
 	}
+
 	message.RegisterGrpcServer(service.service, service)
 
 	go func(s *RpcServer) {
@@ -118,6 +173,9 @@ func StartGrpcServer(name, ip string, port int) {
 			return
 		}
 	}(service)
+
+	go service.readChanel()
+	go service.handleChanel()
 
 	if service_ == nil {
 		service_ = make(map[string]*RpcServer)

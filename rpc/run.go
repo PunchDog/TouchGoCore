@@ -6,7 +6,8 @@ import (
 )
 
 const (
-	MAX_MSG_SIZE = 1024 * 1024 * 10
+	MAX_MSG_SIZE     = 1024 * 1024 * 10
+	MAX_CHANNEL_SIZE = 100000
 )
 
 func Run() {

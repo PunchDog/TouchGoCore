@@ -52,6 +52,7 @@ func (this *ListNode) new() INode {
 	if newnode == nil {
 		return nil
 	}
+	newnode.cls = this.cls // 设置相同的类型
 	return newNode
 }
 
@@ -64,6 +65,9 @@ func (this *ListNode) InsertAfter(data interface{}) (newNode INode) {
 		}
 	}()
 	newNode = this.new()
+	if newNode == nil {
+		return nil
+	}
 	newnode := newNode.GetNode()
 	newnode.id = this.list.getMaxId()
 	newnode.pre = this
@@ -90,6 +94,9 @@ func (this *ListNode) InsertBefore(data interface{}) (newNode INode) {
 		}
 	}()
 	newNode = this.new()
+	if newNode == nil {
+		return nil
+	}
 	newnode := newNode.GetNode()
 	newnode.id = this.list.getMaxId()
 	newnode.pre = this.pre
@@ -147,6 +154,8 @@ type List struct {
 	len          int     //长度
 	rangeDelList []INode //删除列表
 	dellock      bool    //删除锁
+	nextID       int64   //下一个节点ID
+	idMux        sync.Mutex //ID生成锁
 }
 
 // 创建一个链表
@@ -155,23 +164,24 @@ func NewList() *List {
 		head: nil,
 		tail: nil,
 		len:  0,
+		nextID: 0,
+		// idMux zero value is usable
 	}
 }
 
-var maxId int64 = 0
-var mux sync.Mutex
 
-// 获取一个ID，并且maxId++
+
+// 获取一个ID，并且nextID++
 func (this *List) getMaxId() int64 {
-	mux.Lock()
-	defer mux.Unlock()
+	this.idMux.Lock()
+	defer this.idMux.Unlock()
 
-	if maxId == 0 || maxId > time.Now().UnixNano()+1 {
-		maxId = time.Now().UnixNano() + 1
+	if this.nextID == 0 || this.nextID > time.Now().UnixNano()+1 {
+		this.nextID = time.Now().UnixNano() + 1
 	} else {
-		maxId++
+		this.nextID++
 	}
-	return maxId
+	return this.nextID
 }
 
 // 长度
@@ -278,6 +288,7 @@ func (this *List) Range(f func(INode) bool) {
 		for _, node := range this.rangeDelList {
 			node.Remove()
 		}
+		this.rangeDelList = nil // 清空引用，防止内存泄漏
 	}()
 
 	node := this.head
@@ -291,7 +302,16 @@ func (this *List) Range(f func(INode) bool) {
 
 // 清空
 func (this *List) Clear() {
+	// 遍历所有节点并删除，防止内存泄漏
+	node := this.head
+	for node != nil {
+		next := node.GetNode().next
+		node.Remove()
+		node = next
+	}
+	// 确保状态一致
 	this.head = nil
 	this.tail = nil
 	this.len = 0
+	this.rangeDelList = nil
 }

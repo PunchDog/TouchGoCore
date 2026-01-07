@@ -2,7 +2,7 @@ package util
 
 import (
 	"reflect"
-	"sync"
+	"sync/atomic"
 	"time"
 	"touchgocore/vars"
 )
@@ -155,31 +155,25 @@ type List struct {
 	rangeDelList []INode //删除列表
 	dellock      bool    //删除锁
 	nextID       int64   //下一个节点ID
-	idMux        sync.Mutex //ID生成锁
 }
 
 // 创建一个链表
 func NewList() *List {
 	return &List{
-		head: nil,
-		tail: nil,
-		len:  0,
+		head:   nil,
+		tail:   nil,
+		len:    0,
 		nextID: 0,
 		// idMux zero value is usable
 	}
 }
 
-
-
 // 获取一个ID，并且nextID++
 func (this *List) getMaxId() int64 {
-	this.idMux.Lock()
-	defer this.idMux.Unlock()
-
 	if this.nextID == 0 || this.nextID > time.Now().UnixNano()+1 {
-		this.nextID = time.Now().UnixNano() + 1
+		atomic.StoreInt64(&this.nextID, time.Now().UnixNano()+1)
 	} else {
-		this.nextID++
+		atomic.AddInt64(&this.nextID, 1)
 	}
 	return this.nextID
 }

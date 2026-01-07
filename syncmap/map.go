@@ -1,45 +1,44 @@
 package syncmap
 
-import "sync"
+import (
+	"sync"
+	"sync/atomic"
+)
 
 type Map struct {
 	sync.Map
-	num  int          //数量
-	lock sync.RWMutex //读写锁
+	num int32 //数量
 }
 
 // 数据长点
 func (this *Map) Length() int {
-	this.lock.RLock()
-	defer this.lock.RUnlock()
-	return this.num
+	return int(atomic.LoadInt32(&this.num))
 }
 
 // 添加数据
 func (this *Map) Store(k, v interface{}) {
-	this.LoadOrStore(k, v)
+	if _, h := this.Load(k); !h {
+		atomic.AddInt32(&this.num, 1)
+	}
+	this.Map.Store(k, v)
 }
 
 // 删除数据
 func (this *Map) Delete(k interface{}) {
 	if _, h := this.Load(k); h {
-		this.lock.Lock()
 		this.Map.Delete(k)
-		this.num--
-		this.lock.Unlock()
+		atomic.AddInt32(&this.num, -1)
 	}
 }
 
 // 清空所有数据（不可以在fn内有对this的Store或者Delete操作）
 func (this *Map) ClearAll(fn func(k, v interface{}) bool) {
-	this.lock.Lock()
-	defer this.lock.Unlock()
 	if fn != nil {
 		this.Map.Range(func(k, v interface{}) bool {
 			return fn(k, v)
 		})
 	}
-	this.num = 0
+	atomic.StoreInt32(&this.num, 0)
 	this.Map = sync.Map{}
 }
 
@@ -47,9 +46,7 @@ func (this *Map) ClearAll(fn func(k, v interface{}) bool) {
 func (this *Map) LoadOrStore(key, value interface{}) (actual interface{}, loaded bool) {
 	actual, loaded = this.Map.LoadOrStore(key, value)
 	if !loaded {
-		this.lock.Lock()
-		this.num++
-		this.lock.Unlock()
+		atomic.AddInt32(&this.num, 1)
 	}
 	return
 }

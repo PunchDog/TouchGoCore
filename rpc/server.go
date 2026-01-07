@@ -5,12 +5,14 @@ import (
 	"io"
 	"net"
 	"strconv"
+	"time"
 	"touchgocore/network/message"
 	"touchgocore/syncmap"
 	"touchgocore/util"
 	"touchgocore/vars"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/proto"
 )
@@ -149,12 +151,27 @@ func StartGrpcServer(name, ip string, port int) {
 		return
 	}
 
-	opt := []grpc.ServerOption{
+	// opt := []grpc.ServerOption{
+	// 	grpc.MaxRecvMsgSize(MAX_MSG_SIZE),
+	// 	grpc.MaxSendMsgSize(MAX_MSG_SIZE),
+	// }
+
+	s := grpc.NewServer(
+		grpc.KeepaliveParams(keepalive.ServerParameters{
+			// MaxConnectionIdle 和 MaxConnectionAge 设为 0 表示无限制，永不主动断开
+			MaxConnectionIdle:     0,                // 不因空闲断开
+			MaxConnectionAge:      0,                // 不因存活时间断开
+			MaxConnectionAgeGrace: 30 * time.Second, // 优雅关闭宽限期
+			Time:                  2 * time.Hour,    // 服务端 ping 间隔（基本不主动 ping）
+			Timeout:               20 * time.Second, // ping 超时
+		}),
+		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
+			MinTime:             5 * time.Second, // 允许客户端最小 5 秒 ping 一次（宽松策略）
+			PermitWithoutStream: true,            // 允许无 stream 时 ping
+		}),
 		grpc.MaxRecvMsgSize(MAX_MSG_SIZE),
 		grpc.MaxSendMsgSize(MAX_MSG_SIZE),
-	}
-
-	s := grpc.NewServer(opt...)
+	)
 	service := &RpcServer{
 		name:          name,
 		service:       s,

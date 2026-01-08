@@ -86,7 +86,7 @@ func Run(serverName string) {
 			<-time.After(time.Millisecond * 10)
 			panic("加载MySql配置出错:" + err.Error())
 		}
-		db.MySqlRun()
+		// db.MySqlRun()
 		vars.Info("加载MySql数据成功")
 	}
 

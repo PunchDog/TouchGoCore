@@ -24,12 +24,6 @@ import (
 	"touchgocore/websocket"
 )
 
-var chExit chan bool
-
-func init() {
-	chExit = make(chan bool, 1)
-}
-
 // 总体开关,此函数需要放在main的最后
 func Run(serverName string) {
 	defer func() {
@@ -159,20 +153,7 @@ func Run(serverName string) {
 	vars.Info("touchgocore启动完成")
 
 	//进程监控
-	go signalProcHandler()
-
-	//主循环
-	aftertime := int64(time.Second) / int64(util.Fps) //按照帧率停顿时间
-	timer := time.NewTimer(time.Duration(aftertime) * time.Millisecond)
-	for {
-		select {
-		case <-timer.C:
-			localtimer.TimeTick()
-		case <-websocket.Tick(): //websocket处理
-		case <-chExit:
-			return
-		}
-	}
+	signalProcHandler()
 }
 
 func closeServer() {
@@ -186,7 +167,6 @@ func closeServer() {
 	util.DefaultCallFunc.Do(util.CallStop)
 
 	vars.Info("关闭完成,退出服务器")
-	chExit <- true
 }
 
 func signalProcHandler() {

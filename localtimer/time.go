@@ -382,6 +382,7 @@ var (
 	defaultTimerManager *TimerManager
 	timerChannel        chan TimerInterface
 	managerInitOnce     sync.Once
+	closech             chan any
 )
 
 // NewTimerManager 创建新的定时器管理器
@@ -549,12 +550,15 @@ func (m *TimerManager) cleanupWheel(wheel *TimerWheel) {
 func Run() {
 	vars.Info("启动计时器系统")
 	defaultTimerManager = NewTimerManager()
+	closech = make(chan any)
+	go TimeTick()
 	vars.Info("计时器系统启动完成")
 }
 
 // TimeStop 停止定时器系统
 func TimeStop() {
 	vars.Info("正在停止计时器系统...")
+	close(closech)
 
 	// 关闭所有定时器管理器
 	timerManagerMap.Range(func(key, value interface{}) bool {
@@ -562,9 +566,10 @@ func TimeStop() {
 			vars.Info("关闭定时器管理器，当前定时器数量: %d", mgr.GetTimerCount())
 			mgr.Close()
 		}
-		timerManagerMap.Delete(key)
+		// timerManagerMap.Delete(key)
 		return true
 	})
+	timerManagerMap.Clear()
 
 	// 关闭定时器通道
 	if timerChannel != nil {
@@ -592,21 +597,23 @@ func AddTimer(timer TimerInterface) error {
 
 // TimeTick 处理定时器滴答
 func TimeTick() {
-	select {
-	case timer, ok := <-timerChannel:
-		if !ok {
-			// 通道已关闭
+	for {
+		select {
+		case timer, ok := <-timerChannel:
+			if !ok {
+				// 通道已关闭
+				return
+			}
+
+			timer.Tick()
+			if timer.HasNext() {
+				if err := AddTimer(timer); err != nil {
+					vars.Error("重新调度定时器失败: %v", err)
+				}
+			}
+		case <-closech:
 			return
 		}
-
-		timer.Tick()
-		if timer.HasNext() {
-			if err := AddTimer(timer); err != nil {
-				vars.Error("重新调度定时器失败: %v", err)
-			}
-		}
-	default:
-		// 没有定时器需要处理
 	}
 }
 

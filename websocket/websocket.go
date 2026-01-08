@@ -76,6 +76,8 @@ func Run() {
 			continue
 		}
 	}
+
+	go Tick()
 	vars.Info("websocket服务启动")
 }
 
@@ -87,32 +89,33 @@ func Stop() {
 	close(closeCh)
 }
 
-func Tick() chan bool {
-	select {
-	case <-closeCh:
-		//关闭所有服务器
-		for _, server := range serverList {
-			server.Close()
-		}
-		//关闭所有客户端
-		clientmap.Range(func(key, value interface{}) bool {
-			client := value.(*Client)
-			client.Close("")
-			return true
-		})
+func Tick() {
+	for {
+		select {
+		case <-closeCh:
+			//关闭所有服务器
+			for _, server := range serverList {
+				server.Close()
+			}
+			//关闭所有客户端
+			clientmap.Range(func(key, value interface{}) bool {
+				client := value.(*Client)
+				client.Close("")
+				return true
+			})
 
-		//关闭消息队列
-		close(msgQueue)
-		return nil
-	case read_msg := <-msgQueue:
-		// 	处理消息队列
-		if c, h := clientmap.Load(read_msg.uid); h {
-			pbmsg := util.PasreFSMessage(read_msg.data)
-			if pbmsg != nil {
-				client := c.(*Client)
-				client.OnMessage(client, pbmsg)
+			//关闭消息队列
+			close(msgQueue)
+			return
+		case read_msg := <-msgQueue:
+			// 	处理消息队列
+			if c, h := clientmap.Load(read_msg.uid); h {
+				pbmsg := util.PasreFSMessage(read_msg.data)
+				if pbmsg != nil {
+					client := c.(*Client)
+					client.OnMessage(client, pbmsg)
+				}
 			}
 		}
 	}
-	return nil
 }

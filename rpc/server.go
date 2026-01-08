@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"strconv"
+	"sync/atomic"
 	"time"
 	"touchgocore/network/message"
 	"touchgocore/syncmap"
@@ -18,7 +19,7 @@ import (
 )
 
 var (
-	service_ map[string]*RpcServer = nil
+	service_ syncmap.Map
 )
 
 type msginfo struct {
@@ -36,6 +37,7 @@ type RpcServer struct {
 	readchannel        chan *msginfo
 	handlechannel      chan *msginfo
 	done               chan struct{}
+	stopped            atomic.Bool
 }
 
 func (s *RpcServer) Msg(stream message.Grpc_MsgServer) error {
@@ -69,17 +71,31 @@ func (s *RpcServer) Msg(stream message.Grpc_MsgServer) error {
 		}
 
 		if err != nil {
-			vars.Error(fmt.Sprintf("接收gRPC消息错误: %v", err))
+			vars.Error("接收gRPC消息错误: %v", err)
 			// 移除客户端stream
 			s.nametoclientstream.Delete(clientNameKey)
 			return err
 		}
 
-		s.readchannel <- &msginfo{
+		// 避免在服务器停止后继续发送消息
+		select {
+		case <-s.done:
+			vars.Info("RPC服务器已停止，丢弃接收到的消息[%s]", clientNameKey)
+			return nil
+		default:
+		}
+
+		select {
+		case s.readchannel <- &msginfo{
 			req:           msg,
 			clientNameKey: clientNameKey,
 			protol1:       msg.GetHead().GetProtocol1(),
 			protol2:       msg.GetHead().GetProtocol2(),
+		}:
+			// 发送成功
+		case <-s.done:
+			vars.Info("RPC服务器已停止，丢弃接收到的消息[%s]", clientNameKey)
+			return nil
 		}
 	}
 	return nil
@@ -140,16 +156,23 @@ func (s *RpcServer) handleChanel() {
 
 // 关闭服务
 func (s *RpcServer) Stop() {
+	if s.stopped.Load() {
+		return
+	}
+	s.stopped.Store(true)
 	close(s.done)
 	s.service.Stop()
+	vars.Info("RPC服务器停止[%s]", s.name)
 }
 
 func StartGrpcServer(name, ip string, port int) {
-	lis, err := net.Listen("tcp", "[::]:"+strconv.Itoa(port))
+	addr := "[::]:" + strconv.Itoa(port)
+	lis, err := net.Listen("tcp", addr)
 	if err != nil {
-		vars.Error("gRPC监听失败: %v", err)
+		vars.Error("gRPC监听失败[%s]: %v", addr, err)
 		return
 	}
+	vars.Info("gRPC监听已启动[%s]，服务器名称:%s", addr, name)
 
 	// opt := []grpc.ServerOption{
 	// 	grpc.MaxRecvMsgSize(MAX_MSG_SIZE),
@@ -185,8 +208,10 @@ func StartGrpcServer(name, ip string, port int) {
 	go func(s *RpcServer) {
 		//启动监听
 		if err := s.service.Serve(lis); err != nil {
-			vars.Error("gRPC服务启动失败: %v", err)
-			delete(service_, s.name)
+			vars.Error("gRPC服务启动失败[%s]: %v", s.name, err)
+			service_.Delete(s.name)
+			// 通知处理goroutine退出
+			close(s.done)
 			return
 		}
 	}(service)
@@ -194,9 +219,6 @@ func StartGrpcServer(name, ip string, port int) {
 	go service.readChanel()
 	go service.handleChanel()
 
-	if service_ == nil {
-		service_ = make(map[string]*RpcServer)
-	}
-	service_[name] = service
+	service_.Store(name, service)
 	vars.Info("gRPC服务启动成功,端口:%d", port)
 }

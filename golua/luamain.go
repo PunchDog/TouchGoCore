@@ -119,8 +119,10 @@ func NewLuaScript(initluapath string) *LuaScript {
 		p.l.Register(funcname, function)
 	}
 	//注册类
-	for i, _ := range _exportsClass {
-		newLuaClass(i, p)
+	for class := range _exportsClass {
+		if err := newLuaClass(class, p); err != nil {
+			vars.Error("注册Lua类失败: %v", err)
+		}
 	}
 
 	//读取脚本文件

@@ -1,7 +1,6 @@
 package touchgocore
 
 import (
-	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -9,7 +8,6 @@ import (
 	"path"
 	"runtime"
 	"strconv"
-	"sync"
 	"syscall"
 	"time"
 
@@ -169,30 +167,12 @@ func Run(serverName string) {
 	for {
 		select {
 		case <-timer.C:
-			if err := loop(); err != nil {
-				vars.Error(err.Error())
-				break
-			}
+			localtimer.TimeTick()
 		case <-websocket.Tick(): //websocket处理
+		case <-chExit:
+			return
 		}
 	}
-}
-
-func loop() (err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			err = r.(error)
-		}
-	}()
-
-	err = nil
-	select {
-	case <-chExit:
-		err = errors.New("退出服务器")
-	case <-localtimer.TimeTick(): //定时器处理
-	default:
-	}
-	return
 }
 
 func closeServer() {
@@ -214,11 +194,5 @@ func signalProcHandler() {
 	chSig := make(chan os.Signal, 1)
 	signal.Notify(chSig, syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT, syscall.SIGKILL)
 	vars.Info("Signal: ", <-chSig)
-	wg := sync.WaitGroup{}
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		closeServer()
-	}()
-	wg.Wait()
+	closeServer()
 }

@@ -591,12 +591,12 @@ func AddTimer(timer TimerInterface) error {
 }
 
 // TimeTick 处理定时器滴答
-func TimeTick() chan TimerInterface {
+func TimeTick() {
 	select {
 	case timer, ok := <-timerChannel:
 		if !ok {
 			// 通道已关闭
-			return nil
+			return
 		}
 
 		timer.Tick()
@@ -608,7 +608,6 @@ func TimeTick() chan TimerInterface {
 	default:
 		// 没有定时器需要处理
 	}
-	return nil
 }
 
 // GetDefaultManager 返回默认定时器管理器

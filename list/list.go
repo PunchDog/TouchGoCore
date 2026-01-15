@@ -1,160 +1,21 @@
 package list
 
 import (
-	"reflect"
+	"sync"
 	"sync/atomic"
 	"time"
 	"touchgocore/vars"
 )
 
-// 节点接口
-type INode interface {
-	GetId() int64
-	GetData() interface{}
-	InsertAfter(data interface{}) INode
-	InsertBefore(data interface{}) INode
-	Remove()
-	GetNode() *ListNode
-}
-
-// 实现一个双向链表，支持增删改查
-// 链表节点
-type ListNode struct {
-	id   int64       //节点id
-	pre  INode       //上一个节点
-	next INode       //下一个节点
-	data interface{} //数据
-	list *List       //所属链表
-	cls  INode       //节点类型
-}
-
-// 获取节点
-func (this *ListNode) GetNode() *ListNode {
-	return this
-}
-
-// 获取id
-func (this *ListNode) GetId() int64 {
-	return this.id
-}
-
-// 获取数据
-func (this *ListNode) GetData() interface{} {
-	return this.data
-}
-
-func (this *ListNode) new() INode {
-	if this.cls == nil {
-		return nil
-	}
-	newNode := reflect.New(reflect.TypeOf(this.cls).Elem()).Interface().(INode)
-	newnode := newNode.GetNode()
-	if newnode == nil {
-		return nil
-	}
-	newnode.cls = this.cls // 设置相同的类型
-	return newNode
-}
-
-// 在当前节点后插入一个节点
-func (this *ListNode) InsertAfter(data interface{}) (newNode INode) {
-	defer func() {
-		if err := recover(); err != nil {
-			vars.Error("", err)
-			newNode = nil
-		}
-	}()
-	newNode = this.new()
-	if newNode == nil {
-		return nil
-	}
-	newnode := newNode.GetNode()
-	newnode.id = this.list.getMaxId()
-	newnode.pre = this
-	newnode.next = this.next
-	newnode.data = data
-	newnode.list = this.list
-
-	if this.next == nil {
-		this.list.tail = newNode
-	} else {
-		this.next.GetNode().pre = newNode
-	}
-	this.next = newNode
-	this.list.len++
-	return
-}
-
-// 在当前节点前插入一个节点
-func (this *ListNode) InsertBefore(data interface{}) (newNode INode) {
-	defer func() {
-		if err := recover(); err != nil {
-			vars.Error("", err)
-			newNode = nil
-		}
-	}()
-	newNode = this.new()
-	if newNode == nil {
-		return nil
-	}
-	newnode := newNode.GetNode()
-	newnode.id = this.list.getMaxId()
-	newnode.pre = this.pre
-	newnode.next = this
-	newnode.data = data
-	newnode.list = this.list
-
-	if this.pre == nil {
-		this.list.head = newNode
-	} else {
-		this.pre.GetNode().next = newNode
-	}
-	this.pre = newNode
-	this.list.len++
-	return
-}
-
-// 删除当前节点
-func (this *ListNode) Remove() {
-	if this.list == nil {
-		return
-	}
-
-	//如果是链表遍历期间，需要删除的节点先缓存下来，等遍历结束后再删除
-	if this.list.dellock {
-		this.list.rangeDelList = append(this.list.rangeDelList, this)
-		return
-	}
-
-	//删除节点
-	if this.pre == nil {
-		this.list.head = this.next
-	} else {
-		this.pre.GetNode().next = this.next
-	}
-	if this.next == nil {
-		this.list.tail = this.pre
-	} else {
-		this.next.GetNode().pre = this.pre
-	}
-	this.list.len--
-	this.list = nil
-	this.pre = nil
-	this.next = nil
-	// this.data = nil
-	// this.cls = nil
-	this.id = 0
-	return
-}
-
 // 链表
 type List struct {
-	head         INode   //头节点
-	tail         INode   //尾节点
-	len          int     //长度
-	rangeDelList []INode //删除列表
-	dellock      bool    //删除锁
-	nextID       int64   //下一个节点ID
+	mu           sync.Mutex // 保护并发修改
+	head         INode      //头节点
+	tail         INode      //尾节点
+	len          int        //长度
+	rangeDelList []INode    //删除列表
+	dellock      bool       //删除锁
+	nextID       int64      //下一个节点ID
 }
 
 // 创建一个链表
@@ -168,49 +29,34 @@ func NewList() *List {
 	}
 }
 
-// 获取一个ID，并且nextID++
-func (this *List) getMaxId() int64 {
-	if this.nextID == 0 || this.nextID > time.Now().UnixNano()+1 {
-		atomic.StoreInt64(&this.nextID, time.Now().UnixNano()+1)
-	} else {
-		atomic.AddInt64(&this.nextID, 1)
+// generateNextID 生成下一个节点ID，使用原子操作保证并发安全
+func (l *List) generateNextID() int64 {
+	for {
+		old := atomic.LoadInt64(&l.nextID)
+		now := time.Now().UnixNano()
+		var newID int64
+		if old == 0 || old > now+1 {
+			newID = now + 1
+		} else {
+			newID = old + 1
+		}
+		if atomic.CompareAndSwapInt64(&l.nextID, old, newID) {
+			return newID
+		}
+		// CAS失败，重试
 	}
-	return this.nextID
 }
 
 // 长度
-func (this *List) Length() int {
-	return this.len
-}
-
-// 添加一个节点，如果cls为nil，则用默认的ListNode创建
-func (this *List) AddNew(data interface{}, cls INode) INode {
-	var newnode INode
-	if cls == nil {
-		newnode = new(ListNode)
-		cls = newnode
-	} else {
-		newnode = reflect.New(reflect.TypeOf(cls).Elem()).Interface().(INode)
-	}
-
-	obj := newnode.GetNode()
-	if obj == nil {
-		return nil
-	}
-	obj.data = data
-	obj.cls = cls
-
-	if this.Add(newnode) {
-		return newnode
-	}
-	return nil
+func (l *List) Length() int {
+	return l.len
 }
 
 // 插入一个老的节点
-func (this *List) Add(node INode) (bret bool) {
+func (l *List) Add(node INode) (bret bool) {
 	defer func() {
 		if err := recover(); err != nil {
-			vars.Error("", err)
+			vars.Error("%v", err)
 			bret = false
 		}
 	}()
@@ -222,49 +68,52 @@ func (this *List) Add(node INode) (bret bool) {
 	//删除老的链接
 	node.GetNode().Remove()
 
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
 	obj := node.GetNode()
 	if obj == nil {
 		bret = false
 		return
 	}
 
-	if obj.cls == nil {
-		obj.cls = node
+	if obj.nodeType == nil {
+		obj.nodeType = node
 	}
 
-	obj.id = this.getMaxId()
-	obj.list = this
+	obj.id = l.generateNextID()
+	obj.list = l
 	obj.pre = nil
 	obj.next = nil
 
 	//添加新的链接
-	if this.head == nil {
-		this.head = node
-		this.tail = node
+	if l.head == nil {
+		l.head = node
+		l.tail = node
 	} else {
-		this.tail.GetNode().next = node
-		node.GetNode().pre = this.tail
-		this.tail = node
+		l.tail.GetNode().next = node
+		node.GetNode().pre = l.tail
+		l.tail = node
 	}
-	this.len++
+	l.len++
 	bret = true
 	return
 }
 
 // 获取头节点
-func (this *List) Head() INode {
-	return this.head
+func (l *List) Head() INode {
+	return l.head
 }
 
 // 获取尾节点
-func (this *List) Tail() INode {
-	return this.tail
+func (l *List) Tail() INode {
+	return l.tail
 }
 
 // 获取一个节点
-func (this *List) Get(id int64) INode {
+func (l *List) Get(id int64) INode {
 	var node INode = nil
-	this.Range(func(n INode) bool {
+	l.Range(func(n INode) bool {
 		if n.GetId() == id {
 			node = n
 			return false
@@ -275,17 +124,24 @@ func (this *List) Get(id int64) INode {
 }
 
 // 遍历
-func (this *List) Range(f func(INode) bool) {
-	this.dellock = true
+func (l *List) Range(f func(INode) bool) {
+	l.mu.Lock()
+	l.dellock = true
+	l.mu.Unlock()
+
 	defer func() {
-		this.dellock = false
-		for _, node := range this.rangeDelList {
-			node.Remove()
+		l.mu.Lock()
+		l.dellock = false
+		for _, node := range l.rangeDelList {
+			if n := node.GetNode(); n != nil {
+				l.removeNodeLocked(n)
+			}
 		}
-		this.rangeDelList = nil // 清空引用，防止内存泄漏
+		l.rangeDelList = nil // 清空引用，防止内存泄漏
+		l.mu.Unlock()
 	}()
 
-	node := this.head
+	node := l.head
 	for node != nil {
 		if condition := f(node); !condition {
 			break
@@ -295,17 +151,46 @@ func (this *List) Range(f func(INode) bool) {
 }
 
 // 清空
-func (this *List) Clear() {
+func (l *List) Clear() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
 	// 遍历所有节点并删除，防止内存泄漏
-	node := this.head
+	node := l.head
 	for node != nil {
 		next := node.GetNode().next
-		node.Remove()
+		// node.Remove()
+		l.removeNodeLocked(node.GetNode())
 		node = next
 	}
 	// 确保状态一致
-	this.head = nil
-	this.tail = nil
-	this.len = 0
-	this.rangeDelList = nil
+	l.head = nil
+	l.tail = nil
+	l.len = 0
+	l.rangeDelList = nil
+}
+
+// removeNodeLocked 从链表中删除节点，调用者必须已持有 mu 锁
+func (l *List) removeNodeLocked(node *ListNode) {
+	if node.list != l {
+		return // 不属于此链表
+	}
+
+	// 删除节点
+	if node.pre == nil {
+		l.head = node.next
+	} else {
+		node.pre.GetNode().next = node.next
+	}
+	if node.next == nil {
+		l.tail = node.pre
+	} else {
+		node.next.GetNode().pre = node.pre
+	}
+	l.len--
+	// 清理节点引用
+	node.list = nil
+	node.pre = nil
+	node.next = nil
+	node.id = 0
 }

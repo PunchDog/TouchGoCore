@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"touchgocore/list"
 	"touchgocore/util"
 	"touchgocore/vars"
 )
@@ -116,7 +117,7 @@ var timerPool = &TimerPool{}
 
 // Timer 表示基础定时器结构
 type Timer struct {
-	util.ListNode
+	list.ListNode
 
 	// 定时器元数据
 	uid      int64 // 唯一标识符
@@ -289,7 +290,7 @@ func NewTimer(interval, count int64, cls TimerInterface) (TimerInterface, error)
 // TimerWheel 表示时间轮结构
 type TimerWheel struct {
 	wheelConfig  int64               // 时间轮精度（毫秒）
-	tickWheel    *util.List          // 定时器链表
+	tickWheel    *list.List          // 定时器链表
 	wheelLock    sync.RWMutex        // 时间轮锁（读写优化）
 	addTimerChan chan TimerInterface // 定时器添加通道
 	isRunning    atomic.Bool         // 是否运行
@@ -409,7 +410,7 @@ func NewTimerManager() *TimerManager {
 	for i, config := range wheelConfigs {
 		wheel := &TimerWheel{
 			wheelConfig:  config,
-			tickWheel:    util.NewList(),
+			tickWheel:    list.NewList(),
 			addTimerChan: make(chan TimerInterface, MaxAddTimerChannelNum),
 		}
 		wheel.isRunning.Store(true)
@@ -462,7 +463,7 @@ func (m *TimerManager) handleTimerAdd(wheel *TimerWheel, timer TimerInterface) {
 	}
 
 	parent.wheel = wheel
-	wheel.tickWheel.Add(timer.(util.INode))
+	wheel.tickWheel.Add(timer.(list.INode))
 }
 
 // processWheelTick 处理时间轮滴答事件
@@ -472,7 +473,7 @@ func (m *TimerManager) processWheelTick(wheel *TimerWheel, wheelType TimerType) 
 
 	currentTime := time.Now().UTC().UnixMilli()
 
-	wheel.tickWheel.Range(func(node util.INode) bool {
+	wheel.tickWheel.Range(func(node list.INode) bool {
 		timer := node.(TimerInterface)
 		parent := timer.GetParent()
 
@@ -529,7 +530,7 @@ func (m *TimerManager) cleanupWheel(wheel *TimerWheel) {
 	currentTime := time.Now().UTC().UnixMilli()
 
 	// 执行所有已过期的定时器
-	wheel.tickWheel.Range(func(node util.INode) bool {
+	wheel.tickWheel.Range(func(node list.INode) bool {
 		timer := node.(TimerInterface)
 		parent := timer.GetParent()
 		if parent != nil && parent.nextTime <= currentTime {

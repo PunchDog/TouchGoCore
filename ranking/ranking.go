@@ -1,7 +1,6 @@
 package ranking
 
 import (
-	"bytes"
 	"encoding/gob"
 	"log"
 	"math/rand"
@@ -16,6 +15,10 @@ const SkipListMaxLevel = 32
 // 随机概率
 const SkipListProbability = 0.25
 
+// 包级别的随机数生成器，线程安全
+var randSource = rand.NewSource(time.Now().UnixNano())
+var randGen = rand.New(randSource)
+
 // RankInfo 排名信息结构体
 type RankInfo struct {
 	ID        int64
@@ -24,12 +27,13 @@ type RankInfo struct {
 	Timestamp int64
 }
 
-// 比较函数，用于降序排序
+// 比较函数，用于降序排序（值大的在前面）
 func compareDesc(a, b int64) bool {
 	return a > b
 }
 
 // 比较函数，用于跳跃表的降序排序（值大的在前面）
+// 跳跃表插入时，会寻找第一个不小于新节点的位置
 func less(a, b int64) bool {
 	return a < b
 }
@@ -98,8 +102,7 @@ func newSkipList() *SkipList {
 
 func randomLevel() int32 {
 	lvl := int32(1)
-	rand.Seed(time.Now().UnixNano())
-	for rand.Float32() < SkipListProbability && lvl < SkipListMaxLevel {
+	for randGen.Float32() < SkipListProbability && lvl < SkipListMaxLevel {
 		lvl++
 	}
 	return lvl
@@ -115,12 +118,31 @@ func (sl *SkipList) insert(key int64, val *RankInfo) {
 		} else {
 			rank[i] = rank[i+1]
 		}
-		for x.Level[i].Forward != nil &&
-			(less(x.Level[i].Forward.Key, key) ||
-				(x.Level[i].Forward.Key == key &&
-					x.Level[i].Forward.Value.Compare(val) < 0)) {
-			rank[i] += x.Level[i].Span
-			x = x.Level[i].Forward
+		for {
+			forward := x.Level[i].Forward
+			if forward == nil {
+				break
+			}
+			// 优化比较逻辑，减少函数调用
+			forwardKey := forward.Key
+			// 实现降序排序：值大的排在前面
+			if forwardKey > key {
+				rank[i] += x.Level[i].Span
+				x = forward
+				continue
+			}
+			if forwardKey < key {
+				break
+			}
+			// 相同key的情况，比较时间戳和ID
+			forwardVal := forward.Value
+			if forwardVal.Timestamp < val.Timestamp ||
+				(forwardVal.Timestamp == val.Timestamp && forwardVal.ID < val.ID) {
+				rank[i] += x.Level[i].Span
+				x = forward
+				continue
+			}
+			break
 		}
 		update[i] = x
 	}
@@ -137,11 +159,15 @@ func (sl *SkipList) insert(key int64, val *RankInfo) {
 
 	x = newSkipListNode(level, key, val)
 	for i := int32(0); i < level; i++ {
-		x.Level[i].Forward = update[i].Level[i].Forward
+		forward := update[i].Level[i].Forward
+		x.Level[i].Forward = forward
 		update[i].Level[i].Forward = x
 
-		x.Level[i].Span = update[i].Level[i].Span - (rank[0] - rank[i])
-		update[i].Level[i].Span = rank[0] - rank[i] + 1
+		// 优化跨度计算，减少算术运算
+		origSpan := update[i].Level[i].Span
+		newRank := rank[0] - rank[i] + 1
+		x.Level[i].Span = origSpan - newRank + 1
+		update[i].Level[i].Span = newRank
 	}
 
 	for i := level; i < sl.Level; i++ {
@@ -154,31 +180,52 @@ func (sl *SkipList) remove(key int64, val *RankInfo) bool {
 	var update [SkipListMaxLevel]*SkipListNode
 	x := sl.Header
 	for i := sl.Level - 1; i >= 0; i-- {
-		for x.Level[i].Forward != nil &&
-			(less(x.Level[i].Forward.Key, key) ||
-				(x.Level[i].Forward.Key == key &&
-					x.Level[i].Forward.Value.Compare(val) < 0)) {
-			x = x.Level[i].Forward
+		for {
+			forward := x.Level[i].Forward
+			if forward == nil {
+				break
+			}
+			forwardKey := forward.Key
+			// 实现降序排序：值大的排在前面
+			if forwardKey > key {
+				x = forward
+				continue
+			}
+			if forwardKey < key {
+				break
+			}
+			// 相同key的情况，比较时间戳和ID
+			forwardVal := forward.Value
+			if forwardVal.Timestamp < val.Timestamp ||
+				(forwardVal.Timestamp == val.Timestamp && forwardVal.ID < val.ID) {
+				x = forward
+				continue
+			}
+			break
 		}
 		update[i] = x
 	}
 	x = x.Level[0].Forward
-	if x != nil && x.Key == key && x.Value.Compare(val) == 0 {
-		// delete node
-		for i := int32(0); i < sl.Level; i++ {
-			if update[i].Level[i].Forward == x {
-				update[i].Level[i].Span += x.Level[i].Span - 1
-				update[i].Level[i].Forward = x.Level[i].Forward
-			} else {
-				update[i].Level[i].Span--
+	if x != nil && x.Key == key {
+		// 优化比较逻辑，减少函数调用
+		xVal := x.Value
+		if xVal.Timestamp == val.Timestamp && xVal.ID == val.ID {
+			// delete node
+			for i := int32(0); i < sl.Level; i++ {
+				if update[i].Level[i].Forward == x {
+					update[i].Level[i].Span += x.Level[i].Span - 1
+					update[i].Level[i].Forward = x.Level[i].Forward
+				} else {
+					update[i].Level[i].Span--
+				}
 			}
-		}
 
-		for sl.Level > 1 && sl.Header.Level[sl.Level-1].Forward == nil {
-			sl.Level--
+			for sl.Level > 1 && sl.Header.Level[sl.Level-1].Forward == nil {
+				sl.Level--
+			}
+			sl.Length--
+			return true
 		}
-		sl.Length--
-		return true
 	}
 	return false
 }
@@ -186,31 +233,70 @@ func (sl *SkipList) remove(key int64, val *RankInfo) bool {
 func (sl *SkipList) search(key int64, val *RankInfo) bool {
 	x := sl.Header
 	for i := sl.Level - 1; i >= 0; i-- {
-		for x.Level[i].Forward != nil &&
-			(less(x.Level[i].Forward.Key, key) ||
-				(x.Level[i].Forward.Key == key &&
-					x.Level[i].Forward.Value.Compare(val) < 0)) {
-			x = x.Level[i].Forward
+		for {
+			forward := x.Level[i].Forward
+			if forward == nil {
+				break
+			}
+			forwardKey := forward.Key
+			// 实现降序排序：值大的排在前面
+			if forwardKey > key {
+				x = forward
+				continue
+			}
+			if forwardKey < key {
+				break
+			}
+			// 相同key的情况，比较时间戳和ID
+			forwardVal := forward.Value
+			if forwardVal.Timestamp < val.Timestamp ||
+				(forwardVal.Timestamp == val.Timestamp && forwardVal.ID < val.ID) {
+				x = forward
+				continue
+			}
+			break
 		}
 	}
 	x = x.Level[0].Forward
-	return x != nil && x.Key == key && x.Value.Compare(val) == 0
+	return x != nil && x.Key == key &&
+		x.Value.Timestamp == val.Timestamp &&
+		x.Value.ID == val.ID
 }
 
 func (sl *SkipList) rank(key int64, val *RankInfo) int32 {
 	rank := int32(0)
 	x := sl.Header
 	for i := sl.Level - 1; i >= 0; i-- {
-		for x.Level[i].Forward != nil &&
-			(less(x.Level[i].Forward.Key, key) ||
-				(x.Level[i].Forward.Key == key &&
-					x.Level[i].Forward.Value.Compare(val) < 0)) {
-			rank += x.Level[i].Span
-			x = x.Level[i].Forward
+		for {
+			forward := x.Level[i].Forward
+			if forward == nil {
+				break
+			}
+			forwardKey := forward.Key
+			// 实现降序排序：值大的排在前面
+			if forwardKey > key {
+				rank += x.Level[i].Span
+				x = forward
+				continue
+			}
+			if forwardKey < key {
+				break
+			}
+			// 相同key的情况，比较时间戳和ID
+			forwardVal := forward.Value
+			if forwardVal.Timestamp < val.Timestamp ||
+				(forwardVal.Timestamp == val.Timestamp && forwardVal.ID < val.ID) {
+				rank += x.Level[i].Span
+				x = forward
+				continue
+			}
+			break
 		}
 	}
 	x = x.Level[0].Forward
-	if x != nil && x.Key == key && x.Value.Compare(val) == 0 {
+	if x != nil && x.Key == key &&
+		x.Value.Timestamp == val.Timestamp &&
+		x.Value.ID == val.ID {
 		return rank
 	}
 	return -1
@@ -220,12 +306,20 @@ func (sl *SkipList) searchByRank(rank int32) (int64, *RankInfo) {
 	visited := int32(0)
 	x := sl.Header
 	for i := sl.Level - 1; i >= 0; i-- {
-		for x.Level[i].Forward != nil && (visited+x.Level[i].Span) <= rank {
-			visited += x.Level[i].Span
-			x = x.Level[i].Forward
-		}
-		if visited == rank {
-			return x.Key, x.Value
+		for {
+			forward := x.Level[i].Forward
+			if forward == nil {
+				break
+			}
+			newVisited := visited + x.Level[i].Span
+			if newVisited > rank {
+				break
+			}
+			visited = newVisited
+			x = forward
+			if visited == rank {
+				return x.Key, x.Value
+			}
 		}
 	}
 	return -1, nil
@@ -235,12 +329,20 @@ func (sl *SkipList) getFirstByRank(rank int32) *SkipListNode {
 	visited := int32(0)
 	x := sl.Header
 	for i := sl.Level - 1; i >= 0; i-- {
-		for x.Level[i].Forward != nil && (visited+x.Level[i].Span) <= rank {
-			visited += x.Level[i].Span
-			x = x.Level[i].Forward
-		}
-		if visited == rank {
-			return x
+		for {
+			forward := x.Level[i].Forward
+			if forward == nil {
+				break
+			}
+			newVisited := visited + x.Level[i].Span
+			if newVisited > rank {
+				break
+			}
+			visited = newVisited
+			x = forward
+			if visited == rank {
+				return x
+			}
 		}
 	}
 	return nil
@@ -257,10 +359,12 @@ func copyValue(v *RankInfo) *RankInfo {
 }
 
 func (sl *SkipList) searchByRankRange(min, max int32) []*RankInfo {
-	res := make([]*RankInfo, 0)
+	// 计算结果数量，预分配切片容量
+	rangeSize := max - min + 1
+	res := make([]*RankInfo, 0, rangeSize)
 	st := sl.getFirstByRank(min)
 	if st == nil {
-		return nil
+		return res
 	}
 
 	rank := min
@@ -284,6 +388,8 @@ type RankTree struct {
 	Sl *SkipList
 	//EntryMapping map[int64]*RankInfo
 	EntryMapping sync.Map
+	// 读写锁，保护跳跃表的并发访问
+	rwMutex sync.RWMutex
 }
 
 func NewRankTree() *RankTree {
@@ -295,34 +401,41 @@ func NewRankTree() *RankTree {
 
 // 添加新排名信息
 func (rt *RankTree) AddRankInfo(uid int64, val int64, timestamp int64) {
+	// 写操作，需要互斥锁
+	rt.rwMutex.Lock()
+	defer rt.rwMutex.Unlock()
+
 	var info *RankInfo
-	//if info = rt.EntryMapping[uid]; info != nil {
 	if tempV, has := rt.EntryMapping.Load(uid); has {
 		info = tempV.(*RankInfo)
 		if info.Value == val {
-			return
+			return // 相同值，不需要更新
 		}
+		// 先删除旧值，再更新
 		rt.Sl.remove(info.Value, info)
 		info.Value = val
 		info.Timestamp = timestamp
 	} else {
-		info = new(RankInfo)
-		info.ID = uid
-		info.Value = val
-		info.Timestamp = timestamp
+		// 只在需要时创建新对象
+		info = &RankInfo{
+			ID:        uid,
+			Value:     val,
+			Timestamp: timestamp,
+		}
 	}
 	rt.Sl.insert(info.Value, info)
-	//rt.EntryMapping[uid] = info
 	rt.EntryMapping.Store(uid, info)
 }
 
 // 删除排名信息
 func (rt *RankTree) RemoveRankInfo(uid int64) bool {
-	//if info := rt.EntryMapping[uid]; info != nil {
+	// 写操作，需要互斥锁
+	rt.rwMutex.Lock()
+	defer rt.rwMutex.Unlock()
+
 	if tempV, has := rt.EntryMapping.Load(uid); has {
 		info := tempV.(*RankInfo)
 		rt.Sl.remove(info.Value, info)
-		//delete(rt.EntryMapping, uid)
 		rt.EntryMapping.Delete(uid)
 		return true
 	}
@@ -330,30 +443,18 @@ func (rt *RankTree) RemoveRankInfo(uid int64) bool {
 }
 
 // 更新排名信息
-// TODO 名字去掉
 func (rt *RankTree) UpdateRankInfo(uid int64, val int64, timestamp int64) {
-	// if info := rt.EntryMapping[uid]; info == nil || info.Val != val {
-	// 	rt.RemoveRankInfo(uid)
-	// 	rt.AddRankInfo(uid, val, timestamp)
-	// }
-
-	tempV, has := rt.EntryMapping.Load(uid)
-	if has {
-		info := tempV.(*RankInfo)
-		if info.Value == val {
-			return
-		}
-	}
-	rt.RemoveRankInfo(uid)
+	// 直接调用AddRankInfo，它已经包含了更新逻辑
 	rt.AddRankInfo(uid, val, timestamp)
 }
 
 // 查询用户排名
 func (rt *RankTree) QueryRankInfo(uid int64) *RankInfo {
+	// 读操作，需要读锁
+	rt.rwMutex.RLock()
+	defer rt.rwMutex.RUnlock()
+
 	var info *RankInfo
-	// if info = rt.EntryMapping[uid]; info == nil {
-	// 	return nil
-	// }
 	if tempV, has := rt.EntryMapping.Load(uid); has {
 		info = tempV.(*RankInfo)
 	} else {
@@ -365,6 +466,10 @@ func (rt *RankTree) QueryRankInfo(uid int64) *RankInfo {
 
 // 查询指定范围排名
 func (rt *RankTree) QueryByRankRange(min, max int32) []*RankInfo {
+	// 读操作，需要读锁
+	rt.rwMutex.RLock()
+	defer rt.rwMutex.RUnlock()
+
 	if min > max {
 		return nil
 	}
@@ -379,6 +484,10 @@ func (rt *RankTree) QueryByRankRange(min, max int32) []*RankInfo {
 
 // 根据排名查询信息
 func (rt *RankTree) QueryByRank(rank int32) *RankInfo {
+	// 读操作，需要读锁
+	rt.rwMutex.RLock()
+	defer rt.rwMutex.RUnlock()
+
 	key, val := rt.Sl.searchByRank(rank)
 	if key < 0 {
 		return nil
@@ -388,6 +497,10 @@ func (rt *RankTree) QueryByRank(rank int32) *RankInfo {
 
 // 获取排名长度
 func (rt *RankTree) RankLength() int32 {
+	// 读操作，需要读锁
+	rt.rwMutex.RLock()
+	defer rt.rwMutex.RUnlock()
+
 	return rt.Sl.Length
 }
 
@@ -399,19 +512,32 @@ func LoadRanking(filename string) *RankTree {
 		return nil
 	}
 	defer f.Close()
-	info, _ := f.Stat()
-	raw := make([]byte, info.Size())
-	_, err = f.Read(raw)
-	if err != nil {
-		log.Fatalln("Read map file, err", err.Error())
+
+	// 创建gob解码器
+	dec := gob.NewDecoder(f)
+
+	// 先解码排名信息数量
+	var count int32
+	if err := dec.Decode(&count); err != nil {
+		log.Fatalln("Load Ranking count error:", err.Error())
 		return nil
 	}
-	rt := new(RankTree)
-	enc := gob.NewDecoder(bytes.NewReader(raw))
-	err = enc.Decode(rt)
-	if err != nil {
-		log.Fatalln("Load Ranking error:", err.Error())
+
+	// 创建排名树
+	rt := NewRankTree()
+
+	// 解码所有排名信息
+	for i := int32(0); i < count; i++ {
+		var info RankInfo
+		if err := dec.Decode(&info); err != nil {
+			log.Fatalln("Load Ranking info error:", err.Error())
+			return nil
+		}
+		// 重新构建跳跃表
+		rt.Sl.insert(info.Value, &info)
+		rt.EntryMapping.Store(info.ID, &info)
 	}
+
 	return rt
 }
 
@@ -423,14 +549,36 @@ func SaveRanking(rt *RankTree, filename string) bool {
 		return false
 	}
 	defer f.Close()
-	buffer := new(bytes.Buffer)
-	enc := gob.NewEncoder(buffer)
-	err = enc.Encode(rt)
-	if err != nil {
-		log.Println("Dump encode err:", err.Error())
+
+	// 创建gob编码器
+	enc := gob.NewEncoder(f)
+
+	// 写操作，需要互斥锁
+	rt.rwMutex.RLock()
+	defer rt.rwMutex.RUnlock()
+
+	// 收集所有排名信息
+	infos := make([]*RankInfo, 0, rt.Sl.Length)
+	rt.Sl.foreach(func(key int64, value interface{}) {
+		if info, ok := value.(*RankInfo); ok {
+			infos = append(infos, info)
+		}
+	})
+
+	// 编码排名信息数量
+	if err := enc.Encode(int32(len(infos))); err != nil {
+		log.Println("Dump encode count err:", err.Error())
 		return false
 	}
-	f.Write(buffer.Bytes())
+
+	// 编码所有排名信息
+	for _, info := range infos {
+		if err := enc.Encode(info); err != nil {
+			log.Println("Dump encode info err:", err.Error())
+			return false
+		}
+	}
+
 	return true
 }
 
@@ -443,7 +591,7 @@ type DbRankInfo struct {
 }
 
 var (
-	RTS      map[int64]*RankTree
+	RTS     map[int64]*RankTree
 	RTSLock sync.RWMutex
 )
 

@@ -500,9 +500,18 @@ func Error(msg string, args ...any) {
 
 // logWithLevel 统一的日志记录函数
 func logWithLevel(level slog.Level, msg string, args ...any) {
+	var formattedMsg string
+	if len(args) > 0 {
+		// 如果有参数，使用fmt.Sprintf格式化消息
+		formattedMsg = fmt.Sprintf(msg, args...)
+	} else {
+		// 没有参数，直接使用原始消息
+		formattedMsg = msg
+	}
+
 	if globalLogger == nil || !globalLogger.IsEnabled() {
 		// 使用简单的fmt输出作为fallback
-		logSimple(level, msg, args...)
+		logSimple(level, formattedMsg, nil...)
 		return
 	}
 
@@ -510,13 +519,13 @@ func logWithLevel(level slog.Level, msg string, args ...any) {
 
 	switch level {
 	case slog.LevelDebug:
-		logger.Debug(msg, args...)
+		logger.Debug(formattedMsg)
 	case slog.LevelInfo:
-		logger.Info(msg, args...)
+		logger.Info(formattedMsg)
 	case slog.LevelWarn:
-		logger.Warn(msg, args...)
+		logger.Warn(formattedMsg)
 	case slog.LevelError:
-		logger.Error(msg, args...)
+		logger.Error(formattedMsg)
 	}
 }
 
@@ -532,7 +541,11 @@ func logSimple(level slog.Level, msg string, args ...any) {
 		levelStr = "[ERROR]"
 	}
 
-	fmt.Printf("%s %s\n", levelStr, fmt.Sprintf(msg, args...))
+	if len(args) > 0 {
+		fmt.Printf("%s %s\n", levelStr, fmt.Sprintf(msg, args...))
+	} else {
+		fmt.Printf("%s %s\n", levelStr, msg)
+	}
 }
 
 // 初始化函数（默认使用默认配置）

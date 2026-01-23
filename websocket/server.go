@@ -109,6 +109,11 @@ func ListenAndServe(port int, className string) error {
 	}
 
 	go func() { //异步启动
+		defer func() {
+			if err := recover(); err != nil {
+				vars.Error("WebSocket服务器发生panic错误: %v", err)
+			}
+		}()
 		server.ListenAndServe()
 	}()
 	serverList = append(serverList, server)

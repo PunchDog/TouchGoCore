@@ -1,7 +1,6 @@
 package websocket
 
 import (
-	"fmt"
 	"reflect"
 	"sync"
 	"touchgocore/config"
@@ -72,7 +71,7 @@ func Run() {
 	for _, port := range config.Cfg_.Ws.Port {
 		err := ListenAndServe(port.Port, port.CallbackClassName)
 		if err != nil {
-			vars.Error(fmt.Sprintf("websocket服务启动端口%d监听失败:%s", port.Port, err.Error()))
+			vars.Error("websocket服务启动端口%d监听失败:%v", port.Port, err.Error())
 			continue
 		}
 	}
@@ -98,7 +97,7 @@ func Tick() {
 				server.Close()
 			}
 			//关闭所有客户端
-			clientmap.Range(func(key, value interface{}) bool {
+			clientMap.Range(func(key, value interface{}) bool {
 				client := value.(*Client)
 				client.Close("")
 				return true
@@ -109,7 +108,7 @@ func Tick() {
 			return
 		case read_msg := <-msgQueue:
 			// 	处理消息队列
-			if c, h := clientmap.Load(read_msg.uid); h {
+			if c, h := clientMap.Load(read_msg.uid); h {
 				pbmsg := util.PasreFSMessage(read_msg.data)
 				if pbmsg != nil {
 					client := c.(*Client)

@@ -426,6 +426,12 @@ func NewTimerManager() *TimerManager {
 
 // runWheel 运行时间轮循环
 func (m *TimerManager) runWheel(wheel *TimerWheel, wheelType TimerType) {
+	defer func() {
+		if err := recover(); err != nil {
+			vars.Error("时间轮运行发生panic错误: %v, 类型: %s", err, wheelType.String())
+		}
+	}()
+
 	ticker := time.NewTicker(time.Duration(wheel.wheelConfig) * time.Millisecond)
 	defer ticker.Stop()
 
@@ -598,6 +604,12 @@ func AddTimer(timer TimerInterface) error {
 
 // TimeTick 处理定时器滴答
 func TimeTick() {
+	defer func() {
+		if err := recover(); err != nil {
+			vars.Error("定时器滴答处理发生panic错误: %v", err)
+		}
+	}()
+
 	for {
 		select {
 		case timer, ok := <-timerChannel:

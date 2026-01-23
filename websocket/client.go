@@ -14,8 +14,8 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-var max_uid int64 = 0
-var clientmap syncmap.Map
+var maxUID int64 = 0
+var clientMap syncmap.Map
 
 // 客户端
 // 修改Client结构体定义
@@ -25,7 +25,7 @@ type Client struct {
 	remoteAddr string
 	closeCh    chan bool
 	msgChan    chan []byte
-	Uid        int64
+	UID        int64
 	iCallName  string
 }
 
@@ -45,7 +45,7 @@ func (c *Client) connectionDial(url string) error {
 			return nil
 		}
 
-		vars.Error(fmt.Sprintf("连接尝试 %d/%d 失败: %v", i+1, maxRetries, err))
+		vars.Error("连接尝试 %d/%d 失败: %v", i+1, maxRetries, err)
 		time.Sleep(retryInterval)
 		retryInterval *= 2 // 指数退避
 	}
@@ -55,9 +55,16 @@ func (c *Client) connectionDial(url string) error {
 
 func (c *Client) handleLoop() {
 	defer func() {
+		if err := recover(); err != nil {
+			vars.Error("客户端handleLoop发生panic错误: %v, 客户端地址: %s", err, c.remoteAddr)
+		}
 		c.Close("")
 		runtime.Goexit()
 	}()
+
+	// 设置写超时时间，5秒
+	writeTimeout := 5 * time.Second
+
 	for c.Connected() {
 		select {
 		case msg, ok := <-c.msgChan:
@@ -65,7 +72,18 @@ func (c *Client) handleLoop() {
 				return
 			}
 			if c.Connected() {
-				c.wsConnect.WriteMessage(websocket.BinaryMessage, msg)
+				// 设置写超时
+				if err := c.wsConnect.SetWriteDeadline(time.Now().Add(writeTimeout)); err != nil {
+					vars.Error("设置写超时失败: %v, 客户端地址: %s", err, c.remoteAddr)
+					c.Close("设置写超时失败")
+					return
+				}
+				// 执行写操作
+				if err := c.wsConnect.WriteMessage(websocket.BinaryMessage, msg); err != nil {
+					vars.Error("写消息失败: %v, 客户端地址: %s", err, c.remoteAddr)
+					c.Close("写消息失败")
+					return
+				}
 			} else {
 				return
 			}
@@ -75,6 +93,9 @@ func (c *Client) handleLoop() {
 
 func (c *Client) readLoop() {
 	defer func() {
+		if err := recover(); err != nil {
+			vars.Error("客户端readLoop发生panic错误: %v, 客户端地址: %s", err, c.remoteAddr)
+		}
 		c.Close("")
 		runtime.Goexit()
 	}()
@@ -82,7 +103,7 @@ func (c *Client) readLoop() {
 	for c.Connected() {
 		if _, data, err := c.wsConnect.ReadMessage(); err == nil {
 			if c.Connected() {
-				msgQueue <- &msgQueueType{uid: c.Uid, data: data}
+				msgQueue <- &msgQueueType{uid: c.UID, data: data}
 			}
 		} else {
 			return
@@ -114,10 +135,10 @@ func (c *Client) Close(reason string) {
 		c.wsConnect.Close()
 		close(c.msgChan)
 		c.wsConnect = nil
-		clientmap.Delete(c.Uid)
+		clientMap.Delete(c.UID)
 		c.wsConnect = nil
 		c.remoteAddr = ""
-		c.Uid = 0
+		c.UID = 0
 		if clientpool != nil {
 			v, ok := clientcall.Load(c.iCallName)
 			if ok {
@@ -129,7 +150,7 @@ func (c *Client) Close(reason string) {
 			c.ICall = nil
 			clientpool.Put(c)
 		}
-		vars.Info(fmt.Sprintf("%s 连接关闭，原因：%s", c.remoteAddr, reason))
+		vars.Info("%s 连接关闭，原因：%s", c.remoteAddr, reason)
 	}
 }
 
@@ -163,10 +184,10 @@ func (c *Client) SendMsg(msg ...any) {
 
 // 修改InitConnection为NewClient
 func NewClient(connType interface{}, remoteAddr string, className string) (*Client, error) {
-	if max_uid == 0 || max_uid > time.Now().UnixNano()+1 {
-		max_uid = time.Now().UnixNano() + 1
+	if maxUID == 0 || maxUID > time.Now().UnixNano()+1 {
+		maxUID = time.Now().UnixNano() + 1
 	} else {
-		max_uid++
+		maxUID++
 	}
 
 	var client *Client = nil
@@ -180,7 +201,7 @@ func NewClient(connType interface{}, remoteAddr string, className string) (*Clie
 		client = &Client{}
 	}
 
-	client.Uid = max_uid
+	client.UID = maxUID
 	client.remoteAddr = remoteAddr
 	client.closeCh = make(chan bool, 1)
 	client.msgChan = make(chan []byte, MAX_WRITE_BUFFER_SIZE)
@@ -231,7 +252,7 @@ func NewClient(connType interface{}, remoteAddr string, className string) (*Clie
 		return nil, errors.New("连接回调验证失败")
 	}
 
-	clientmap.Store(client.Uid, client)
+	clientMap.Store(client.UID, client)
 	// vars.Info("%s 连接建立成功", client.remoteAddr)
 	go client.readLoop()
 	go client.handleLoop()

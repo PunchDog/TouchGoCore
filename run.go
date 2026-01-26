@@ -127,7 +127,8 @@ func initLogger() {
 // setCPUNum 设置CPU核数
 func setCPUNum() {
 	//设置核数
-	runtime.GOMAXPROCS(runtime.NumCPU())
+	// runtime.GOMAXPROCS(runtime.NumCPU())
+	runtime.GOMAXPROCS(0)
 	vars.Info("加载核心配置")
 }
 

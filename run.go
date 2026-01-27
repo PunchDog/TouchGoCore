@@ -28,7 +28,7 @@ import (
 func Run(serverName string) {
 	defer func() {
 		if err := recover(); err != nil {
-			vars.Error("程序发生panic错误: %v", err)
+			fmt.Printf("程序发生panic错误: %v", err)
 		}
 	}()
 
@@ -37,7 +37,7 @@ func Run(serverName string) {
 
 	// 加载配置
 	if err := loadConfig(serverName); err != nil {
-		vars.Error("加载配置失败: %v", err)
+		fmt.Printf("加载配置失败: %v", err)
 		<-time.After(time.Millisecond * 100)
 		os.Exit(1)
 	}
@@ -59,7 +59,7 @@ func Run(serverName string) {
 	startServices()
 
 	// 核心加载完了后自己想执行的东西
-	util.DefaultCallFunc.Do(util.CallStart)
+	_, _ = util.DefaultCallFunc.Do(util.CallStart)
 
 	// 启动完成
 	vars.Info("touchgocore启动完成")
@@ -76,7 +76,7 @@ func closeServer() {
 	telegram.TelegramStop()
 
 	//退出时清理工作
-	util.DefaultCallFunc.Do(util.CallStop)
+	_, _ = util.DefaultCallFunc.Do(util.CallStop)
 
 	//关闭日志系统
 	vars.Shutdown()

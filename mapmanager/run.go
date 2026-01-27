@@ -10,5 +10,5 @@ func Run() {
 		return
 	}
 
-	util.DefaultCallFunc.Do("RunMap")
+	_, _ = util.DefaultCallFunc.Do("RunMap")
 }

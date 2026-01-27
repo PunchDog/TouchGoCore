@@ -86,10 +86,10 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message) {
 	} else {
 		//按设定的命令发消息
 		if message.Text[0] == '/' {
-			util.DefaultCallFunc.Do(util.CallTelegramMsg+message.Text, bot, message)
+			_, _ = util.DefaultCallFunc.Do(util.CallTelegramMsg+message.Text, bot, message)
 		} else {
 			//说话消息
-			util.DefaultCallFunc.Do(util.CallTelegramMsg+"Say", message.Text, bot, message)
+			_, _ = util.DefaultCallFunc.Do(util.CallTelegramMsg+"Say", message.Text, bot, message)
 		}
 	}
 }
@@ -120,7 +120,7 @@ type telegramTimer struct {
 
 func (t *telegramTimer) Tick() {
 	//每分钟广播一次心跳
-	util.DefaultCallFunc.Do(util.CallTelegramMsg+"Minute", t.bot)
+	_, _ = util.DefaultCallFunc.Do(util.CallTelegramMsg+"Minute", t.bot)
 }
 
 // 机器人监听代码

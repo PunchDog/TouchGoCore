@@ -140,10 +140,8 @@ func (s *RpcServer) handleChanel() {
 		case <-s.done:
 			return
 		case msg := <-s.handlechannel:
-			util.DefaultCallFunc.SetDoRet()
 			key := fmt.Sprintf("%s:%d:%d", util.CallRpcMsg, msg.protol1, msg.protol2)
-			bret := util.DefaultCallFunc.Do(key, msg)
-			res := util.DefaultCallFunc.GetRet()
+			res, bret := util.DefaultCallFunc.Do(key, msg)
 			if bret {
 				rsp := res[0].Interface().(proto.Message)
 				s.Send(msg.clientNameKey, msg.protol1, msg.protol2, rsp)

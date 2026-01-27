@@ -13,10 +13,10 @@ func Run() {
 		return
 	}
 
-	util.DefaultCallFunc.Do("RunLua")
+	_, _ = util.DefaultCallFunc.Do("RunLua")
 }
 
 // 关闭所有的定时器
 func Stop() {
-	util.DefaultCallFunc.Do("StopLua")
+	_, _ = util.DefaultCallFunc.Do("StopLua")
 }

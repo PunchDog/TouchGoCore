@@ -1,9 +1,10 @@
-package util
+﻿package util
 
 import (
-	"errors"
+	"log"
 	"reflect"
 	"sync"
+	"touchgocore/vars"
 )
 
 const (
@@ -17,86 +18,134 @@ const (
 
 var DefaultCallFunc *CallFunction = new(CallFunction)
 
+// callEntry 存储每个键对应的回调函数列表及其锁
+type callEntry struct {
+	mu   sync.RWMutex
+	fns  []reflect.Value
+	meta []*funcMeta // 缓存函数元数据以提高性能
+}
+
+// funcMeta 缓存函数的反射元数据
+type funcMeta struct {
+	inCount int            // 参数个数
+	inTypes []reflect.Type // 参数类型
+}
+
+// CallFunction 是回调管理器
 type CallFunction struct {
-	fn      sync.Map        // 数据key/list
-	retCh   []reflect.Value //返回值
-	bRet    bool            //设置返回值
-	retWait sync.Mutex      //等待器
+	entries sync.Map // key -> *callEntry
 }
 
-// 注册回调函数
-func (self *CallFunction) Register(key interface{}, fn interface{}) {
-	var fnlist []interface{} = nil
-	if l, has := self.fn.Load(key); has {
-		fnlist = l.([]interface{})
-	} else {
-		fnlist = make([]interface{}, 0)
+// Register 注册回调函数
+func (self *CallFunction) Register(key any, fn any) {
+	val := reflect.ValueOf(fn)
+	if val.Kind() != reflect.Func {
+		panic("Register: fn must be a function")
 	}
-	fnlist = append(fnlist, fn)
-	self.fn.Store(key, fnlist)
+
+	// 获取或创建 callEntry
+	entry, _ := self.entries.LoadOrStore(key, &callEntry{})
+	ce := entry.(*callEntry)
+
+	ce.mu.Lock()
+	defer ce.mu.Unlock()
+
+	// 缓存函数元数据
+	meta := &funcMeta{
+		inCount: val.Type().NumIn(),
+		inTypes: make([]reflect.Type, val.Type().NumIn()),
+	}
+	for i := 0; i < meta.inCount; i++ {
+		meta.inTypes[i] = val.Type().In(i)
+	}
+
+	ce.fns = append(ce.fns, val)
+	ce.meta = append(ce.meta, meta)
 }
 
-// 需要取返回值的数据，所以这里需要特殊处理
-func (self *CallFunction) SetDoRet() {
-	self.retWait.Lock()
-	self.retCh = make([]reflect.Value, 0)
-	self.bRet = true
-}
-func (self *CallFunction) GetRet() []reflect.Value {
-	defer self.retWait.Unlock()
-	self.bRet = false
-	return self.retCh
-}
 
-// 使用回调函数
-func (self *CallFunction) Do(key interface{}, values ...interface{}) (bret bool) {
+
+// Do 执行回调函数
+func (self *CallFunction) Do(key any, values ...any) (result []reflect.Value, ok bool) {
+	// 恢复可能的 panic
 	defer func() {
 		if err := recover(); err != nil {
-			bret = false
+			log.Printf("callback.Do panic: key=%v, error=%v", key, err)
+			result = nil
+			ok = false
 		}
 	}()
 
-	if l, has := self.fn.Load(key); has {
-		fnlist := l.([]interface{})
-		//转化函数参数
-		args := []reflect.Value{}
-		for _, value := range values {
-			args = append(args, reflect.ValueOf(value))
+	entry, loaded := self.entries.Load(key)
+	if !loaded {
+		return nil, false
+	}
+
+	ce := entry.(*callEntry)
+	ce.mu.RLock()
+	fns := ce.fns
+	metas := ce.meta
+	ce.mu.RUnlock()
+
+	if len(fns) == 0 {
+		return nil, false
+	}
+
+	// 准备参数值
+	args := make([]reflect.Value, len(values))
+	for i, v := range values {
+		args[i] = reflect.ValueOf(v)
+	}
+
+	// 执行每个回调函数
+	var lastResult []reflect.Value
+	for i, fn := range fns {
+		meta := metas[i]
+
+		// 检查参数数量
+		if len(args) < meta.inCount {
+			log.Printf("callback.Do: insufficient arguments for key=%v, need %d got %d",
+				key, meta.inCount, len(args))
+			continue
 		}
-		for _, fn := range fnlist {
-			//获取函数
-			method := reflect.ValueOf(fn)
-			method.Type().NumIn()
-			//调用
-			args1 := []reflect.Value{}
-			args1 = append(args1, args...)
-			if len(args1) > method.Type().NumIn() { //去掉多余的数据
-				args1 = args1[0:method.Type().NumIn()]
-			} else if len(args1) < method.Type().NumIn() {
-				panic("参数数量小于实际个数")
+
+		// 截取所需数量的参数
+		callArgs := args
+		if len(callArgs) > meta.inCount {
+			callArgs = callArgs[:meta.inCount]
+		}
+
+		// 尝试转换参数类型
+		convertedArgs := make([]reflect.Value, meta.inCount)
+		for j := 0; j < meta.inCount; j++ {
+			arg := callArgs[j]
+			targetType := meta.inTypes[j]
+
+			// 如果类型可赋值，直接使用
+			if arg.IsValid() && arg.Type().AssignableTo(targetType) {
+				convertedArgs[j] = arg
+				continue
 			}
 
-			//检查数据
-			for i := 0; i < method.Type().NumIn(); i++ {
-				in := method.Type().In(i)
-				if args1[i].Kind() == reflect.Invalid {
-					if in.Kind() != reflect.Invalid {
-						args1[i] = reflect.New(in)
-					} else {
-						args1[i] = reflect.ValueOf(errors.New("错误的无效类型"))
-					}
-				} else if args1[i].Kind() != in.Kind() {
-					// old := args1[i]
-					// args1[i] = reflect.New(in)
-					// args1[i].Set(old.Interface())
-				}
+			// 尝试转换
+			if arg.IsValid() && arg.Type().ConvertibleTo(targetType) {
+				convertedArgs[j] = arg.Convert(targetType)
+				continue
 			}
-			l := method.Call(args1)
-			if self.bRet {
-				self.retCh = l
-			}
+
+			// 无法转换，创建零值
+			vars.Info("callback.Do: argument type mismatch for key=%v, param %d: got %v, need %v",
+				key, j, arg.Type(), targetType)
+			convertedArgs[j] = reflect.Zero(targetType)
 		}
-		bret = true
+
+		// 调用函数
+		results := fn.Call(convertedArgs)
+		lastResult = results
 	}
-	return
+
+	if lastResult != nil {
+		return lastResult, true
+	}
+	return nil, false
 }

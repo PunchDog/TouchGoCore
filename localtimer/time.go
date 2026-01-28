@@ -88,8 +88,9 @@ type TimerPool struct {
 
 // Get 从池中获取定时器
 func (p *TimerPool) Get(cls TimerInterface) TimerInterface {
+	tpname, _ := util.GetClassName(cls)
 	tp := reflect.TypeOf(cls).Elem()
-	if pool, ok := p.pool.Load(tp); ok {
+	if pool, ok := p.pool.Load(tpname); ok {
 		return pool.(*sync.Pool).Get().(TimerInterface)
 	}
 
@@ -98,7 +99,7 @@ func (p *TimerPool) Get(cls TimerInterface) TimerInterface {
 			return reflect.New(tp).Interface().(TimerInterface)
 		},
 	}
-	p.pool.Store(tp, newPool)
+	p.pool.Store(tpname, newPool)
 	return newPool.Get().(TimerInterface)
 }
 
@@ -107,8 +108,8 @@ func (p *TimerPool) Put(cls TimerInterface) {
 	if cls == nil {
 		return
 	}
-	tp := reflect.TypeOf(cls).Elem()
-	if pool, ok := p.pool.Load(tp); ok {
+	tpname, _ := util.GetClassName(cls)
+	if pool, ok := p.pool.Load(tpname); ok {
 		pool.(*sync.Pool).Put(cls)
 	}
 }

@@ -18,16 +18,23 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
+const (
+	// WebAppDataKey 用于HMAC密钥计算的常量
+	WebAppDataKey = "WebAppData"
+	// MaxButtonsPerRow 每行最多按钮数
+	MaxButtonsPerRow = 2
+)
+
 func init() {
 	util.DefaultCallFunc.Register(util.CallTelegramMsg+"StartMessage", startMessage)
 }
 
-func startMessage(bot *tgbotapi.BotAPI, chat_id int64, desc, bannelurl string) error {
+func startMessage(bot *tgbotapi.BotAPI, chatID int64, desc, bannerURL string) error {
 	// 构建游戏链接
-	vars.Info("telegram start game link", config.Cfg_.Telegram.GameToShort)
+	vars.Info("telegram start game link: %v", config.Cfg_.Telegram.GameToShort)
 
 	photo := tgbotapi.NewPhoto(
-		chat_id,
+		chatID,
 		tgbotapi.FileURL(config.Cfg_.Telegram.GameBannerUrl),
 	)
 
@@ -39,11 +46,10 @@ func startMessage(bot *tgbotapi.BotAPI, chat_id int64, desc, bannelurl string) e
 
 		pt1 := photo.ReplyMarkup.(*tgbotapi.InlineKeyboardMarkup)
 		InlineKeyboard := &pt1.InlineKeyboard
-		linemax := 2 //没排按钮最多2个
 		cnt := 0
 		idx := 0
 		for key, gameurl := range config.Cfg_.Telegram.GameToShort {
-			if cnt%linemax == 0 {
+			if cnt%MaxButtonsPerRow == 0 {
 				*InlineKeyboard = append(*InlineKeyboard, []tgbotapi.InlineKeyboardButton{})
 				idx = len(*InlineKeyboard) - 1
 			}
@@ -55,15 +61,15 @@ func startMessage(bot *tgbotapi.BotAPI, chat_id int64, desc, bannelurl string) e
 				})
 		}
 	} else { //其他消息
-		if bannelurl != "" {
-			photo.File = tgbotapi.FileURL(bannelurl)
+		if bannerURL != "" {
+			photo.File = tgbotapi.FileURL(bannerURL)
 		}
 		photo.Caption = desc
 	}
 
 	// 发送消息
 	if _, err := bot.Send(photo); err != nil {
-		vars.Error("telegram send message error", err)
+		vars.Error("telegram send message error: %v", err)
 		return err
 	}
 	return nil
@@ -85,11 +91,15 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message) {
 		// }
 	} else {
 		//按设定的命令发消息
-		if message.Text[0] == '/' {
-			_, _ = util.DefaultCallFunc.Do(util.CallTelegramMsg+message.Text, bot, message)
+		if len(message.Text) > 0 && message.Text[0] == '/' {
+			if _, ok := util.DefaultCallFunc.Do(util.CallTelegramMsg+message.Text, bot, message); !ok {
+				vars.Debug("no handler registered for command: %s", message.Text)
+			}
 		} else {
 			//说话消息
-			_, _ = util.DefaultCallFunc.Do(util.CallTelegramMsg+"Say", message.Text, bot, message)
+			if _, ok := util.DefaultCallFunc.Do(util.CallTelegramMsg+"Say", message.Text, bot, message); !ok {
+				vars.Debug("no handler registered for say message")
+			}
 		}
 	}
 }
@@ -97,15 +107,22 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message) {
 // 处理回调查询（游戏跳转确认）
 func handleCallback(bot *tgbotapi.BotAPI, callback *tgbotapi.CallbackQuery) {
 	if callback.GameShortName != "" {
+		// 检查游戏URL是否存在
+		gameURL, exists := config.Cfg_.Telegram.GameToShort[callback.GameShortName]
+		if !exists || gameURL == "" {
+			vars.Error("game URL not found for short name: %s", callback.GameShortName)
+			return
+		}
+
 		// 构建回调响应
 		answer := tgbotapi.NewCallback(callback.ID, "")
 		answer.ShowAlert = false
-		answer.URL = config.Cfg_.Telegram.GameToShort[callback.GameShortName] // 关键字段：触发Mini App跳转
+		answer.URL = gameURL // 关键字段：触发Mini App跳转
 
 		// 发送确认响应
 		_, err := bot.Send(answer)
 		if err != nil {
-			vars.Error("回调响应失败", err)
+			vars.Error("回调响应失败: %v", err)
 			return
 		}
 	}
@@ -120,7 +137,9 @@ type telegramTimer struct {
 
 func (t *telegramTimer) Tick() {
 	//每分钟广播一次心跳
-	_, _ = util.DefaultCallFunc.Do(util.CallTelegramMsg+"Minute", t.bot)
+	if _, ok := util.DefaultCallFunc.Do(util.CallTelegramMsg+"Minute", t.bot); !ok {
+		vars.Debug("no handler registered for minute tick")
+	}
 }
 
 // 机器人监听代码
@@ -131,12 +150,12 @@ func TelegramStart() {
 
 	bot, err := tgbotapi.NewBotAPI(config.Cfg_.Telegram.BotToken)
 	if err != nil {
-		vars.Error("telegram bot api error", err)
+		vars.Error("telegram bot api error: %v", err)
 		return
 	}
 
 	bot.Debug = true
-	vars.Info("Authorized on account", bot.Self.UserName)
+	vars.Info("Authorized on account: %s", bot.Self.UserName)
 
 	u := tgbotapi.NewUpdate(0)
 	u.Timeout = 60
@@ -144,9 +163,9 @@ func TelegramStart() {
 	closeCh = make(chan any)
 
 	//创建定时器,每1分钟发送一次心跳
-	t, err := localtimer.NewTimer(60*1000, -1, &telegramTimer{})
+	t, err := localtimer.NewTimer(util.MILLISECONDS_OF_MINUTE, -1, &telegramTimer{})
 	if err != nil {
-		vars.Error("telegram timer error", err)
+		vars.Error("telegram timer error: %v", err)
 		return
 	}
 	timer := t.(*telegramTimer)
@@ -184,10 +203,10 @@ func TelegramStop() {
 // botToken: 机器人的Token
 // data: 原始查询字符串（例如："user=auth_date=...&hash=..."）
 // 返回：验证成功后的键值对map，或错误信息
-func validateWebAppData(botToken, data string) (map[string]interface{}, error) {
+func validateWebAppData(botToken, data string) (map[string]any, error) {
 	defer func() {
 		if condition := recover(); condition != nil {
-			vars.Error("validateWebAppData panic", condition)
+			vars.Error("validateWebAppData panic: %v", condition)
 		}
 	}()
 	// 分割查询字符串为键值对
@@ -228,11 +247,11 @@ func validateWebAppData(botToken, data string) (map[string]interface{}, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to unescape value: %v", err)
 		}
-		dataCheckStr.WriteString(fmt.Sprintf("%s=%s", key, value))
+		fmt.Fprintf(&dataCheckStr, "%s=%s", key, value)
 	}
 
 	// 计算密钥
-	h := hmac.New(sha256.New, []byte("WebAppData"))
+	h := hmac.New(sha256.New, []byte(WebAppDataKey))
 	h.Write([]byte(botToken))
 	key := h.Sum(nil)
 
@@ -270,30 +289,56 @@ func validateWebAppData(botToken, data string) (map[string]interface{}, error) {
 func TelegramVerify(data string) (string, string, error) {
 	defer func() {
 		if condition := recover(); condition != nil {
-			vars.Error("telegram verify panic", condition)
+			vars.Error("telegram verify panic: %v", condition)
 		}
 	}()
 
 	if config.Cfg_.Telegram == nil || config.Cfg_.Telegram.BotToken == "" {
-		vars.Error("telegram verify error", "telegram config error")
+		vars.Error("telegram verify error: %s", "telegram config error")
 		return "", "", errors.New("telegram config error")
 	}
 
 	result, err := validateWebAppData(config.Cfg_.Telegram.BotToken, data)
 	if err != nil {
-		vars.Error("telegram verify error", err)
+		vars.Error("telegram verify error: %v", err)
 		return "", "", err
 	}
-	vars.Info("telegram verify success", result)
-	user := result["user"].(map[string]any)
-	id := fmt.Sprintf("%d", int64(user["id"].(float64)))
-	var username string
-	if n, h := user["username"]; h {
-		username = n.(string)
-	} else {
-		if n1, h := user["first_name"]; h {
-			username = n1.(string)
+	vars.Info("telegram verify success: %v", result)
+
+	// 安全类型断言和提取
+	var id, username string
+	if userMap, ok := result["user"].(map[string]any); ok {
+		// 提取用户ID（支持多种数字类型）
+		if idVal, ok := userMap["id"]; ok {
+			switch v := idVal.(type) {
+			case float64:
+				id = fmt.Sprintf("%d", int64(v))
+			case int64:
+				id = fmt.Sprintf("%d", v)
+			case int:
+				id = fmt.Sprintf("%d", v)
+			case float32:
+				id = fmt.Sprintf("%d", int64(v))
+			case int32:
+				id = fmt.Sprintf("%d", v)
+			case uint64:
+				id = fmt.Sprintf("%d", v)
+			default:
+				return "", "", fmt.Errorf("unsupported id type: %T", v)
+			}
+		} else {
+			return "", "", errors.New("user id not found")
 		}
+
+		// 提取用户名（优先使用username，其次first_name）
+		if n, ok := userMap["username"].(string); ok && n != "" {
+			username = n
+		} else if n1, ok := userMap["first_name"].(string); ok && n1 != "" {
+			username = n1
+		}
+	} else {
+		return "", "", errors.New("user data not found or invalid format")
 	}
+
 	return id, username, nil
 }

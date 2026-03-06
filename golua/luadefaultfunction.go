@@ -1,101 +1,50 @@
-//go:build lua54
-
 package lua
 
 import (
-	"reflect"
 	"touchgocore/util"
 	"touchgocore/vars"
 
 	"github.com/aarzilli/golua/lua"
 )
 
-// 两个默认执行的函数
+// Lua 内置函数：日志输出
 func info(L *lua.State) int {
-	retstr := L.ToString(1)
-	vars.Info(retstr)
+	msg := L.ToString(1)
+	vars.Info("%s", msg)
 	return 0
 }
 
 func debug(L *lua.State) int {
-	retstr := L.ToString(1)
-	vars.Debug(retstr)
+	msg := L.ToString(1)
+	vars.Debug("%s", msg)
 	return 0
 }
 
 func error1(L *lua.State) int {
-	retstr := L.ToString(1)
-	vars.Error(retstr)
+	msg := L.ToString(1)
+	vars.Error("%s", msg)
 	return 0
 }
 
 func dofile(L *lua.State) int {
-	retstr := L.ToString(1)
-	if err := L.DoFile(retstr); err != nil {
-		push(L, -1)
-		push(L, err.Error())
+	filePath := L.ToString(1)
+	if err := L.DoFile(filePath); err != nil {
+		PushValue(L, 0)
+		PushValue(L, err.Error())
 	} else {
-		push(L, 0)
-		push(L, "ok")
+		PushValue(L, 1)
+		PushValue(L, "ok")
 	}
 	return 2
 }
 
-// 获取路径下所有文件
+// GetLuaFiles 获取指定路径下所有 Lua 文件
 func getpathluafile(L *lua.State) int {
 	path := L.ToString(1)
-	pathlist := util.GetPathFile(path, []string{".lua"})
+	fileList := util.GetPathFile(path, []string{LuaFileExt})
 
-	//返回所有文件
-	tbl := newTable(pathlist)
+	// 返回所有文件
+	tbl := newTable(fileList)
 	tbl.PushTable(L)
 	return 1
-}
-
-// 转换压数据
-func push(L *lua.State, val interface{}) bool {
-	switch val.(type) {
-	case string:
-		L.PushString(val.(string))
-	case uint, uint8, uint16, uint32, uint64, int, int8, int16, int32, int64:
-		d := int64(0)
-		val1 := reflect.ValueOf(val).Convert(reflect.ValueOf(d).Type())
-		reflect.ValueOf(&d).Elem().Set(val1)
-		L.PushInteger(d)
-	case bool:
-		L.PushBoolean(val.(bool))
-	case float32:
-		L.PushNumber(float64(val.(float32)))
-	case float64:
-		L.PushNumber(val.(float64))
-	case *LuaTable:
-		tbl := val.(*LuaTable)
-		return tbl.PushTable(L)
-	default:
-		//有可能是list的，需要转一下table试试
-		tbl := newTable(val)
-		if tbl.HaveData() {
-			return tbl.PushTable(L)
-		}
-		return false
-	}
-	return true
-}
-
-// 获取数据函数
-func pop(L *lua.State, idx int) interface{} {
-	var ret interface{} = nil
-	//根据数据类型转换
-	switch L.Type(idx) {
-	case lua.LUA_TBOOLEAN:
-		ret = L.ToBoolean(idx)
-	case lua.LUA_TSTRING:
-		ret = L.ToString(idx)
-	case lua.LUA_TNUMBER:
-		ret = L.ToNumber(idx)
-	case lua.LUA_TTABLE:
-		tbl := getTable(L, idx)
-		ret = tbl
-	}
-	return ret
 }

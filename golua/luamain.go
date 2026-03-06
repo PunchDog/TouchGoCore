@@ -1,10 +1,9 @@
-//go:build lua54
-
 package lua
 
 import (
 	"fmt"
 	"touchgocore/config"
+	"touchgocore/localtimer"
 	"touchgocore/syncmap"
 	"touchgocore/util"
 	"touchgocore/vars"
@@ -12,182 +11,211 @@ import (
 	"github.com/aarzilli/golua/lua"
 )
 
-// lua指针
-var _defaultlua *LuaScript = nil
-var _luaList map[int64]*LuaScript = nil
-var _LuaListUid int64 = 0
+// 全局 Lua 实例管理
+var defaultLua *LuaScript = nil
+var luaInstances map[int64]*LuaScript = nil
+var nextInstanceID int64 = 0
 
-// 注册用的函数
-var _exports map[string]func(L *lua.State) int
-var _exportsClass map[ILuaClassInterface]bool
+// 注册的函数和类
+var registeredFuncs map[string]func(L *lua.State) int
+var registeredClasses map[ILuaClassInterface]bool
 
 type luaTimer struct {
-	util.Timer
+	localtimer.TimerInterface
 	tick      int64
 	luaScript *LuaScript
 }
 
 func (this *luaTimer) Tick() {
 	this.tick++
-	this.luaScript.defaultLuaData.Range(func(key, value interface{}) bool {
-		lua := value.(ILuaClassInterface)
-		lua.Update()
+	this.luaScript.registeredObjects.Range(func(key, value interface{}) bool {
+		obj := value.(ILuaClassInterface)
+		obj.Update()
 		return true
 	})
-	//30分钟清理一次lua缓存
-	if this.tick%1800 == 0 {
-		//定时垃圾回收
+	// 定期清理 Lua 缓存
+	if this.tick%GCTickCount == 0 {
 		this.luaScript.Call("collectgarbage", "collect")
 	}
 }
 
 type LuaScript struct {
-	l                 *lua.State
-	retList           []interface{} //返回值列表
-	initluapath       string        //初始化脚本地址
-	defaultLuaData    *syncmap.Map
-	defaultLuaDataUid int64
-	luaTimer          *luaTimer
-	Uid               int64
+	state             *lua.State
+	returnValues      []interface{} // 返回值列表
+	initScriptPath    string        // 初始化脚本地址
+	registeredObjects *syncmap.Map  // 注册的 Go 对象
+	nextObjectID      int64         // 下一个对象 ID
+	timer             *luaTimer     // 定时器
+	UID               int64         // 脚本实例 ID
 }
 
-func (this *LuaScript) Init() {
-	//关闭老的lua脚本
-	this.Close()
-	//新创建lua脚本指针
-	this.l = lua.NewState()
-	this.l.OpenLibs()
+func (ls *LuaScript) Init() {
+	// 关闭老的 Lua 脚本
+	ls.Close()
+	// 新创建 Lua 状态机
+	ls.state = lua.NewState()
+	ls.state.OpenLibs()
 
-	//初始化几个主要函数
-	this.l.Register("info", info)
-	this.l.Register("debug", debug)
-	this.l.Register("error", error1)
-	this.l.Register("dofile", dofile)
-	this.l.Register("getpathluafile", getpathluafile)
+	// 注册内置函数
+	ls.state.Register("info", info)
+	ls.state.Register("debug", debug)
+	ls.state.Register("error", error1)
+	ls.state.Register("dofile", dofile)
+	ls.state.Register("getpathluafile", getpathluafile)
 }
 
-func (this *LuaScript) Close() {
-	if this.l != nil {
-		this.luaTimer.Remove()
-		this.l.Close()
-		this.l = nil
+func (ls *LuaScript) Close() {
+	if ls.state != nil {
+		if ls.timer != nil {
+			ls.timer.Remove()
+		}
+		ls.state.Close()
+		ls.state = nil
 	}
 }
 
-// 调用
-func (this *LuaScript) Call(funcname string, list ...interface{}) bool {
+// Call 调用 Lua 函数
+func (ls *LuaScript) Call(funcname string, list ...interface{}) ([]interface{}, error) {
 	var nargs int = 0
-	//设置函数名
-	this.l.GetGlobal(funcname)
-	//压参数
-	for _, val := range list {
-		if !push(this.l, val) {
-			vars.Error("调用函数%s出错，压参数出错")
-			return false
+	// 设置函数名
+	ls.state.GetGlobal(funcname)
+	
+	// 检查函数是否存在
+	if ls.state.IsNil(-1) {
+		ls.state.Pop(1)
+		return nil, fmt.Errorf("函数调用错误: 找不到 Lua 函数 '%s'", funcname)
+	}
+	
+	// 检查是否是函数类型
+	if ls.state.Type(-1) != lua.LUA_TFUNCTION {
+		ls.state.Pop(1)
+		return nil, fmt.Errorf("函数调用错误: '%s' 不是一个 Lua 函数", funcname)
+	}
+	
+	// 压参数
+	for i, val := range list {
+		if !PushValue(ls.state, val) {
+			vars.Error("调用函数 %s 出错，压参数 %d 出错", funcname, i+1)
+			ls.state.Pop(1) // 弹出函数
+			return nil, fmt.Errorf("函数调用错误: 压入参数 %d 失败", i+1)
 		}
-
 		nargs++
 	}
-	//调用lua函数
-	this.retList = make([]interface{}, 0)
-	if err := this.l.Call(nargs, -1); err != nil {
-		vars.Error("lua call fail:", err)
-		return false
+	
+	// 调用 Lua 函数
+	ls.returnValues = make([]interface{}, 0)
+	if err := ls.state.Call(nargs, -1); err != nil {
+		return nil, fmt.Errorf("函数调用错误: Lua 调用失败: %w", err)
 	}
 
-	//写返回值
-	nNum := this.l.GetTop()
+	// 写返回值
+	nNum := ls.state.GetTop()
 	for i := 1; i <= nNum; i++ {
-		this.retList = append(this.retList, pop(this.l, i))
+		ls.returnValues = append(ls.returnValues, LuaToGoValue(ls.state, i))
 	}
-	fmt.Println(this.retList)
-	return true
+	return ls.returnValues, nil
 }
 
 // 创建一个lua指针
-func NewLuaScript(initluapath string) *LuaScript {
+func NewLuaScript(initluapath string) (*LuaScript, error) {
 	p := &LuaScript{
-		l:                 nil,
-		retList:           make([]interface{}, 0),
-		initluapath:       initluapath,
-		defaultLuaData:    &syncmap.Map{},
-		defaultLuaDataUid: 0,
+		state:             nil,
+		returnValues:      make([]interface{}, 0),
+		initScriptPath:    initluapath,
+		registeredObjects: &syncmap.Map{},
+		nextObjectID:      0,
 	}
 	p.Init()
-	//初始化注册的函数
-	for funcname, function := range _exports {
-		p.l.Register(funcname, function)
+
+	// 初始化注册的函数
+	for funcName, function := range registeredFuncs {
+		p.state.Register(funcName, function)
 	}
-	//注册类
-	for class := range _exportsClass {
-		if err := newLuaClass(class, p); err != nil {
-			vars.Error("注册Lua类失败: %v", err)
+
+	// 注册类
+	for class := range registeredClasses {
+		if err := registerClass(class, p); err != nil {
+			vars.Error("注册 Lua 类失败: %v", err)
 		}
 	}
 
-	//读取脚本文件
-	if err := p.l.DoFile(initluapath); err != nil {
-		panic(err)
+	// 读取脚本文件
+	if err := p.state.DoFile(p.initScriptPath); err != nil {
+		return nil, fmt.Errorf("加载 Lua 脚本失败: %w", err)
 	}
 
-	//创建定时器
-	p.luaTimer = util.NewTimer(1000, -1, &luaTimer{}).(*luaTimer)
-	p.luaTimer.luaScript = p
-	p.luaTimer.tick = 0
-	util.AddTimer(p.luaTimer)
+	// 创建定时器
+	timerImpl := &luaTimer{}
+	tmr, err := localtimer.NewTimer(UpdateIntervalMs, -1, timerImpl)
+	if err != nil {
+		return nil, fmt.Errorf("创建定时器失败: %w", err)
+	}
+	p.timer = tmr.(*luaTimer)
+	p.timer.luaScript = p
+	p.timer.tick = 0
+	localtimer.AddTimer(p.timer)
 
-	//加入管理列表
-	_LuaListUid++
-	_luaList[_LuaListUid] = p
-	return p
+	// 加入管理列表
+	nextInstanceID++
+	luaInstances[nextInstanceID] = p
+	p.UID = nextInstanceID
+	return p, nil
 }
 
-// 调用
-func Call(funcname string, list ...interface{}) bool {
-	return _defaultlua.Call(funcname, list...)
+// Call 调用默认 Lua 实例的函数
+func Call(funcName string, args ...interface{}) ([]interface{}, error) {
+	if defaultLua == nil {
+		return nil, fmt.Errorf("Lua 服务未启动")
+	}
+	return defaultLua.Call(funcName, args...)
 }
 
-// 注册函数列表
-func RegisterLuaFunc(funcname string, function func(L *lua.State) int) bool {
-	if _exports == nil {
-		_exports = make(map[string]func(L *lua.State) int)
+// RegisterFunction 注册全局函数到所有 Lua 实例
+func RegisterLuaFunc(funcName string, function func(L *lua.State) int) error {
+	if registeredFuncs == nil {
+		registeredFuncs = make(map[string]func(L *lua.State) int)
 	}
-	if _, ok := _exports[funcname]; ok {
-		return false
+	if _, ok := registeredFuncs[funcName]; ok {
+		return fmt.Errorf("函数 %s 已注册", funcName)
 	}
-	_exports[funcname] = function
-	return true
+	registeredFuncs[funcName] = function
+	return nil
 }
 
-// 注册一个类到默认lua
-func RegisterLuaClass(class ILuaClassInterface) bool {
-	//初始化一个类初始化
-	if _exportsClass == nil {
-		_exportsClass = make(map[ILuaClassInterface]bool)
+// RegisterClass 注册一个类到所有 Lua 实例
+func RegisterLuaClass(class ILuaClassInterface) error {
+	className, _ := util.GetClassName(class)
+	if registeredClasses == nil {
+		registeredClasses = make(map[ILuaClassInterface]bool)
 	}
-	if _, ok := _exportsClass[class]; ok {
-		return false
+	if _, ok := registeredClasses[class]; ok {
+		return fmt.Errorf("类 %s 已注册", className)
 	}
-	_exportsClass[class] = true
-	return true
+	registeredClasses[class] = true
+	return nil
 }
 
-// 启动函数
-func RunLua() {
+// RunLua 启动 Lua 服务
+func RunLua() error {
 	if config.Cfg_.Lua == "off" {
-		vars.Info("不启动lua服务")
-		return
+		vars.Info("不启动 Lua 服务")
+		return nil
 	}
 
-	_luaList = make(map[int64]*LuaScript)
-	_defaultlua = NewLuaScript(config.Cfg_.Lua)
-	vars.Info("启动lua服务成功")
+	luaInstances = make(map[int64]*LuaScript)
+	var err error
+	defaultLua, err = NewLuaScript(config.Cfg_.Lua)
+	if err != nil {
+		return fmt.Errorf("创建 Lua 脚本失败: %w", err)
+	}
+	vars.Info("启动 Lua 服务成功")
+	return nil
 }
 
 // 关闭所有的定时器
 func StopLua() {
-	for _, lua := range _luaList {
-		lua.Close()
+	for _, ls := range luaInstances {
+		ls.Close()
 	}
 }
 

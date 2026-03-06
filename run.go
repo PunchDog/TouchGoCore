@@ -119,9 +119,9 @@ func initLogger() {
 	for i := 0; i < l; i++ {
 		showsr = showsr + "*"
 	}
-	vars.Info(showsr)
-	vars.Info(centerstr)
-	vars.Info(showsr)
+	vars.Info("%s", showsr)
+	vars.Info("%s", centerstr)
+	vars.Info("%s", showsr)
 }
 
 // setCPUNum 设置CPU核数

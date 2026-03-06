@@ -2,7 +2,6 @@ package lua
 
 import (
 	"touchgocore/config"
-	"touchgocore/util"
 	"touchgocore/vars"
 )
 
@@ -13,10 +12,10 @@ func Run() {
 		return
 	}
 
-	_, _ = util.DefaultCallFunc.Do("RunLua")
+	RunLua()
 }
 
 // 关闭所有的定时器
 func Stop() {
-	_, _ = util.DefaultCallFunc.Do("StopLua")
+	StopLua()
 }

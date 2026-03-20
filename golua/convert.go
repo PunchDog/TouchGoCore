@@ -52,12 +52,24 @@ func PushValue(L *lua.State, val interface{}) bool {
 		L.PushNil()
 		return true
 	default:
-		// 尝试将其他类型转换为 table
-		tbl := newTable(val)
-		if tbl.HaveData() {
-			return tbl.PushTable(L)
-		}
-		return false
+		// 尝试将其他类型转换为 table，使用 defer recover 防止 panic
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					// 类型转换失败，推送 nil
+					L.PushNil()
+				}
+			}()
+			tbl := newTable(val)
+			if tbl.HaveData() {
+				if !tbl.PushTable(L) {
+					L.PushNil()
+				}
+			} else {
+				L.PushNil()
+			}
+		}()
+		return true
 	}
 	return true
 }

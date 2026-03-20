@@ -40,7 +40,7 @@ func (c *Client) connectionDial(url string) error {
 			c.wsConnect = wsConn
 			c.remoteAddr = url
 			c.closeCh = make(chan bool, 1)
-			c.msgChan = make(chan []byte, MAX_WRITE_BUFFER_SIZE)
+			c.msgChan = make(chan []byte, DEFAULT_WRITE_BUFFER_SIZE)
 
 			return nil
 		}
@@ -130,16 +130,26 @@ func (c *Client) Connected() bool {
 
 func (c *Client) Close(reason string) {
 	if c.Connected() {
+		// 先调用 OnClose 回调
 		c.OnClose(c)
+
+		// 关闭通道和连接
 		close(c.closeCh)
-		c.wsConnect.Close()
+		if c.wsConnect != nil {
+			c.wsConnect.Close()
+		}
 		close(c.msgChan)
-		c.wsConnect = nil
+
+		// 从客户端映射中移除
 		clientMap.Delete(c.UID)
+
+		// 清理客户端资源
 		c.wsConnect = nil
 		c.remoteAddr = ""
 		c.UID = 0
-		if clientpool != nil {
+
+		// 归还 ICall 到对象池
+		if clientpool != nil && c.ICall != nil {
 			v, ok := clientcall.Load(c.iCallName)
 			if ok {
 				icallpool := v.(sync.Pool)
@@ -148,36 +158,66 @@ func (c *Client) Close(reason string) {
 				vars.Error("未找到类名对应的ICall接口实现: %s", c.iCallName)
 			}
 			c.ICall = nil
+		}
+
+		// 归还 Client 到对象池
+		if clientpool != nil {
 			clientpool.Put(c)
 		}
+
 		vars.Info("%s 连接关闭，原因：%s", c.remoteAddr, reason)
 	}
 }
 
 // 发送消息
 func (c *Client) SendMsg(msg ...any) {
-	if c.Connected() {
-		l := len(msg)
-		if l == 0 {
+	if !c.Connected() {
+		return
+	}
+
+	l := len(msg)
+	if l == 0 {
+		return
+	}
+
+	// 背压控制：检查通道是否接近满
+	if enableBackpressure {
+		chanLen := len(c.msgChan)
+		chanCap := cap(c.msgChan)
+		if float64(chanLen) >= float64(chanCap)*BACKPRESSURE_THRESHOLD {
+			vars.Warning("WebSocket 发送通道背压过高: len=%d, cap=%d, client=%s", chanLen, chanCap, c.remoteAddr)
+			if dropMessageOnFull {
+				vars.Error("WebSocket 发送通道已满，丢弃消息: client=%s", c.remoteAddr)
+				return
+			}
+		}
+	}
+
+	if l == 1 {
+		if v, ok := msg[0].([]byte); ok {
+			select {
+			case c.msgChan <- v:
+			default:
+				// 通道满时记录错误
+				vars.Error("WebSocket 发送通道已满，丢弃消息: client=%s", c.remoteAddr)
+			}
 			return
 		}
-		if l == 1 {
-			if v, ok := msg[0].([]byte); ok {
-				c.msgChan <- v
+	} else if l == 3 {
+		// 使用的是 protobuf，传入数据 cmd1, cmd2, proto message
+		if v, ok := msg[2].(proto.Message); ok {
+			pb := util.NewFSMessage(msg[0].(int32), msg[1].(int32), v)
+			data, err := proto.Marshal(pb)
+			if err != nil {
+				vars.Error("打包数据失败: %v", err)
 				return
 			}
-		} else if l == 3 {
-			//使用的是protobuf,传入数据cmd1,cmd2,protomessage
-			if v, ok := msg[2].(proto.Message); ok {
-				pb := util.NewFSMessage(msg[0].(int32), msg[1].(int32), v)
-				data, err := proto.Marshal(pb)
-				if err != nil {
-					vars.Error("打包数据失败:", err)
-					return
-				}
-				c.msgChan <- data
-				return
+			select {
+			case c.msgChan <- data:
+			default:
+				vars.Error("WebSocket 发送通道已满，丢弃消息: client=%s", c.remoteAddr)
 			}
+			return
 		}
 	}
 }
@@ -204,7 +244,7 @@ func NewClient(connType interface{}, remoteAddr string, className string) (*Clie
 	client.UID = maxUID
 	client.remoteAddr = remoteAddr
 	client.closeCh = make(chan bool, 1)
-	client.msgChan = make(chan []byte, MAX_WRITE_BUFFER_SIZE)
+	client.msgChan = make(chan []byte, DEFAULT_WRITE_BUFFER_SIZE)
 	client.iCallName = className
 
 	defer func() {

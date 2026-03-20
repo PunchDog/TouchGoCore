@@ -1,6 +1,8 @@
 ﻿package util
 
 import (
+	"errors"
+	"fmt"
 	"log"
 	"reflect"
 	"sync"
@@ -99,13 +101,16 @@ func (self *CallFunction) Do(key any, values ...any) (result []reflect.Value, ok
 
 	// 执行每个回调函数
 	var lastResult []reflect.Value
+	var lastErr error
 	for i, fn := range fns {
 		meta := metas[i]
 
 		// 检查参数数量
 		if len(args) < meta.inCount {
-			log.Printf("callback.Do: insufficient arguments for key=%v, need %d got %d",
+			errMsg := fmt.Sprintf("callback.Do: insufficient arguments for key=%v, need %d got %d",
 				key, meta.inCount, len(args))
+			vars.Error(errMsg)
+			lastErr = errors.New(errMsg)
 			continue
 		}
 
@@ -117,6 +122,7 @@ func (self *CallFunction) Do(key any, values ...any) (result []reflect.Value, ok
 
 		// 尝试转换参数类型
 		convertedArgs := make([]reflect.Value, meta.inCount)
+		hasError := false
 		for j := 0; j < meta.inCount; j++ {
 			arg := callArgs[j]
 			targetType := meta.inTypes[j]
@@ -133,10 +139,18 @@ func (self *CallFunction) Do(key any, values ...any) (result []reflect.Value, ok
 				continue
 			}
 
-			// 无法转换，创建零值
-			vars.Info("callback.Do: argument type mismatch for key=%v, param %d: got %v, need %v",
+			// 无法转换，记录错误并跳过此回调
+			errMsg := fmt.Sprintf("callback.Do: argument type mismatch for key=%v, param %d: got %v, need %v",
 				key, j, arg.Type(), targetType)
-			convertedArgs[j] = reflect.Zero(targetType)
+			vars.Error(errMsg)
+			hasError = true
+			lastErr = errors.New(errMsg)
+			break
+		}
+
+		// 如果有错误，跳过此回调
+		if hasError {
+			continue
 		}
 
 		// 调用函数
@@ -146,6 +160,10 @@ func (self *CallFunction) Do(key any, values ...any) (result []reflect.Value, ok
 
 	if lastResult != nil {
 		return lastResult, true
+	}
+	// 如果有错误但没有结果，返回错误信息
+	if lastErr != nil {
+		vars.Error("callback.Do 执行失败: %v", lastErr)
 	}
 	return nil, false
 }

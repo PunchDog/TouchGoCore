@@ -1,18 +1,21 @@
 package rpc
 
 import (
+	"crypto/tls"
 	"fmt"
 	"io"
 	"net"
 	"strconv"
 	"sync/atomic"
 	"time"
+	"touchgocore/config"
 	"touchgocore/network/message"
 	"touchgocore/syncmap"
 	"touchgocore/util"
 	"touchgocore/vars"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/proto"
@@ -163,21 +166,31 @@ func (s *RpcServer) Stop() {
 	vars.Info("RPC服务器停止[%s]", s.name)
 }
 
-func StartGrpcServer(name, ip string, port int) {
+func StartGrpcServer(name, ip string, port int, useTLS bool) {
 	addr := "[::]:" + strconv.Itoa(port)
 	lis, err := net.Listen("tcp", addr)
 	if err != nil {
 		vars.Error("gRPC监听失败[%s]: %v", addr, err)
 		return
 	}
-	vars.Info("gRPC监听已启动[%s]，服务器名称:%s", addr, name)
 
-	// opt := []grpc.ServerOption{
-	// 	grpc.MaxRecvMsgSize(MAX_MSG_SIZE),
-	// 	grpc.MaxSendMsgSize(MAX_MSG_SIZE),
-	// }
+	// 检查 TLS 配置
+	var serverOptions []grpc.ServerOption
 
-	s := grpc.NewServer(
+	if useTLS && config.Cfg_ != nil && config.Cfg_.Rpc != nil && config.Cfg_.Rpc.TLS != nil {
+		cert, err := tls.LoadX509KeyPair(config.Cfg_.Rpc.TLS.CertFile, config.Cfg_.Rpc.TLS.KeyFile)
+		if err != nil {
+			vars.Error("gRPC加载TLS证书失败[%s]: %v", addr, err)
+			return
+		}
+		tlsConfig := &tls.Config{
+			Certificates: []tls.Certificate{cert},
+			MinVersion:   tls.VersionTLS12,
+		}
+		serverOptions = append(serverOptions, grpc.Creds(credentials.NewTLS(tlsConfig)))
+	}
+
+	serverOptions = append(serverOptions,
 		grpc.KeepaliveParams(keepalive.ServerParameters{
 			// MaxConnectionIdle 和 MaxConnectionAge 设为 0 表示无限制，永不主动断开
 			MaxConnectionIdle:     0,                // 不因空闲断开
@@ -193,6 +206,14 @@ func StartGrpcServer(name, ip string, port int) {
 		grpc.MaxRecvMsgSize(MAX_MSG_SIZE),
 		grpc.MaxSendMsgSize(MAX_MSG_SIZE),
 	)
+
+	vars.Info("gRPC监听已启动[%s]，服务器名称:%s, TLS: %v", addr, name, useTLS)
+
+	if !useTLS {
+		vars.Warning("gRPC服务器[%s]未启用TLS，请确保是内网环境", name)
+	}
+
+	s := grpc.NewServer(serverOptions...)
 	service := &RpcServer{
 		name:          name,
 		service:       s,

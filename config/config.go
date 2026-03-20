@@ -17,12 +17,16 @@ type Cfg struct {
 	Mongo    *MongoDBConfig   `json:"mongo"`
 	Ip       string           `json:"ip"`        //端口所在IP，如果没填，就获取本地内网IP
 	Ws       *WebsocketConfig `json:"ws"`        //websocket启动模式:off不启动;:1234启动监听
+	Websocket *WebsocketConfig `json:"websocket"` // WebSocket 详细配置
 	Lua      string           `json:"lua"`       //off不启动，填写lua文件的相对路径启动lua
+	LuaConfig *LuaConfig      `json:"lua_config"` // Lua 详细配置
 	LogLevel string           `json:"log_level"` //日志等级，off为不开,其次为INFO,DEBUG,WARN,ERROR
 	MapPath  string           `json:"map_path"`  //地图配置位置
 	Web      *WebConfig       `json:"web"`       //web配置
 	RpcPort  *RpcConfig       `json:"rpc_port"`  //rpc_port端口，没有则表示不开rpc服务
+	Rpc      *RpcConfig       `json:"rpc"`       // gRPC 配置
 	Telegram *TelegramConfig  `json:"telegram"`  //telegram配置
+	Server   *ServerConfig    `json:"server"`    // 服务器全局配置
 	//其他配置
 	Other interface{} `json:"other_data"` //其他配置,需要自行传入想要的数据模型
 }

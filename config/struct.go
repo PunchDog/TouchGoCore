@@ -51,12 +51,26 @@ type WebsocketConfig struct {
 	URL string `json:"url"`
 	//内网地址
 	InURL string `json:"inurl"`
+	// 允许的 Origin 白名单（为空则允许所有）
+	AllowedOrigins []string `json:"allowed_origins"`
+	// 是否启用 Origin 验证
+	CheckOrigin bool `json:"check_origin"`
+	// 内网连接是否跳过 Origin 验证
+	SkipOriginForIntranet bool `json:"skip_origin_for_intranet"`
 }
 
 type RpcAddr struct {
-	Name string `json:"name"`
-	Addr string `json:"addr"`
-	Port int    `json:"port"`
+	Name   string `json:"name"`
+	Addr   string `json:"addr"`
+	Port   int    `json:"port"`
+	UseTLS bool   `json:"use_tls"` // 是否使用 TLS，为 false 时表示内网连接跳过 TLS
+}
+
+type RpcTLSConfig struct {
+	CertFile        string `json:"cert_file"`        // 证书文件路径
+	KeyFile         string `json:"key_file"`         // 私钥文件路径
+	Enable          bool   `json:"enable"`           // 是否启用 TLS
+	SkipForIntranet bool   `json:"skip_for_intranet"` // 内网连接是否跳过 TLS
 }
 
 type RpcConfig struct {
@@ -64,6 +78,8 @@ type RpcConfig struct {
 	Server []*RpcAddr `json:"server"`
 	//客户端配置
 	Client []*RpcAddr `json:"client"`
+	// TLS 配置
+	TLS *RpcTLSConfig `json:"tls"`
 }
 
 // telegram配置
@@ -73,4 +89,24 @@ type TelegramConfig struct {
 	GameBannerUrl   string            `json:"game_banner_url"`
 	GameDescription string            `json:"game_description"`
 	GameToShort     map[string]string `json:"game_to_short"`
+}
+
+// Lua 配置
+type LuaConfig struct {
+	ScriptPath      string `json:"script_path"`       // Lua 脚本路径
+	Enable          string `json:"enable"`            // 是否启用 "on" 或 "off"
+	UpdateInterval  int64  `json:"update_interval"`   // 更新间隔 (毫秒)
+	GCTickCount     int64  `json:"gc_tick_count"`     // GC 触发周期 (tick数)
+	MaxMemoryMB     int64  `json:"max_memory_mb"`     // 最大内存限制 (MB)
+}
+
+// 服务器全局配置
+type ServerConfig struct {
+	Debug         bool   `json:"debug"`          // 调试模式
+	FPS           int    `json:"fps"`             // 帧率
+	Version       string `json:"version"`        // 版本号
+	MaxMsgSize    int    `json:"max_msg_size"`   // 最大消息大小
+	WriteBuffer   int    `json:"write_buffer"`   // 写缓冲大小
+	ReadBuffer    int    `json:"read_buffer"`    // 读缓冲大小
+	Backpressure bool   `json:"backpressure"`   // 是否启用背压
 }

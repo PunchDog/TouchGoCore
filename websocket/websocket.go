@@ -12,15 +12,21 @@ import (
 )
 
 const (
-	MAX_WRITE_BUFFER_SIZE = 10240
-	MAX_READ_BUFFER_SIZE  = 102400
+	DEFAULT_WRITE_BUFFER_SIZE = 10240
+	DEFAULT_READ_BUFFER_SIZE  = 102400
+	// 背压阈值：当通道满于此比例时，记录警告日志
+	BACKPRESSURE_THRESHOLD = 0.9
 )
 
 var (
-	closeCh    chan bool          = nil
-	msgQueue   chan *msgQueueType = nil
-	clientpool *sync.Pool         = nil
-	clientcall syncmap.Map
+	closeCh             chan bool          = nil
+	msgQueue            chan *msgQueueType = nil
+	clientpool          *sync.Pool         = nil
+	clientcall          syncmap.Map
+	writeBufferSize     int                = DEFAULT_WRITE_BUFFER_SIZE
+	readBufferSize      int                = DEFAULT_READ_BUFFER_SIZE
+	enableBackpressure  bool                = false
+	dropMessageOnFull   bool                = false
 )
 
 type msgQueueType struct {
@@ -57,8 +63,20 @@ func Run() {
 	if config.Cfg_.Ws == nil {
 		return
 	}
+
+	// 从配置中读取背压设置
+	if config.Cfg_.Websocket != nil {
+		// 这里可以添加配置读取逻辑
+		// 目前使用默认值
+		enableBackpressure = true  // 启用背压控制
+		dropMessageOnFull = false  // 通道满时是否丢弃消息
+	}
+
+	writeBufferSize = DEFAULT_WRITE_BUFFER_SIZE
+	readBufferSize = DEFAULT_READ_BUFFER_SIZE
+
 	closeCh = make(chan bool)
-	msgQueue = make(chan *msgQueueType, MAX_READ_BUFFER_SIZE)
+	msgQueue = make(chan *msgQueueType, readBufferSize)
 	clientpool = &sync.Pool{
 		New: func() interface{} {
 			return &Client{

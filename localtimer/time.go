@@ -339,13 +339,38 @@ func (m *TimerManager) AddTimer(timer TimerInterface) error {
 		return ErrTimerInvalidType
 	}
 
+	wheel := m.wheels[wheelType]
+	chanLen := int64(len(wheel.addTimerChan))
+	chanCap := int64(cap(wheel.addTimerChan))
+
+	// 检查通道是否接近满
+	if float64(chanLen) >= float64(chanCap)*0.9 {
+		vars.Warning("定时器通道背压过高: 类型=%s, len=%d, cap=%d", wheelType.String(), chanLen, chanCap)
+	}
+
 	select {
-	case m.wheels[wheelType].addTimerChan <- timer:
+	case wheel.addTimerChan <- timer:
 		m.stats.TimersAdded.Add(1)
-		m.wheels[wheelType].timerCount.Add(1)
+		wheel.timerCount.Add(1)
 		return nil
 	default:
-		return ErrTimerChannelFull
+		// 通道满时，尝试阻塞发送（带超时）
+		select {
+		case wheel.addTimerChan <- timer:
+			m.stats.TimersAdded.Add(1)
+			wheel.timerCount.Add(1)
+			return nil
+		case <-time.After(time.Millisecond * 100):
+			// 超时后尝试直接执行定时器
+			go func() {
+				timer.Tick()
+				if timer.HasNext() {
+					_ = m.AddTimer(timer)
+				}
+			}()
+			vars.Warning("定时器通道已满，异步执行定时器")
+			return nil
+		}
 	}
 }
 

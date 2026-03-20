@@ -299,3 +299,38 @@ func String2NumberArray[T any](str string, sep string) []T {
 	}
 	return ret
 }
+
+// IsIntranetIP 检测IP是否为内网IP
+// 内网IP范围：
+// - 127.0.0.0/8 (localhost)
+// - 10.0.0.0/8
+// - 172.16.0.0/12
+// - 192.168.0.0/16
+func IsIntranetIP(ipStr string) bool {
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		return false
+	}
+
+	// 127.0.0.0/8 (localhost)
+	if ip[0] == 127 {
+		return true
+	}
+
+	// 10.0.0.0/8
+	if ip[0] == 10 {
+		return true
+	}
+
+	// 172.16.0.0/12
+	if ip[0] == 172 && ip[1] >= 16 && ip[1] <= 31 {
+		return true
+	}
+
+	// 192.168.0.0/16
+	if ip[0] == 192 && ip[1] == 168 {
+		return true
+	}
+
+	return false
+}

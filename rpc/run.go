@@ -28,7 +28,16 @@ func Run() {
 			vars.Error("RPC服务器配置无效: Name=%s, Addr=%s, Port=%d", v.Name, v.Addr, v.Port)
 			continue
 		}
-		StartGrpcServer(v.Name, v.Addr, v.Port)
+		// 如果全局启用了 TLS 且配置了跳过内网 TLS，先检查配置
+		useTLS := v.UseTLS
+		if config.Cfg_.Rpc != nil && config.Cfg_.Rpc.TLS != nil && config.Cfg_.Rpc.TLS.Enable && config.Cfg_.Rpc.TLS.SkipForIntranet {
+			// 如果服务器配置中 UseTLS 为 false，表示这是内网服务器，不使用 TLS
+			useTLS = v.UseTLS
+		} else if config.Cfg_.Rpc != nil && config.Cfg_.Rpc.TLS != nil && config.Cfg_.Rpc.TLS.Enable {
+			// 全局启用 TLS
+			useTLS = true
+		}
+		StartGrpcServer(v.Name, v.Addr, v.Port, useTLS)
 	}
 
 	// 启动客户端连接

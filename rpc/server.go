@@ -144,10 +144,18 @@ func (s *RpcServer) handleChanel() {
 			return
 		case msg := <-s.handlechannel:
 			key := fmt.Sprintf("%s:%d:%d", util.CallRpcMsg, msg.protol1, msg.protol2)
-			res, bret := util.DefaultCallFunc.Do(key, msg)
+			// 启用返回值收集
+			util.DefaultCallFunc.SetDoRet()
+			bret := util.DefaultCallFunc.Do(key, msg)
 			if bret {
-				rsp := res[0].Interface().(proto.Message)
-				s.Send(msg.clientNameKey, msg.protol1, msg.protol2, rsp)
+				// 获取返回值
+				res := util.DefaultCallFunc.GetRet()
+				if len(res) > 0 {
+					rsp := res[0].Interface().(proto.Message)
+					s.Send(msg.clientNameKey, msg.protol1, msg.protol2, rsp)
+				} else {
+					vars.Error("处理gRPC请求错误,没有返回值,协议号:%d:%d", msg.protol1, msg.protol2)
+				}
 			} else {
 				vars.Error("处理gRPC请求错误,协议号:%d:%d", msg.protol1, msg.protol2)
 			}

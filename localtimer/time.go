@@ -409,14 +409,21 @@ var (
 	defaultTimerManager *TimerManager
 	timerChannel        chan TimerInterface
 	managerInitOnce     sync.Once
+	timerSystemStopped  atomic.Bool // 标记系统是否已停止，用于替代重置 sync.Once
 	closech             chan any
 )
 
 // NewTimerManager 创建新的定时器管理器
 func NewTimerManager() *TimerManager {
+	// Once 只负责首次初始化；重启后通过 timerChannel == nil 判断是否需要重新创建
 	managerInitOnce.Do(func() {
 		timerChannel = make(chan TimerInterface, MaxTimerChannelNum)
 	})
+	// 支持 TimeStop 后重启：若通道已被关闭并置 nil，则重新创建
+	if timerSystemStopped.Load() && timerChannel == nil {
+		timerChannel = make(chan TimerInterface, MaxTimerChannelNum)
+		timerSystemStopped.Store(false)
+	}
 
 	// 时间轮配置：毫秒/秒/分钟/10分钟/小时
 	wheelConfigs := []int64{
@@ -599,7 +606,6 @@ func TimeStop() {
 			vars.Info("关闭定时器管理器，当前定时器数量: %d", mgr.GetTimerCount())
 			mgr.Close()
 		}
-		// timerManagerMap.Delete(key)
 		return true
 	})
 	timerManagerMap.Clear()
@@ -611,7 +617,10 @@ func TimeStop() {
 	}
 
 	defaultTimerManager = nil
-	managerInitOnce = sync.Once{}
+	// 标记系统已停止，允许下次 TimeInit 重新初始化
+	// 注意：不重置 managerInitOnce（重置 sync.Once 是未定义行为），
+	// 通过 timerSystemStopped 标志配合 timerChannel 判空来支持重启
+	timerSystemStopped.Store(true)
 	vars.Info("计时器系统已停止")
 }
 

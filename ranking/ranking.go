@@ -543,7 +543,8 @@ func LoadRanking(filename string) *RankTree {
 
 // dump排名模块
 func SaveRanking(rt *RankTree, filename string) bool {
-	f, err := os.OpenFile(filename, os.O_WRONLY|os.O_CREATE, 0666)
+	// O_TRUNC 确保覆写而非追加，避免文件内容错乱
+	f, err := os.OpenFile(filename, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0666)
 	if err != nil {
 		log.Fatalln(err.Error())
 		return false
@@ -642,18 +643,20 @@ func saveRankTrees(rts map[int64]*RankTree) []DbRankInfo {
 }
 
 func Load(infos []DbRankInfo) {
+	RTSLock.Lock()
 	RTS = LoadRankTrees(infos)
-	// if RTS == nil {
-	// 	RTS = make(map[int16]*RankTree)
-	// 	saveRankTrees(RTS)
-	// }
+	RTSLock.Unlock()
 }
 
 func Save() []DbRankInfo {
 	return saveRankTrees(RTS)
 }
 
+// GetRankTree 获取或创建指定类型的排行榜（写锁保护全局 map）
 func GetRankTree(rtype int64) *RankTree {
+	RTSLock.Lock()
+	defer RTSLock.Unlock()
+
 	rt, ok := RTS[rtype]
 	if !ok {
 		rt = NewRankTree()
@@ -664,19 +667,23 @@ func GetRankTree(rtype int64) *RankTree {
 
 // 获取所有的排行榜
 func GetAllRankTree() *map[int64]*RankTree {
+	RTSLock.RLock()
+	defer RTSLock.RUnlock()
 	return &RTS
 }
 
+// HasRankTree 检查指定类型排行榜是否存在（读锁）
 func HasRankTree(rtype int64) bool {
+	RTSLock.RLock()
+	defer RTSLock.RUnlock()
 	_, ok := RTS[rtype]
-	if !ok {
-		return false
-	}
-
-	return true
+	return ok
 }
 
+// ResetRankTree 重置指定类型排行榜（写锁）
 func ResetRankTree(rtype int64) {
+	RTSLock.Lock()
+	defer RTSLock.Unlock()
 	delete(RTS, rtype)
 	RTS[rtype] = NewRankTree()
 }

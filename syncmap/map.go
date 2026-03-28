@@ -15,12 +15,16 @@ func (this *Map) Length() int {
 	return int(atomic.LoadInt32(&this.num))
 }
 
-// 添加数据
+// 添加数据（原子操作，无 TOCTOU 竞态）
 func (this *Map) Store(k, v interface{}) {
-	if _, h := this.Load(k); !h {
+	_, loaded := this.Map.LoadOrStore(k, v)
+	if loaded {
+		// key 已存在，直接更新值
+		this.Map.Store(k, v)
+	} else {
+		// key 是新插入的，计数 +1
 		atomic.AddInt32(&this.num, 1)
 	}
-	this.Map.Store(k, v)
 }
 
 // 删除数据

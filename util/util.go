@@ -11,45 +11,40 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
-type IPInfo struct {
-	Code int    `json:"code"`
-	Data IPData `json:"data`
-}
-type IPData struct {
-	Country   string `json:"country"`
-	CountryId string `json:"country_id"`
-	Area      string `json:"area"`
-	AreaId    string `json:"area_id"`
-	Region    string `json:"region"`
-	RegionId  string `json:"region_id"`
-	City      string `json:"city"`
-	CityId    string `json:"city_id"`
-	Isp       string `json:"isp"`
-}
+// globalRand 包级全局随机数生成器（加互斥锁保证并发安全）
+// 避免每次 RandInt 都创建新 rand.Source 导致的性能浪费
+var (
+	globalRand   = rand.New(rand.NewSource(time.Now().UnixNano()))
+	globalRandMu sync.Mutex
+)
 
-// 随机64位
+// RandInt 返回 [0, max) 范围的随机 int64
 func RandInt(max int64) int64 {
 	if max == 0 {
 		return 0
 	}
-	rr := rand.New(rand.NewSource(time.Now().UnixNano() * rand.Int63n(9999)))
-	return rr.Int63n(max)
+	globalRandMu.Lock()
+	v := globalRand.Int63n(max)
+	globalRandMu.Unlock()
+	return v
 }
 
-// 随机范围
+// RandRange 返回 [min, max) 或 [max, min) 范围的随机 int64
 func RandRange(max int64, min int64) (ret int64) {
-	random := rand.New(rand.NewSource(time.Now().UnixNano()))
+	globalRandMu.Lock()
+	defer globalRandMu.Unlock()
 	if max-min == 0 {
 		ret = min
 	} else if max-min > 0 {
-		ret = int64(random.Intn(int(max-min)) + int(min))
+		ret = int64(globalRand.Intn(int(max-min))) + min
 	} else {
-		// max-min < 0
+		// max < min，交换边界
 		min = min + 1
-		ret = int64(random.Intn(int(min-max)) + int(max))
+		ret = int64(globalRand.Intn(int(min-max))) + max
 	}
 	return
 }

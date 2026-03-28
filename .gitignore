@@ -19,3 +19,6 @@ bin/
 example/*/*.log
 example/*/*_debug_*
 example/*/*/*.log
+.workbuddy/*/*
+.workbuddy/*
+

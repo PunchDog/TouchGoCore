@@ -2,6 +2,7 @@ package lua
 
 import (
 	"fmt"
+	"sync"
 	"touchgocore/config"
 	"touchgocore/localtimer"
 	"touchgocore/syncmap"
@@ -11,14 +12,20 @@ import (
 	"github.com/aarzilli/golua/lua"
 )
 
-// 全局 Lua 实例管理
+// 全局 Lua 实例管理（sync.Map 保证线程安全）
 var defaultLua *LuaScript = nil
-var luaInstances map[int64]*LuaScript = nil
+var luaInstances sync.Map // map[int64]*LuaScript
 var nextInstanceID int64 = 0
+var instanceIDMu sync.Mutex // 保护 nextInstanceID
 
-// 注册的函数和类
-var registeredFuncs map[string]func(L *lua.State) int
-var registeredClasses map[ILuaClassInterface]bool
+// 注册的函数和类（读写锁保护）
+var (
+	registeredFuncsMu  sync.RWMutex
+	registeredFuncs    map[string]func(L *lua.State) int
+
+	registeredClassesMu sync.RWMutex
+	registeredClasses   map[ILuaClassInterface]bool
+)
 
 type luaTimer struct {
 	localtimer.TimerInterface
@@ -127,17 +134,21 @@ func NewLuaScript(initluapath string) (*LuaScript, error) {
 	}
 	p.Init()
 
-	// 初始化注册的函数
+	// 初始化注册的函数（持读锁遍历）
+	registeredFuncsMu.RLock()
 	for funcName, function := range registeredFuncs {
 		p.state.Register(funcName, function)
 	}
+	registeredFuncsMu.RUnlock()
 
-	// 注册类
+	// 注册类（持读锁遍历）
+	registeredClassesMu.RLock()
 	for class := range registeredClasses {
 		if err := registerClass(class, p); err != nil {
 			vars.Error("注册 Lua 类失败: %v", err)
 		}
 	}
+	registeredClassesMu.RUnlock()
 
 	// 读取脚本文件
 	if err := p.state.DoFile(p.initScriptPath); err != nil {
@@ -155,10 +166,14 @@ func NewLuaScript(initluapath string) (*LuaScript, error) {
 	p.timer.tick = 0
 	localtimer.AddTimer(p.timer)
 
-	// 加入管理列表
+	// 加入管理列表（原子递增 ID，sync.Map 存储）
+	instanceIDMu.Lock()
 	nextInstanceID++
-	luaInstances[nextInstanceID] = p
-	p.UID = nextInstanceID
+	id := nextInstanceID
+	instanceIDMu.Unlock()
+
+	luaInstances.Store(id, p)
+	p.UID = id
 	return p, nil
 }
 
@@ -170,8 +185,10 @@ func Call(funcName string, args ...interface{}) ([]interface{}, error) {
 	return defaultLua.Call(funcName, args...)
 }
 
-// RegisterFunction 注册全局函数到所有 Lua 实例
+// RegisterLuaFunc 注册全局函数到所有 Lua 实例（线程安全）
 func RegisterLuaFunc(funcName string, function func(L *lua.State) int) error {
+	registeredFuncsMu.Lock()
+	defer registeredFuncsMu.Unlock()
 	if registeredFuncs == nil {
 		registeredFuncs = make(map[string]func(L *lua.State) int)
 	}
@@ -182,9 +199,11 @@ func RegisterLuaFunc(funcName string, function func(L *lua.State) int) error {
 	return nil
 }
 
-// RegisterClass 注册一个类到所有 Lua 实例
+// RegisterLuaClass 注册一个类到所有 Lua 实例（线程安全）
 func RegisterLuaClass(class ILuaClassInterface) error {
 	className, _ := util.GetClassName(class)
+	registeredClassesMu.Lock()
+	defer registeredClassesMu.Unlock()
 	if registeredClasses == nil {
 		registeredClasses = make(map[ILuaClassInterface]bool)
 	}
@@ -202,7 +221,7 @@ func RunLua() error {
 		return nil
 	}
 
-	luaInstances = make(map[int64]*LuaScript)
+	// luaInstances 为 sync.Map，无需 make
 	var err error
 	defaultLua, err = NewLuaScript(config.Cfg_.Lua)
 	if err != nil {
@@ -214,9 +233,12 @@ func RunLua() error {
 
 // 关闭所有的定时器
 func StopLua() {
-	for _, ls := range luaInstances {
-		ls.Close()
-	}
+	luaInstances.Range(func(_, v interface{}) bool {
+		if ls, ok := v.(*LuaScript); ok {
+			ls.Close()
+		}
+		return true
+	})
 }
 
 func init() {

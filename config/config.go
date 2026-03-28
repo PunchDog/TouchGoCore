@@ -3,8 +3,6 @@ package config
 import (
 	"encoding/json"
 	"flag"
-	"fmt"
-	"io/ioutil"
 	"os"
 	"path"
 
@@ -55,11 +53,11 @@ func (this *Cfg) Load(cfgname string) {
 		path1 = path.Join(_basePath, "/conf/", p.GetString(cfgname, "ini", ""))
 	}
 
-	file, err := ioutil.ReadFile(path1)
+	file, err := os.ReadFile(path1)
 	if err != nil {
 		panic("读取启动配置出错:" + err.Error())
 	}
-	fmt.Println(string(file))
+	// 注意：不打印配置内容，避免密码等敏感信息泄露到日志
 
 	err = json.Unmarshal(file, &this)
 	if err != nil {

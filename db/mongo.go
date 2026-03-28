@@ -86,7 +86,7 @@ func (dbo *DbOperate) newMongoDB(cfg *config.MongoDBConfig) error {
 			models := make([]mongo.IndexModel, 0)
 			for _, str := range table.Index {
 				models = append(models, mongo.IndexModel{
-					Keys:    bson.D{{str, 1}},
+					Keys:    bson.D{{Key: str, Value: 1}},
 					Options: options.Index().SetName(str),
 				})
 			}
@@ -223,7 +223,7 @@ func (dbo *DbOperate) DBFindAll(name string, query interface{}, resHandler func(
 	collection := dbo.session.Database(dbo.dbName).Collection(name)
 	qCursor, err := collection.Find(context.Background(), query)
 
-	vars.Debug("[DBFindAll] name:%s,query:%v, q:%b", name, query, qCursor)
+	vars.Debug("[DBFindAll] name:%s,query:%v", name, query)
 
 	if err != nil {
 		return err
@@ -256,7 +256,7 @@ func (dbo *DbOperate) DBFindAllEx(name string, query interface{}, resHandler fun
 	//sortCond 查询结果进行排序
 	opts := options.Find()
 	if sortCond != "" {
-		opts = options.Find().SetSort(bson.D{{sortCond, -1}}).SetLimit(1)
+		opts = options.Find().SetSort(bson.D{{Key: sortCond, Value: -1}}).SetLimit(1)
 	}
 	if projection != nil {
 		opts.SetProjection(projection)

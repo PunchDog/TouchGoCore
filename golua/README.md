@@ -45,6 +45,7 @@
 | 文件 | 说明 |
 |------|------|
 | `luamain.go` | LuaScript 结构体、全局管理、启动/停止 |
+| **`manager.go`** | **新增：统一状态管理器（推荐使用）** |
 | `luaClass.go` | 类注册、反射调用、userdata 处理 |
 | `luatable.go` | LuaTable 类型、table 转换 |
 | `convert.go` | 统一类型转换函数 |
@@ -208,7 +209,32 @@ defer lua.PutLuaTable(tbl)
 
 ## API 参考
 
-### 全局函数
+### 🆕 推荐：LuaManager（统一状态管理）
+
+```go
+// 创建管理器（替代分散的全局变量）
+manager := lua.NewLuaManager()
+
+// 创建脚本实例
+script, err := manager.NewScript("path.lua")
+
+// 注册全局函数/类
+manager.RegisterFunc("goFunc", func(L *lua.State) int { return 0 })
+manager.RegisterClass(&MyClass{})
+
+// 调用函数
+results, err := manager.Call("luaFunc", args...)
+
+// 统计信息
+stats := manager.Stats()
+fmt.Printf("活跃实例: %d, 总调用: %d\n", 
+    stats["scripts_active"], stats["calls_total"])
+
+// 关闭所有
+manager.CloseAll()
+```
+
+### 全局函数（向后兼容）
 
 #### RegisterLuaFunc
 ```go
@@ -299,6 +325,23 @@ const (
     LuaFileExt         = ".lua" // Lua 文件扩展名
 )
 ```
+
+## 🚀 新架构优势（v0.03+）
+
+### 统一状态管理
+- **旧问题**：7个分散的全局变量，难以追踪和调试
+- **新方案**：`LuaManager` 单点管理所有状态
+- **收益**：更好的并发控制、内存管理、监控能力
+
+### 改进的热重载
+- **旧问题**：失败恢复不完整，状态可能不一致
+- **新方案**：与管理器集成，支持完整状态恢复
+- **收益**：更可靠的热更新，减少生产环境事故
+
+### 向后兼容
+- 所有现有 API 完全兼容
+- 渐进式迁移支持
+- 详细的迁移指南：`MIGRATION.md`
 
 ## 注意事项
 

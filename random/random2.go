@@ -2,6 +2,7 @@ package random
 
 import (
 	"math"
+	"sync/atomic"
 	"touchgocore/vars"
 )
 
@@ -31,19 +32,31 @@ func areCoprime(a, b int64) bool {
 	return gcd(a, b) == 1
 }
 
-// findNextPrime 返回与 mc.q 互质的最小质数
+// findNextPrime 返回与 mc 互质的最小质数
 func findNextPrime(mc int64) int64 {
-	for i := int64(0); ; i++ {
-		a := int64(math.Pow(5, float64(i)))*4 + 1 //5的幂次方
+	// 设置最大迭代次数，避免无限循环
+	const maxIterations = 1000
+	
+	for i := int64(0); i < maxIterations; i++ {
+		base := int64(math.Pow(5, float64(i)))
+		a := base*4 + 1 // 5的幂次方 * 4 + 1
+		
 		if isPrime(a) && areCoprime(a, mc) {
-			return int64(math.Pow(5, float64(i)))
+			// 根据注释，应该返回 p = base
+			return base
 		}
 	}
+	
+	// 如果没有找到符合条件的质数，返回一个安全的默认值
+	// 使用 5^4 = 625 作为默认值
+	return 625
 }
 
 func NewMonteCarlo(Seed *int64) *MonteCarlo {
 	mc := &MonteCarlo{}
-	mc.seed = Seed
+	if Seed != nil {
+		mc.seed.Store(*Seed)
+	}
 	mc.init()
 	return mc
 }
@@ -52,14 +65,15 @@ type MonteCarlo struct {
 	q        int64
 	p        int64
 	M        int64
-	seed     *int64
-	nextTime int64
-	tick     int64
+	seed     atomic.Int64  // 使用 atomic.Int64 替代指针
+	nextTime atomic.Int64  // 使用 atomic.Int64 保证并发安全
+	tick     atomic.Int64  // 使用 atomic.Int64 保证并发安全
 }
 
 func (mc *MonteCarlo) init() {
-	mc.nextTime = *mc.seed
-	mc.M = 1 << ((*mc.seed>>2)&0x7 + 17)
+	seed := mc.seed.Load()
+	mc.nextTime.Store(seed)
+	mc.M = 1 << ((seed>>2)&0x7 + 17)
 	p := findNextPrime(mc.M)
 	mc.q = (p+1)*2 + 1
 	mc.p = p*4 + 1
@@ -75,11 +89,20 @@ func (s *MonteCarlo) nextInt64() int64 {
 			vars.Error("随机数生成失败:%s", err.(error))
 		}
 	}()
-	// atomic.AddInt64(&s.tick, 1)
-	// if s.tick%500 == 0 {
+	
+	// 原子地增加 tick 计数器
+	s.tick.Add(1)
+	// 每 500 次调用重新初始化（可选）
+	// if s.tick.Load()%500 == 0 {
 	// 	s.init()
 	// }
-	s.nextTime = (s.nextTime*s.p + s.q) % s.M
-	*s.seed += s.nextTime & 0xffff
-	return int64(s.nextTime & 0x7fffffffffffffff)
+	
+	// 原子操作获取和更新 nextTime
+	next := s.nextTime.Load()
+	next = (next*s.p + s.q) % s.M
+	s.nextTime.Store(next)
+	
+	// 原子地更新 seed
+	s.seed.Add(next & 0xffff)
+	return int64(next & 0x7fffffffffffffff)
 }

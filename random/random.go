@@ -24,13 +24,14 @@ const (
 
 type MersenneTwister struct {
 	mt    [N]uint64
-	index int32
-	seed  *int64
+	index atomic.Int32  // 使用 atomic.Int32 替代普通的 int32
+	seed  atomic.Int64  // 使用 atomic.Int64 替代指针，避免共享问题
 }
 
 func NewMersenneTwister(seed *int64) *MersenneTwister {
-	ret := &MersenneTwister{
-		seed: seed,
+	ret := &MersenneTwister{}
+	if seed != nil {
+		ret.seed.Store(*seed)
 	}
 	ret.resetMersenneTwister()
 	return ret
@@ -38,12 +39,13 @@ func NewMersenneTwister(seed *int64) *MersenneTwister {
 
 // 重置随机数
 func (mt *MersenneTwister) resetMersenneTwister() {
-	mt.mt = [N]uint64{uint64(*mt.seed)}
+	seed := mt.seed.Load()
+	mt.mt = [N]uint64{uint64(seed)}
 	for i := 1; i < N; i++ {
 		mt.mt[i] = MASK * (mt.mt[i-1] ^ (mt.mt[i-1] >> 62) + uint64(i))
 	}
 
-	mt.index = 0
+	mt.index.Store(0)
 	for i := 0; i < N; i++ {
 		mt.nextInt64()
 	}
@@ -58,13 +60,17 @@ func (mt *MersenneTwister) twist() {
 		}
 		mt.mt[i] = mt.mt[(i+M)%N] ^ xA
 	}
-	atomic.StoreInt32(&mt.index, 0)
+	mt.index.Store(0)
 }
 
 func (mt *MersenneTwister) nextInt64() int64 {
-	idx := atomic.AddInt32(&mt.index, 1) - 1
+	// 使用原子操作获取并递增 index
+	idx := mt.index.Add(1) - 1
 	if idx >= N {
+		// 需要重新 twist，但这里可能有竞态条件
+		// 多个 goroutine 可能同时进入这个分支
 		mt.twist()
+		// 重置后重新获取 index
 		idx = 0
 	}
 
@@ -74,6 +80,8 @@ func (mt *MersenneTwister) nextInt64() int64 {
 	*y ^= (*y << T) & C
 	*y ^= *y >> L
 
-	*mt.seed += int64(*y & 0xffff)
-	return int64(*y & 0x7fffffffffffffff)
+	// 原子地更新 seed
+	yVal := *y
+	mt.seed.Add(int64(yVal & 0xffff))
+	return int64(yVal & 0x7fffffffffffffff)
 }

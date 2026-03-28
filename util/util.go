@@ -4,50 +4,14 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"fmt"
-	"math/rand"
 	"net"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 )
-
-// globalRand 包级全局随机数生成器（加互斥锁保证并发安全）
-// 避免每次 RandInt 都创建新 rand.Source 导致的性能浪费
-var (
-	globalRand   = rand.New(rand.NewSource(time.Now().UnixNano()))
-	globalRandMu sync.Mutex
-)
-
-// RandInt 返回 [0, max) 范围的随机 int64
-func RandInt(max int64) int64 {
-	if max == 0 {
-		return 0
-	}
-	globalRandMu.Lock()
-	v := globalRand.Int63n(max)
-	globalRandMu.Unlock()
-	return v
-}
-
-// RandRange 返回 [min, max) 或 [max, min) 范围的随机 int64
-func RandRange(max int64, min int64) (ret int64) {
-	globalRandMu.Lock()
-	defer globalRandMu.Unlock()
-	if max-min == 0 {
-		ret = min
-	} else if max-min > 0 {
-		ret = int64(globalRand.Intn(int(max-min))) + min
-	} else {
-		// max < min，交换边界
-		min = min + 1
-		ret = int64(globalRand.Intn(int(min-max))) + max
-	}
-	return
-}
 
 // MD5 实现 :主要是针对 字符串的加密
 func MD5(data string) string {

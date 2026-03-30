@@ -84,6 +84,7 @@ func (n *ListNode) InsertAfter(data interface{}) (newNode INode) {
 	}
 	n.next = newNode
 	n.list.len++
+	n.list.nodeMap[newnode.id] = newNode // 添加到 map 索引
 	return
 }
 
@@ -116,6 +117,7 @@ func (n *ListNode) InsertBefore(data interface{}) (newNode INode) {
 	}
 	n.pre = newNode
 	n.list.len++
+	n.list.nodeMap[newnode.id] = newNode // 添加到 map 索引
 	return
 }
 

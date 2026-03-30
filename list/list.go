@@ -3,52 +3,42 @@ package list
 import (
 	"sync"
 	"sync/atomic"
-	"time"
 	"touchgocore/vars"
 )
 
 // 链表
 type List struct {
-	mu           sync.Mutex // 保护并发修改
-	head         INode      //头节点
-	tail         INode      //尾节点
-	len          int        //长度
-	rangeDelList []INode    //删除列表
-	dellock      bool       //删除锁
-	nextID       int64      //下一个节点ID
+	mu           sync.RWMutex  // 读写锁，提高读操作并发性能
+	head         INode         //头节点
+	tail         INode         //尾节点
+	len          int           //长度
+	rangeDelList []INode       //删除列表
+	dellock      bool          //删除锁
+	nextID       atomic.Int64   //下一个节点ID（使用原子操作）
+	nodeMap      map[int64]INode //节点ID映射，支持O(1)查询
 }
 
 // 创建一个链表
 func NewList() *List {
+	var nextID atomic.Int64
 	return &List{
-		head:   nil,
-		tail:   nil,
-		len:    0,
-		nextID: 0,
-		// idMux zero value is usable
+		head:    nil,
+		tail:    nil,
+		len:     0,
+		nextID:  nextID,
+		nodeMap: make(map[int64]INode),
 	}
 }
 
 // generateNextID 生成下一个节点ID，使用原子操作保证并发安全
 func (l *List) generateNextID() int64 {
-	for {
-		old := atomic.LoadInt64(&l.nextID)
-		now := time.Now().UnixNano()
-		var newID int64
-		if old == 0 || old > now+1 {
-			newID = now + 1
-		} else {
-			newID = old + 1
-		}
-		if atomic.CompareAndSwapInt64(&l.nextID, old, newID) {
-			return newID
-		}
-		// CAS失败，重试
-	}
+	return l.nextID.Add(1)
 }
 
 // 长度
 func (l *List) Length() int {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
 	return l.len
 }
 
@@ -96,31 +86,30 @@ func (l *List) Add(node INode) (bret bool) {
 		l.tail = node
 	}
 	l.len++
+	l.nodeMap[obj.id] = node // 添加到 map 索引
 	bret = true
 	return
 }
 
 // 获取头节点
 func (l *List) Head() INode {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
 	return l.head
 }
 
 // 获取尾节点
 func (l *List) Tail() INode {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
 	return l.tail
 }
 
 // 获取一个节点
 func (l *List) Get(id int64) INode {
-	var node INode = nil
-	l.Range(func(n INode) bool {
-		if n.GetId() == id {
-			node = n
-			return false
-		}
-		return true
-	})
-	return node
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.nodeMap[id]
 }
 
 // 遍历
@@ -141,7 +130,11 @@ func (l *List) Range(f func(INode) bool) {
 		l.mu.Unlock()
 	}()
 
+	// 使用读锁遍历，提高并发性能
+	l.mu.RLock()
 	node := l.head
+	l.mu.RUnlock()
+
 	for node != nil {
 		if condition := f(node); !condition {
 			break
@@ -159,7 +152,6 @@ func (l *List) Clear() {
 	node := l.head
 	for node != nil {
 		next := node.GetNode().next
-		// node.Remove()
 		l.removeNodeLocked(node.GetNode())
 		node = next
 	}
@@ -168,6 +160,7 @@ func (l *List) Clear() {
 	l.tail = nil
 	l.len = 0
 	l.rangeDelList = nil
+	l.nodeMap = make(map[int64]INode) // 重建 map，清理所有引用
 }
 
 // removeNodeLocked 从链表中删除节点，调用者必须已持有 mu 锁
@@ -188,6 +181,7 @@ func (l *List) removeNodeLocked(node *ListNode) {
 		node.next.GetNode().pre = node.pre
 	}
 	l.len--
+	delete(l.nodeMap, node.id) // 从 map 索引中删除
 	// 清理节点引用
 	node.list = nil
 	node.pre = nil

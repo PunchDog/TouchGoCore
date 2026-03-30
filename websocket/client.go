@@ -29,6 +29,8 @@ type Client struct {
 	msgChan    chan []byte
 	UID        int64
 	iCallName  string
+	// 原子关闭标志，防止竞态条件
+	closed     atomic.Bool
 }
 
 // 新增带重试机制的WebSocket连接方法
@@ -114,6 +116,11 @@ func (c *Client) readLoop() {
 }
 
 func (c *Client) IsClose() bool {
+	// 先检查原子关闭标志，性能更好
+	if c.closed.Load() {
+		return true
+	}
+	
 	if c.closeCh == nil {
 		return true
 	}
@@ -131,8 +138,12 @@ func (c *Client) Connected() bool {
 }
 
 func (c *Client) Close(reason string) {
-	if c.Connected() {
-		// 先调用 OnClose 回调
+	// 使用原子操作确保只关闭一次
+	if c.closed.CompareAndSwap(false, true) {
+		// 先从映射中移除，防止新消息到达
+		clientMap.Delete(c.UID)
+		
+		// 调用 OnClose 回调
 		c.OnClose(c)
 
 		// 关闭通道和连接
@@ -141,9 +152,6 @@ func (c *Client) Close(reason string) {
 			c.wsConnect.Close()
 		}
 		close(c.msgChan)
-
-		// 从客户端映射中移除
-		clientMap.Delete(c.UID)
 
 		// 清理客户端资源
 		c.wsConnect = nil
@@ -256,8 +264,11 @@ func NewClient(connType interface{}, remoteAddr string, className string) (*Clie
 		if client == nil {
 			return nil, errors.New("内存池获取失败")
 		}
+		// 重置原子关闭标志
+		client.closed.Store(false)
 	} else {
 		client = &Client{}
+		// 原子标志自动初始化为 false
 	}
 
 	client.UID = uid

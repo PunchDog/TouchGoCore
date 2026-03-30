@@ -19,15 +19,31 @@ const (
 )
 
 var (
-	closeCh             chan bool          = nil
-	msgQueue            chan *msgQueueType = nil
-	clientpool          *sync.Pool         = nil
-	clientcall          syncmap.Map
-	writeBufferSize     int                = DEFAULT_WRITE_BUFFER_SIZE
-	readBufferSize      int                = DEFAULT_READ_BUFFER_SIZE
-	enableBackpressure  bool                = false
-	dropMessageOnFull   bool                = false
+	closeCh               chan bool          = nil
+	msgQueue              chan *msgQueueType = nil
+	clientpool            *sync.Pool         = nil
+	clientcall            syncmap.Map
+	writeBufferSize       int                = DEFAULT_WRITE_BUFFER_SIZE
+	readBufferSize        int                = DEFAULT_READ_BUFFER_SIZE
+	enableBackpressure    bool                = false
+	dropMessageOnFull     bool                = false
+	workerPoolEnabled     bool                = false // 是否启用 Worker Pool
+	workerPoolSize        int                = 0     // Worker 数量
+	workerPoolQueues      []chan *msgQueueType       // Worker 消息队列
+	workerPoolStop        chan struct{}              // Worker Pool 停止信号
+	workerPoolWaitGroup   sync.WaitGroup             // Worker 等待组
+	workerPoolStats       []*workerStats             // Worker 统计信息
+	workerPoolStatsMutex  sync.Mutex                 // 统计信息保护锁
 )
+
+// workerStats 用于收集 Worker 的统计信息
+type workerStats struct {
+	WorkerID      int
+	Messages      atomic.Int64 // 处理的消息数量
+	Errors        atomic.Int64 // 错误数量
+	LastMessageAt time.Time
+	Running       atomic.Bool
+}
 
 type msgQueueType struct {
 	uid  int64
@@ -68,8 +84,8 @@ func Run() {
 	if config.Cfg_.Websocket != nil {
 		// 这里可以添加配置读取逻辑
 		// 目前使用默认值
-		enableBackpressure = true  // 启用背压控制
-		dropMessageOnFull = false  // 通道满时是否丢弃消息
+		enableBackpressure = true // 启用背压控制
+		dropMessageOnFull = false // 通道满时是否丢弃消息
 	}
 
 	writeBufferSize = DEFAULT_WRITE_BUFFER_SIZE
@@ -127,9 +143,13 @@ func Tick() {
 		case read_msg := <-msgQueue:
 			// 	处理消息队列
 			if c, h := clientMap.Load(read_msg.uid); h {
+				client := c.(*Client)
+				// 检查客户端是否已关闭，防止竞态条件
+				if client.IsClose() {
+					continue
+				}
 				pbmsg := util.PasreFSMessage(read_msg.data)
 				if pbmsg != nil {
-					client := c.(*Client)
 					client.OnMessage(client, pbmsg)
 				}
 			}

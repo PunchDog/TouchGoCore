@@ -1,10 +1,12 @@
 package rpc
 
 import (
+	"context"
 	"crypto/tls"
 	"fmt"
 	"io"
 	"net"
+	"reflect"
 	"strconv"
 	"sync/atomic"
 	"time"
@@ -41,6 +43,8 @@ type RpcServer struct {
 	handlechannel      chan *msginfo
 	done               chan struct{}
 	stopped            atomic.Bool
+	// 使用独立的 CallFunction 实例，避免全局单例并发问题
+	callFunc *util.CallFunction
 }
 
 func (s *RpcServer) Msg(stream message.Grpc_MsgServer) error {
@@ -138,26 +142,67 @@ func (s *RpcServer) readChanel() {
 
 // 操作数据
 func (s *RpcServer) handleChanel() {
+	// 消息处理超时，默认5秒
+	const timeout = 5 * time.Second
+
 	for {
 		select {
 		case <-s.done:
 			return
 		case msg := <-s.handlechannel:
-			key := fmt.Sprintf("%s:%d:%d", util.CallRpcMsg, msg.protol1, msg.protol2)
-			// 启用返回值收集
-			util.DefaultCallFunc.SetDoRet()
-			bret := util.DefaultCallFunc.Do(key, msg)
-			if bret {
-				// 获取返回值
-				res := util.DefaultCallFunc.GetRet()
-				if len(res) > 0 {
-					rsp := res[0].Interface().(proto.Message)
-					s.Send(msg.clientNameKey, msg.protol1, msg.protol2, rsp)
+			// 为每个消息处理创建超时上下文
+			ctx, cancel := context.WithTimeout(context.Background(), timeout)
+
+			// 使用通道来接收处理结果
+			resultCh := make(chan struct {
+				bret bool
+				res  []reflect.Value
+			}, 1)
+
+			// 在新的 goroutine 中处理消息，以便可以超时控制
+			go func() {
+				key := fmt.Sprintf("%s:%d:%d", util.CallRpcMsg, msg.protol1, msg.protol2)
+				// 使用独立的 CallFunction 实例，避免全局单例并发问题
+				s.callFunc.SetDoRet()
+				bret := s.callFunc.Do(key, msg)
+				if bret {
+					// 获取返回值
+					res := s.callFunc.GetRet()
+					resultCh <- struct {
+						bret bool
+						res  []reflect.Value
+					}{bret: true, res: res}
 				} else {
-					vars.Error("处理gRPC请求错误,没有返回值,协议号:%d:%d", msg.protol1, msg.protol2)
+					resultCh <- struct {
+						bret bool
+						res  []reflect.Value
+					}{bret: false, res: nil}
 				}
-			} else {
-				vars.Error("处理gRPC请求错误,协议号:%d:%d", msg.protol1, msg.protol2)
+			}()
+
+			// 等待处理结果或超时
+			select {
+			case <-ctx.Done():
+				// 超时或取消
+				cancel()
+				vars.Error("处理gRPC请求超时,协议号:%d:%d, 客户端:%s",
+					msg.protol1, msg.protol2, msg.clientNameKey)
+				// 清理 goroutine（它会在完成后退出）
+
+			case result := <-resultCh:
+				cancel()
+				if result.bret {
+					if len(result.res) > 0 {
+						rsp := result.res[0].Interface().(proto.Message)
+						s.Send(msg.clientNameKey, msg.protol1, msg.protol2, rsp)
+					} else {
+						vars.Error("处理gRPC请求错误,没有返回值,协议号:%d:%d, 客户端:%s",
+							msg.protol1, msg.protol2, msg.clientNameKey)
+					}
+				} else {
+					vars.Error("处理gRPC请求错误,协议号:%d:%d, 客户端:%s",
+						msg.protol1, msg.protol2, msg.clientNameKey)
+				}
 			}
 		}
 	}
@@ -228,6 +273,7 @@ func StartGrpcServer(name, ip string, port int, useTLS bool) {
 		readchannel:   make(chan *msginfo, MAX_CHANNEL_SIZE),
 		handlechannel: make(chan *msginfo, MAX_CHANNEL_SIZE),
 		done:          make(chan struct{}),
+		callFunc:      &util.CallFunction{}, // 创建独立的 CallFunction 实例
 	}
 
 	message.RegisterGrpcServer(service.service, service)

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"reflect"
 	"sync"
+	"sync/atomic"
 	"touchgocore/vars"
 )
 
@@ -51,20 +52,20 @@ type CallFunction struct {
 	fn    sync.Map        // key -> 函数列表映射
 	retCh []reflect.Value // 返回值收集
 	retMu sync.Mutex      // 返回值保护锁
-	bRet  bool            // 是否收集返回值
+	bRet  atomic.Bool     // 是否收集返回值（使用原子操作）
 }
 
 // 需要取返回值的数据，所以这里需要特殊处理
 func (c *CallFunction) SetDoRet() {
 	c.retMu.Lock()
 	c.retCh = make([]reflect.Value, 0, 16) // 预分配空间
-	c.bRet = true
 	c.retMu.Unlock()
+	c.bRet.Store(true)
 }
 func (c *CallFunction) GetRet() []reflect.Value {
 	c.retMu.Lock()
 	defer c.retMu.Unlock()
-	c.bRet = false
+	c.bRet.Store(false)
 	return c.retCh
 }
 
@@ -164,7 +165,7 @@ func (c *CallFunction) Do(key any, values ...any) (ok bool) {
 			}
 			method := reflect.ValueOf(fn)
 			ret := method.Call(args)
-			if c.bRet {
+			if c.bRet.Load() {
 				c.retMu.Lock()
 				c.retCh = append(c.retCh, ret...)
 				c.retMu.Unlock()
@@ -173,4 +174,33 @@ func (c *CallFunction) Do(key any, values ...any) (ok bool) {
 		ok = true
 	}
 	return
+}
+
+// DoWithRet 执行回调并直接返回所有返回值，避免使用全局状态
+// 这是线程安全的替代方案，推荐在需要返回值的场景使用
+func (c *CallFunction) DoWithRet(key any, values ...any) ([]reflect.Value, bool) {
+	defer func() {
+		if err := recover(); err != nil {
+			vars.Error("调用回调函数失败", "key", key, "err", err)
+		}
+	}()
+
+	var results []reflect.Value
+
+	if l, has := c.fn.Load(key); has {
+		funcs := l.([]any)
+		for _, fn := range funcs {
+			args, err := callFunctionArgs(fn, values...)
+			if err != nil {
+				vars.Debug("参数转换失败", "函数", fn, "参数", values, "error", err)
+				continue
+			}
+			method := reflect.ValueOf(fn)
+			ret := method.Call(args)
+			results = append(results, ret...)
+		}
+		return results, true
+	}
+
+	return nil, false
 }

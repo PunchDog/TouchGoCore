@@ -781,3 +781,72 @@ func BenchmarkConcurrentAdd(b *testing.B) {
 	}
 	wg.Wait()
 }
+
+// BenchmarkPoolAddRemove 性能基准测试 - 测试对象池对添加删除的影响
+func BenchmarkPoolAddRemove(b *testing.B) {
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		l := NewList()
+		nodes := make([]INode, 100)
+		for j := 0; j < 100; j++ {
+			nodes[j] = NewNode(j, nil)
+			l.Add(nodes[j])
+		}
+		for j := 0; j < 100; j++ {
+			nodes[j].Remove()
+		}
+	}
+}
+
+// BenchmarkPoolStress 性能压力测试 - 高频创建销毁测试对象池效果
+func BenchmarkPoolStress(b *testing.B) {
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		l := NewList()
+		// 添加大量节点
+		for j := 0; j < 1000; j++ {
+			l.Add(NewNode(j, nil))
+		}
+		// 随机删除一些节点
+		l.Range(func(node INode) bool {
+			if node.GetData().(int)%2 == 0 {
+				node.Remove()
+			}
+			return true
+		})
+	}
+}
+
+// BenchmarkPoolConcurrentStress 并发压力测试 - 验证对象池在并发下的表现
+func BenchmarkPoolConcurrentStress(b *testing.B) {
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		l := NewList()
+		var wg sync.WaitGroup
+
+		// 并发添加 1000 个节点
+		for j := 0; j < 100; j++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for k := 0; k < 10; k++ {
+					l.Add(NewNode(k, nil))
+				}
+			}()
+		}
+		wg.Wait()
+
+		// 并发删除所有节点
+		for j := 0; j < 10; j++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				l.Range(func(node INode) bool {
+					node.Remove()
+					return true
+				})
+			}()
+		}
+		wg.Wait()
+	}
+}

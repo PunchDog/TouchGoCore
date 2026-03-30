@@ -154,10 +154,21 @@ func (n *ListNode) Remove() {
 // 添加一个节点，如果nodeType为nil，则用默认的ListNode创建
 func NewNode(data interface{}, nodeType INode) INode {
 	var newnode INode
+
+	// 尝试从节点池获取节点对象
 	if nodeType == nil {
-		newnode = new(ListNode)
-		nodeType = newnode
+		// 对于默认类型，尝试从池中获取
+		node := acquireNode()
+		if node != nil {
+			newnode = node
+			nodeType = newnode
+		} else {
+			// 池为空或获取失败，创建新节点
+			newnode = new(ListNode)
+			nodeType = newnode
+		}
 	} else {
+		// 对于自定义类型，保持原有反射创建逻辑
 		newnode = reflect.New(reflect.TypeOf(nodeType).Elem()).Interface().(INode)
 	}
 

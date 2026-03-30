@@ -20,12 +20,10 @@ type List struct {
 
 // 创建一个链表
 func NewList() *List {
-	var nextID atomic.Int64
 	return &List{
 		head:    nil,
 		tail:    nil,
 		len:     0,
-		nextID:  nextID,
 		nodeMap: make(map[int64]INode),
 	}
 }
@@ -182,9 +180,16 @@ func (l *List) removeNodeLocked(node *ListNode) {
 	}
 	l.len--
 	delete(l.nodeMap, node.id) // 从 map 索引中删除
-	// 清理节点引用
+
+	// 清理节点引用并归还到池中
 	node.list = nil
 	node.pre = nil
 	node.next = nil
 	node.id = 0
+	node.data = nil
+	node.nodeType = nil
+
+	// 将节点归还到对象池，只有默认 ListNode 类型才放入池
+	// 自定义类型不应放入池中，因为类型不确定
+	releaseNode(node)
 }

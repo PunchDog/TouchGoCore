@@ -92,12 +92,12 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message) {
 	} else {
 		//按设定的命令发消息
 		if len(message.Text) > 0 && message.Text[0] == '/' {
-			if ok := util.DefaultCallFunc.Do(util.CallTelegramMsg+message.Text, bot, message); !ok {
+			if _, ok := util.DefaultCallFunc.Do(util.CallTelegramMsg+message.Text, bot, message); !ok {
 				vars.Debug("no handler registered for command: %s", message.Text)
 			}
 		} else {
 			//说话消息
-			if ok := util.DefaultCallFunc.Do(util.CallTelegramMsg+"Say", message.Text, bot, message); !ok {
+			if _, ok := util.DefaultCallFunc.Do(util.CallTelegramMsg+"Say", message.Text, bot, message); !ok {
 				vars.Debug("no handler registered for say message")
 			}
 		}
@@ -137,7 +137,7 @@ type telegramTimer struct {
 
 func (t *telegramTimer) Tick() {
 	//每分钟广播一次心跳
-	if ok := util.DefaultCallFunc.Do(util.CallTelegramMsg+"Minute", t.bot); !ok {
+	if _, ok := util.DefaultCallFunc.Do(util.CallTelegramMsg+"Minute", t.bot); !ok {
 		vars.Debug("no handler registered for minute tick")
 	}
 }

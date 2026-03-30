@@ -1,757 +1,493 @@
-// Package db 提供 MySQL 数据库操作封装，基于 GORM 实现。
-//
-// 重构说明（v0.02）：
-//   - 底层从 database/sql 迁移到 gorm.io/gorm，彻底消除 SQL 注入风险
-//   - 所有 WHERE 条件通过 GORM 参数化查询传递，不再做字符串拼接
-//   - 新增 Transaction / WithTx 支持事务
-//   - 新增 WithContext 支持 context 超时传播
-//   - Rows / DBResult 保持原有 API 不变，调用方无需修改
 package db
 
 import (
-	"errors"
 	"fmt"
-	"strconv"
-	"strings"
 	"time"
 
 	"touchgocore/config"
+	"touchgocore/syncmap"
 	"touchgocore/vars"
 
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 	"gorm.io/gorm/logger"
-
-	"context"
 )
 
-// ──────────────────────────────────────────────
-// 配置模型
-// ──────────────────────────────────────────────
-
-// DBConfigModel 数据库连接配置。
-type DBConfigModel struct {
-	Host          string
-	User          string
-	Password      string
-	DBName        string
-	AutoCloseTime int
-	MaxOpenConns  int
-	MaxIdleConns  int
-}
-
-// ──────────────────────────────────────────────
-// 操作枚举
-// ──────────────────────────────────────────────
-
-// EDBType 数据库操作类型。
-type EDBType int
-
-const (
-	EDBType_Query       EDBType = iota + 1
-	EDBType_Query_Count          // SELECT count(*)
-	EDBType_Query_Sum            // SELECT sum(field)
-	EDBType_Query_Max            // SELECT max(field)
-	EDBType_Insert
-	EDBType_Update
-	EDBType_Delete
-)
-
-// ──────────────────────────────────────────────
-// Condition — 链式查询构建器
-// ──────────────────────────────────────────────
-
-// Condition 封装一次数据库操作所需的条件、字段、分页等信息。
-// 所有方法返回 *Condition 以支持链式调用。
-type Condition struct {
-	types     EDBType
-	tableName string // 已处理反引号的表名
-	cacheKey  string
-	order     string
-	limit     string // "offset,count" 或 "count"
-	group     string
-	// whereClauses 收集所有 AND 条件片段，每个元素为 (clause, args...)
-	whereClauses []whereClause
-	// orGroups 收集 OR 合并的子 Condition
-	orGroups  [][]whereClause
-	filter    bool
-	values    *map[string]interface{} // INSERT / UPDATE 的 KV 数据
-	ctx       context.Context         // 可选，用于超时传播
-}
-
-type whereClause struct {
-	sql  string
-	args []interface{}
-}
-
-// SetFilterEx 添加一个带表达式的 WHERE 条件（AND 连接）。
-//
-//	key: 字段名（自动加反引号，支持 "." 和已有反引号的字段名）
-//	ex:  操作符，如 "=", ">", "<=", "!=" 等
-//	val: 值，支持 scalar / []int / []int64 / []float64 / []string / []interface{}
-func (c *Condition) SetFilterEx(key string, ex string, val interface{}) error {
-	c.filter = true
-
-	col := quoteColumn(key)
-	var clause string
-	var args []interface{}
-
-	switch v := val.(type) {
-	case []interface{}:
-		placeholders := makePlaceholders(len(v))
-		clause = fmt.Sprintf("%s %s (%s)", col, ex, placeholders)
-		args = v
-	case []string:
-		iface := make([]interface{}, len(v))
-		for i, s := range v {
-			iface[i] = s
-		}
-		placeholders := makePlaceholders(len(iface))
-		clause = fmt.Sprintf("%s IN (%s)", col, placeholders)
-		args = iface
-	case []int:
-		iface := make([]interface{}, len(v))
-		for i, n := range v {
-			iface[i] = n
-		}
-		placeholders := makePlaceholders(len(iface))
-		clause = fmt.Sprintf("%s IN (%s)", col, placeholders)
-		args = iface
-	case []int64:
-		iface := make([]interface{}, len(v))
-		for i, n := range v {
-			iface[i] = n
-		}
-		placeholders := makePlaceholders(len(iface))
-		clause = fmt.Sprintf("%s IN (%s)", col, placeholders)
-		args = iface
-	case []float64:
-		iface := make([]interface{}, len(v))
-		for i, f := range v {
-			iface[i] = f
-		}
-		placeholders := makePlaceholders(len(iface))
-		clause = fmt.Sprintf("%s IN (%s)", col, placeholders)
-		args = iface
-	default:
-		clause = fmt.Sprintf("%s %s ?", col, ex)
-		args = []interface{}{val}
-	}
-
-	c.whereClauses = append(c.whereClauses, whereClause{sql: clause, args: args})
-	return nil
-}
-
-// SetFilter 添加等值 WHERE 条件（AND 连接），支持 slice 形式的 IN 查询。
-func (c *Condition) SetFilter(key string, val interface{}) *Condition {
-	_ = c.SetFilterEx(key, "=", val)
-	return c
-}
-
-// SetFilterOr 将多个 Condition 的 WHERE 片段以 OR 方式合并到当前条件。
-// 合并后与其他条件之间仍以 AND 连接。
-func (c *Condition) SetFilterOr(conditions ...*Condition) {
-	for _, other := range conditions {
-		if c.tableName != "" && other.tableName != "" && c.tableName != other.tableName {
-			vars.Error("不是操作同一张表，不能进行条件合并")
-			continue
-		}
-		if len(other.whereClauses) > 0 {
-			c.orGroups = append(c.orGroups, other.whereClauses)
-		}
-	}
-}
-
-// SetTableName 设置操作的表名（自动加反引号）。
-func (c *Condition) SetTableName(tableName string) *Condition {
-	c.tableName = quoteTable(tableName)
-	return c
-}
-
-// SetCacheKey 设置缓存键（供上层缓存淘汰使用，框架本身不处理缓存）。
-func (c *Condition) SetCacheKey(cacheKey ...interface{}) *Condition {
-	if len(cacheKey) == 1 {
-		switch v := cacheKey[0].(type) {
-		case string:
-			c.cacheKey = v
-		default:
-			c.cacheKey = fmt.Sprintf("%v", v)
-		}
-	} else if len(cacheKey) > 1 {
-		format, ok := cacheKey[0].(string)
-		if ok {
-			c.cacheKey = fmt.Sprintf(format, cacheKey[1:]...)
-		}
-	}
-	return c
-}
-
-// Order 设置排序（原始 SQL 片段，如 "id DESC"）。
-func (c *Condition) Order(order string) *Condition {
-	c.order = order
-	return c
-}
-
-// Limit 设置分页。
-//   - Limit(10)       → LIMIT 10
-//   - Limit(20, 10)   → LIMIT 20,10  (offset=20, count=10)
-func (c *Condition) Limit(limit ...int) *Condition {
-	parts := make([]string, len(limit))
-	for i, v := range limit {
-		parts[i] = strconv.Itoa(v)
-	}
-	c.limit = strings.Join(parts, ",")
-	return c
-}
-
-// Group 设置 GROUP BY 字段名（原始 SQL 片段）。
-func (c *Condition) Group(field string) *Condition {
-	c.group = field
-	return c
-}
-
-// SetDataMap 设置 INSERT / UPDATE 的数据 KV Map。
-func (c *Condition) SetDataMap(data *map[string]interface{}) *Condition {
-	c.values = data
-	return c
-}
-
-// SetDataMapByOne 向数据 KV Map 中追加一个字段。
-func (c *Condition) SetDataMapByOne(key string, value interface{}) *Condition {
-	if c.values == nil {
-		m := make(map[string]interface{})
-		c.values = &m
-	}
-	(*c.values)[key] = value
-	return c
-}
-
-// SetDBType 设置操作类型（一般不需要手动调用，由 Query/Insert/Update/Del 自动设置）。
-func (c *Condition) SetDBType(tp EDBType) {
-	c.types = tp
-}
-
-// WithContext 绑定 context（用于超时控制）。
-func (c *Condition) WithContext(ctx context.Context) *Condition {
-	c.ctx = ctx
-	return c
-}
-
-// ──────────────────────────────────────────────
-// Rows — 遍历结果集
-// ──────────────────────────────────────────────
-
-// Rows 封装查询结果，提供顺序遍历和字段读取能力。
-type Rows struct {
-	row       *map[string]interface{}
-	rows      *[]map[string]interface{}
-	row_index int
-}
-
-// Next 移动游标到下一行；首次调用指向第一行。
-// 返回 error 表示无数据或已到末尾。
-func (r *Rows) Next() error {
-	if r.rows == nil {
-		return errors.New("返回多个数据才能使用")
-	}
-	if len(*r.rows) == 0 {
-		return errors.New("没有查询到数据")
-	}
-	if r.row != nil {
-		r.row_index++
-		if r.row_index >= len(*r.rows) {
-			return errors.New("已经是结果最后")
-		}
-	}
-	r.row = &(*r.rows)[r.row_index]
-	return nil
-}
-
-// GetInt 以 int64 读取当前行指定字段值。
-func (r *Rows) GetInt(key string) int64 {
-	if r.row == nil {
-		return 0
-	}
-	v, ok := (*r.row)[key]
-	if !ok || v == nil {
-		return 0
-	}
-	switch val := v.(type) {
-	case int64:
-		return val
-	case int:
-		return int64(val)
-	case float64:
-		return int64(val)
-	case string:
-		n, _ := strconv.ParseInt(val, 10, 64)
-		return n
-	default:
-		n, _ := strconv.ParseInt(fmt.Sprintf("%v", val), 10, 64)
-		return n
-	}
-}
-
-// GetFloat 以 float64 读取当前行指定字段值。
-func (r *Rows) GetFloat(key string) float64 {
-	if r.row == nil {
-		return 0
-	}
-	v, ok := (*r.row)[key]
-	if !ok || v == nil {
-		return 0
-	}
-	switch val := v.(type) {
-	case float64:
-		return val
-	case float32:
-		return float64(val)
-	case int64:
-		return float64(val)
-	case string:
-		f, _ := strconv.ParseFloat(val, 64)
-		return f
-	default:
-		f, _ := strconv.ParseFloat(fmt.Sprintf("%v", val), 64)
-		return f
-	}
-}
-
-// GetString 以 string 读取当前行指定字段值。
-func (r *Rows) GetString(key string) string {
-	if r.row == nil {
-		return ""
-	}
-	v, ok := (*r.row)[key]
-	if !ok || v == nil {
-		return ""
-	}
-	if s, ok := v.(string); ok {
-		return s
-	}
-	return fmt.Sprintf("%v", v)
-}
-
-// ForMap 遍历当前行的所有字段。
-func (r *Rows) ForMap(fn func(k string, v interface{})) {
-	if r.row == nil {
-		return
-	}
-	for k, v := range *r.row {
-		fn(k, v)
-	}
-}
-
-// ──────────────────────────────────────────────
-// DBResult — 查询结果集
-// ──────────────────────────────────────────────
-
-// DBResult 保存查询返回的全部行数据。
-type DBResult struct {
-	values []map[string]interface{}
-}
-
-// Count 返回结果行数。
-func (r *DBResult) Count() int {
-	return len(r.values)
-}
-
-// GetOne 返回第一行的 Rows 指针（用于单行读取）。
-func (r *DBResult) GetOne() *Rows {
-	if len(r.values) == 0 {
-		return &Rows{}
-	}
-	return &Rows{row: &r.values[0]}
-}
-
-// GetAll 返回覆盖所有行的 Rows 指针（需配合 Next() 遍历）。
-func (r *DBResult) GetAll() *Rows {
-	return &Rows{rows: &r.values}
-}
-
-// ──────────────────────────────────────────────
-// DbMysql — GORM 封装
-// ──────────────────────────────────────────────
-
-// DbMysql 封装 GORM DB，提供与原有 API 兼容的链式查询接口。
+// DbMysql 封装 GORM MySQL 数据库操作
 type DbMysql struct {
-	db        *gorm.DB       // GORM 连接（来自连接池复用）
-	config    *DBConfigModel
-	condition *Condition
-	Result    *DBResult
+	gormDB *gorm.DB
+	config *config.MySqlDBConfig
 }
 
-// NewDbMysql 创建 DbMysql 实例。同一 DSN 复用已有的 *gorm.DB 实例（连接池共享）。
+// 全局 GORM 连接池
+// key: 数据库连接字符串, value: *gorm.DB
+var gormPool *syncmap.Map = &syncmap.Map{}
+
+// NewDbMysql 创建 MySQL 数据库连接
 func NewDbMysql(cfg *config.MySqlDBConfig) (*DbMysql, error) {
-	m := &DbMysql{
-		config: &DBConfigModel{
-			Host:         cfg.Host,
-			User:         cfg.Username,
-			Password:     cfg.Password,
-			DBName:       cfg.DBName,
-			MaxIdleConns: cfg.MaxIdleConns,
-			MaxOpenConns: cfg.MaxOpenConns,
-		},
+	dsn := buildDSN(cfg)
+
+	// 尝试从连接池获取
+	if db, ok := gormPool.Load(dsn); ok {
+		return &DbMysql{gormDB: db.(*gorm.DB), config: cfg}, nil
 	}
-	return m, m.connect()
+
+	// 创建新连接
+	gormDB, err := gorm.Open(mysql.Open(dsn), &gorm.Config{
+		Logger: logger.Default.LogMode(logger.Silent), // 默认静默，可通过 SetLoggerLevel 调整
+	})
+	if err != nil {
+		vars.Error("%v", err)
+		return nil, fmt.Errorf("failed to connect database: %w", err)
+	}
+
+	// 配置连接池
+	sqlDB, err := gormDB.DB()
+	if err != nil {
+		vars.Error("%v", err)
+		return nil, fmt.Errorf("failed to get sql.DB: %w", err)
+	}
+
+	if cfg.MaxIdleConns > 0 {
+		sqlDB.SetMaxIdleConns(cfg.MaxIdleConns)
+	}
+	if cfg.MaxOpenConns > 0 {
+		sqlDB.SetMaxOpenConns(cfg.MaxOpenConns)
+	}
+	sqlDB.SetConnMaxLifetime(time.Hour * 24) // 连接最大生存时间24小时
+
+	// 缓存到连接池
+	gormPool.Store(dsn, gormDB)
+
+	return &DbMysql{gormDB: gormDB, config: cfg}, nil
 }
 
-// GetConfig 返回当前数据库配置。
-func (m *DbMysql) GetConfig() *DBConfigModel {
+// buildDSN 构建数据源名称
+func buildDSN(cfg *config.MySqlDBConfig) string {
+	return fmt.Sprintf("%s:%s@tcp(%s)/%s?parseTime=true&loc=Local&charset=utf8mb4&collation=utf8mb4_unicode_ci",
+		cfg.Username, cfg.Password, cfg.Host, cfg.DBName)
+}
+
+// GetDB 获取 GORM 实例
+// 使用方式: mysqlDB.GetDB().Model(&User{}).Where("id = ?", id).First(&user)
+func (m *DbMysql) GetDB() *gorm.DB {
+	return m.gormDB
+}
+
+// Config 获取配置
+func (m *DbMysql) Config() *config.MySqlDBConfig {
 	return m.config
 }
 
-// connect 建立（或复用）GORM 连接。
-func (m *DbMysql) connect() error {
-	dsn := fmt.Sprintf(
-		"%s:%s@tcp(%s)/%s?parseTime=true&loc=Local&charset=utf8mb4",
-		m.config.User, m.config.Password, m.config.Host, m.config.DBName,
-	)
-
-	// 尝试复用已有连接
-	if m.connectOnly(dsn) {
-		return nil
-	}
-
-	// 日志级别：生产环境使用 Warn，仅打印慢查询和错误
-	logLevel := logger.Warn
-	gormDB, err := gorm.Open(mysql.Open(dsn), &gorm.Config{
-		Logger: logger.Default.LogMode(logLevel),
-		// 禁用外键约束检查（游戏服务端通常自己管理关联）
-		DisableForeignKeyConstraintWhenMigrating: true,
-	})
-	if err != nil {
-		return fmt.Errorf("gorm open mysql: %w", err)
-	}
-
-	sqlDB, err := gormDB.DB()
-	if err != nil {
-		return fmt.Errorf("get underlying sql.DB: %w", err)
-	}
-
-	if m.config.MaxIdleConns > 0 {
-		sqlDB.SetMaxIdleConns(m.config.MaxIdleConns)
-	}
-	if m.config.MaxOpenConns > 0 {
-		sqlDB.SetMaxOpenConns(m.config.MaxOpenConns)
-	}
-	lifetime := time.Second * 2400 // 默认 40 分钟保活
-	if m.config.AutoCloseTime > 0 {
-		lifetime = time.Duration(m.config.AutoCloseTime) * time.Second
-	}
-	sqlDB.SetConnMaxLifetime(lifetime)
-
-	_DbMap.Store(dsn, gormDB)
-	m.db = gormDB
-	return nil
-}
-
-// connectOnly 尝试从共享池中取出已有连接。
-func (m *DbMysql) connectOnly(dsn string) bool {
-	if v, ok := _DbMap.Load(dsn); ok {
-		if gormDB, ok := v.(*gorm.DB); ok {
-			m.db = gormDB
-			return true
-		}
-	}
-	return false
-}
-
-// Ping 检测数据库连接是否健康。
+// Ping 检查数据库连接
 func (m *DbMysql) Ping() error {
-	sqlDB, err := m.db.DB()
+	sqlDB, err := m.gormDB.DB()
 	if err != nil {
 		return err
 	}
 	return sqlDB.Ping()
 }
 
-// Close 关闭底层连接池（通常不需要手动调用，连接池由框架管理）。
-func (m *DbMysql) Close() {
-	if sqlDB, err := m.db.DB(); err == nil {
-		_ = sqlDB.Close()
-	}
-	m.db = nil
-}
-
-// SetCondition 设置本次操作的查询条件。
-func (m *DbMysql) SetCondition(condition *Condition) *DbMysql {
-	m.condition = condition
-	return m
-}
-
-// ──────────────────────────────────────────────
-// 内部工具：构建 GORM DB 实例
-// ──────────────────────────────────────────────
-
-// buildDB 根据 Condition 构建带 WHERE / ORDER / GROUP / LIMIT 的 *gorm.DB。
-func (m *DbMysql) buildDB() (*gorm.DB, error) {
-	if m.condition == nil {
-		return nil, errors.New("没有设置条件，不能操作数据库")
-	}
-
-	base := m.db
-	// 绑定 context（支持超时传播）
-	if m.condition.ctx != nil {
-		base = base.WithContext(m.condition.ctx)
-	}
-
-	db := base.Table(m.condition.tableName)
-
-	// AND 条件
-	for _, wc := range m.condition.whereClauses {
-		db = db.Where(wc.sql, wc.args...)
-	}
-
-	// OR 条件组：每组内部 AND，组间 OR
-	for _, group := range m.condition.orGroups {
-		if len(group) == 0 {
-			continue
-		}
-		// 将一个 group 的多个子句拼成一个 OR 子条件
-		orDB := m.db.Where(group[0].sql, group[0].args...)
-		for _, wc := range group[1:] {
-			orDB = orDB.Where(wc.sql, wc.args...)
-		}
-		db = db.Or(orDB)
-	}
-
-	if m.condition.group != "" {
-		db = db.Group(m.condition.group)
-	}
-	if m.condition.order != "" {
-		db = db.Order(m.condition.order)
-	}
-	if m.condition.limit != "" {
-		parts := strings.SplitN(m.condition.limit, ",", 2)
-		if len(parts) == 1 {
-			n, _ := strconv.Atoi(strings.TrimSpace(parts[0]))
-			db = db.Limit(n)
-		} else {
-			offset, _ := strconv.Atoi(strings.TrimSpace(parts[0]))
-			count, _ := strconv.Atoi(strings.TrimSpace(parts[1]))
-			db = db.Offset(offset).Limit(count)
-		}
-	}
-
-	return db, nil
-}
-
-// scanToDBResult 将 GORM 的 []map[string]interface{} 结果包装为 *DBResult。
-func scanToDBResult(rows []map[string]interface{}) *DBResult {
-	return &DBResult{values: rows}
-}
-
-// ──────────────────────────────────────────────
-// 查询操作
-// ──────────────────────────────────────────────
-
-// Query 执行 SELECT 查询，返回满足条件的所有行。
-// 若 Condition.values 中设置了字段名，则只 SELECT 指定列。
-func (m *DbMysql) Query() (*DBResult, error) {
-	db, err := m.buildDB()
-	if err != nil {
-		return nil, err
-	}
-
-	// 按需选择字段
-	if m.condition.values != nil {
-		cols := make([]string, 0, len(*m.condition.values))
-		for k := range *m.condition.values {
-			cols = append(cols, k)
-		}
-		db = db.Select(cols)
-	}
-
-	var result []map[string]interface{}
-	if tx := db.Find(&result); tx.Error != nil {
-		vars.Error("Query error: %v", tx.Error)
-		return nil, tx.Error
-	}
-	m.Result = scanToDBResult(result)
-	return m.Result, nil
-}
-
-// QueryCount 执行 SELECT count(*) 查询。
-func (m *DbMysql) QueryCount() (*DBResult, error) {
-	db, err := m.buildDB()
-	if err != nil {
-		return nil, err
-	}
-
-	var count int64
-	if tx := db.Count(&count); tx.Error != nil {
-		vars.Error("QueryCount error: %v", tx.Error)
-		return nil, tx.Error
-	}
-	m.Result = &DBResult{values: []map[string]interface{}{
-		{"count(*)": count},
-	}}
-	return m.Result, nil
-}
-
-// QuerySum 执行 SELECT sum(rowname) 查询。
-func (m *DbMysql) QuerySum(rowname string) (*DBResult, error) {
-	db, err := m.buildDB()
-	if err != nil {
-		return nil, err
-	}
-
-	var result []map[string]interface{}
-	col := fmt.Sprintf("SUM(%s) AS `%s`", quoteColumn(rowname), rowname)
-	if tx := db.Select(col).Find(&result); tx.Error != nil {
-		vars.Error("QuerySum error: %v", tx.Error)
-		return nil, tx.Error
-	}
-	m.Result = scanToDBResult(result)
-	return m.Result, nil
-}
-
-// QueryMax 执行 SELECT max(rowname) 查询。
-func (m *DbMysql) QueryMax(rowname string) (*DBResult, error) {
-	db, err := m.buildDB()
-	if err != nil {
-		return nil, err
-	}
-
-	var result []map[string]interface{}
-	col := fmt.Sprintf("MAX(%s) AS `%s`", quoteColumn(rowname), rowname)
-	if tx := db.Select(col).Find(&result); tx.Error != nil {
-		vars.Error("QueryMax error: %v", tx.Error)
-		return nil, tx.Error
-	}
-	m.Result = scanToDBResult(result)
-	return m.Result, nil
-}
-
-// ──────────────────────────────────────────────
-// 写操作
-// ──────────────────────────────────────────────
-
-// Insert 向表中插入一行数据。数据来源于 Condition.values。
-func (m *DbMysql) Insert() error {
-	if m.condition == nil {
-		return errors.New("没有设置条件，不能操作数据库")
-	}
-	if m.condition.values == nil {
-		return errors.New("没有要插入的数据")
-	}
-
-	base := m.db
-	if m.condition.ctx != nil {
-		base = base.WithContext(m.condition.ctx)
-	}
-
-	// GORM Create 接受 map[string]interface{}
-	if tx := base.Table(m.condition.tableName).Create(m.condition.values); tx.Error != nil {
-		vars.Error("Insert error: %v", tx.Error)
-		return tx.Error
-	}
-	return nil
-}
-
-// Update 更新满足条件的行。数据来源于 Condition.values，WHERE 由 Condition 的过滤条件决定。
-func (m *DbMysql) Update() error {
-	if m.condition == nil {
-		return errors.New("没有设置条件，不能操作数据库")
-	}
-	if m.condition.values == nil {
-		return errors.New("没有要修改的数据")
-	}
-
-	db, err := m.buildDB()
+// Close 关闭数据库连接
+func (m *DbMysql) Close() error {
+	sqlDB, err := m.gormDB.DB()
 	if err != nil {
 		return err
 	}
-
-	if tx := db.Updates(m.condition.values); tx.Error != nil {
-		vars.Error("Update error: %v", tx.Error)
-		return tx.Error
-	}
-	return nil
+	return sqlDB.Close()
 }
 
-// Del 删除满足条件的行。要求必须设置 WHERE 条件（防止误删全表）。
-func (m *DbMysql) Del() error {
-	if m.condition == nil {
-		return errors.New("没有删除条件")
-	}
-	if !m.condition.filter && len(m.condition.whereClauses) == 0 {
-		return errors.New("Del 必须设置 WHERE 条件，拒绝无条件删除")
-	}
-
-	db, err := m.buildDB()
-	if err != nil {
-		return err
-	}
-
-	// 使用裸 map 作为目标以跳过 GORM 的零值过滤
-	if tx := db.Delete(&map[string]interface{}{}); tx.Error != nil {
-		vars.Error("Del error: %v", tx.Error)
-		return tx.Error
-	}
-	return nil
+// SetLoggerLevel 设置日志级别
+// logger.Silent - 静默
+// logger.Error - 错误
+// logger.Warn - 警告
+// logger.Info - 信息
+func (m *DbMysql) SetLoggerLevel(level logger.LogLevel) {
+	m.gormDB.Logger = logger.Default.LogMode(level)
 }
 
-// ──────────────────────────────────────────────
-// 事务支持（新增）
-// ──────────────────────────────────────────────
-
-// Transaction 在一个事务中执行 fn。
-// fn 返回 error 时自动回滚，返回 nil 时自动提交。
-//
-// 示例：
-//
-//	err := mysqlDB.Transaction(func(tx *gorm.DB) error {
-//	    if err := tx.Table("users").Create(map[string]interface{}{...}).Error; err != nil {
-//	        return err
-//	    }
-//	    return tx.Table("logs").Create(map[string]interface{}{...}).Error
-//	})
+// Transaction 执行事务
+// 示例:
+//   err := mysqlDB.Transaction(func(tx *gorm.DB) error {
+//       if err := tx.Create(&order).Error; err != nil {
+//           return err
+//       }
+//       return tx.Model(&product).Update("stock", gorm.Expr("stock - ?", order.Quantity)).Error
+//   })
 func (m *DbMysql) Transaction(fn func(tx *gorm.DB) error) error {
-	return m.db.Transaction(fn)
+	return m.gormDB.Transaction(fn)
 }
 
-// WithTx 返回一个绑定了外部事务的新 DbMysql 实例，用于跨方法传递事务。
-func (m *DbMysql) WithTx(tx *gorm.DB) *DbMysql {
-	clone := *m
-	clone.db = tx
-	return &clone
+// AutoMigrate 自动迁移表结构
+// 示例: mysqlDB.AutoMigrate(&User{}, &Order{})
+func (m *DbMysql) AutoMigrate(models ...interface{}) error {
+	return m.gormDB.AutoMigrate(models...)
 }
 
-// RawDB 返回底层 *gorm.DB，供需要直接操作 GORM 的高级用法使用。
-func (m *DbMysql) RawDB() *gorm.DB {
-	return m.db
+// Create 创建记录
+// 示例: mysqlDB.Create(&User{Name: "John", Age: 30})
+func (m *DbMysql) Create(value interface{}) error {
+	return m.gormDB.Create(value).Error
 }
 
-// ──────────────────────────────────────────────
-// 内部工具函数
-// ──────────────────────────────────────────────
+// BatchCreate 批量创建记录
+// 示例: mysqlDB.BatchCreate([]*User{{Name: "John"}, {Name: "Jane"}})
+func (m *DbMysql) BatchCreate(values interface{}) error {
+	return m.gormDB.Create(values).Error
+}
 
-// quoteColumn 对字段名加反引号（跳过已有反引号或含 "." 的字段名）。
-func quoteColumn(key string) string {
-	if strings.ContainsAny(key, "`.") {
-		return key
+// Find 查询多条记录
+// 示例: var users []User; mysqlDB.Find(&users, "age > ?", 18)
+func (m *DbMysql) Find(dest interface{}, conds ...interface{}) error {
+	return m.gormDB.Find(dest, conds...).Error
+}
+
+// First 查询第一条记录（按主键）
+// 示例: var user User; mysqlDB.First(&user, 1)
+func (m *DbMysql) First(dest interface{}, conds ...interface{}) error {
+	return m.gormDB.First(dest, conds...).Error
+}
+
+// Take 查询一条记录（无排序）
+// 示例: var user User; mysqlDB.Take(&user, "name = ?", "John")
+func (m *DbMysql) Take(dest interface{}, conds ...interface{}) error {
+	return m.gormDB.Take(dest, conds...).Error
+}
+
+// Last 查询最后一条记录（按主键倒序）
+// 示例: var user User; mysqlDB.Last(&user)
+func (m *DbMysql) Last(dest interface{}, conds ...interface{}) error {
+	return m.gormDB.Last(dest, conds...).Error
+}
+
+// Updates 更新记录
+// 示例: mysqlDB.Updates(&User{ID: 1, Name: "NewName"})
+func (m *DbMysql) Updates(values interface{}) error {
+	return m.gormDB.Updates(values).Error
+}
+
+// Update 更新单个字段
+// 示例: mysqlDB.Update("name", "NewName")
+func (m *DbMysql) Update(column string, value interface{}) error {
+	return m.gormDB.Update(column, value).Error
+}
+
+// UpdateWithConditions 根据条件更新
+// 示例: mysqlDB.UpdateWithConditions(&User{}, "age > ?", 18, map[string]interface{}{"status": "inactive"})
+func (m *DbMysql) UpdateWithConditions(model interface{}, whereClause interface{}, args []interface{}, updates map[string]interface{}) error {
+	query := m.gormDB.Model(model)
+	if len(args) > 0 {
+		query = query.Where(whereClause, args...)
+	} else {
+		query = query.Where(whereClause)
 	}
-	return "`" + key + "`"
+	return query.Updates(updates).Error
 }
 
-// quoteTable 对表名加反引号（跳过已有特殊字符）。
-func quoteTable(tableName string) string {
-	if strings.ContainsAny(tableName, "`. ") {
-		return tableName
-	}
-	return "`" + tableName + "`"
+// Delete 删除记录
+// 示例: mysqlDB.Delete(&User{}, 1)
+func (m *DbMysql) Delete(value interface{}, conds ...interface{}) error {
+	return m.gormDB.Delete(value, conds...).Error
 }
 
-// makePlaceholders 生成 n 个 "?" 的逗号分隔字符串。
-func makePlaceholders(n int) string {
-	if n <= 0 {
-		return ""
+// DeleteWithConditions 根据条件删除
+// 示例: mysqlDB.DeleteWithConditions(&User{}, "age > ?", []interface{}{18})
+func (m *DbMysql) DeleteWithConditions(model interface{}, whereClause interface{}, args []interface{}) error {
+	query := m.gormDB.Model(model)
+	if len(args) > 0 {
+		query = query.Where(whereClause, args...)
+	} else {
+		query = query.Where(whereClause)
 	}
-	parts := make([]string, n)
-	for i := range parts {
-		parts[i] = "?"
+	return query.Delete(nil).Error
+}
+
+// Count 统计记录数
+// 示例: count, _ := mysqlDB.Count(&User{}, "age > ?", 18)
+func (m *DbMysql) Count(model interface{}, whereClause interface{}, args ...interface{}) (int64, error) {
+	var count int64
+	query := m.gormDB.Model(model)
+	if len(args) > 0 {
+		query = query.Where(whereClause, args...)
+	} else {
+		query = query.Where(whereClause)
 	}
-	return strings.Join(parts, ",")
+	err := query.Count(&count).Error
+	return count, err
+}
+
+// Exists 检查记录是否存在
+// 示例: exists, _ := mysqlDB.Exists(&User{}, "email = ?", "test@example.com")
+func (m *DbMysql) Exists(model interface{}, whereClause interface{}, args ...interface{}) (bool, error) {
+	var count int64
+	query := m.gormDB.Model(model)
+	if len(args) > 0 {
+		query = query.Where(whereClause, args...)
+	} else {
+		query = query.Where(whereClause)
+	}
+	err := query.Count(&count).Error
+	return count > 0, err
+}
+
+// Sum 计算字段总和
+// 示例: total, _ := mysqlDB.Sum(&Order{}, "amount", "status = ?", "paid")
+func (m *DbMysql) Sum(model interface{}, column string, whereClause interface{}, args ...interface{}) (float64, error) {
+	var result float64
+	query := m.gormDB.Model(model).Select(fmt.Sprintf("COALESCE(SUM(%s), 0)", column))
+	if len(args) > 0 {
+		query = query.Where(whereClause, args...)
+	} else {
+		query = query.Where(whereClause)
+	}
+	err := query.Row().Scan(&result)
+	return result, err
+}
+
+// Avg 计算字段平均值
+// 示例: avg, _ := mysqlDB.Avg(&Order{}, "amount")
+func (m *DbMysql) Avg(model interface{}, column string, whereClause interface{}, args ...interface{}) (float64, error) {
+	var result float64
+	query := m.gormDB.Model(model).Select(fmt.Sprintf("COALESCE(AVG(%s), 0)", column))
+	if len(args) > 0 {
+		query = query.Where(whereClause, args...)
+	} else {
+		query = query.Where(whereClause)
+	}
+	err := query.Row().Scan(&result)
+	return result, err
+}
+
+// Max 获取字段最大值
+// 示例: max, _ := mysqlDB.Max(&Order{}, "amount")
+func (m *DbMysql) Max(model interface{}, column string, whereClause interface{}, args ...interface{}) (interface{}, error) {
+	var result interface{}
+	query := m.gormDB.Model(model).Select(fmt.Sprintf("MAX(%s)", column))
+	if len(args) > 0 {
+		query = query.Where(whereClause, args...)
+	} else {
+		query = query.Where(whereClause)
+	}
+	err := query.Row().Scan(&result)
+	return result, err
+}
+
+// Min 获取字段最小值
+// 示例: min, _ := mysqlDB.Min(&Order{}, "amount")
+func (m *DbMysql) Min(model interface{}, column string, whereClause interface{}, args ...interface{}) (interface{}, error) {
+	var result interface{}
+	query := m.gormDB.Model(model).Select(fmt.Sprintf("MIN(%s)", column))
+	if len(args) > 0 {
+		query = query.Where(whereClause, args...)
+	} else {
+		query = query.Where(whereClause)
+	}
+	err := query.Row().Scan(&result)
+	return result, err
+}
+
+// RawQuery 执行原生 SQL 查询
+// 示例: var results []map[string]interface{}; mysqlDB.RawQuery("SELECT * FROM users WHERE age > ?", 18, &results)
+func (m *DbMysql) RawQuery(sql string, args []interface{}, dest interface{}) error {
+	return m.gormDB.Raw(sql, args...).Scan(dest).Error
+}
+
+// Exec 执行原生 SQL（不返回结果）
+// 示例: mysqlDB.Exec("UPDATE users SET status = ? WHERE id IN ?", "active", []int{1, 2, 3})
+func (m *DbMysql) Exec(sql string, args ...interface{}) error {
+	return m.gormDB.Exec(sql, args...).Error
+}
+
+// Pluck 查询单个列的值
+// 示例: var ages []int64; mysqlDB.Pluck(&User{}, "age", &ages)
+func (m *DbMysql) Pluck(model interface{}, column string, dest interface{}) error {
+	return m.gormDB.Model(model).Pluck(column, dest).Error
+}
+
+// Paginate 分页查询
+// page: 页码（从1开始）
+// pageSize: 每页数量
+// 返回: 总记录数, 当前页数据, 错误
+// 示例: total, users, err := mysqlDB.Paginate(&User{}, 1, 20, "age > ?", []interface{}{18}, "created_at DESC")
+func (m *DbMysql) Paginate(model interface{}, page, pageSize int, whereClause interface{}, args []interface{}, order string, dest interface{}) (int64, error) {
+	query := m.gormDB.Model(model)
+
+	// 应用 WHERE 条件
+	if whereClause != nil {
+		if len(args) > 0 {
+			query = query.Where(whereClause, args...)
+		} else {
+			query = query.Where(whereClause)
+		}
+	}
+
+	// 应用排序
+	if order != "" {
+		query = query.Order(order)
+	}
+
+	// 获取总数
+	var total int64
+	if err := query.Count(&total).Error; err != nil {
+		return 0, err
+	}
+
+	// 应用分页
+	offset := (page - 1) * pageSize
+	if err := query.Offset(offset).Limit(pageSize).Find(dest).Error; err != nil {
+		return 0, err
+	}
+
+	return total, nil
+}
+
+// BatchUpdate 批量更新
+// 示例: mysqlDB.BatchUpdate(&User{}, "status = ?", []interface{}{"active"}, map[string]interface{}{"updated_at": time.Now()})
+func (m *DbMysql) BatchUpdate(model interface{}, whereClause interface{}, args []interface{}, updates map[string]interface{}) (int64, error) {
+	query := m.gormDB.Model(model)
+	if len(args) > 0 {
+		query = query.Where(whereClause, args...)
+	} else {
+		query = query.Where(whereClause)
+	}
+	result := query.Updates(updates)
+	return result.RowsAffected, result.Error
+}
+
+// BatchDelete 批量删除
+// 返回: 删除的记录数, 错误
+// 示例: count, err := mysqlDB.BatchDelete(&User{}, "age < ?", []interface{}{18})
+func (m *DbMysql) BatchDelete(model interface{}, whereClause interface{}, args []interface{}) (int64, error) {
+	query := m.gormDB.Model(model)
+	if len(args) > 0 {
+		query = query.Where(whereClause, args...)
+	} else {
+		query = query.Where(whereClause)
+	}
+	result := query.Delete(nil)
+	return result.RowsAffected, result.Error
+}
+
+// Upsert 插入或更新（MySQL 的 ON DUPLICATE KEY UPDATE）
+// 示例: mysqlDB.Upsert(&User{Name: "John", Email: "john@example.com"}, "email")
+func (m *DbMysql) Upsert(model interface{}, conflictColumns ...string) error {
+	if len(conflictColumns) == 0 {
+		return m.gormDB.Create(model).Error
+	}
+
+	query := m.gormDB.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: conflictColumns[0]}},
+		UpdateAll: true,
+	})
+	return query.Create(model).Error
+}
+
+// Where 创建带条件的查询链（方便链式调用）
+// 示例:
+//   var users []User
+//   mysqlDB.Where("age > ?", 18).Where("status = ?", "active").Order("created_at DESC").Find(&users)
+func (m *DbMysql) Where(query interface{}, args ...interface{}) *gorm.DB {
+	return m.gormDB.Where(query, args...)
+}
+
+// Order 创建带排序的查询链
+// 示例: mysqlDB.Order("created_at DESC").Find(&users)
+func (m *DbMysql) Order(value interface{}) *gorm.DB {
+	return m.gormDB.Order(value)
+}
+
+// Limit 创建带限制的查询链
+// 示例: mysqlDB.Limit(10).Find(&users)
+func (m *DbMysql) Limit(limit int) *gorm.DB {
+	return m.gormDB.Limit(limit)
+}
+
+// Offset 创建带偏移的查询链
+// 示例: mysqlDB.Offset(10).Limit(10).Find(&users)
+func (m *DbMysql) Offset(offset int) *gorm.DB {
+	return m.gormDB.Offset(offset)
+}
+
+// Group 创建带分组的查询链
+// 示例: var results []map[string]interface{}; mysqlDB.Group("status").Select("status, COUNT(*) as count").Find(&results)
+func (m *DbMysql) Group(name string) *gorm.DB {
+	return m.gormDB.Group(name)
+}
+
+// Having 创建带 Having 条件的查询链
+// 示例: mysqlDB.Group("status").Having("COUNT(*) > ?", 10).Find(&results)
+func (m *DbMysql) Having(query interface{}, args ...interface{}) *gorm.DB {
+	return m.gormDB.Having(query, args...)
+}
+
+// Select 创建带字段选择的查询链
+// 示例: mysqlDB.Select("id, name").Find(&users)
+func (m *DbMysql) Select(query interface{}, args ...interface{}) *gorm.DB {
+	return m.gormDB.Select(query, args...)
+}
+
+// Distinct 去重
+// 示例: mysqlDB.Distinct("status").Find(&statuses)
+func (m *DbMysql) Distinct(args ...interface{}) *gorm.DB {
+	return m.gormDB.Distinct(args...)
+}
+
+// Joins 关联查询
+// 示例: mysqlDB.Joins("LEFT JOIN orders ON users.id = orders.user_id").Find(&results)
+func (m *DbMysql) Joins(query string, args ...interface{}) *gorm.DB {
+	return m.gormDB.Joins(query, args...)
+}
+
+// Preload 预加载关联（用于模型关联）
+// 示例: var user User; mysqlDB.Preload("Orders").First(&user, 1)
+func (m *DbMysql) Preload(query string, args ...interface{}) *gorm.DB {
+	return m.gormDB.Preload(query, args...)
+}
+
+// Scopes 应用作用域
+// 示例: mysqlDB.Scopes(Age(18), Active()).Find(&users)
+func (m *DbMysql) Scopes(funcs ...func(*gorm.DB) *gorm.DB) *gorm.DB {
+	return m.gormDB.Scopes(funcs...)
+}
+
+// Model 指定模型
+// 示例: mysqlDB.Model(&User{}).Where("age > ?", 18).Count(&count)
+func (m *DbMysql) Model(value interface{}) *gorm.DB {
+	return m.gormDB.Model(value)
+}
+
+// Table 指定表名
+// 示例: mysqlDB.Table("users").Where("age > ?", 18).Find(&results)
+func (m *DbMysql) Table(name string, args ...interface{}) *gorm.DB {
+	return m.gormDB.Table(name, args...)
+}
+
+// Begin 开始事务
+// 示例: tx := mysqlDB.Begin()
+func (m *DbMysql) Begin() *gorm.DB {
+	return m.gormDB.Begin()
+}
+
+// Commit 提交事务
+// 示例: tx.Commit()
+func (m *DbMysql) Commit(tx *gorm.DB) error {
+	return tx.Commit().Error
+}
+
+// Rollback 回滚事务
+// 示例: tx.Rollback()
+func (m *DbMysql) Rollback(tx *gorm.DB) error {
+	return tx.Rollback().Error
+}
+
+// GetStats 获取连接池统计信息
+// 返回: 最大打开连接数, 当前空闲连接数, 当前使用连接数, 总等待次数, 总等待时间, 空闲连接数
+func (m *DbMysql) GetStats() (maxOpen, open, inUse, waitCount, waitDuration, idle int) {
+	sqlDB, err := m.gormDB.DB()
+	if err != nil {
+		return
+	}
+	stats := sqlDB.Stats()
+	return stats.MaxOpenConnections, stats.OpenConnections, stats.InUse, int(stats.WaitCount), int(stats.WaitDuration.Nanoseconds() / 1000000), stats.Idle
 }

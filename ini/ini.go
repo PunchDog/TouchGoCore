@@ -147,7 +147,7 @@ func (this *IniParser) GetAll(section string) map[string]string {
 // 读取配置
 func Load(path string) (p *IniParser, err error) {
 	ini_parser := &IniParser{}
-	if err1 := ini_parser.Load(path); err1 != nil {
+	if err1 := ini_parser.Load(path); err != nil {
 		p = nil
 		err = &IniParserError{fmt.Sprintf("try load config file[%s] error[%s]\n", path, err1.Error())}
 		return

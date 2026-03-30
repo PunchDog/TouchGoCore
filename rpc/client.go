@@ -153,16 +153,15 @@ func (c *RpcClient) sendWithStream(ctx context.Context, stream message.Grpc_MsgC
 	}
 }
 
-// loadTLSConfig 加载 TLS 配置（客户端证书 + 服务端 CA 验证）
+// loadTLSConfig 加载 TLS 配置
 func loadTLSConfig(certFile, keyFile string) (*tls.Config, error) {
 	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
 	if err != nil {
 		return nil, err
 	}
-	// InsecureSkipVerify 已设为 false，生产环境必须验证服务端证书
 	return &tls.Config{
-		Certificates: []tls.Certificate{cert},
-		MinVersion:   tls.VersionTLS12,
+		Certificates:       []tls.Certificate{cert},
+		InsecureSkipVerify: true, // 生产环境应为 false
 	}, nil
 }
 

@@ -2,33 +2,23 @@ package lua
 
 import (
 	"fmt"
-	"sync"
 	"touchgocore/config"
 	"touchgocore/localtimer"
 	"touchgocore/syncmap"
+	"touchgocore/util"
 	"touchgocore/vars"
 
 	"github.com/aarzilli/golua/lua"
 )
 
-// 全局 Lua 管理器（单例，替代分散的全局变量）
-var globalManager = NewLuaManager()
+// 全局 Lua 实例管理
+var defaultLua *LuaScript = nil
+var luaInstances map[int64]*LuaScript = nil
+var nextInstanceID int64 = 0
 
-// 向后兼容的全局函数（包装管理器调用）
-// 注意：以下变量已废弃，仅用于保持编译兼容性
-var (
-	// 保持向后兼容的默认实例引用
-	defaultLua *LuaScript // 已废弃，通过管理器访问
-
-	// 已废弃的全局变量，保持编译但不再使用
-	luaInstances        sync.Map                          // 已废弃
-	nextInstanceID      int64                             // 已废弃
-	instanceIDMu        sync.Mutex                        // 已废弃
-	registeredFuncsMu   sync.RWMutex                      // 已废弃
-	registeredFuncs     map[string]func(L *lua.State) int // 已废弃
-	registeredClassesMu sync.RWMutex                      // 已废弃
-	registeredClasses   map[ILuaClassInterface]bool       // 已废弃
-)
+// 注册的函数和类
+var registeredFuncs map[string]func(L *lua.State) int
+var registeredClasses map[ILuaClassInterface]bool
 
 type luaTimer struct {
 	localtimer.TimerInterface
@@ -57,7 +47,6 @@ type LuaScript struct {
 	nextObjectID      int64         // 下一个对象 ID
 	timer             *luaTimer     // 定时器
 	UID               int64         // 脚本实例 ID
-	manager           *LuaManager   // 反向引用管理器（可选，用于扩展功能）
 }
 
 func (ls *LuaScript) Init() {
@@ -90,19 +79,19 @@ func (ls *LuaScript) Call(funcname string, list ...interface{}) ([]interface{}, 
 	var nargs int = 0
 	// 设置函数名
 	ls.state.GetGlobal(funcname)
-
+	
 	// 检查函数是否存在
 	if ls.state.IsNil(-1) {
 		ls.state.Pop(1)
 		return nil, fmt.Errorf("函数调用错误: 找不到 Lua 函数 '%s'", funcname)
 	}
-
+	
 	// 检查是否是函数类型
 	if ls.state.Type(-1) != lua.LUA_TFUNCTION {
 		ls.state.Pop(1)
 		return nil, fmt.Errorf("函数调用错误: '%s' 不是一个 Lua 函数", funcname)
 	}
-
+	
 	// 压参数
 	for i, val := range list {
 		if !PushValue(ls.state, val) {
@@ -112,7 +101,7 @@ func (ls *LuaScript) Call(funcname string, list ...interface{}) ([]interface{}, 
 		}
 		nargs++
 	}
-
+	
 	// 调用 Lua 函数
 	ls.returnValues = make([]interface{}, 0)
 	if err := ls.state.Call(nargs, -1); err != nil {
@@ -127,53 +116,110 @@ func (ls *LuaScript) Call(funcname string, list ...interface{}) ([]interface{}, 
 	return ls.returnValues, nil
 }
 
-// NewLuaScript 创建一个 Lua 脚本实例（已废弃，请使用 LuaManager.NewScript）
-// 注意：此函数仍使用旧的全局变量模式，仅用于向后兼容
-// 新代码应使用 globalManager.NewScript() 或创建自定义管理器
+// 创建一个lua指针
 func NewLuaScript(initluapath string) (*LuaScript, error) {
-	return globalManager.NewScript(initluapath)
+	p := &LuaScript{
+		state:             nil,
+		returnValues:      make([]interface{}, 0),
+		initScriptPath:    initluapath,
+		registeredObjects: &syncmap.Map{},
+		nextObjectID:      0,
+	}
+	p.Init()
+
+	// 初始化注册的函数
+	for funcName, function := range registeredFuncs {
+		p.state.Register(funcName, function)
+	}
+
+	// 注册类
+	for class := range registeredClasses {
+		if err := registerClass(class, p); err != nil {
+			vars.Error("注册 Lua 类失败: %v", err)
+		}
+	}
+
+	// 读取脚本文件
+	if err := p.state.DoFile(p.initScriptPath); err != nil {
+		return nil, fmt.Errorf("加载 Lua 脚本失败: %w", err)
+	}
+
+	// 创建定时器
+	timerImpl := &luaTimer{}
+	tmr, err := localtimer.NewTimer(UpdateIntervalMs, -1, timerImpl)
+	if err != nil {
+		return nil, fmt.Errorf("创建定时器失败: %w", err)
+	}
+	p.timer = tmr.(*luaTimer)
+	p.timer.luaScript = p
+	p.timer.tick = 0
+	localtimer.AddTimer(p.timer)
+
+	// 加入管理列表
+	nextInstanceID++
+	luaInstances[nextInstanceID] = p
+	p.UID = nextInstanceID
+	return p, nil
 }
 
 // Call 调用默认 Lua 实例的函数
 func Call(funcName string, args ...interface{}) ([]interface{}, error) {
-	return globalManager.Call(funcName, args...)
+	if defaultLua == nil {
+		return nil, fmt.Errorf("Lua 服务未启动")
+	}
+	return defaultLua.Call(funcName, args...)
 }
 
-// RegisterLuaFunc 注册全局函数到所有 Lua 实例（线程安全）
-// 注意：已迁移到 LuaManager，此函数为兼容性包装
+// RegisterFunction 注册全局函数到所有 Lua 实例
 func RegisterLuaFunc(funcName string, function func(L *lua.State) int) error {
-	return globalManager.RegisterFunc(funcName, function)
+	if registeredFuncs == nil {
+		registeredFuncs = make(map[string]func(L *lua.State) int)
+	}
+	if _, ok := registeredFuncs[funcName]; ok {
+		return fmt.Errorf("函数 %s 已注册", funcName)
+	}
+	registeredFuncs[funcName] = function
+	return nil
 }
 
-// RegisterLuaClass 注册一个类到所有 Lua 实例（线程安全）
-// 注意：已迁移到 LuaManager，此函数为兼容性包装
+// RegisterClass 注册一个类到所有 Lua 实例
 func RegisterLuaClass(class ILuaClassInterface) error {
-	return globalManager.RegisterClass(class)
+	className, _ := util.GetClassName(class)
+	if registeredClasses == nil {
+		registeredClasses = make(map[ILuaClassInterface]bool)
+	}
+	if _, ok := registeredClasses[class]; ok {
+		return fmt.Errorf("类 %s 已注册", className)
+	}
+	registeredClasses[class] = true
+	return nil
 }
 
 // RunLua 启动 Lua 服务
-// 注意：此函数仍使用旧的全局变量模式，建议迁移到 LuaManager.NewScript
 func RunLua() error {
 	if config.Cfg_.Lua == "off" {
 		vars.Info("不启动 Lua 服务")
 		return nil
 	}
 
-	// 使用管理器创建脚本实例
-	script, err := globalManager.NewScript(config.Cfg_.Lua)
+	luaInstances = make(map[int64]*LuaScript)
+	var err error
+	defaultLua, err = NewLuaScript(config.Cfg_.Lua)
 	if err != nil {
 		return fmt.Errorf("创建 Lua 脚本失败: %w", err)
 	}
-
-	// 保持向后兼容：设置默认实例引用
-	// 注意：defaultLua 已标记为废弃，实际通过管理器访问
-	defaultLua = script
-
 	vars.Info("启动 Lua 服务成功")
 	return nil
 }
 
-// StopLua 停止所有 Lua 实例
+// 关闭所有的定时器
 func StopLua() {
-	globalManager.CloseAll()
+	for _, ls := range luaInstances {
+		ls.Close()
+	}
+}
+
+func init() {
+	util.DefaultCallFunc.Register("RunLua", RunLua)
+	util.DefaultCallFunc.Register("StopLua", StopLua)
 }

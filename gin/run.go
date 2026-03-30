@@ -6,7 +6,6 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
-	"time"
 	"touchgocore/config"
 	"touchgocore/util"
 	"touchgocore/vars"
@@ -70,14 +69,6 @@ func Run() {
 		vars.Error("web服务未开启")
 		return
 	}
-
-	// 根据配置动态设置模式，避免生产环境信息泄露
-	if config.Cfg_.Server != nil && config.Cfg_.Server.Debug {
-		gin.SetMode(gin.DebugMode)
-	} else {
-		gin.SetMode(gin.ReleaseMode)
-	}
-
 	ginServer := gin.Default()
 
 	//将注册到这里的函数注册进去
@@ -90,22 +81,14 @@ func Run() {
 		ginServer.Static("/static", *config.Cfg_.Web.Static)
 	}
 
-	// 异步启动，用 channel 接收启动阶段的绑定错误
-	// gin.Run() 成功绑定端口后会阻塞直到进程退出，因此这里只捕获启动失败
 	errChan := make(chan error, 1)
-	go func() {
-		if err := ginServer.Run("[::]:" + strconv.Itoa(config.Cfg_.Web.HTTPPort)); err != nil {
-			errChan <- err
-		}
+	go func() { //异步启动
+		errChan <- ginServer.Run("[::]:" + strconv.Itoa(config.Cfg_.Web.HTTPPort))
 	}()
-
-	// 给一小段时间检测绑定端口是否失败（如端口占用）
-	select {
-	case err := <-errChan:
+	//将服务器名字注册到redis中
+	if err := <-errChan; err != nil {
 		vars.Error("web服务启动失败:%v", err)
 		return
-	case <-time.After(100 * time.Millisecond):
-		// 100ms 内无错误视为启动成功
-		vars.Info("web服务启动成功,端口:%d", config.Cfg_.Web.HTTPPort)
 	}
+	vars.Info("web服务启动成功,端口:%d", config.Cfg_.Web.HTTPPort)
 }

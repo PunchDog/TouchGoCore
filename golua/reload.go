@@ -20,7 +20,6 @@ type ScriptWatcher struct {
 	stopChan     chan struct{}
 	dependencies map[string]time.Time // 依赖文件路径 -> 修改时间
 	callbacks    []ScriptReloadCallback
-	manager      *LuaManager          // 关联的 Lua 管理器（用于重新创建脚本）
 }
 
 // NewScriptWatcher 创建脚本监视器
@@ -31,7 +30,6 @@ func NewScriptWatcher(script *LuaScript) *ScriptWatcher {
 		stopChan:     make(chan struct{}),
 		dependencies: make(map[string]time.Time),
 		callbacks:    make([]ScriptReloadCallback, 0),
-		manager:      globalManager, // 默认使用全局管理器
 	}
 }
 
@@ -140,32 +138,17 @@ func (sw *ScriptWatcher) reloadScript() {
 	// 备份当前状态
 	oldScript := sw.script
 	registeredObjectsCopy := oldScript.registeredObjects
-	oldUID := oldScript.UID
 
 	// 停止旧脚本
 	oldScript.Close()
 
-	// 使用管理器重新创建脚本（保持相同的 UID）
-	var newScript *LuaScript
-	var err error
-	
-	if sw.manager != nil {
-		// 通过管理器重新创建
-		newScript, err = sw.manager.NewScript(sw.scriptPath)
-	} else {
-		// 回退到旧方式（不推荐）
-		newScript, err = NewLuaScript(sw.scriptPath)
-	}
-	
+	// 创建新脚本
+	newScript, err := NewLuaScript(sw.scriptPath)
 	if err != nil {
 		vars.Error("重新加载 Lua 脚本失败: %v", err)
-		
-		// 尝试恢复旧脚本（有限恢复）
-		if oldScript.state == nil {
-			oldScript.Init()
-			// 注意：这里无法恢复函数/类注册，需要调用者处理回滚
-		}
+		// 恢复旧脚本
 		sw.script = oldScript
+		oldScript.Init()
 
 		// 触发回调
 		for _, callback := range sw.callbacks {
@@ -174,14 +157,13 @@ func (sw *ScriptWatcher) reloadScript() {
 		return
 	}
 
-	// 恢复注册的对象（复制到新脚本）
+	// 恢复注册的对象
 	registeredObjectsCopy.Range(func(key, value interface{}) bool {
 		newScript.registeredObjects.Store(key, value)
 		return true
 	})
 
-	// 保持相同的 UID（如果可能）
-	// 注意：新脚本有自己的 UID，但我们可以更新引用
+	// 更新脚本引用
 	sw.script = newScript
 
 	// 更新修改时间
@@ -196,7 +178,7 @@ func (sw *ScriptWatcher) reloadScript() {
 		}
 	}
 
-	vars.Info("Lua 脚本重新加载成功 (旧UID: %d, 新UID: %d)", oldUID, newScript.UID)
+	vars.Info("Lua 脚本重新加载成功")
 
 	// 触发回调
 	for _, callback := range sw.callbacks {
@@ -229,7 +211,6 @@ func (ls *LuaScript) ReloadScript() error {
 
 	// 保存注册的对象
 	registeredObjectsCopy := ls.registeredObjects
-	oldUID := ls.UID
 
 	// 关闭旧状态
 	ls.Close()
@@ -237,29 +218,22 @@ func (ls *LuaScript) ReloadScript() error {
 	// 重新初始化
 	ls.Init()
 
-	// 重新注册函数（从管理器获取）
-	if ls.manager != nil {
-		// 使用管理器重新注册函数和类
-		// 注意：这里需要访问管理器的内部状态，暂时简化处理
-		// 实际应该通过管理器重新创建整个脚本
-		vars.Warning("ReloadScript 使用旧模式，建议使用 ScriptWatcher 进行热重载")
-	} else {
-		// 回退到旧的全局变量方式
-		for funcName, function := range registeredFuncs {
-			ls.state.Register(funcName, function)
-		}
+	// 重新注册函数
+	for funcName, function := range registeredFuncs {
+		ls.state.Register(funcName, function)
+	}
 
-		for class := range registeredClasses {
-			if err := registerClass(class, ls); err != nil {
-				vars.Error("注册 Lua 类失败: %v", err)
-			}
+	// 重新注册类
+	for class := range registeredClasses {
+		if err := registerClass(class, ls); err != nil {
+			vars.Error("注册 Lua 类失败: %v", err)
 		}
 	}
 
 	// 加载脚本
 	if err := ls.state.DoFile(ls.initScriptPath); err != nil {
 		return fmt.Errorf("加载 Lua 脚本失败: %w", err)
-  }
+	}
 
 	// 恢复注册的对象
 	registeredObjectsCopy.Range(func(key, value interface{}) bool {
@@ -267,7 +241,7 @@ func (ls *LuaScript) ReloadScript() error {
 		return true
 	})
 
-	vars.Info("Lua 脚本重新加载成功 (UID: %d)", oldUID)
+	vars.Info("Lua 脚本重新加载成功")
 	return nil
 }
 

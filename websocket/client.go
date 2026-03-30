@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"runtime"
 	"sync"
-	"sync/atomic"
 	"time"
 	"touchgocore/syncmap"
 	"touchgocore/util"
@@ -15,8 +14,7 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// maxUID 使用原子操作保证并发安全
-var maxUID atomic.Int64
+var maxUID int64 = 0
 var clientMap syncmap.Map
 
 // 客户端
@@ -234,28 +232,11 @@ func (c *Client) SendMsg(msg ...any) {
 
 // 修改InitConnection为NewClient
 func NewClient(connType interface{}, remoteAddr string, className string) (*Client, error) {
-	// 使用 atomic.Int64 保证 UID 唯一性，无竞态
-	now := time.Now().UnixNano()
-	for {
-		cur := maxUID.Load()
-		next := cur + 1
-		if cur == 0 || next > now {
-			// 初始化或防溢出：以当前纳秒为基准
-			if maxUID.CompareAndSwap(cur, now+1) {
-				next = now + 1
-			} else {
-				continue
-			}
-		} else {
-			if !maxUID.CompareAndSwap(cur, next) {
-				continue
-			}
-		}
-		// 成功分配到 next
-		_ = next
-		break
+	if maxUID == 0 || maxUID > time.Now().UnixNano()+1 {
+		maxUID = time.Now().UnixNano() + 1
+	} else {
+		maxUID++
 	}
-	uid := maxUID.Load()
 
 	var client *Client = nil
 	var err error = nil
@@ -271,7 +252,7 @@ func NewClient(connType interface{}, remoteAddr string, className string) (*Clie
 		// 原子标志自动初始化为 false
 	}
 
-	client.UID = uid
+	client.UID = maxUID
 	client.remoteAddr = remoteAddr
 	client.closeCh = make(chan bool, 1)
 	client.msgChan = make(chan []byte, DEFAULT_WRITE_BUFFER_SIZE)

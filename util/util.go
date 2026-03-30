@@ -4,6 +4,7 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"fmt"
+	"math/rand"
 	"net"
 	"os"
 	"path/filepath"
@@ -12,6 +13,46 @@ import (
 	"strings"
 	"time"
 )
+
+type IPInfo struct {
+	Code int    `json:"code"`
+	Data IPData `json:"data`
+}
+type IPData struct {
+	Country   string `json:"country"`
+	CountryId string `json:"country_id"`
+	Area      string `json:"area"`
+	AreaId    string `json:"area_id"`
+	Region    string `json:"region"`
+	RegionId  string `json:"region_id"`
+	City      string `json:"city"`
+	CityId    string `json:"city_id"`
+	Isp       string `json:"isp"`
+}
+
+// 随机64位
+func RandInt(max int64) int64 {
+	if max == 0 {
+		return 0
+	}
+	rr := rand.New(rand.NewSource(time.Now().UnixNano() * rand.Int63n(9999)))
+	return rr.Int63n(max)
+}
+
+// 随机范围
+func RandRange(max int64, min int64) (ret int64) {
+	random := rand.New(rand.NewSource(time.Now().UnixNano()))
+	if max-min == 0 {
+		ret = min
+	} else if max-min > 0 {
+		ret = int64(random.Intn(int(max-min)) + int(min))
+	} else {
+		// max-min < 0
+		min = min + 1
+		ret = int64(random.Intn(int(min-max)) + int(max))
+	}
+	return
+}
 
 // MD5 实现 :主要是针对 字符串的加密
 func MD5(data string) string {

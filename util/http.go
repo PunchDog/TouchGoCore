@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"log"
 	"mime/multipart"
 	"net/http"
@@ -12,23 +13,23 @@ import (
 	"time"
 )
 
-// HTTPGet 发送 GET 请求，返回响应体字节切片
+// HTTPGet get 请求
 func HTTPGet(uri string) ([]byte, error) {
 	response, err := http.Get(uri)
 	if err != nil {
 		return nil, err
 	}
-	defer response.Body.Close()
 
+	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("http get error: uri=%v, statusCode=%v", uri, response.StatusCode)
+		return nil, fmt.Errorf("http get error : uri=%v , statusCode=%v", uri, response.StatusCode)
 	}
-	return io.ReadAll(response.Body)
+	return ioutil.ReadAll(response.Body)
 }
 
-// HttpPost 发送 POST 表单请求
+// post
 func HttpPost(uri string, data string) ([]byte, error) {
-	response, err := http.Post(uri, "application/x-www-form-urlencoded;charset=utf-8", bytes.NewBufferString(data))
+	response, err := http.Post(uri, "application/x-www-form-urlencoded;charset=utf-8", bytes.NewBuffer([]byte(data)))
 	if err != nil {
 		log.Println(err)
 		return nil, err
@@ -36,82 +37,87 @@ func HttpPost(uri string, data string) ([]byte, error) {
 	defer response.Body.Close()
 
 	if response.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("http post error: uri=%v, statusCode=%v", uri, response.StatusCode)
+		return nil, fmt.Errorf("http get error : uri=%v , statusCode=%v", uri, response.StatusCode)
 	}
-	return io.ReadAll(response.Body)
+	return ioutil.ReadAll(response.Body)
 }
 
-// HttpPostByContentType 发送指定 Content-Type 的 POST 请求，返回响应体字符串
-func HttpPostByContentType(url string, data interface{}, contentType string) (string, error) {
+// 发送POST请求
+// url:请求地址，data:POST请求提交的数据,contentType:请求体格式，如：application/json
+// content:请求放回的内容
+func HttpPostByContentType(url string, data interface{}, contentType string) (content string) {
 	jsonStr, err := json.Marshal(data)
 	if err != nil {
-		return "", fmt.Errorf("marshal request body: %w", err)
+		fmt.Println(err)
 	}
-
+	fmt.Println(string(jsonStr))
 	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonStr))
+	req.Header.Add("content-type", contentType)
+	req.Header.Add("content-type", "charset=UTF-8")
+
 	if err != nil {
-		return "", fmt.Errorf("create request: %w", err)
+		panic(err)
 	}
-	req.Header.Set("Content-Type", contentType)
-	req.Header.Set("charset", "UTF-8")
+	defer req.Body.Close()
 
 	client := &http.Client{Timeout: 15 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("do request: %w", err)
+	resp, error := client.Do(req)
+	if error != nil {
+		panic(error)
 	}
 	defer resp.Body.Close()
 
-	result, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("read response body: %w", err)
-	}
-	return string(result), nil
+	result, _ := ioutil.ReadAll(resp.Body)
+	content = string(result)
+	return
 }
 
-// PostJSONAuth 带 Basic Auth 的 POST JSON 请求
 func PostJSONAuth(url string, data interface{}, user string, password string) ([]byte, error) {
 	jsonStr, err := json.Marshal(data)
 	if err != nil {
-		return nil, fmt.Errorf("marshal request body: %w", err)
+		fmt.Println(err)
 	}
-
+	fmt.Println(string(jsonStr))
 	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonStr))
-	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("charset", "UTF-8")
+	req.Header.Add("content-type", "application/json")
+	req.Header.Add("content-type", "charset=UTF-8")
 	req.SetBasicAuth(user, password)
 
-	client := &http.Client{Timeout: 15 * time.Second}
-	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("do request: %w", err)
+		panic(err)
+	}
+	defer req.Body.Close()
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, error := client.Do(req)
+	if error != nil {
+		panic(error)
 	}
 	defer resp.Body.Close()
-	return io.ReadAll(resp.Body)
+	return ioutil.ReadAll(resp.Body)
 }
 
-// PostJSON 发送 JSON POST 请求
+// PostJSON post json 数据请求
 func PostJSON(uri string, obj interface{}) ([]byte, error) {
 	jsonData, err := json.Marshal(obj)
 	if err != nil {
 		return nil, err
 	}
-	response, err := http.Post(uri, "application/json;charset=utf-8", bytes.NewBuffer(jsonData))
+	//variable.Log.Println(string(jsonData))
+	body := bytes.NewBuffer(jsonData)
+	response, err := http.Post(uri, "application/json;charset=utf-8", body)
 	if err != nil {
 		return nil, err
 	}
 	defer response.Body.Close()
 
 	if response.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("http post error: uri=%v, statusCode=%v", uri, response.StatusCode)
+		return nil, fmt.Errorf("http get error : uri=%v , statusCode=%v", uri, response.StatusCode)
 	}
-	return io.ReadAll(response.Body)
+	return ioutil.ReadAll(response.Body)
 }
 
-// PostFile 上传单个文件
+// PostFile 上传文件
 func PostFile(fieldname, filename, uri string) ([]byte, error) {
 	fields := []MultipartFormField{
 		{
@@ -132,32 +138,37 @@ type MultipartFormField struct {
 }
 
 // PostMultipartForm 上传文件或其他多个字段
-func PostMultipartForm(fields []MultipartFormField, uri string) ([]byte, error) {
+func PostMultipartForm(fields []MultipartFormField, uri string) (respBody []byte, err error) {
 	bodyBuf := &bytes.Buffer{}
 	bodyWriter := multipart.NewWriter(bodyBuf)
 
 	for _, field := range fields {
 		if field.IsFile {
-			fileWriter, err := bodyWriter.CreateFormFile(field.Fieldname, field.Filename)
-			if err != nil {
-				return nil, fmt.Errorf("error writing to buffer: %w", err)
+			fileWriter, e := bodyWriter.CreateFormFile(field.Fieldname, field.Filename)
+			if e != nil {
+				err = fmt.Errorf("error writing to buffer , err=%v", e)
+				return
 			}
-			fh, err := os.Open(field.Filename)
-			if err != nil {
-				return nil, fmt.Errorf("error opening file: %w", err)
+
+			fh, e := os.Open(field.Filename)
+			if e != nil {
+				err = fmt.Errorf("error opening file , err=%v", e)
+				return
 			}
 			defer fh.Close()
 
 			if _, err = io.Copy(fileWriter, fh); err != nil {
-				return nil, err
+				return
 			}
 		} else {
-			partWriter, err := bodyWriter.CreateFormField(field.Fieldname)
-			if err != nil {
-				return nil, err
+			partWriter, e := bodyWriter.CreateFormField(field.Fieldname)
+			if e != nil {
+				err = e
+				return
 			}
-			if _, err = io.Copy(partWriter, bytes.NewReader(field.Value)); err != nil {
-				return nil, err
+			valueReader := bytes.NewReader(field.Value)
+			if _, err = io.Copy(partWriter, valueReader); err != nil {
+				return
 			}
 		}
 	}
@@ -165,14 +176,15 @@ func PostMultipartForm(fields []MultipartFormField, uri string) ([]byte, error) 
 	contentType := bodyWriter.FormDataContentType()
 	bodyWriter.Close()
 
-	resp, err := http.Post(uri, contentType, bodyBuf)
-	if err != nil {
-		return nil, err
+	resp, e := http.Post(uri, contentType, bodyBuf)
+	if e != nil {
+		err = e
+		return
 	}
 	defer resp.Body.Close()
-
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("http post error: uri=%v, statusCode=%v", uri, resp.StatusCode)
+		return nil, err
 	}
-	return io.ReadAll(resp.Body)
+	respBody, err = ioutil.ReadAll(resp.Body)
+	return
 }

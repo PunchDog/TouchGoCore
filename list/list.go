@@ -3,18 +3,19 @@ package list
 import (
 	"sync"
 	"sync/atomic"
+	"time"
 	"touchgocore/vars"
 )
 
 // 链表
 type List struct {
-	mu           sync.RWMutex  // 读写锁，提高读操作并发性能
-	head         INode         //头节点
-	tail         INode         //尾节点
-	len          int           //长度
-	rangeDelList []INode       //删除列表
-	dellock      bool          //删除锁
-	nextID       atomic.Int64   //下一个节点ID（使用原子操作）
+	mu           sync.RWMutex    // 读写锁，提高读操作并发性能
+	head         INode           //头节点
+	tail         INode           //尾节点
+	len          int             //长度
+	rangeDelList []INode         //删除列表
+	dellock      bool            //删除锁
+	nextID       atomic.Int64    //下一个节点ID（使用原子操作）
 	nodeMap      map[int64]INode //节点ID映射，支持O(1)查询
 }
 
@@ -30,6 +31,10 @@ func NewList() *List {
 
 // generateNextID 生成下一个节点ID，使用原子操作保证并发安全
 func (l *List) generateNextID() int64 {
+	//如果nextID和当前时间相差1秒，就用当前时间作为新的iD,否则+1
+	if time.Now().UnixMilli()-l.nextID.Load()/int64(time.Millisecond) >= 1000 {
+		l.nextID.Store(time.Now().UnixNano())
+	}
 	return l.nextID.Add(1)
 }
 

@@ -156,8 +156,7 @@ func NewLuaScript(initluapath string) (*LuaScript, error) {
 	}
 
 	// 创建定时器
-	timerImpl := &luaTimer{}
-	tmr, err := localtimer.NewTimer(UpdateIntervalMs, -1, timerImpl)
+	tmr, err := localtimer.NewTimer(UpdateIntervalMs, -1, &luaTimer{})
 	if err != nil {
 		return nil, fmt.Errorf("创建定时器失败: %w", err)
 	}

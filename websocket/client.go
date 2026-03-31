@@ -18,6 +18,32 @@ import (
 var maxUID int64 = 0
 var clientMap syncmap.Map
 
+// ============ 改进部分 ============
+
+// ClientStats 客户端统计信息
+type ClientStats struct {
+	ConnectTime      time.Time
+	Uptime           time.Duration
+	MessagesSent     int64
+	MessagesReceived int64
+	BytesSent        int64
+	BytesReceived    int64
+	Errors           int64
+	LastActivity     time.Time
+}
+
+// ICall WebSocket回调接口（在client.go中也定义，避免循环依赖）
+type ICall interface {
+	// OnConnect 创建连接时的处理
+	OnConnect(client *Client) bool
+	// OnMessage 收到消息时的处理
+	OnMessage(client *Client, message proto.Message)
+	// OnClose 关闭连接时的处理
+	OnClose(client *Client)
+}
+
+// ============ 原有代码 ============
+
 // 客户端
 // 修改Client结构体定义
 type Client struct {
@@ -30,6 +56,17 @@ type Client struct {
 	iCallName  string
 	// 原子关闭标志，防止竞态条件
 	closed atomic.Bool
+	
+	// ============ 改进：添加统计字段 ============
+	stats struct {
+		connectTime      time.Time
+		messagesSent     atomic.Int64
+		messagesReceived atomic.Int64
+		bytesSent        atomic.Int64
+		bytesReceived    atomic.Int64
+		errors           atomic.Int64
+		lastActivity     atomic.Value // time.Time
+	}
 }
 
 // 新增带重试机制的WebSocket连接方法
@@ -44,6 +81,10 @@ func (c *Client) connectionDial(url string) error {
 			c.remoteAddr = url
 			c.closeCh = make(chan bool, 1)
 			c.msgChan = make(chan []byte, DEFAULT_WRITE_BUFFER_SIZE)
+			
+			// ============ 改进：初始化统计 ============
+			c.stats.connectTime = time.Now()
+			c.stats.lastActivity.Store(time.Now())
 
 			return nil
 		}
@@ -87,6 +128,11 @@ func (c *Client) handleLoop() {
 					c.Close("写消息失败")
 					return
 				}
+				
+				// ============ 改进：更新统计 ============
+				c.stats.messagesSent.Add(1)
+				c.stats.bytesSent.Add(int64(len(msg)))
+				c.stats.lastActivity.Store(time.Now())
 			} else {
 				return
 			}
@@ -107,6 +153,11 @@ func (c *Client) readLoop() {
 		if _, data, err := c.wsConnect.ReadMessage(); err == nil {
 			if c.Connected() {
 				msgQueue <- &msgQueueType{uid: c.UID, data: data}
+				
+				// ============ 改进：更新统计 ============
+				c.stats.messagesReceived.Add(1)
+				c.stats.bytesReceived.Add(int64(len(data)))
+				c.stats.lastActivity.Store(time.Now())
 			}
 		} else {
 			return
@@ -161,7 +212,8 @@ func (c *Client) Close(reason string) {
 		if clientpool != nil && c.ICall != nil {
 			v, ok := clientcall.Load(c.iCallName)
 			if ok {
-				icallpool := v.(sync.Pool)
+				// 使用指针避免复制sync.Pool
+				icallpool := v.(*sync.Pool)
 				icallpool.Put(c.ICall)
 			} else {
 				vars.Error("未找到类名对应的ICall接口实现: %s", c.iCallName)
@@ -175,6 +227,9 @@ func (c *Client) Close(reason string) {
 		}
 
 		vars.Info("%s 连接关闭，原因：%s", c.remoteAddr, reason)
+		
+		// ============ 改进：更新服务器统计 ============
+		UpdateConnectionStats(false)
 	}
 }
 
@@ -209,6 +264,7 @@ func (c *Client) SendMsg(msg ...any) {
 			default:
 				// 通道满时记录错误
 				vars.Error("WebSocket 发送通道已满，丢弃消息: client=%s", c.remoteAddr)
+				c.stats.errors.Add(1)
 			}
 			return
 		}
@@ -219,12 +275,14 @@ func (c *Client) SendMsg(msg ...any) {
 			data, err := proto.Marshal(pb)
 			if err != nil {
 				vars.Error("打包数据失败: %v", err)
+				c.stats.errors.Add(1)
 				return
 			}
 			select {
 			case c.msgChan <- data:
 			default:
 				vars.Error("WebSocket 发送通道已满，丢弃消息: client=%s", c.remoteAddr)
+				c.stats.errors.Add(1)
 			}
 			return
 		}
@@ -258,6 +316,10 @@ func NewClient(connType interface{}, remoteAddr string, className string) (*Clie
 	client.closeCh = make(chan bool, 1)
 	client.msgChan = make(chan []byte, DEFAULT_WRITE_BUFFER_SIZE)
 	client.iCallName = className
+	
+	// ============ 改进：初始化统计 ============
+	client.stats.connectTime = time.Now()
+	client.stats.lastActivity.Store(time.Now())
 
 	defer func() {
 		if err != nil {
@@ -283,7 +345,8 @@ func NewClient(connType interface{}, remoteAddr string, className string) (*Clie
 	//使用反射创建ICall接口
 	if className != "" {
 		if v, h := clientcall.Load(className); h {
-			icallpool := v.(sync.Pool)
+			// 使用指针避免复制sync.Pool
+			icallpool := v.(*sync.Pool)
 			icall := icallpool.Get()
 			if icall == nil {
 				vars.Error("内存池获取失败: %s", className)
@@ -308,5 +371,42 @@ func NewClient(connType interface{}, remoteAddr string, className string) (*Clie
 	// vars.Info("%s 连接建立成功", client.remoteAddr)
 	go client.readLoop()
 	go client.handleLoop()
+	
+	// ============ 改进：更新服务器统计 ============
+	UpdateConnectionStats(true)
+	UpdateMessageStats()
+	
 	return client, nil
+}
+
+// ============ 新增改进方法 ============
+
+// GetStats 获取客户端统计信息
+func (c *Client) GetStats() ClientStats {
+	lastAct := c.stats.lastActivity.Load()
+	var lastActivity time.Time
+	if lastAct != nil {
+		lastActivity = lastAct.(time.Time)
+	} else {
+		lastActivity = c.stats.connectTime
+	}
+	
+	return ClientStats{
+		ConnectTime:      c.stats.connectTime,
+		Uptime:           time.Since(c.stats.connectTime),
+		MessagesSent:     c.stats.messagesSent.Load(),
+		MessagesReceived: c.stats.messagesReceived.Load(),
+		BytesSent:        c.stats.bytesSent.Load(),
+		BytesReceived:    c.stats.bytesReceived.Load(),
+		Errors:           c.stats.errors.Load(),
+		LastActivity:     lastActivity,
+	}
+}
+
+// UpdateStatsFromMessage 从消息更新统计（用于Tick函数）
+func (c *Client) UpdateStatsFromMessage(data []byte) {
+	c.stats.messagesReceived.Add(1)
+	c.stats.bytesReceived.Add(int64(len(data)))
+	c.stats.lastActivity.Store(time.Now())
+	UpdateMessageStats()
 }

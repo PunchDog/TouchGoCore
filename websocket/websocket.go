@@ -13,6 +13,20 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+// ============ 改进部分 ============
+
+// 使用原子操作改进的全局变量管理
+var (
+	serverStats struct {
+		totalConnections atomic.Int64
+		currentConnections atomic.Int64
+		totalMessages atomic.Int64
+		totalErrors atomic.Int64
+	}
+)
+
+// ============ 原有代码 ============
+
 const (
 	DEFAULT_WRITE_BUFFER_SIZE = 10240
 	DEFAULT_READ_BUFFER_SIZE  = 102400
@@ -68,10 +82,15 @@ func (this *defaultCall) OnClose(client *Client) {
 	vars.Info("defaultCall OnClose")
 }
 
-func RegisterCall(className string, factoryFunc ICall) {
-	clientcall.Store(className, sync.Pool{
-		New: func() interface{} {
-			newCall := reflect.New(reflect.TypeOf(factoryFunc).Elem()).Interface().(ICall)
+func RegisterCall(className string, factoryFunc any) {
+	clientcall.Store(className, &sync.Pool{
+		New: func() any {
+			// 使用反射创建新的ICall实例
+			typ := reflect.TypeOf(factoryFunc)
+			if typ.Kind() == reflect.Ptr {
+				typ = typ.Elem()
+			}
+			newCall := reflect.New(typ).Interface()
 			return newCall
 		},
 	})
@@ -143,7 +162,7 @@ func Tick() {
 			close(msgQueue)
 			return
 		case read_msg := <-msgQueue:
-			// 	处理消息队列
+			// 处理消息队列
 			if c, h := clientMap.Load(read_msg.uid); h {
 				client := c.(*Client)
 				// 检查客户端是否已关闭，防止竞态条件
@@ -152,9 +171,63 @@ func Tick() {
 				}
 				pbmsg := util.PasreFSMessage(read_msg.data)
 				if pbmsg != nil {
+					// ============ 改进：更新统计 ============
+					if client != nil {
+						client.UpdateStatsFromMessage(read_msg.data)
+					}
 					client.OnMessage(client, pbmsg)
+				} else {
+					// ============ 改进：记录解析错误 ============
+					UpdateErrorStats()
+					vars.Error("解析消息失败，客户端: %d", read_msg.uid)
 				}
+			} else {
+				// ============ 改进：记录客户端未找到错误 ============
+				UpdateErrorStats()
+				vars.Error("客户端未找到: %d", read_msg.uid)
 			}
 		}
 	}
+}
+
+// ============ 新增改进功能 ============
+
+// GetServerStats 获取服务器统计信息
+func GetServerStats() struct {
+	TotalConnections int64
+	CurrentConnections int64
+	TotalMessages int64
+	TotalErrors int64
+} {
+	return struct {
+		TotalConnections int64
+		CurrentConnections int64
+		TotalMessages int64
+		TotalErrors int64
+	}{
+		TotalConnections: serverStats.totalConnections.Load(),
+		CurrentConnections: serverStats.currentConnections.Load(),
+		TotalMessages: serverStats.totalMessages.Load(),
+		TotalErrors: serverStats.totalErrors.Load(),
+	}
+}
+
+// UpdateConnectionStats 更新连接统计
+func UpdateConnectionStats(connected bool) {
+	if connected {
+		serverStats.totalConnections.Add(1)
+		serverStats.currentConnections.Add(1)
+	} else {
+		serverStats.currentConnections.Add(-1)
+	}
+}
+
+// UpdateMessageStats 更新消息统计
+func UpdateMessageStats() {
+	serverStats.totalMessages.Add(1)
+}
+
+// UpdateErrorStats 更新错误统计
+func UpdateErrorStats() {
+	serverStats.totalErrors.Add(1)
 }

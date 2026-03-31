@@ -12,7 +12,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
-	"google.golang.org/protobuf/proto"
 )
 
 const (
@@ -29,14 +28,10 @@ var (
 	skipOriginForIntranet   bool
 )
 
-type ICall interface {
-	// 创建连接时的处理
-	OnConnect(client *Client) bool
-	//收到消息时的处理
-	OnMessage(client *Client, message proto.Message)
-	// 关闭连接时的处理
-	OnClose(client *Client)
-}
+// ============ 改进部分 ============
+
+// ServerStats 服务器统计信息
+// ============ 原有代码 ============
 
 // initUpgrader 初始化 WebSocket Upgrader
 func initUpgrader() {
@@ -130,7 +125,7 @@ func getClientIP(r *http.Request) string {
 	// 最后从TCP连接获取（可能为代理IP）
 	ip, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
-		vars.Error("获取客户端IP失败", err)
+		vars.Error("获取客户端IP失败: %v", err)
 		ip = "127.0.0.1"
 	}
 	return ip
@@ -152,7 +147,7 @@ func ListenAndServe(port int, className string) error {
 	r.GET("/ws", func(c *gin.Context) {
 		defer func() {
 			if err := recover(); err != nil {
-				vars.Error("", err.(error))
+				vars.Error("WebSocket处理发生panic错误: %v", err)
 			}
 		}()
 		var (
@@ -162,7 +157,7 @@ func ListenAndServe(port int, className string) error {
 		// 完成ws协议的握手操作
 		// Upgrade:websocket
 		if wsConn, err = upgrader.Upgrade(c.Writer, c.Request, nil); err != nil {
-			vars.Error("路径/ws链接错误", err)
+			vars.Error("路径/ws链接错误: %v", err)
 			http.NotFound(c.Writer, c.Request)
 			return
 		}
@@ -176,7 +171,7 @@ func ListenAndServe(port int, className string) error {
 		
 		_, err = NewClient(wsConn, getClientIP(c.Request), classNameStr)
 		if err != nil {
-			vars.Error("", err)
+			vars.Error("创建WebSocket客户端失败: %v", err)
 			return
 		}
 	})
@@ -198,4 +193,11 @@ func ListenAndServe(port int, className string) error {
 	serverList = append(serverList, server)
 	//将服务器名字注册到redis中
 	return nil
+}
+
+// ============ 新增改进功能 ============
+
+// IsIntranetIP 检查是否为内网IP（改进版本）
+func IsIntranetIP(ip string) bool {
+	return util.IsIntranetIP(ip)
 }

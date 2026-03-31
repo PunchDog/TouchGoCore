@@ -2,43 +2,119 @@
 
 ## 概述
 
-`golua` 是一个功能完整的 Go 与 Lua 脚本集成模块，基于 `github.com/aarzilli/golua/lua` 封装，提供了强大的双向交互能力。
+`golua` 是一个功能完整的 Go 与 Lua 脚本集成模块，基于 `github.com/arnodel/golua` 封装，提供了强大的双向交互能力。
+
+**重要更新**：本模块已从 `github.com/aarzilli/golua`（C 绑定）迁移到 `github.com/arnodel/golua`（纯 Go 实现）。
 
 ## 核心特性
 
-1. **Lua 虚拟机管理**
+1. **无 CGO 依赖**
+   - 纯 Go 实现，无需安装 Lua C 库
+   - 跨平台编译更容易
+   - 使用 Go 的垃圾回收机制
+
+2. **Lua 虚拟机管理**
    - 多实例支持
    - 自动生命周期管理
    - 定时更新和垃圾回收
 
-2. **类注册和方法调用**
+3. **类注册和方法调用**
    - 通过 `ILuaClassInterface` 接口注册 Go 类
    - 自动处理对象生命周期（Init/Delete/Update）
    - 反射调用方法，性能优化（缓存）
 
-3. **类型转换系统**
-   - Go → Lua: `PushValue`, `LuaToGoValue`
-   - Lua → Go: `LuaToGoReflectValue`
+4. **类型转换系统**
+   - Go → Lua: `GoToLuaValue`, `LuaToGoValue`
+   - Lua → Go: `LuaToReflectValue`
    - 支持基本类型、table、自定义类型
 
-4. **并发安全**
+5. **并发安全**
    - `SafeLuaScript` 提供并发安全的封装
    - 使用读写锁保护状态
 
-5. **性能优化**
+6. **性能优化**
    - 反射缓存（`MethodCache`）- 支持懒加载和预计算
    - 对象池（`LuaTablePool`）- 高效复用 LuaTable 对象
    - 减少重复反射开销
 
-6. **热重载功能**
+7. **热重载功能**
    - 监控脚本文件变化
    - 支持依赖文件监控
    - 热重载回调机制
 
-7. **增强的 LuaTable 操作**
+8. **增强的 LuaTable 操作**
    - 支持路径访问（`GetByPath`, `SetByPath`）
    - 支持方括号语法（如 `player['name']`）
    - 丰富的表操作方法（`Filter`, `Map`, `Copy` 等）
+
+## 迁移说明
+
+### 从 aarzilli/golua 到 arnodel/golua 的主要变化
+
+#### 1. 类型系统
+
+**旧版本 (aarzilli/golua):**
+```go
+import "github.com/aarzilli/golua/lua"
+
+L := lua.NewState()
+L.PushString("hello")
+str := L.ToString(1)
+```
+
+**新版本 (arnodel/golua):**
+```go
+import rt "github.com/arnodel/golua/runtime"
+
+r := rt.New(os.Stdout)
+value := rt.StringValue("hello")
+str := value.AsString()
+```
+
+#### 2. 函数注册
+
+**旧版本:**
+```go
+func myFunction(L *lua.State) int {
+    arg := L.ToString(1)
+    L.PushString("result")
+    return 1
+}
+
+L.Register("myFunc", myFunction)
+```
+
+**新版本:**
+```go
+func myFunction(t *rt.Thread, c *rt.GoCont) (rt.Cont, error) {
+    arg, _ := c.StringArg(0)
+    next := c.Next()
+    t.Push1(next, rt.StringValue("result"))
+    return next, nil
+}
+
+r.SetEnvGoFunc(r.GlobalEnv(), "myFunc", myFunction, 1, false)
+```
+
+#### 3. Lua 脚本调用
+
+**旧版本:**
+```go
+L.GetGlobal("functionName")
+L.PushString("arg")
+L.Call(1, 1)
+result := L.ToString(-1)
+```
+
+**新版本:**
+```go
+funcVal := r.GetEnv(r.GlobalEnv(), rt.StringValue("functionName"))
+result, err := rt.Call1(r.MainThread(), funcVal, rt.StringValue("arg"))
+```
+
+### 向后兼容性
+
+本模块保持了对外 API 的向后兼容性，从 Lua 脚本的角度看，API 保持一致。所有变更都在 Go 代码内部。
 
 ## 文件结构
 
@@ -54,7 +130,9 @@
 | `consts.go` | 常量定义 |
 | `luadefaultfunction.go` | 内置 Lua 函数 |
 | `run.go` | 启动/停止接口 |
-| `doc.go` | 模块文档 |
+| `extended.go` | LuaTable 扩展方法 |
+| `table_api.go` | LuaTable 基础 API |
+| `reload.go` | 热重载功能 |
 
 ## 快速开始
 
@@ -212,7 +290,7 @@ defer lua.PutLuaTable(tbl)
 
 #### RegisterLuaFunc
 ```go
-func RegisterLuaFunc(funcName string, function func(L *lua.State) int) error
+func RegisterLuaFunc(funcName string, function func(t *rt.Thread, c *rt.GoCont) (rt.Cont, error)) error
 ```
 注册全局函数到所有 Lua 实例。
 
@@ -250,6 +328,21 @@ type SafeLuaScript struct { *LuaScript }
 func NewSafeLuaScript(initScriptPath string) (*SafeLuaScript, error)
 func (s *SafeLuaScript) Call(funcName string, args ...interface{}) ([]interface{}, error)
 ```
+
+## 类型转换 API
+
+### Go 到 Lua
+```go
+func GoToLuaValue(val interface{}) rt.Value
+```
+将 Go 值转换为 arnodel/golua 的 rt.Value。
+
+### Lua 到 Go
+```go
+func LuaToGoValue(v rt.Value) interface{}
+func LuaToReflectValue(v rt.Value, targetType reflect.Type) (reflect.Value, error)
+```
+将 Lua 值转换为 Go 值。
 
 ## 性能优化
 
@@ -302,70 +395,44 @@ const (
 
 ## 注意事项
 
-1. **CGO 依赖**: 本模块基于 `github.com/aarzilli/golua`，需要 CGO 支持
-   - 必须启用 CGO：`set CGO_ENABLED=1` (Windows) 或 `export CGO_ENABLED=1` (Linux/Mac)
-   - 需要安装 Lua C 库和编译器
-   - Windows 上需要安装 MinGW-w64 和 Lua 静态库
+1. **无 CGO 依赖**: 本模块基于 `github.com/arnodel/golua`，是纯 Go 实现
+   - 不需要安装 Lua C 库
+   - 跨平台编译更容易
+   - 使用 Go 的垃圾回收
 
 2. **编译命令**:
-   - **Windows**: `build_windows.bat` 或
-     ```batch
-     set CGO_ENABLED=1
-     go build -tags "!lua52,!lua53,!lua54"
-     ```
-   - **Linux/Mac**:
-     ```bash
-     export CGO_ENABLED=1
-     go build -tags "!lua52,!lua53,!lua54"
-     ```
-   - 指定 Lua 版本：使用 `-tags lua52`, `-tags lua53`, 或 `-tags lua54`
+   ```bash
+   go build
+   ```
+   不再需要设置 CGO_ENABLED 或指定 Lua 版本标签。
 
 3. **Table Key**: Lua table 的 key 目前只支持 string 类型
 
 4. **定时更新**: 每 1 秒触发一次注册对象的 `Update()` 方法
 
-5. **垃圾回收**: 每 30 分钟执行一次 Lua 垃圾回收
+5. **垃圾回收**: 使用 Go 的 GC，定期触发清理
 
 6. **并发安全**: 在多 goroutine 环境下使用 `SafeLuaScript`
 
-## 编译依赖安装
+## Lua 版本
 
-### Windows
-1. 安装 MinGW-w64: https://www.mingw-w64.org/
-2. 下载 Lua C 源码: https://www.lua.org/download.html
-3. 编译 Lua 静态库或使用预编译版本
-4. 确保 MinGW 和 Lua 的 bin 目录在 PATH 环境变量中
-
-### Linux
-```bash
-# Ubuntu/Debian
-sudo apt-get install build-essential liblua5.1-dev
-
-# CentOS/RHEL
-sudo yum install gcc lua-devel
-
-# 或者使用 Lua 5.2/5.3/5.4
-sudo apt-get install liblua5.4-dev  # 或 liblua5.3-dev, liblua5.4-dev
-```
-
-### macOS
-```bash
-brew install lua
-```
-
-## 编译问题排查
-
-如果遇到编译错误，请检查：
-1. CGO 是否启用 (`go env CGO_ENABLED` 应该是 `1`)
-2. 是否安装了 GCC 编译器 (`gcc --version`)
-3. Lua C 库是否正确安装 (`pkg-config --cflags lua5.1` 或类似)
-4. 构建标签是否正确
-
-详细错误排查请参见 `ERRORS.md` 文件。
+本模块使用 `github.com/arnodel/golua`，实现的是 **Lua 5.5** 版本。
 
 ## 示例项目
 
 参见 `example/` 目录获取完整的使用示例。
+
+## 迁移指南
+
+如果您从旧版本（aarzilli/golua）迁移，请注意：
+
+1. ✅ Lua 脚本无需修改
+2. ✅ Go 类接口保持不变
+3. ✅ 对外 API 保持兼容
+4. ⚠️ 内部实现完全改变
+5. ✅ 编译更简单（无需 CGO）
+
+详细迁移指南请参阅 `golua_migration_plan.md`。
 
 ## 许可证
 

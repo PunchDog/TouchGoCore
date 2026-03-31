@@ -2,9 +2,8 @@ package lua
 
 import (
 	"reflect"
+	rt "github.com/arnodel/golua/runtime"
 	"touchgocore/syncmap"
-
-	"github.com/aarzilli/golua/lua"
 )
 
 // newTable 从 Go 数据创建 LuaTable 对象
@@ -67,14 +66,6 @@ func newTable(data interface{}) *LuaTable {
 		for i, item := range v {
 			tbl.SetTableData(i+1, newTable(item))
 		}
-		// 不再支持 *syncmap.Map 和 syncmap.Map 的直接复制
-		// 使用 newTable 进行统一转换
-	case interface{}:
-		// 尝试通过 newTable 处理接口类型
-		tbl2 := newTable(v)
-		if tbl2.HaveData() {
-			tbl.tbl = tbl2.tbl
-		}
 	default:
 		// 尝试反射处理其他类型
 		rv := reflect.ValueOf(v)
@@ -114,26 +105,37 @@ func isNestedStructure(v interface{}) bool {
 	return rv.Kind() == reflect.Map || rv.Kind() == reflect.Slice || rv.Kind() == reflect.Array
 }
 
-// getTable 从 Lua 栈读取 table 并转换为 LuaTable（支持嵌套）
-func getTable(L *lua.State, idx int) *LuaTable {
-	if L.IsTable(idx) {
-		tbl := newTable(nil)
-		L.PushNil()
-		for L.Next(idx) != 0 {
-			key := LuaToGoValue(L, -2)
-			// 检查值是否是嵌套 table
-			if L.IsTable(-1) {
-				val := getTable(L, -1) // 递归处理嵌套 table
-				tbl.SetTableData(key, val)
-			} else {
-				val := LuaToGoValue(L, -1)
-				tbl.SetTableData(key, val)
-			}
-			L.Pop(1)
-		}
-		return tbl
+// tableFromRuntimeV2 从 arnodel/golua 的 rt.Table 转换为 *LuaTable (内部版本)
+func tableFromRuntimeV2(tbl *rt.Table) *LuaTable {
+	if tbl == nil {
+		return nil
 	}
-	return nil
+
+	result := newTable(nil)
+
+	// 使用 Next 遍历 table
+	var k rt.Value = rt.NilValue
+	for {
+		key, val, ok := tbl.Next(k)
+		if !ok || key == rt.NilValue {
+			break
+		}
+
+		goKey := LuaToGoValue(key)
+		goValue := LuaToGoValue(val)
+
+		// 检查值是否是嵌套 table
+		if t, ok := val.TryTable(); ok {
+			nestedTbl := tableFromRuntimeV2(t)
+			result.Set(goKey, nestedTbl)
+		} else {
+			result.Set(goKey, goValue)
+		}
+
+		k = key
+	}
+
+	return result
 }
 
 type LuaTable struct {
@@ -176,31 +178,38 @@ func (this *LuaTable) SetTableData(key, val interface{}) {
 	this.Set(key, val)
 }
 
-// Push 将 table 压入 Lua 栈（支持嵌套）
-func (this *LuaTable) PushTable(L *lua.State) bool {
-	if !this.HasData() {
-		return false
+// ToTable 转换为 arnodel/golua 的 rt.Table
+func (this *LuaTable) ToTable() *rt.Table {
+	if this.tbl == nil {
+		return rt.NewTable()
 	}
 
-	// 创建空表
-	L.NewTable()
-
-	// 遍历 map 填充表（自动处理嵌套 LuaTable）
+	tbl := rt.NewTable()
 	this.tbl.Range(func(key, value interface{}) bool {
-		PushValue(L, key)
+		luaKey := GoToLuaValue(key)
 
 		// 检查值是否是嵌套 LuaTable
 		if nestedTbl, ok := value.(*LuaTable); ok && nestedTbl != nil {
-			nestedTbl.PushTable(L) // 递归压入嵌套 table
+			nestedTable := nestedTbl.ToTable()
+			luaValue := rt.TableValue(nestedTable)
+			tbl.Set(luaKey, luaValue)
 		} else {
-			PushValue(L, value)
+			luaValue := GoToLuaValue(value)
+			tbl.Set(luaKey, luaValue)
 		}
 
-		L.SetTable(-3)
 		return true
 	})
 
-	return true
+	return tbl
+}
+
+// PushTable 保持向后兼容的函数（已废弃）
+// 在新版本中，使用 ToTable() 替代
+func (this *LuaTable) PushTable(L interface{}) bool {
+	// 为了向后兼容，接受第一个参数但不使用
+	_ = L
+	return this.HasData()
 }
 
 // SubTable 获取或创建嵌套 table

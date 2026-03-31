@@ -3,12 +3,10 @@ package lua
 import (
 	"fmt"
 	"reflect"
+	rt "github.com/arnodel/golua/runtime"
 	"touchgocore/syncmap"
 	"touchgocore/util"
 	"touchgocore/vars"
-	"unsafe"
-
-	"github.com/aarzilli/golua/lua"
 )
 
 // 注册类接口
@@ -31,6 +29,7 @@ func (this *ILuaClassObject) Update() {
 // ////////////////////////////////////////////////////////////////////////////////////////////////////
 // ////////////////////////////////////////////////////////////////////////////////////////////////////
 // ////////////////////////////////////////////////////////////////////////////////////////////////////
+
 // userDataMeta 元数据，用于关联 Go 对象和 Lua userdata
 type userDataMeta struct {
 	uid    int64
@@ -57,27 +56,38 @@ type methodCallback struct {
 }
 
 // callBack 处理 Lua 到 Go 的方法调用
-func (mc *methodCallback) callBack(L *lua.State) int {
-	// 获取 userdata 元数据
-	userdataPtr := L.ToUserdata(1)
-	if userdataPtr == nil {
+func (mc *methodCallback) callBack(t *rt.Thread, c *rt.GoCont) (rt.Cont, error) {
+	// 获取第一个参数（对象本身）
+	arg0 := c.Arg(0)
+
+	// 检查是否是 UserData
+	userData, ok := arg0.TryUserData()
+	if !ok {
+		vars.Error("LUA回调%s: 第一个参数不是 UserData", mc.methodName)
+		return nil, fmt.Errorf("无效的 userdata")
+	}
+	if userData == nil {
 		vars.Error("LUA回调%s: userdata为空", mc.methodName)
-		return 0
+		return c.Next(), nil
 	}
 
-	meta := *(*userDataMeta)(userdataPtr)
+	meta, ok := userData.Value().(*userDataMeta)
+	if !ok {
+		vars.Error("LUA回调%s: userdata 元数据类型错误", mc.methodName)
+		return c.Next(), nil
+	}
 
 	// 从 syncmap 中获取实际对象
 	dataRaw, ok := meta.script.registeredObjects.Load(meta.uid)
 	if !ok {
 		vars.Error("LUA回调%s: 找不到uid=%d的对象", mc.methodName, meta.uid)
-		return 0
+		return c.Next(), nil
 	}
 
 	data, ok := dataRaw.(ILuaClassInterface)
 	if !ok {
 		vars.Error("LUA回调%s: uid=%d的对象未实现ILuaClassInterface", mc.methodName, meta.uid)
-		return 0
+		return c.Next(), nil
 	}
 
 	// 获取类缓存
@@ -85,7 +95,7 @@ func (mc *methodCallback) callBack(L *lua.State) int {
 	registryRaw, ok := classRegistryMap.Load(className)
 	if !ok {
 		vars.Error("LUA回调%s: 类 %s 未注册", mc.methodName, className)
-		return 0
+		return c.Next(), nil
 	}
 	registry := registryRaw.(*ClassRegistry)
 
@@ -93,21 +103,22 @@ func (mc *methodCallback) callBack(L *lua.State) int {
 	method, ok := registry.MethodCache.GetMethod(mc.methodName)
 	if !ok {
 		vars.Error("LUA回调%s: 方法不存在", mc.methodName)
-		return 0
+		return c.Next(), nil
 	}
 
 	// 处理输入参数
 	args := make([]reflect.Value, 0, method.Type.NumIn())
-	luaArgCount := L.GetTop()
+	luaArgCount := c.NArgs()
 
-	// Lua 参数从索引 2 开始（索引 1 是对象自身）
-	for i := 0; i < method.Type.NumIn() && (i+2) <= luaArgCount; i++ {
-		luaIdx := i + 2
+	// Lua 参数从索引 1 开始（索引 0 是对象自身）
+	for i := 0; i < method.Type.NumIn() && (i+1) < luaArgCount; i++ {
+		luaIdx := i + 1
 		paramType := method.Type.In(i)
-		argValue, err := LuaToGoReflectValue(L, luaIdx, paramType)
+		argVal := c.Arg(luaIdx)
+		argValue, err := LuaToReflectValue(argVal, paramType)
 		if err != nil {
 			vars.Error("LUA回调%s: 参数%d转换失败: %v", mc.methodName, i+1, err)
-			return 0
+			return nil, err
 		}
 		args = append(args, argValue)
 	}
@@ -116,20 +127,18 @@ func (mc *methodCallback) callBack(L *lua.State) int {
 	resultValues := method.Func.Call(args)
 
 	// 处理返回值
+	next := c.Next()
 	for i, result := range resultValues {
 		if result.Kind() == reflect.Invalid {
 			vars.Error("LUA回调函数%s返回值%d无效", mc.methodName, i+1)
-			return 0
+			return nil, fmt.Errorf("无效的返回值")
 		}
 
-		if !PushValue(L, result.Interface()) {
-			vars.Error("LUA回调函数%s返回值%d处理失败,类型:%v 值:%v",
-				mc.methodName, i+1, result.Type(), result.Interface())
-			return 0
-		}
+		luaValue := GoToLuaValue(result.Interface())
+		t.Push1(next, luaValue)
 	}
 
-	return len(resultValues)
+	return next, nil
 }
 
 // registerClass 注册一个 Go 类到 Lua 脚本
@@ -140,13 +149,11 @@ func registerClass(class ILuaClassInterface, script *LuaScript) error {
 	className, _ := util.GetClassName(class)
 
 	// 检查是否已存在同名类（避免重复注册）
-	script.state.GetGlobal(className)
-	if !script.state.IsNil(-1) {
+	existing := script.env.Get(rt.StringValue(className))
+	if existing != rt.NilValue {
 		vars.Info("类 %s 已注册，跳过重复注册", className)
-		script.state.Pop(1)
 		return nil
 	}
-	script.state.Pop(1)
 
 	// 创建或获取类缓存
 	var registry *ClassRegistry
@@ -165,7 +172,7 @@ func registerClass(class ILuaClassInterface, script *LuaScript) error {
 	}
 
 	// 创建类构造函数
-	constructor := func(L *lua.State) int {
+	constructor := func(t *rt.Thread, c *rt.GoCont) (rt.Cont, error) {
 		// 创建新实例
 		classType := reflect.TypeOf(class).Elem()
 		cls := reflect.New(classType).Interface().(ILuaClassInterface)
@@ -176,36 +183,38 @@ func registerClass(class ILuaClassInterface, script *LuaScript) error {
 		// 存储到 syncmap 中
 		script.registeredObjects.Store(script.nextObjectID, cls)
 
-		// 创建 userdata 并设置元表
+		// 创建元数据
 		meta := &userDataMeta{
 			uid:         script.nextObjectID,
 			script:      script,
 			reflectType: reflect.TypeOf(cls),
 		}
 
-		// 分配 userdata 内存
-		userdataPtr := script.state.NewUserdata(uintptr(unsafe.Sizeof(meta)))
-		*(*userDataMeta)(userdataPtr) = *meta
+		// 创建 UserData（使用空元表，稍后设置）
+		userData := rt.NewUserData(meta, nil)
 
-		// 设置元表
-		script.state.LGetMetaTable(className)
-		if script.state.IsNil(-1) {
-			vars.Error("类 %s 的元表不存在", className)
-			return 0
-		}
-		script.state.SetMetaTable(-2)
-
-		return 1
+		// 返回 userdata
+		next := c.Next()
+		t.Push1(next, rt.UserDataValue(userData))
+		return next, nil
 	}
 
 	// 创建析构函数（__gc 元方法）
-	destructor := func(L *lua.State) int {
-		userdataPtr := L.ToUserdata(1)
-		if userdataPtr == nil {
-			return 0
+	destructor := func(t *rt.Thread, c *rt.GoCont) (rt.Cont, error) {
+		arg0 := c.Arg(0)
+
+		userData, ok := arg0.TryUserData()
+		if !ok {
+			return c.Next(), nil
+		}
+		if userData == nil {
+			return c.Next(), nil
 		}
 
-		meta := *(*userDataMeta)(userdataPtr)
+		meta, ok := userData.Value().(*userDataMeta)
+		if !ok {
+			return c.Next(), nil
+		}
 
 		// 从 syncmap 中获取并删除对象
 		if dataRaw, ok := meta.script.registeredObjects.Load(meta.uid); ok {
@@ -217,69 +226,61 @@ func registerClass(class ILuaClassInterface, script *LuaScript) error {
 			}
 		}
 
-		return 0
+		return c.Next(), nil
 	}
 
 	// 创建 __index 元方法
-	indexMethod := func(L *lua.State) int {
-		// 检查栈顶是否是字符串（方法名）
-		if L.Type(2) != lua.LUA_TSTRING {
-			return 0
+	indexMethod := func(t *rt.Thread, c *rt.GoCont) (rt.Cont, error) {
+		// 检查第二个参数是否是字符串（方法名）
+		arg1 := c.Arg(1)
+
+		methodName, ok := arg1.TryString()
+		if !ok {
+			return c.Next(), nil
 		}
 
-		methodName := L.ToString(2)
-
-		// 尝试从元表获取方法
-		L.GetMetaTable(1)
-		L.PushString(methodName)
-		L.GetTable(-2)
-
-		// 如果找到方法，返回
-		if L.IsFunction(-1) {
-			L.Remove(-2) // 移除元表
-			return 1
+		// 从缓存获取方法
+		_, ok = registry.MethodCache.GetMethod(methodName)
+		if !ok {
+			return c.Next(), nil
 		}
 
-		// 没找到方法，返回 nil
-		L.Pop(2) // 移除结果和元表
-		return 0
+		// 创建方法闭包
+		methodMeta := &methodCallback{methodName: methodName}
+		methodFunc := rt.NewGoFunction(methodMeta.callBack, methodName, 1, false)
+
+		next := c.Next()
+		t.Push1(next, rt.FunctionValue(methodFunc))
+		return next, nil
 	}
 
 	// 注册构造函数到全局
-	script.state.PushGoFunction(constructor)
-	script.state.SetGlobal(className)
+	constructorFunc := rt.NewGoFunction(constructor, className, 0, false)
+	script.runtime.SetEnv(script.env, className, rt.FunctionValue(constructorFunc))
 
-	// 创建或获取类的元表
-	script.state.NewMetaTable(className)
+	// 创建类的元表
+	metaTable := rt.NewTable()
 
 	// 注册 __gc 元方法
-	script.state.PushString("__gc")
-	script.state.PushGoFunction(destructor)
-	script.state.SetTable(-3)
+	script.runtime.SetEnv(metaTable, "__gc", rt.FunctionValue(rt.NewGoFunction(destructor, "__gc", 1, false)))
 
 	// 注册 __index 元方法
-	script.state.PushString("__index")
-	script.state.PushGoFunction(indexMethod)
-	script.state.SetTable(-3)
+	script.runtime.SetEnv(metaTable, "__index", rt.FunctionValue(rt.NewGoFunction(indexMethod, "__index", 2, false)))
 
 	// 注册 __tostring 元方法（用于调试）
-	script.state.PushString("__tostring")
-	script.state.PushGoFunction(func(L *lua.State) int {
-		script.state.PushString(fmt.Sprintf("%s userdata", className))
-		return 1
-	})
-	script.state.SetTable(-3)
+	tostringFunc := rt.NewGoFunction(func(t *rt.Thread, c *rt.GoCont) (rt.Cont, error) {
+		next := c.Next()
+		t.Push1(next, rt.StringValue(fmt.Sprintf("%s userdata", className)))
+		return next, nil
+	}, "__tostring", 1, false)
+	script.runtime.SetEnv(metaTable, "__tostring", rt.FunctionValue(tostringFunc))
 
 	// 注册所有方法到元表
 	for _, methodName := range registry.MethodCache.GetMethodNames() {
-		script.state.PushString(methodName)
 		methodMeta := &methodCallback{methodName: methodName}
-		script.state.PushGoFunction(methodMeta.callBack)
-		script.state.SetTable(-3)
+		methodFunc := rt.NewGoFunction(methodMeta.callBack, methodName, 1, false)
+		script.runtime.SetEnv(metaTable, methodName, rt.FunctionValue(methodFunc))
 	}
-
-	// 弹出元表
-	script.state.Pop(1)
 
 	vars.Info("成功注册 Lua 类: %s, 方法数: %d", className, len(registry.MethodCache.Methods))
 

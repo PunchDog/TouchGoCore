@@ -5,6 +5,7 @@ import (
 	"os"
 	"time"
 
+	rt "github.com/arnodel/golua/runtime"
 	"touchgocore/vars"
 )
 
@@ -220,7 +221,7 @@ func (ls *LuaScript) ReloadScript() error {
 
 	// 重新注册函数
 	for funcName, function := range registeredFuncs {
-		ls.state.Register(funcName, function)
+		ls.runtime.SetEnvGoFunc(ls.env, funcName, function, 1, false)
 	}
 
 	// 重新注册类
@@ -230,9 +231,21 @@ func (ls *LuaScript) ReloadScript() error {
 		}
 	}
 
-	// 加载脚本
-	if err := ls.state.DoFile(ls.initScriptPath); err != nil {
-		return fmt.Errorf("加载 Lua 脚本失败: %w", err)
+	// 读取并编译脚本文件
+	source, err := os.ReadFile(ls.initScriptPath)
+	if err != nil {
+		return fmt.Errorf("读取 Lua 脚本文件失败: %w", err)
+	}
+
+	chunk, err := ls.runtime.CompileAndLoadLuaChunk("main", source, rt.TableValue(ls.env))
+	if err != nil {
+		return fmt.Errorf("编译 Lua 脚本失败: %w", err)
+	}
+
+	// 执行主脚本
+	_, err = rt.Call1(ls.thread, rt.FunctionValue(chunk))
+	if err != nil {
+		return fmt.Errorf("执行 Lua 脚本失败: %w", err)
 	}
 
 	// 恢复注册的对象

@@ -2,8 +2,7 @@ package lua
 
 import (
 	"sync"
-
-	"github.com/aarzilli/golua/lua"
+	rt "github.com/arnodel/golua/runtime"
 )
 
 // LuaScript 并发安全封装
@@ -35,11 +34,11 @@ func (s *SafeLuaScript) GetUID() int64 {
 	return s.LuaScript.UID
 }
 
-// GetState 获取 Lua 状态机（谨慎使用，可能导致并发问题）
-func (s *SafeLuaScript) GetState() *lua.State {
+// GetRuntime 获取运行时（谨慎使用，可能导致并发问题）
+func (s *SafeLuaScript) GetRuntime() *rt.Runtime {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.LuaScript.state
+	return s.LuaScript.runtime
 }
 
 // GetReturnValues 获取最近的返回值

@@ -2,13 +2,16 @@ package lua
 
 import (
 	"fmt"
+	"os"
+	"runtime"
 	"touchgocore/config"
 	"touchgocore/localtimer"
 	"touchgocore/syncmap"
 	"touchgocore/util"
 	"touchgocore/vars"
 
-	"github.com/aarzilli/golua/lua"
+	"github.com/arnodel/golua/lib"
+	rt "github.com/arnodel/golua/runtime"
 )
 
 // 全局 Lua 实例管理
@@ -17,7 +20,7 @@ var luaInstances map[int64]*LuaScript = nil
 var nextInstanceID int64 = 0
 
 // 注册的函数和类
-var registeredFuncs map[string]func(L *lua.State) int
+var registeredFuncs map[string]func(t *rt.Thread, c *rt.GoCont) (rt.Cont, error)
 var registeredClasses map[ILuaClassInterface]bool
 
 type luaTimer struct {
@@ -33,93 +36,89 @@ func (this *luaTimer) Tick() {
 		obj.Update()
 		return true
 	})
-	// 定期清理 Lua 缓存
+	// 定期清理 Lua 垃圾回收
 	if this.tick%GCTickCount == 0 {
-		this.luaScript.Call("collectgarbage", "collect")
+		// arnodel/golua 使用 Go 的 GC，不需要手动调用
+		// 这里可以触发 Go 的 GC
+		runtime.GC()
 	}
 }
 
 type LuaScript struct {
-	state             *lua.State
-	returnValues      []interface{} // 返回值列表
-	initScriptPath    string        // 初始化脚本地址
-	registeredObjects *syncmap.Map  // 注册的 Go 对象
-	nextObjectID      int64         // 下一个对象 ID
-	timer             *luaTimer     // 定时器
-	UID               int64         // 脚本实例 ID
+	runtime           *rt.Runtime
+	thread            *rt.Thread
+	returnValues      []interface{}
+	initScriptPath    string
+	registeredObjects *syncmap.Map
+	nextObjectID      int64
+	timer             *luaTimer
+	UID               int64
+	env               *rt.Table // 全局环境
 }
 
 func (ls *LuaScript) Init() {
 	// 关闭老的 Lua 脚本
 	ls.Close()
-	// 新创建 Lua 状态机
-	ls.state = lua.NewState()
-	ls.state.OpenLibs()
+
+	// 创建新的运行时
+	ls.runtime = rt.New(os.Stdout)
+	ls.thread = ls.runtime.MainThread()
+	ls.env = ls.runtime.GlobalEnv()
+
+	// 注册标准库
+	lib.LoadAll(ls.runtime)()
 
 	// 注册内置函数
-	ls.state.Register("info", info)
-	ls.state.Register("debug", debug)
-	ls.state.Register("error", error1)
-	ls.state.Register("dofile", dofile)
-	ls.state.Register("getpathluafile", getpathluafile)
+	registerDefaultFunctions(ls)
 }
 
 func (ls *LuaScript) Close() {
-	if ls.state != nil {
+	if ls.runtime != nil {
 		if ls.timer != nil {
 			ls.timer.Remove()
 		}
-		ls.state.Close()
-		ls.state = nil
+		ls.runtime = nil
+		ls.thread = nil
+		ls.env = nil
 	}
 }
 
 // Call 调用 Lua 函数
 func (ls *LuaScript) Call(funcname string, list ...interface{}) ([]interface{}, error) {
-	var nargs int = 0
-	// 设置函数名
-	ls.state.GetGlobal(funcname)
-	
-	// 检查函数是否存在
-	if ls.state.IsNil(-1) {
-		ls.state.Pop(1)
+	// 从全局环境获取函数
+	funcVal := ls.env.Get(rt.StringValue(funcname))
+	if funcVal == rt.NilValue {
 		return nil, fmt.Errorf("函数调用错误: 找不到 Lua 函数 '%s'", funcname)
 	}
-	
+
 	// 检查是否是函数类型
-	if ls.state.Type(-1) != lua.LUA_TFUNCTION {
-		ls.state.Pop(1)
+	if _, ok := funcVal.TryCallable(); !ok {
 		return nil, fmt.Errorf("函数调用错误: '%s' 不是一个 Lua 函数", funcname)
 	}
-	
-	// 压参数
-	for i, val := range list {
-		if !PushValue(ls.state, val) {
-			vars.Error("调用函数 %s 出错，压参数 %d 出错", funcname, i+1)
-			ls.state.Pop(1) // 弹出函数
-			return nil, fmt.Errorf("函数调用错误: 压入参数 %d 失败", i+1)
-		}
-		nargs++
+
+	// 转换参数为 rt.Value
+	args := make([]rt.Value, 0, len(list))
+	for _, val := range list {
+		args = append(args, GoToLuaValue(val))
 	}
-	
+
 	// 调用 Lua 函数
 	ls.returnValues = make([]interface{}, 0)
-	if err := ls.state.Call(nargs, -1); err != nil {
+
+	// 使用 Call1 调用（返回一个值）
+	result, err := rt.Call1(ls.thread, funcVal, args...)
+	if err != nil {
 		return nil, fmt.Errorf("函数调用错误: Lua 调用失败: %w", err)
 	}
 
-	// 写返回值
-	nNum := ls.state.GetTop()
-	for i := 1; i <= nNum; i++ {
-		ls.returnValues = append(ls.returnValues, LuaToGoValue(ls.state, i))
-	}
+	// 处理返回值
+	ls.returnValues = append(ls.returnValues, LuaToGoValue(result))
 	return ls.returnValues, nil
 }
 
-// 创建一个lua指针
+// 创建一个 Lua 脚本实例
 func NewLuaScript(initluapath string) (*LuaScript, error) {
 	p := &LuaScript{
-		state:             nil,
 		returnValues:      make([]interface{}, 0),
 		initScriptPath:    initluapath,
 		registeredObjects: &syncmap.Map{},
@@ -129,7 +128,7 @@ func NewLuaScript(initluapath string) (*LuaScript, error) {
 
 	// 初始化注册的函数
 	for funcName, function := range registeredFuncs {
-		p.state.Register(funcName, function)
+		p.runtime.SetEnvGoFunc(p.env, funcName, function, 1, false)
 	}
 
 	// 注册类
@@ -139,9 +138,21 @@ func NewLuaScript(initluapath string) (*LuaScript, error) {
 		}
 	}
 
-	// 读取脚本文件
-	if err := p.state.DoFile(p.initScriptPath); err != nil {
-		return nil, fmt.Errorf("加载 Lua 脚本失败: %w", err)
+	// 读取并编译脚本文件
+	source, err := os.ReadFile(p.initScriptPath)
+	if err != nil {
+		return nil, fmt.Errorf("读取 Lua 脚本文件失败: %w", err)
+	}
+
+	chunk, err := p.runtime.CompileAndLoadLuaChunk("main", source, rt.TableValue(p.env))
+	if err != nil {
+		return nil, fmt.Errorf("编译 Lua 脚本失败: %w", err)
+	}
+
+	// 执行主脚本
+	_, err = rt.Call1(p.thread, rt.FunctionValue(chunk))
+	if err != nil {
+		return nil, fmt.Errorf("执行 Lua 脚本失败: %w", err)
 	}
 
 	// 创建定时器
@@ -170,10 +181,10 @@ func Call(funcName string, args ...interface{}) ([]interface{}, error) {
 	return defaultLua.Call(funcName, args...)
 }
 
-// RegisterFunction 注册全局函数到所有 Lua 实例
-func RegisterLuaFunc(funcName string, function func(L *lua.State) int) error {
+// RegisterLuaFunc 注册全局函数到所有 Lua 实例
+func RegisterLuaFunc(funcName string, function func(t *rt.Thread, c *rt.GoCont) (rt.Cont, error)) error {
 	if registeredFuncs == nil {
-		registeredFuncs = make(map[string]func(L *lua.State) int)
+		registeredFuncs = make(map[string]func(t *rt.Thread, c *rt.GoCont) (rt.Cont, error))
 	}
 	if _, ok := registeredFuncs[funcName]; ok {
 		return fmt.Errorf("函数 %s 已注册", funcName)
@@ -182,7 +193,7 @@ func RegisterLuaFunc(funcName string, function func(L *lua.State) int) error {
 	return nil
 }
 
-// RegisterClass 注册一个类到所有 Lua 实例
+// RegisterLuaClass 注册一个类到所有 Lua 实例
 func RegisterLuaClass(class ILuaClassInterface) error {
 	className, _ := util.GetClassName(class)
 	if registeredClasses == nil {
@@ -212,14 +223,18 @@ func RunLua() error {
 	return nil
 }
 
-// 关闭所有的定时器
+// StopLua 关闭所有的定时器
 func StopLua() {
 	for _, ls := range luaInstances {
 		ls.Close()
 	}
 }
 
-func init() {
-	util.DefaultCallFunc.Register("RunLua", RunLua)
-	util.DefaultCallFunc.Register("StopLua", StopLua)
+// registerDefaultFunctions 注册默认的内置函数
+func registerDefaultFunctions(ls *LuaScript) {
+	ls.runtime.SetEnvGoFunc(ls.env, "info", info, 1, false)
+	ls.runtime.SetEnvGoFunc(ls.env, "debug", debug, 1, false)
+	ls.runtime.SetEnvGoFunc(ls.env, "error", error1, 1, false)
+	ls.runtime.SetEnvGoFunc(ls.env, "dofile", dofile, 1, false)
+	ls.runtime.SetEnvGoFunc(ls.env, "getpathluafile", getpathluafile, 1, false)
 }

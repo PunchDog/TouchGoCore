@@ -12,12 +12,12 @@ type INode interface {
 	InsertAfter(data interface{}) INode
 	InsertBefore(data interface{}) INode
 	Remove()
-	GetNode() *ListNode
+	GetNode() *Node
 }
 
 // 实现一个双向链表，支持增删改查
 // 链表节点
-type ListNode struct {
+type Node struct {
 	id       int64       //节点id
 	pre      INode       //上一个节点
 	next     INode       //下一个节点
@@ -27,21 +27,21 @@ type ListNode struct {
 }
 
 // 获取节点
-func (n *ListNode) GetNode() *ListNode {
+func (n *Node) GetNode() *Node {
 	return n
 }
 
 // 获取id
-func (n *ListNode) GetId() int64 {
+func (n *Node) GetId() int64 {
 	return n.id
 }
 
 // 获取数据
-func (n *ListNode) GetData() interface{} {
+func (n *Node) GetData() interface{} {
 	return n.data
 }
 
-func (n *ListNode) new() INode {
+func (n *Node) new() INode {
 	if n.nodeType == nil {
 		return nil
 	}
@@ -55,7 +55,7 @@ func (n *ListNode) new() INode {
 }
 
 // 在当前节点后插入一个节点
-func (n *ListNode) InsertAfter(data interface{}) (newNode INode) {
+func (n *Node) InsertAfter(data interface{}) (newNode INode) {
 	defer func() {
 		if err := recover(); err != nil {
 			vars.Error("%v", err)
@@ -89,7 +89,7 @@ func (n *ListNode) InsertAfter(data interface{}) (newNode INode) {
 }
 
 // 在当前节点前插入一个节点
-func (n *ListNode) InsertBefore(data interface{}) (newNode INode) {
+func (n *Node) InsertBefore(data interface{}) (newNode INode) {
 	defer func() {
 		if err := recover(); err != nil {
 			vars.Error("%v", err)
@@ -122,7 +122,7 @@ func (n *ListNode) InsertBefore(data interface{}) (newNode INode) {
 }
 
 // 删除当前节点
-func (n *ListNode) Remove() {
+func (n *Node) Remove() {
 	if n == nil {
 		return
 	}
@@ -164,7 +164,7 @@ func NewNode(data interface{}, nodeType INode) INode {
 			nodeType = newnode
 		} else {
 			// 池为空或获取失败，创建新节点
-			newnode = new(ListNode)
+			newnode = new(Node)
 			nodeType = newnode
 		}
 	} else {

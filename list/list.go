@@ -167,7 +167,7 @@ func (l *List) Clear() {
 }
 
 // removeNodeLocked 从链表中删除节点，调用者必须已持有 mu 锁
-func (l *List) removeNodeLocked(node *ListNode) {
+func (l *List) removeNodeLocked(node *Node) {
 	if node.list != l {
 		return // 不属于此链表
 	}

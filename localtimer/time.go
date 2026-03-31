@@ -118,7 +118,7 @@ var timerPool = &TimerPool{}
 
 // Timer 表示基础定时器结构
 type Timer struct {
-	list.ListNode
+	list.Node
 
 	// 定时器元数据
 	uid      int64 // 唯一标识符
@@ -170,7 +170,7 @@ func (t *Timer) RemoveFromManager(cleanPool bool) {
 		defer t.wheel.wheelLock.Unlock()
 	}
 
-	t.ListNode.Remove() // 从链表中移除
+	t.Node.Remove() // 从链表中移除
 
 	if cleanPool && t.self != nil {
 		timerPool.Put(t.self)

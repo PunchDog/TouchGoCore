@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 	"touchgocore/syncmap"
 	"touchgocore/util"
@@ -28,7 +29,7 @@ type Client struct {
 	UID        int64
 	iCallName  string
 	// 原子关闭标志，防止竞态条件
-	closed     atomic.Bool
+	closed atomic.Bool
 }
 
 // 新增带重试机制的WebSocket连接方法
@@ -118,7 +119,7 @@ func (c *Client) IsClose() bool {
 	if c.closed.Load() {
 		return true
 	}
-	
+
 	if c.closeCh == nil {
 		return true
 	}
@@ -140,7 +141,7 @@ func (c *Client) Close(reason string) {
 	if c.closed.CompareAndSwap(false, true) {
 		// 先从映射中移除，防止新消息到达
 		clientMap.Delete(c.UID)
-		
+
 		// 调用 OnClose 回调
 		c.OnClose(c)
 

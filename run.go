@@ -59,7 +59,7 @@ func Run(serverName string) {
 	startServices()
 
 	// 核心加载完了后自己想执行的东西
-	_, _ = util.DefaultCallFunc.Do(util.CallStart)
+	util.DefaultCallFunc.Do(util.CallStart)
 
 	// 启动完成
 	vars.Info("touchgocore启动完成")
@@ -76,7 +76,7 @@ func closeServer() {
 	telegram.TelegramStop()
 
 	//退出时清理工作
-	_, _ = util.DefaultCallFunc.Do(util.CallStop)
+	util.DefaultCallFunc.Do(util.CallStop)
 
 	//关闭日志系统
 	vars.Shutdown()

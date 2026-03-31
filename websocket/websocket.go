@@ -3,6 +3,8 @@ package websocket
 import (
 	"reflect"
 	"sync"
+	"sync/atomic"
+	"time"
 	"touchgocore/config"
 	"touchgocore/syncmap"
 	"touchgocore/util"
@@ -19,21 +21,21 @@ const (
 )
 
 var (
-	closeCh               chan bool          = nil
-	msgQueue              chan *msgQueueType = nil
-	clientpool            *sync.Pool         = nil
-	clientcall            syncmap.Map
-	writeBufferSize       int                = DEFAULT_WRITE_BUFFER_SIZE
-	readBufferSize        int                = DEFAULT_READ_BUFFER_SIZE
-	enableBackpressure    bool                = false
-	dropMessageOnFull     bool                = false
-	workerPoolEnabled     bool                = false // 是否启用 Worker Pool
-	workerPoolSize        int                = 0     // Worker 数量
-	workerPoolQueues      []chan *msgQueueType       // Worker 消息队列
-	workerPoolStop        chan struct{}              // Worker Pool 停止信号
-	workerPoolWaitGroup   sync.WaitGroup             // Worker 等待组
-	workerPoolStats       []*workerStats             // Worker 统计信息
-	workerPoolStatsMutex  sync.Mutex                 // 统计信息保护锁
+	closeCh              chan bool          = nil
+	msgQueue             chan *msgQueueType = nil
+	clientpool           *sync.Pool         = nil
+	clientcall           syncmap.Map
+	writeBufferSize      int                  = DEFAULT_WRITE_BUFFER_SIZE
+	readBufferSize       int                  = DEFAULT_READ_BUFFER_SIZE
+	enableBackpressure   bool                 = false
+	dropMessageOnFull    bool                 = false
+	workerPoolEnabled    bool                 = false // 是否启用 Worker Pool
+	workerPoolSize       int                  = 0     // Worker 数量
+	workerPoolQueues     []chan *msgQueueType         // Worker 消息队列
+	workerPoolStop       chan struct{}                // Worker Pool 停止信号
+	workerPoolWaitGroup  sync.WaitGroup               // Worker 等待组
+	workerPoolStats      []*workerStats               // Worker 统计信息
+	workerPoolStatsMutex sync.Mutex                   // 统计信息保护锁
 )
 
 // workerStats 用于收集 Worker 的统计信息

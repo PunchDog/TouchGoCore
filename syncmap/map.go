@@ -6,47 +6,83 @@ import (
 )
 
 type Map struct {
-	sync.Map
-	num int32 //数量
+	mp  map[any]any
+	num atomic.Int32 //数量
+	mu  sync.RWMutex
 }
 
 // 数据长点
 func (this *Map) Length() int {
-	return int(atomic.LoadInt32(&this.num))
+	return int(this.num.Load())
 }
 
 // 添加数据
-func (this *Map) Store(k, v interface{}) {
-	if _, h := this.Load(k); !h {
-		atomic.AddInt32(&this.num, 1)
+func (this *Map) Store(k, v any) {
+	this.mu.Lock()
+	defer this.mu.Unlock()
+	if this.mp == nil {
+		this.mp = make(map[any]any)
 	}
-	this.Map.Store(k, v)
+	if _, h := this.mp[k]; !h {
+		this.num.Add(1)
+	}
+	this.mp[k] = v
 }
 
 // 删除数据
-func (this *Map) Delete(k interface{}) {
-	if _, h := this.Load(k); h {
-		this.Map.Delete(k)
-		atomic.AddInt32(&this.num, -1)
+func (this *Map) Delete(k any) {
+	this.mu.Lock()
+	defer this.mu.Unlock()
+	if _, h := this.mp[k]; h {
+		delete(this.mp, k)
+		this.num.Add(-1)
 	}
 }
 
 // 清空所有数据（不可以在fn内有对this的Store或者Delete操作）
 func (this *Map) ClearAll(fn func(k, v interface{}) bool) {
-	if fn != nil {
-		this.Map.Range(func(k, v interface{}) bool {
-			return fn(k, v)
-		})
+	this.mu.Lock()
+	defer this.mu.Unlock()
+	for k, v := range this.mp {
+		if !fn(k, v) {
+			break
+		}
 	}
-	atomic.StoreInt32(&this.num, 0)
-	this.Map = sync.Map{}
+	this.mp = make(map[any]any)
+	this.num.Store(0)
 }
 
 // 添加或读取
 func (this *Map) LoadOrStore(key, value interface{}) (actual interface{}, loaded bool) {
-	actual, loaded = this.Map.LoadOrStore(key, value)
+	this.mu.Lock()
+	defer this.mu.Unlock()
+	if this.mp == nil {
+		this.mp = make(map[any]any)
+	}
+
+	actual, loaded = this.mp[key]
 	if !loaded {
-		atomic.AddInt32(&this.num, 1)
+		this.mp[key] = value
+		this.num.Add(1)
 	}
 	return
+}
+
+// 读取
+func (this *Map) Load(k any) (v any, ok bool) {
+	this.mu.RLock()
+	defer this.mu.RUnlock()
+	v, ok = this.mp[k]
+	return
+}
+
+// 循环
+func (this *Map) Range(fn func(k, v interface{}) bool) {
+	this.mu.RLock()
+	defer this.mu.RUnlock()
+	for k, v := range this.mp {
+		if !fn(k, v) {
+			break
+		}
+	}
 }

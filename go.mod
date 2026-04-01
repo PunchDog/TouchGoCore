@@ -1,6 +1,6 @@
 module touchgocore
 
-go 1.25.1
+go 1.25.8
 
 require (
 	github.com/arnodel/golua v0.2.0

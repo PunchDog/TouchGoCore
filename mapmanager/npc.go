@@ -5,6 +5,7 @@ import (
 
 	lua "touchgocore/golua"
 	"touchgocore/syncmap"
+	"touchgocore/vars"
 )
 
 // ============================================================================
@@ -73,7 +74,7 @@ type Npc struct {
 	ID        uint32 `json:"id"`        // NPC唯一标识
 	Name      string `json:"name"`      // NPC名称
 	Shape     string `json:"shape"`     // 外观资源ID
-	Direction int    `json:"direction"` // 朝向(0-7,代表8个方向)
+	Direction int8   `json:"direction"` // 朝向(0-7,代表8个方向)
 	AutoMove  bool   `json:"auto_move"` // 是否自动行走
 
 	// 位置与移动
@@ -105,7 +106,8 @@ func (n *Npc) Init(id int64, lua *lua.LuaScript) {
 // SetName 设置NPC名称
 func (n *Npc) SetName(name string) {
 	if name == "" {
-		panic("[NPC] 名称不能为空")
+		vars.Error("[NPC] 名字无效")
+		name = "未知NPC"
 	}
 	n.Name = name
 }
@@ -117,9 +119,10 @@ func (n *Npc) SetShape(shape string) {
 
 // SetDirection 设置NPC朝向
 // @param direction 朝向值(0-7)
-func (n *Npc) SetDirection(direction int) {
+func (n *Npc) SetDirection(direction int8) {
 	if direction < 0 || direction > 7 {
-		panic(fmt.Sprintf("[NPC] 朝向值无效: %d, 期望范围: 0-7", direction))
+		vars.Error("[NPC] 朝向值无效: %d, 期望范围: 0-7", direction)
+		direction = 0
 	}
 	n.Direction = direction
 }

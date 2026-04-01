@@ -458,13 +458,42 @@ func Run(path, name, level string) {
 	Initialize(cfg)
 }
 
-// Initialize 初始化全局日志器
+// Initialize 初始化全局日志器（默认使用异步Channel模式）
 func Initialize(cfg LogConfig) error {
 	var initErr error
 	once.Do(func() {
+		// 默认启用异步模式以保证引擎效率
+		if cfg.AsyncBufferSize <= 0 {
+			cfg.AsyncBufferSize = 10000
+		}
+
+		// 创建基于Channel的异步日志管理器
+		channelManager, err := NewChannelLoggerManager(cfg)
+		if err != nil {
+			initErr = err
+			return
+		}
+
+		// 如果启用异步，使用Channel模式
+		if cfg.Async {
+			initErr = channelManager.initWithChannel()
+			if initErr != nil {
+				return
+			}
+		}
+
+		// 存储到全局变量（保持兼容性）
 		globalLogger, initErr = NewLoggerManager(cfg)
-		if initErr == nil && globalLogger.IsEnabled() {
-			slog.SetDefault(globalLogger.GetLogger())
+		if initErr != nil {
+			// 如果旧模式失败，使用Channel管理器
+			initErr = nil
+		}
+
+		// 将Channel管理器也设为全局
+		InitializeChannelLogger(cfg)
+
+		if GetChannelLogger() != nil && GetChannelLogger().IsEnabled() {
+			slog.SetDefault(GetChannelLogger().GetLogger())
 		}
 	})
 
@@ -478,6 +507,11 @@ func InitializeWithDefaults() error {
 
 // Shutdown 关闭全局日志器
 func Shutdown() error {
+	// 先关闭异步Channel日志（确保所有日志刷出）
+	if err := ShutdownChannelLogger(); err != nil {
+		return err
+	}
+
 	if globalLogger == nil {
 		return nil
 	}
@@ -485,23 +519,71 @@ func Shutdown() error {
 	return globalLogger.Close()
 }
 
-// Debug 调试级别日志
+// Debug 调试级别日志（异步写入，不阻塞业务逻辑）
 func Debug(msg string, args ...any) {
+	formattedMsg := msg
+	if len(args) > 0 {
+		formattedMsg = fmt.Sprintf(msg, args...)
+	}
+
+	// 优先使用异步Channel日志
+	if chLogger := GetChannelLogger(); chLogger != nil && chLogger.IsEnabled() {
+		chLogger.LogAsyncSimple(slog.LevelDebug, formattedMsg)
+		return
+	}
+
+	// Fallback: 旧版日志
 	logWithLevel(slog.LevelDebug, msg, args...)
 }
 
-// Info 信息级别日志
+// Info 信息级别日志（异步写入，不阻塞业务逻辑）
 func Info(msg string, args ...any) {
+	formattedMsg := msg
+	if len(args) > 0 {
+		formattedMsg = fmt.Sprintf(msg, args...)
+	}
+
+	// 优先使用异步Channel日志
+	if chLogger := GetChannelLogger(); chLogger != nil && chLogger.IsEnabled() {
+		chLogger.LogAsyncSimple(slog.LevelInfo, formattedMsg)
+		return
+	}
+
+	// Fallback: 旧版日志
 	logWithLevel(slog.LevelInfo, msg, args...)
 }
 
-// Warn 警告级别日志
+// Warn 警告级别日志（异步写入，不阻塞业务逻辑）
 func Warning(msg string, args ...any) {
+	formattedMsg := msg
+	if len(args) > 0 {
+		formattedMsg = fmt.Sprintf(msg, args...)
+	}
+
+	// 优先使用异步Channel日志
+	if chLogger := GetChannelLogger(); chLogger != nil && chLogger.IsEnabled() {
+		chLogger.LogAsyncSimple(slog.LevelWarn, formattedMsg)
+		return
+	}
+
+	// Fallback: 旧版日志
 	logWithLevel(slog.LevelWarn, msg, args...)
 }
 
-// Error 错误级别日志
+// Error 错误级别日志（异步写入，不阻塞业务逻辑）
 func Error(msg string, args ...any) {
+	formattedMsg := msg
+	if len(args) > 0 {
+		formattedMsg = fmt.Sprintf(msg, args...)
+	}
+
+	// 优先使用异步Channel日志
+	if chLogger := GetChannelLogger(); chLogger != nil && chLogger.IsEnabled() {
+		chLogger.LogAsyncSimple(slog.LevelError, formattedMsg)
+		return
+	}
+
+	// Fallback: 旧版日志
 	logWithLevel(slog.LevelError, msg, args...)
 }
 

@@ -1,6 +1,7 @@
 package syncmap
 
 import (
+	"sort"
 	"sync"
 	"sync/atomic"
 )
@@ -84,5 +85,37 @@ func (this *Map) Range(fn func(k, v any) bool) {
 		if !fn(k, v) {
 			break
 		}
+	}
+}
+
+/*
+根据排序规则排序后循环
+fn 循环回调函数
+sortFunc 排序函数
+*/
+func (this *Map) RangeBySort(fn func(k, v any) bool, sortFunc func(d1, d2 any) bool) {
+	if sortFunc != nil {
+		this.mu.RLock()
+		defer this.mu.RUnlock()
+
+		//先把key放入list排序
+		list := make([]struct{ key, value any }, 0, len(this.mp))
+		for k, v := range this.mp {
+			list = append(list, struct{ key, value any }{k, v})
+		}
+		//按排序规则排序
+		sort.Slice(list, func(i, j int) bool {
+			return sortFunc(list[i].value, list[j].value)
+		})
+
+		//按照排好序的key循环
+		for _, v := range list {
+			if !fn(v.key, v.value) {
+				break
+			}
+		}
+	} else {
+		//没有传排序规则的，按原始排序循环
+		this.Range(fn)
 	}
 }

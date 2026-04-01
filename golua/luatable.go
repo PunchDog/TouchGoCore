@@ -2,8 +2,9 @@ package lua
 
 import (
 	"reflect"
-	rt "github.com/arnodel/golua/runtime"
 	"touchgocore/syncmap"
+
+	rt "github.com/arnodel/golua/runtime"
 )
 
 // newTable 从 Go 数据创建 LuaTable 对象
@@ -139,7 +140,7 @@ func tableFromRuntimeV2(tbl *rt.Table) *LuaTable {
 }
 
 type LuaTable struct {
-	tbl *syncmap.Map
+	tbl *syncmap.MapAny
 }
 
 // HasData 检查 table 是否有数据
@@ -155,7 +156,7 @@ func (this *LuaTable) HaveData() bool {
 // Append 添加列表元素
 func (this *LuaTable) Append(val interface{}) {
 	if this.tbl == nil {
-		this.tbl = &syncmap.Map{}
+		this.tbl = syncmap.NewAny()
 	}
 	this.Set(this.tbl.Length()+1, val)
 }
@@ -168,7 +169,7 @@ func (this *LuaTable) AddListData(val interface{}) {
 // Set 设置键值对
 func (this *LuaTable) Set(key, val interface{}) {
 	if this.tbl == nil {
-		this.tbl = &syncmap.Map{}
+		this.tbl = syncmap.NewAny()
 	}
 	this.tbl.Store(key, val)
 }
@@ -215,7 +216,7 @@ func (this *LuaTable) PushTable(L interface{}) bool {
 // SubTable 获取或创建嵌套 table
 func (this *LuaTable) SubTable(key interface{}) *LuaTable {
 	if this.tbl == nil {
-		this.tbl = &syncmap.Map{}
+		this.tbl = syncmap.NewAny()
 	}
 	data, _ := this.tbl.LoadOrStore(key, newTable(nil))
 	return data.(*LuaTable)

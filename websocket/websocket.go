@@ -18,10 +18,10 @@ import (
 // 使用原子操作改进的全局变量管理
 var (
 	serverStats struct {
-		totalConnections atomic.Int64
+		totalConnections   atomic.Int64
 		currentConnections atomic.Int64
-		totalMessages atomic.Int64
-		totalErrors atomic.Int64
+		totalMessages      atomic.Int64
+		totalErrors        atomic.Int64
 	}
 )
 
@@ -38,7 +38,7 @@ var (
 	closeCh              chan bool          = nil
 	msgQueue             chan *msgQueueType = nil
 	clientpool           *sync.Pool         = nil
-	clientcall           syncmap.Map
+	clientcall           *syncmap.Map[string, *sync.Pool]
 	writeBufferSize      int                  = DEFAULT_WRITE_BUFFER_SIZE
 	readBufferSize       int                  = DEFAULT_READ_BUFFER_SIZE
 	enableBackpressure   bool                 = false
@@ -101,13 +101,11 @@ func Run() {
 		return
 	}
 
+	clientMap = syncmap.NewMap[int64, *Client]()
+
 	// 从配置中读取背压设置
-	if config.Cfg_.Websocket != nil {
-		// 这里可以添加配置读取逻辑
-		// 目前使用默认值
-		enableBackpressure = true // 启用背压控制
-		dropMessageOnFull = false // 通道满时是否丢弃消息
-	}
+	enableBackpressure = true // 启用背压控制
+	dropMessageOnFull = false // 通道满时是否丢弃消息
 
 	writeBufferSize = DEFAULT_WRITE_BUFFER_SIZE
 	readBufferSize = DEFAULT_READ_BUFFER_SIZE
@@ -152,8 +150,7 @@ func Tick() {
 				server.Close()
 			}
 			//关闭所有客户端
-			clientMap.Range(func(key, value interface{}) bool {
-				client := value.(*Client)
+			clientMap.Range(func(key int64, client *Client) bool {
 				client.Close("")
 				return true
 			})
@@ -163,8 +160,7 @@ func Tick() {
 			return
 		case read_msg := <-msgQueue:
 			// 处理消息队列
-			if c, h := clientMap.Load(read_msg.uid); h {
-				client := c.(*Client)
+			if client, h := clientMap.Load(read_msg.uid); h {
 				// 检查客户端是否已关闭，防止竞态条件
 				if client.IsClose() {
 					continue
@@ -194,21 +190,21 @@ func Tick() {
 
 // GetServerStats 获取服务器统计信息
 func GetServerStats() struct {
-	TotalConnections int64
+	TotalConnections   int64
 	CurrentConnections int64
-	TotalMessages int64
-	TotalErrors int64
+	TotalMessages      int64
+	TotalErrors        int64
 } {
 	return struct {
-		TotalConnections int64
+		TotalConnections   int64
 		CurrentConnections int64
-		TotalMessages int64
-		TotalErrors int64
+		TotalMessages      int64
+		TotalErrors        int64
 	}{
-		TotalConnections: serverStats.totalConnections.Load(),
+		TotalConnections:   serverStats.totalConnections.Load(),
 		CurrentConnections: serverStats.currentConnections.Load(),
-		TotalMessages: serverStats.totalMessages.Load(),
-		TotalErrors: serverStats.totalErrors.Load(),
+		TotalMessages:      serverStats.totalMessages.Load(),
+		TotalErrors:        serverStats.totalErrors.Load(),
 	}
 }
 

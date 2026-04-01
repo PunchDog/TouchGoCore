@@ -9,7 +9,7 @@ var (
 	luaTablePool = &sync.Pool{
 		New: func() interface{} {
 			return &LuaTable{
-				tbl: &syncmap.Map{},
+				tbl: syncmap.NewAny(),
 			}
 		},
 	}

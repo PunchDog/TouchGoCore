@@ -133,7 +133,7 @@ func (this *LuaTable) ToMap() map[string]interface{} {
 // Merge 合并另一个 LuaTable
 func (this *LuaTable) Merge(other *LuaTable) {
 	if this.tbl == nil {
-		this.tbl = &syncmap.Map{}
+		this.tbl = syncmap.NewAny()
 	}
 	if other.tbl != nil {
 		other.tbl.Range(func(key, value interface{}) bool {

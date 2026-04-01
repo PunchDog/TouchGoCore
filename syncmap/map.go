@@ -6,116 +6,153 @@ import (
 	"sync/atomic"
 )
 
-type Map struct {
-	mp  map[any]any
-	num atomic.Int32 //数量
+// Map is a concurrent-safe map implementation with atomic counter.
+// It provides thread-safe operations for storing, retrieving, and iterating
+// over key-value pairs.
+//
+// Deprecated: Prefer [MapGeneric] for type-safe operations, or use
+// Go's built-in sync.Map for better performance in read-heavy workloads.
+type Map[K comparable, V any] struct {
+	mp  map[K]V
+	num atomic.Int64
 	mu  sync.RWMutex
 }
 
-// 数据长点
-func (this *Map) Length() int {
-	return int(this.num.Load())
+// Length returns the current number of elements in the map.
+// This operation is atomic and lock-free.
+func (m *Map[K, V]) Length() int {
+	return int(m.num.Load())
 }
 
-// 添加数据
-func (this *Map) Store(k, v any) {
-	this.mu.Lock()
-	defer this.mu.Unlock()
-	if this.mp == nil {
-		this.mp = make(map[any]any)
+// Store adds or updates a key-value pair.
+// If the key already exists, its value is updated without changing the count.
+func (m *Map[K, V]) Store(k K, v V) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.mp == nil {
+		m.mp = make(map[K]V)
 	}
-	if _, h := this.mp[k]; !h {
-		this.num.Add(1)
+	if _, h := m.mp[k]; !h {
+		m.num.Add(1)
 	}
-	this.mp[k] = v
+	m.mp[k] = v
 }
 
-// 删除数据
-func (this *Map) Delete(k any) {
-	this.mu.Lock()
-	defer this.mu.Unlock()
-	if _, h := this.mp[k]; h {
-		delete(this.mp, k)
-		this.num.Add(-1)
+// Delete removes a key-value pair by key.
+// The counter is decremented only if the key existed.
+func (m *Map[K, V]) Delete(k K) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, h := m.mp[k]; h {
+		delete(m.mp, k)
+		m.num.Add(-1)
 	}
 }
 
-// 清空所有数据（不可以在fn内有对this的Store或者Delete操作）
-func (this *Map) ClearAll(fn func(k, v any) bool) {
-	this.mu.Lock()
-	defer this.mu.Unlock()
-	for k, v := range this.mp {
+// ClearAll removes all entries from the map after invoking the callback for each.
+// The callback function 'fn' returns true to continue iteration, false to stop.
+// The callback is invoked while holding the write lock - no Store/Delete operations
+// on this map are allowed within the callback.
+//
+// ClearAll is designed for cleanup scenarios where elements need to be
+// processed before removal, such as closing resources or releasing references.
+func (m *Map[K, V]) ClearAll(fn func(k K, v V) bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for k, v := range m.mp {
 		if !fn(k, v) {
 			break
 		}
 	}
-	this.mp = make(map[any]any)
-	this.num.Store(0)
+	m.mp = make(map[K]V)
+	m.num.Store(0)
 }
 
-// 添加或读取
-func (this *Map) LoadOrStore(key, value any) (actual any, loaded bool) {
-	this.mu.Lock()
-	defer this.mu.Unlock()
-	if this.mp == nil {
-		this.mp = make(map[any]any)
+// LoadOrStore returns the existing value for key if present.
+// Otherwise, it stores the given value and returns the value as loaded.
+// This operation is atomic.
+func (m *Map[K, V]) LoadOrStore(key K, value V) (actual V, loaded bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.mp == nil {
+		m.mp = make(map[K]V)
 	}
 
-	actual, loaded = this.mp[key]
+	actual, loaded = m.mp[key]
 	if !loaded {
-		this.mp[key] = value
-		this.num.Add(1)
+		m.mp[key] = value
+		m.num.Add(1)
 	}
 	return
 }
 
-// 读取
-func (this *Map) Load(k any) (v any, ok bool) {
-	this.mu.RLock()
-	defer this.mu.RUnlock()
-	v, ok = this.mp[k]
+// Load returns the value associated with the key and a boolean indicating
+// whether the key was found.
+func (m *Map[K, V]) Load(k K) (v V, ok bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	v, ok = m.mp[k]
 	return
 }
 
-// 循环
-func (this *Map) Range(fn func(k, v any) bool) {
-	this.mu.RLock()
-	defer this.mu.RUnlock()
-	for k, v := range this.mp {
+// Range calls fn for each key-value pair in the map.
+// If fn returns false, Range stops the iteration.
+// The callback is invoked while holding a read lock.
+func (m *Map[K, V]) Range(fn func(k K, v V) bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for k, v := range m.mp {
 		if !fn(k, v) {
 			break
 		}
 	}
 }
 
-/*
-根据排序规则排序后循环
-fn 循环回调函数
-sortFunc 排序函数
-*/
-func (this *Map) RangeBySort(fn func(k, v any) bool, sortFunc func(d1, d2 any) bool) {
-	if sortFunc != nil {
-		this.mu.RLock()
-		defer this.mu.RUnlock()
+// RangeBySort iterates over key-value pairs in sorted order.
+// If sortFunc is nil, behaves like Range.
+// sortFunc should compare values: return true if d1 should come before d2.
+func (m *Map[K, V]) RangeBySort(fn func(k K, v V) bool, sortFunc func(d1, d2 V) bool) {
+	if sortFunc == nil {
+		m.Range(fn)
+		return
+	}
 
-		//先把key放入list排序
-		list := make([]struct{ key, value any }, 0, len(this.mp))
-		for k, v := range this.mp {
-			list = append(list, struct{ key, value any }{k, v})
-		}
-		//按排序规则排序
-		sort.Slice(list, func(i, j int) bool {
-			return sortFunc(list[i].value, list[j].value)
-		})
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 
-		//按照排好序的key循环
-		for _, v := range list {
-			if !fn(v.key, v.value) {
-				break
-			}
+	type sortTemp struct {
+		key   K
+		value V
+	}
+
+	pairs := make([]sortTemp, 0, len(m.mp))
+	for k, v := range m.mp {
+		pairs = append(pairs, sortTemp{k, v})
+	}
+
+	sort.Slice(pairs, func(i, j int) bool {
+		return sortFunc(pairs[i].value, pairs[j].value)
+	})
+
+	for _, pair := range pairs {
+		if !fn(pair.key, pair.value) {
+			break
 		}
-	} else {
-		//没有传排序规则的，按原始排序循环
-		this.Range(fn)
+	}
+}
+
+type MapAny struct {
+	Map[any, any]
+}
+
+func NewMap[K comparable, V any]() *Map[K, V] {
+	return &Map[K, V]{
+		mp: make(map[K]V),
+	}
+}
+
+func NewAny() *MapAny {
+	return &MapAny{
+		Map: Map[any, any]{mp: make(map[any]any)},
 	}
 }

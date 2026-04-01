@@ -49,7 +49,7 @@ type LuaScript struct {
 	thread            *rt.Thread
 	returnValues      []interface{}
 	initScriptPath    string
-	registeredObjects *syncmap.Map
+	registeredObjects *syncmap.MapAny
 	nextObjectID      int64
 	timer             *luaTimer
 	UID               int64
@@ -121,7 +121,7 @@ func NewLuaScript(initluapath string) (*LuaScript, error) {
 	p := &LuaScript{
 		returnValues:      make([]interface{}, 0),
 		initScriptPath:    initluapath,
-		registeredObjects: &syncmap.Map{},
+		registeredObjects: syncmap.NewAny(),
 		nextObjectID:      0,
 	}
 	p.Init()

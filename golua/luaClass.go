@@ -3,10 +3,11 @@ package lua
 import (
 	"fmt"
 	"reflect"
-	rt "github.com/arnodel/golua/runtime"
 	"touchgocore/syncmap"
 	"touchgocore/util"
 	"touchgocore/vars"
+
+	rt "github.com/arnodel/golua/runtime"
 )
 
 // 注册类接口
@@ -47,7 +48,7 @@ type ClassRegistry struct {
 
 // 全局类注册表，避免重复创建
 var (
-	classRegistryMap = syncmap.Map{} // key: className, value: *ClassRegistry
+	classRegistryMap = syncmap.NewAny() // key: className, value: *ClassRegistry
 )
 
 // methodCallback 表示一个方法回调

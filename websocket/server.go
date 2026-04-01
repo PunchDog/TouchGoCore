@@ -20,12 +20,12 @@ const (
 )
 
 var (
-	serverList              []*http.Server = make([]*http.Server, 0)
-	upgraderOnce            sync.Once
-	upgrader                *websocket.Upgrader
-	allowedOrigins          []string
-	checkOrigin             bool
-	skipOriginForIntranet   bool
+	serverList            []*http.Server = make([]*http.Server, 0)
+	upgraderOnce          sync.Once
+	upgrader              *websocket.Upgrader
+	allowedOrigins        []string
+	checkOrigin           bool
+	skipOriginForIntranet bool
 )
 
 // ============ 改进部分 ============
@@ -36,10 +36,10 @@ var (
 // initUpgrader 初始化 WebSocket Upgrader
 func initUpgrader() {
 	// 加载配置
-	if config.Cfg_ != nil && config.Cfg_.Websocket != nil {
-		allowedOrigins = config.Cfg_.Websocket.AllowedOrigins
-		checkOrigin = config.Cfg_.Websocket.CheckOrigin
-		skipOriginForIntranet = config.Cfg_.Websocket.SkipOriginForIntranet
+	if config.Cfg_ != nil && config.Cfg_.Ws != nil {
+		allowedOrigins = config.Cfg_.Ws.AllowedOrigins
+		checkOrigin = config.Cfg_.Ws.CheckOrigin
+		skipOriginForIntranet = config.Cfg_.Ws.SkipOriginForIntranet
 	}
 
 	upgrader = &websocket.Upgrader{
@@ -143,7 +143,7 @@ func ListenAndServe(port int, className string) error {
 		c.Set("className", className)
 		c.Next()
 	})
-	
+
 	r.GET("/ws", func(c *gin.Context) {
 		defer func() {
 			if err := recover(); err != nil {
@@ -168,7 +168,7 @@ func ListenAndServe(port int, className string) error {
 			classNameFromContext = className // 如果不存在，使用传入的className
 		}
 		classNameStr := classNameFromContext.(string)
-		
+
 		_, err = NewClient(wsConn, getClientIP(c.Request), classNameStr)
 		if err != nil {
 			vars.Error("创建WebSocket客户端失败: %v", err)

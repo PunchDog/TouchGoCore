@@ -22,7 +22,7 @@ type DbMysql struct {
 
 // 全局 GORM 连接池
 // key: 数据库连接字符串, value: *gorm.DB
-var gormPool *syncmap.Map = &syncmap.Map{}
+var gormPool *syncmap.MapAny = syncmap.NewAny()
 
 // NewDbMysql 创建 MySQL 数据库连接
 func NewDbMysql(cfg *config.MySqlDBConfig) (*DbMysql, error) {
@@ -109,12 +109,13 @@ func (m *DbMysql) SetLoggerLevel(level logger.LogLevel) {
 
 // Transaction 执行事务
 // 示例:
-//   err := mysqlDB.Transaction(func(tx *gorm.DB) error {
-//       if err := tx.Create(&order).Error; err != nil {
-//           return err
-//       }
-//       return tx.Model(&product).Update("stock", gorm.Expr("stock - ?", order.Quantity)).Error
-//   })
+//
+//	err := mysqlDB.Transaction(func(tx *gorm.DB) error {
+//	    if err := tx.Create(&order).Error; err != nil {
+//	        return err
+//	    }
+//	    return tx.Model(&product).Update("stock", gorm.Expr("stock - ?", order.Quantity)).Error
+//	})
 func (m *DbMysql) Transaction(fn func(tx *gorm.DB) error) error {
 	return m.gormDB.Transaction(fn)
 }
@@ -385,8 +386,9 @@ func (m *DbMysql) Upsert(model interface{}, conflictColumns ...string) error {
 
 // Where 创建带条件的查询链（方便链式调用）
 // 示例:
-//   var users []User
-//   mysqlDB.Where("age > ?", 18).Where("status = ?", "active").Order("created_at DESC").Find(&users)
+//
+//	var users []User
+//	mysqlDB.Where("age > ?", 18).Where("status = ?", "active").Order("created_at DESC").Find(&users)
 func (m *DbMysql) Where(query interface{}, args ...interface{}) *gorm.DB {
 	return m.gormDB.Where(query, args...)
 }

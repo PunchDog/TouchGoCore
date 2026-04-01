@@ -24,7 +24,7 @@ import (
 )
 
 var (
-	service_ syncmap.Map
+	service_ *syncmap.Map[string, *RpcServer]
 )
 
 type msginfo struct {
@@ -36,7 +36,7 @@ type msginfo struct {
 
 type RpcServer struct {
 	message.UnimplementedGrpcServer
-	nametoclientstream syncmap.Map
+	nametoclientstream *syncmap.Map[string, message.Grpc_MsgServer]
 	name               string
 	service            *grpc.Server
 	readchannel        chan *msginfo
@@ -268,12 +268,13 @@ func StartGrpcServer(name, ip string, port int, useTLS bool) {
 
 	s := grpc.NewServer(serverOptions...)
 	service := &RpcServer{
-		name:          name,
-		service:       s,
-		readchannel:   make(chan *msginfo, MAX_CHANNEL_SIZE),
-		handlechannel: make(chan *msginfo, MAX_CHANNEL_SIZE),
-		done:          make(chan struct{}),
-		callFunc:      &util.CallFunction{}, // 创建独立的 CallFunction 实例
+		name:               name,
+		service:            s,
+		readchannel:        make(chan *msginfo, MAX_CHANNEL_SIZE),
+		handlechannel:      make(chan *msginfo, MAX_CHANNEL_SIZE),
+		done:               make(chan struct{}),
+		callFunc:           &util.CallFunction{}, // 创建独立的 CallFunction 实例
+		nametoclientstream: syncmap.NewMap[string, message.Grpc_MsgServer](),
 	}
 
 	message.RegisterGrpcServer(service.service, service)

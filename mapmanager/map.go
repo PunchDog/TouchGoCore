@@ -13,10 +13,10 @@ import (
 )
 
 // 地图数据 id/map
-var _maplist *syncmap.Map
+var _maplist *syncmap.Map[uint32, *Map]
 
 func init() {
-	_maplist = new(syncmap.Map)
+	_maplist = syncmap.NewMap[uint32, *Map]()
 }
 
 // 地图坐标点类
@@ -36,7 +36,7 @@ type MapNode struct {
 // 地图类
 type Map struct {
 	//地图ID
-	MapId int `json:"mapid"`
+	MapId uint32 `json:"mapid"`
 	//地图坐标信息
 	Node [][]*MapNode `json:"node"`
 	// NPC列表

@@ -3,9 +3,10 @@ package lua
 import (
 	"fmt"
 	"reflect"
-	rt "github.com/arnodel/golua/runtime"
 	"touchgocore/syncmap"
 	"touchgocore/util"
+
+	rt "github.com/arnodel/golua/runtime"
 )
 
 // GoToLuaValue 将 Go 值转换为 arnodel/golua 的 rt.Value
@@ -40,7 +41,7 @@ func GoToLuaValue(val interface{}) rt.Value {
 			return rt.TableValue(v.ToTable())
 		}
 		return rt.NilValue
-	case *syncmap.Map:
+	case *syncmap.MapAny:
 		if v != nil {
 			tbl := &LuaTable{tbl: v}
 			return rt.TableValue(tbl.ToTable())

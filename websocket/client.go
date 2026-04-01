@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
-	"sync"
 	"sync/atomic"
 	"time"
 	"touchgocore/syncmap"
@@ -16,7 +15,7 @@ import (
 )
 
 var maxUID int64 = 0
-var clientMap syncmap.Map
+var clientMap *syncmap.Map[int64, *Client]
 
 // ============ 改进部分 ============
 
@@ -56,7 +55,7 @@ type Client struct {
 	iCallName  string
 	// 原子关闭标志，防止竞态条件
 	closed atomic.Bool
-	
+
 	// ============ 改进：添加统计字段 ============
 	stats struct {
 		connectTime      time.Time
@@ -81,7 +80,7 @@ func (c *Client) connectionDial(url string) error {
 			c.remoteAddr = url
 			c.closeCh = make(chan bool, 1)
 			c.msgChan = make(chan []byte, DEFAULT_WRITE_BUFFER_SIZE)
-			
+
 			// ============ 改进：初始化统计 ============
 			c.stats.connectTime = time.Now()
 			c.stats.lastActivity.Store(time.Now())
@@ -128,7 +127,7 @@ func (c *Client) handleLoop() {
 					c.Close("写消息失败")
 					return
 				}
-				
+
 				// ============ 改进：更新统计 ============
 				c.stats.messagesSent.Add(1)
 				c.stats.bytesSent.Add(int64(len(msg)))
@@ -153,7 +152,7 @@ func (c *Client) readLoop() {
 		if _, data, err := c.wsConnect.ReadMessage(); err == nil {
 			if c.Connected() {
 				msgQueue <- &msgQueueType{uid: c.UID, data: data}
-				
+
 				// ============ 改进：更新统计 ============
 				c.stats.messagesReceived.Add(1)
 				c.stats.bytesReceived.Add(int64(len(data)))
@@ -210,10 +209,9 @@ func (c *Client) Close(reason string) {
 
 		// 归还 ICall 到对象池
 		if clientpool != nil && c.ICall != nil {
-			v, ok := clientcall.Load(c.iCallName)
+			icallpool, ok := clientcall.Load(c.iCallName)
 			if ok {
 				// 使用指针避免复制sync.Pool
-				icallpool := v.(*sync.Pool)
 				icallpool.Put(c.ICall)
 			} else {
 				vars.Error("未找到类名对应的ICall接口实现: %s", c.iCallName)
@@ -227,7 +225,7 @@ func (c *Client) Close(reason string) {
 		}
 
 		vars.Info("%s 连接关闭，原因：%s", c.remoteAddr, reason)
-		
+
 		// ============ 改进：更新服务器统计 ============
 		UpdateConnectionStats(false)
 	}
@@ -316,7 +314,7 @@ func NewClient(connType interface{}, remoteAddr string, className string) (*Clie
 	client.closeCh = make(chan bool, 1)
 	client.msgChan = make(chan []byte, DEFAULT_WRITE_BUFFER_SIZE)
 	client.iCallName = className
-	
+
 	// ============ 改进：初始化统计 ============
 	client.stats.connectTime = time.Now()
 	client.stats.lastActivity.Store(time.Now())
@@ -344,9 +342,8 @@ func NewClient(connType interface{}, remoteAddr string, className string) (*Clie
 	client.remoteAddr = remoteAddr
 	//使用反射创建ICall接口
 	if className != "" {
-		if v, h := clientcall.Load(className); h {
+		if icallpool, h := clientcall.Load(className); h {
 			// 使用指针避免复制sync.Pool
-			icallpool := v.(*sync.Pool)
 			icall := icallpool.Get()
 			if icall == nil {
 				vars.Error("内存池获取失败: %s", className)
@@ -371,11 +368,11 @@ func NewClient(connType interface{}, remoteAddr string, className string) (*Clie
 	// vars.Info("%s 连接建立成功", client.remoteAddr)
 	go client.readLoop()
 	go client.handleLoop()
-	
+
 	// ============ 改进：更新服务器统计 ============
 	UpdateConnectionStats(true)
 	UpdateMessageStats()
-	
+
 	return client, nil
 }
 
@@ -390,7 +387,7 @@ func (c *Client) GetStats() ClientStats {
 	} else {
 		lastActivity = c.stats.connectTime
 	}
-	
+
 	return ClientStats{
 		ConnectTime:      c.stats.connectTime,
 		Uptime:           time.Since(c.stats.connectTime),

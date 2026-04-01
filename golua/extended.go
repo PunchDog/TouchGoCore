@@ -39,7 +39,7 @@ func (this *LuaTable) GetByPath(path string) (interface{}, bool) {
 // SetByPath 通过路径设置嵌套值
 func (this *LuaTable) SetByPath(path string, value interface{}) error {
 	if this.tbl == nil {
-		this.tbl = &syncmap.Map{}
+		this.tbl = syncmap.NewAny()
 	}
 
 	keys := parsePath(path)

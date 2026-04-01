@@ -2,6 +2,7 @@ package rpc
 
 import (
 	"touchgocore/config"
+	"touchgocore/syncmap"
 	"touchgocore/vars"
 
 	"google.golang.org/grpc"
@@ -17,6 +18,8 @@ func Run() {
 		vars.Info("RPC配置为空，跳过RPC服务启动")
 		return
 	}
+	rpcClient_ = syncmap.NewMap[string, *RpcClient]()
+	service_ = syncmap.NewMap[string, *RpcServer]()
 	cfg := config.Cfg_.RpcPort
 	serverCount := len(cfg.Server)
 	clientCount := len(cfg.Client)
@@ -57,8 +60,7 @@ func Run() {
 func Stop() {
 	// 停止所有RPC服务器
 	serverCount := 0
-	service_.Range(func(key, value any) bool {
-		v1 := value.(*RpcServer)
+	service_.Range(func(key string, v1 *RpcServer) bool {
 		v1.Stop()
 		serverCount++
 		return true
@@ -66,8 +68,7 @@ func Stop() {
 
 	// 关闭所有RPC客户端连接
 	clientCount := 0
-	rpcClient_.Range(func(key, value any) bool {
-		v1 := value.(*RpcClient)
+	rpcClient_.Range(func(key string, v1 *RpcClient) bool {
 		if connVal := v1.conn.Load(); connVal != nil {
 			if conn, ok := connVal.(*grpc.ClientConn); ok && conn != nil {
 				conn.Close()

@@ -70,19 +70,19 @@ type Npc struct {
 	lua.ILuaClassObject
 
 	// 基础属性
-	ID        int    `json:"id"`        // NPC唯一标识
+	ID        uint32 `json:"id"`        // NPC唯一标识
 	Name      string `json:"name"`      // NPC名称
 	Shape     string `json:"shape"`     // 外观资源ID
 	Direction int    `json:"direction"` // 朝向(0-7,代表8个方向)
 	AutoMove  bool   `json:"auto_move"` // 是否自动行走
 
 	// 位置与移动
-	MapID    int32      `json:"map_id"`     // 所属地图ID
+	MapID    uint32     `json:"map_id"`     // 所属地图ID
 	MapPoint [][2]int16 `json:"map_points"` // 巡逻路径点
 
 	// 交互数据
-	Shop   *syncmap.Map `json:"-"` // 商店数据 (shopId => []*ShopItem)
-	Dialog *syncmap.Map `json:"-"` // 对话数据 (dialogId => *DialogItem)
+	Shop   *syncmap.Map[int, []*ShopItem] `json:"-"` // 商店数据 (shopId => []*ShopItem)
+	Dialog *syncmap.Map[int, *DialogItem] `json:"-"` // 对话数据 (dialogId => *DialogItem)
 }
 
 // ============================================================================
@@ -93,13 +93,9 @@ type Npc struct {
 // @param id NPC唯一标识
 // @param lua Lua脚本实例
 func (n *Npc) Init(id int64, lua *lua.LuaScript) {
-	n.ID = int(id)
-	if n.Shop == nil {
-		n.Shop = &syncmap.Map{}
-	}
-	if n.Dialog == nil {
-		n.Dialog = &syncmap.Map{}
-	}
+	n.ID = uint32(id)
+	n.Shop = syncmap.NewMap[int, []*ShopItem]()
+	n.Dialog = syncmap.NewMap[int, *DialogItem]()
 }
 
 // ============================================================================
@@ -135,13 +131,12 @@ func (n *Npc) SetAutoMove(autoMove bool) {
 
 // SetMapId 设置所属地图并注册NPC
 // @param mapId 地图ID
-func (n *Npc) SetMapId(mapId int32) {
+func (n *Npc) SetMapId(mapId uint32) {
 	n.MapID = mapId
-	m, ok := _maplist.Load(mapId)
+	maps, ok := _maplist.Load(mapId)
 	if !ok {
 		panic(fmt.Sprintf("[NPC] 配置在未知的地图上: mapId=%d, npcId=%d", mapId, n.ID))
 	}
-	maps := m.(*Map)
 	maps.Npc = append(maps.Npc, n)
 }
 
@@ -174,14 +169,10 @@ func (n *Npc) GetPathPoints() [][2]int16 {
 // @param maxBuyCnt  最大购买数量
 // @param refreshType 刷新类型(day/week/0)
 func (n *Npc) AddShop(shopId, itemId, costType, maxBuyCnt int, cost int64, refreshType string) {
-	if n.Shop == nil {
-		n.Shop = &syncmap.Map{}
-	}
-
 	// 获取或创建商店商品列表
 	var list []*ShopItem
 	if l, ok := n.Shop.Load(shopId); ok {
-		list = l.([]*ShopItem)
+		list = l
 	} else {
 		list = make([]*ShopItem, 0, 4)
 	}
@@ -203,7 +194,7 @@ func (n *Npc) AddShop(shopId, itemId, costType, maxBuyCnt int, cost int64, refre
 // @return 商品列表
 func (n *Npc) GetShop(shopId int) []*ShopItem {
 	if l, ok := n.Shop.Load(shopId); ok {
-		return l.([]*ShopItem)
+		return l
 	}
 	return nil
 }
@@ -214,7 +205,7 @@ func (n *Npc) HasShop() bool {
 		return false
 	}
 	count := 0
-	n.Shop.Range(func(key, value any) bool {
+	n.Shop.Range(func(key int, value []*ShopItem) bool {
 		count++
 		return false
 	})
@@ -231,10 +222,6 @@ func (n *Npc) HasShop() bool {
 // @param dialogType 对话类型
 // @param params   可选参数
 func (n *Npc) AddDialog(dialogId int, text, dialogType string, params ...any) {
-	if n.Dialog == nil {
-		n.Dialog = &syncmap.Map{}
-	}
-
 	item := &DialogItem{
 		ID:   dialogId,
 		Text: text,
@@ -267,7 +254,7 @@ func (n *Npc) GetDialog(dialogId int) (*DialogItem, bool) {
 	if !ok {
 		return nil, false
 	}
-	return item.(*DialogItem), true
+	return item, true
 }
 
 // GetDefaultDialog 获取默认对话项(对话ID最小的)
@@ -279,11 +266,10 @@ func (n *Npc) GetDefaultDialog() *DialogItem {
 	var defaultDialog *DialogItem
 	minId := int(^uint(0) >> 1) // 最大整数
 
-	n.Dialog.Range(func(key, value any) bool {
-		id := key.(int)
+	n.Dialog.Range(func(id int, value *DialogItem) bool {
 		if id < minId {
 			minId = id
-			defaultDialog = value.(*DialogItem)
+			defaultDialog = value
 		}
 		return true
 	})
@@ -297,8 +283,7 @@ func (n *Npc) GetDefaultDialog() *DialogItem {
 func (n *Npc) GetDialogsByType(dialogType string) []*DialogItem {
 	var result []*DialogItem
 
-	n.Dialog.Range(func(key, value any) bool {
-		item := value.(*DialogItem)
+	n.Dialog.Range(func(key int, item *DialogItem) bool {
 		if item.Type == dialogType {
 			result = append(result, item)
 		}
@@ -314,7 +299,7 @@ func (n *Npc) HasDialog() bool {
 		return false
 	}
 	count := 0
-	n.Dialog.Range(func(key, value any) bool {
+	n.Dialog.Range(func(key int, value *DialogItem) bool {
 		count++
 		return false
 	})

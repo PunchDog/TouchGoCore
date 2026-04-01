@@ -25,7 +25,7 @@ import (
 
 var (
 	// RpcClient rpc客户端
-	rpcClient_ syncmap.Map
+	rpcClient_ *syncmap.Map[string, *RpcClient]
 )
 
 // RpcClient rpc客户端

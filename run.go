@@ -17,6 +17,7 @@ import (
 	lua "touchgocore/golua"
 	"touchgocore/ini"
 	"touchgocore/localtimer"
+	"touchgocore/mapmanager"
 	"touchgocore/rpc"
 	"touchgocore/telegram"
 	"touchgocore/util"
@@ -87,7 +88,7 @@ func closeServer() {
 func signalProcHandler() {
 	//开阻塞
 	chSig := make(chan os.Signal, 1)
-	signal.Notify(chSig, syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT, syscall.SIGKILL)
+	signal.Notify(chSig, syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
 	sig := <-chSig
 	vars.Info("Signal: %v", sig)
 	closeServer()
@@ -114,9 +115,8 @@ func initLogger() {
 	vars.Run(path.Join(config.GetBasePath(), "/log"), config.ServerName_, config.Cfg_.LogLevel)
 
 	centerstr := "*         Service:[" + config.ServerName_ + "] Version:[" + util.Version + "]         *"
-	l := len(centerstr)
 	var showsr string
-	for i := 0; i < l; i++ {
+	for range len(centerstr) {
 		showsr = showsr + "*"
 	}
 	vars.Info("%s", showsr)
@@ -185,4 +185,7 @@ func startServices() {
 
 	//启动telegram
 	telegram.TelegramStart()
+
+	//启动地图
+	mapmanager.RunMap()
 }

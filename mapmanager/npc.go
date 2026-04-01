@@ -1,5 +1,3 @@
-//go:build lua54
-
 package mapmanager
 
 import (
@@ -50,12 +48,12 @@ type DialogOption struct {
 
 // 对话项 - NPC交互行为配置
 type DialogItem struct {
-	ID     int         `json:"id"`     // 对话ID
-	Text   string      `json:"text"`   // 对话文本
-	Type   string      `json:"type"`   // 对话类型
-	Param1 interface{} `json:"param1"` // 参数1(可选)
-	Param2 interface{} `json:"param2"` // 参数2(可选)
-	Param3 interface{} `json:"param3"` // 参数3(可选)
+	ID     int    `json:"id"`     // 对话ID
+	Text   string `json:"text"`   // 对话文本
+	Type   string `json:"type"`   // 对话类型
+	Param1 any    `json:"param1"` // 参数1(可选)
+	Param2 any    `json:"param2"` // 参数2(可选)
+	Param3 any    `json:"param3"` // 参数3(可选)
 }
 
 // 商品物品类
@@ -216,7 +214,7 @@ func (n *Npc) HasShop() bool {
 		return false
 	}
 	count := 0
-	n.Shop.Range(func(key, value interface{}) bool {
+	n.Shop.Range(func(key, value any) bool {
 		count++
 		return false
 	})
@@ -232,7 +230,7 @@ func (n *Npc) HasShop() bool {
 // @param text     对话文本
 // @param dialogType 对话类型
 // @param params   可选参数
-func (n *Npc) AddDialog(dialogId int, text, dialogType string, params ...interface{}) {
+func (n *Npc) AddDialog(dialogId int, text, dialogType string, params ...any) {
 	if n.Dialog == nil {
 		n.Dialog = &syncmap.Map{}
 	}
@@ -281,7 +279,7 @@ func (n *Npc) GetDefaultDialog() *DialogItem {
 	var defaultDialog *DialogItem
 	minId := int(^uint(0) >> 1) // 最大整数
 
-	n.Dialog.Range(func(key, value interface{}) bool {
+	n.Dialog.Range(func(key, value any) bool {
 		id := key.(int)
 		if id < minId {
 			minId = id
@@ -299,7 +297,7 @@ func (n *Npc) GetDefaultDialog() *DialogItem {
 func (n *Npc) GetDialogsByType(dialogType string) []*DialogItem {
 	var result []*DialogItem
 
-	n.Dialog.Range(func(key, value interface{}) bool {
+	n.Dialog.Range(func(key, value any) bool {
 		item := value.(*DialogItem)
 		if item.Type == dialogType {
 			result = append(result, item)
@@ -316,7 +314,7 @@ func (n *Npc) HasDialog() bool {
 		return false
 	}
 	count := 0
-	n.Dialog.Range(func(key, value interface{}) bool {
+	n.Dialog.Range(func(key, value any) bool {
 		count++
 		return false
 	})

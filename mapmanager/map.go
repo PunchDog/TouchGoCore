@@ -1,10 +1,8 @@
-//go:build lua54
-
 package mapmanager
 
 import (
 	"encoding/json"
-	"io/ioutil"
+	"os"
 	lua "touchgocore/golua"
 	"touchgocore/syncmap"
 
@@ -46,7 +44,7 @@ type Map struct {
 }
 
 func (this *Map) Load(path string) {
-	file, err := ioutil.ReadFile(path)
+	file, err := os.ReadFile(path)
 	if err != nil {
 		panic("读取启动配置出错:" + err.Error())
 	}
@@ -77,8 +75,4 @@ func RunMap() {
 	//创建lua NPC类
 	lua.RegisterLuaClass(&Npc{})
 	vars.Info("读取地图完成!")
-}
-
-func init() {
-	util.DefaultCallFunc.Register("RunMap", RunMap)
 }

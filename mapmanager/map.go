@@ -61,6 +61,7 @@ func (this *Map) Load(path string) {
 
 func RunMap() {
 	if config.Cfg_.MapPath == "off" || config.Cfg_.MapPath == "" {
+		vars.Info("不启动地图功能")
 		return
 	}
 

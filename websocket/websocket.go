@@ -98,6 +98,7 @@ func RegisterCall(className string, factoryFunc any) {
 
 func Run() {
 	if config.Cfg_.Ws == nil {
+		vars.Info("未启动websocket")
 		return
 	}
 

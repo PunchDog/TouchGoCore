@@ -145,6 +145,7 @@ func (t *telegramTimer) Tick() {
 // 机器人监听代码
 func TelegramStart() {
 	if config.Cfg_.Telegram == nil || config.Cfg_.Telegram.BotToken == "" {
+		vars.Info("不启动Telegram")
 		return
 	}
 

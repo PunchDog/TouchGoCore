@@ -177,9 +177,6 @@ func startServices() {
 	//启动lua脚本
 	lua.Run()
 
-	//启动gin
-	gin.Run()
-
 	// 启动gRPC服务
 	rpc.Run()
 
@@ -188,4 +185,7 @@ func startServices() {
 
 	//启动地图
 	mapmanager.RunMap()
+
+	//启动gin
+	gin.Run()
 }

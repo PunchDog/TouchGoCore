@@ -355,19 +355,3 @@ func (n *Npc) Validate() []string {
 func (n *Npc) String() string {
 	return fmt.Sprintf("Npc[id=%d, name=%s, shape=%s, map=%d]", n.ID, n.Name, n.Shape, n.MapID)
 }
-
-// ============================================================================
-// Lua导出的快捷方法
-// ============================================================================
-
-// New 工厂方法 - Lua调用
-func NewNpc(id int) *Npc {
-	npc := &Npc{
-		ID:     id,
-		Name:   fmt.Sprintf("NPC_%d", id),
-		Shape:  "default",
-		Shop:   &syncmap.Map{},
-		Dialog: &syncmap.Map{},
-	}
-	return npc
-}

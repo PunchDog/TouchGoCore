@@ -3,11 +3,11 @@ package util
 import (
 	"encoding/json"
 	"fmt"
-	"math/rand"
 	"reflect"
 	"strconv"
 	"strings"
 	"time"
+	"touchgocore/random"
 	"touchgocore/vars"
 )
 
@@ -15,10 +15,10 @@ import (
 func RandomStr(length int) string {
 	const charset = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
 	result := make([]byte, length)
-	r := rand.New(rand.NewSource(time.Now().UnixNano()))
 
+	idx := random.NextInt64() % int64(len(charset))
 	for i := range result {
-		result[i] = charset[r.Intn(len(charset))]
+		result[i] = charset[idx]
 	}
 	return string(result)
 }

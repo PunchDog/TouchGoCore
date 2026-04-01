@@ -9,18 +9,18 @@ import (
 )
 
 // 时间工具函数部分保持不变（已优化命名和错误处理）
-// CurrentMillisecond 返回当前毫秒时间戳
-func CurrentMillisecond() int64 {
+// CurrentMS 返回当前毫秒时间戳
+func CurrentMS() int64 {
 	return time.Now().UnixMilli()
 }
 
-// CurrentSecond 返回当前秒时间戳
-func CurrentSecond() int64 {
+// CurrentS 返回当前秒时间戳
+func CurrentS() int64 {
 	return time.Now().Unix()
 }
 
-// MillisecondToTimeString 毫秒转时间字符串
-func MillisecondToTimeString(ms int64) string {
+// MSToTimeString 毫秒转时间字符串
+func MSToTimeString(ms int64) string {
 	return time.UnixMilli(ms).Format("2006-01-02 15:04:05")
 }
 
@@ -40,9 +40,10 @@ func MillisecondToMidnight(ms int64) time.Time {
 	return TimeToMidnight(time.UnixMilli(ms))
 }
 
-// StringToUnixTime 字符串转时间戳
+// StringToUnixTime 字符串转时间戳时间格式一定是2006-01-02 15:04:05
 func StringToUnixTime(value string) (int64, error) {
-	re := regexp.MustCompile(`^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})$`)
+	//时间格式是2006-01-02 15:04:05或者2006/01/02 15:04:05
+	re := regexp.MustCompile(`^(\d{4})[-/](\d{2})[-/](\d{2}) (\d{2}):(\d{2}):(\d{2})$`)
 	matches := re.FindStringSubmatch(value)
 	if matches == nil || len(matches) != 7 {
 		return 0, errors.New("invalid time format, expected: 2006-01-02 15:04:05")
@@ -95,6 +96,12 @@ func IsSameDay(ms1, ms2 int64) bool {
 	t1 := time.UnixMilli(ms1)
 	t2 := time.UnixMilli(ms2)
 	return t1.Year() == t2.Year() && t1.Month() == t2.Month() && t1.Day() == t2.Day()
+}
+
+// 获取时间对应的周几
+func GetWeekDay(ms int64) int {
+	t := time.UnixMilli(ms)
+	return int(t.Weekday())
 }
 
 // FormatDuration 将持续时间格式化为人类可读的字符串

@@ -40,10 +40,10 @@ type userDataMeta struct {
 	reflectValue reflect.Value
 }
 
-// ClassRegistry 类注册信息（使用缓存的版本）
+// ClassRegistry 类注册信息
 type ClassRegistry struct {
 	Name        string
-	MethodCache *MethodCache
+	reflectType reflect.Type
 }
 
 // 全局类注册表，避免重复创建
@@ -91,7 +91,7 @@ func (mc *methodCallback) callBack(t *rt.Thread, c *rt.GoCont) (rt.Cont, error) 
 		return c.Next(), nil
 	}
 
-	// 获取类缓存
+	// 获取类注册信息
 	className, _ := util.GetClassName(data)
 	registryRaw, ok := classRegistryMap.Load(className)
 	if !ok {
@@ -100,8 +100,8 @@ func (mc *methodCallback) callBack(t *rt.Thread, c *rt.GoCont) (rt.Cont, error) 
 	}
 	registry := registryRaw.(*ClassRegistry)
 
-	// 从缓存获取方法
-	method, ok := registry.MethodCache.GetMethod(mc.methodName)
+	// 直接通过反射获取方法
+	method, ok := registry.reflectType.MethodByName(mc.methodName)
 	if !ok {
 		vars.Error("LUA回调%s: 方法不存在", mc.methodName)
 		return c.Next(), nil
@@ -156,20 +156,20 @@ func registerClass(class ILuaClassInterface, script *LuaScript) error {
 		return nil
 	}
 
-	// 创建或获取类缓存
+	// 创建或获取类注册信息
 	var registry *ClassRegistry
 	rawRegistry, loaded := classRegistryMap.Load(className)
 	if loaded {
 		registry = rawRegistry.(*ClassRegistry)
 	} else {
-		// 创建新缓存
-		methodCache := CreateMethodCache(class)
+		// 创建新的类注册信息
+		classType := reflect.TypeOf(class).Elem()
 		registry = &ClassRegistry{
 			Name:        className,
-			MethodCache: methodCache,
+			reflectType: classType,
 		}
 		classRegistryMap.Store(className, registry)
-		vars.Info("创建类缓存: %s, 方法数: %d", className, len(methodCache.Methods))
+		vars.Info("注册 Lua 类: %s", className)
 	}
 
 	// 创建类构造函数
@@ -240,8 +240,8 @@ func registerClass(class ILuaClassInterface, script *LuaScript) error {
 			return c.Next(), nil
 		}
 
-		// 从缓存获取方法
-		_, ok = registry.MethodCache.GetMethod(methodName)
+		// 直接通过反射检查方法是否存在
+		_, ok = registry.reflectType.MethodByName(methodName)
 		if !ok {
 			return c.Next(), nil
 		}
@@ -277,13 +277,18 @@ func registerClass(class ILuaClassInterface, script *LuaScript) error {
 	script.runtime.SetEnv(metaTable, "__tostring", rt.FunctionValue(tostringFunc))
 
 	// 注册所有方法到元表
-	for _, methodName := range registry.MethodCache.GetMethodNames() {
-		methodMeta := &methodCallback{methodName: methodName}
-		methodFunc := rt.NewGoFunction(methodMeta.callBack, methodName, 1, false)
-		script.runtime.SetEnv(metaTable, methodName, rt.FunctionValue(methodFunc))
+	methodCount := 0
+	for i := 0; i < registry.reflectType.NumMethod(); i++ {
+		method := registry.reflectType.Method(i)
+		if method.PkgPath == "" { // 只导出方法
+			methodMeta := &methodCallback{methodName: method.Name}
+			methodFunc := rt.NewGoFunction(methodMeta.callBack, method.Name, 1, false)
+			script.runtime.SetEnv(metaTable, method.Name, rt.FunctionValue(methodFunc))
+			methodCount++
+		}
 	}
 
-	vars.Info("成功注册 Lua 类: %s, 方法数: %d", className, len(registry.MethodCache.Methods))
+	vars.Info("成功注册 Lua 类: %s, 方法数: %d", className, methodCount)
 
 	return nil
 }

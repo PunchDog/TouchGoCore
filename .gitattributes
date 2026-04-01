@@ -1,0 +1,46 @@
+# =============================================================================
+# Git 行尾符配置 - TouchGoCore
+# =============================================================================
+# 确保跨平台统一使用 LF (Unix 风格) 行尾符
+
+# Go 源代码
+*.go text eol=lf
+
+# Lua 脚本
+*.lua text eol=lf
+
+# Shell 脚本
+*.sh text eol=lf
+
+# Makefile
+Makefile text eol=lf
+
+# JSON 配置文件
+*.json text eol=lf
+
+# Markdown 文档
+*.md text eol=lf
+
+# YAML 配置文件
+*.yml text eol=lf
+*.yaml text eol=lf
+
+# INI 配置文件
+*.ini text eol=lf
+
+# Proto 文件
+*.proto text eol=lf
+
+# BAT/CMD 脚本 (Windows 保留 CRLF)
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 图片/二进制文件不进行转换
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.so binary
+*.dll binary
+*.exe binary

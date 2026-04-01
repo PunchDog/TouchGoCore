@@ -49,6 +49,14 @@ func (m *Map[K, V]) Delete(k K) {
 	}
 }
 
+func (m *Map[K, V]) Clear() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.mp = make(map[K]V)
+	m.num.Store(0)
+}
+
 // ClearAll removes all entries from the map after invoking the callback for each.
 // The callback function 'fn' returns true to continue iteration, false to stop.
 // The callback is invoked while holding the write lock - no Store/Delete operations

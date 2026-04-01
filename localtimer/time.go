@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"touchgocore/list"
+	"touchgocore/syncmap"
 	"touchgocore/util"
 	"touchgocore/vars"
 )
@@ -83,15 +84,18 @@ type TimerInterface interface {
 
 // TimerPool 为定时器提供类型安全的对象池管理
 type TimerPool struct {
-	pool sync.Map // map[reflect.Type]*sync.Pool
+	pool *syncmap.Map[string, *sync.Pool] // map[reflect.Type]*sync.Pool
 }
 
 // Get 从池中获取定时器
 func (p *TimerPool) Get(cls TimerInterface) TimerInterface {
+	if p.pool == nil {
+		p.pool = syncmap.NewMap[string, *sync.Pool]()
+	}
 	tpname, _ := util.GetClassName(cls)
 	tp := reflect.TypeOf(cls).Elem()
 	if pool, ok := p.pool.Load(tpname); ok {
-		return pool.(*sync.Pool).Get().(TimerInterface)
+		return pool.Get().(TimerInterface)
 	}
 
 	newPool := &sync.Pool{
@@ -110,7 +114,7 @@ func (p *TimerPool) Put(cls TimerInterface) {
 	}
 	tpname, _ := util.GetClassName(cls)
 	if pool, ok := p.pool.Load(tpname); ok {
-		pool.(*sync.Pool).Put(cls)
+		pool.Put(cls)
 	}
 }
 
@@ -405,7 +409,7 @@ func (m *TimerManager) GetTimerCount() int64 {
 }
 
 var (
-	timerManagerMap     sync.Map // map[*TimerManager]bool
+	timerManagerMap     *syncmap.Map[*TimerManager, bool] // map[*TimerManager]bool
 	defaultTimerManager *TimerManager
 	timerChannel        chan TimerInterface
 	managerInitOnce     sync.Once
@@ -582,6 +586,7 @@ func (m *TimerManager) cleanupWheel(wheel *TimerWheel) {
 // Run 启动定时器系统
 func Run() {
 	vars.Info("启动计时器系统")
+	timerManagerMap = syncmap.NewMap[*TimerManager, bool]()
 	defaultTimerManager = NewTimerManager()
 	closech = make(chan any)
 	go TimeTick()
@@ -594,11 +599,9 @@ func TimeStop() {
 	close(closech)
 
 	// 关闭所有定时器管理器
-	timerManagerMap.Range(func(key, value interface{}) bool {
-		if mgr, ok := key.(*TimerManager); ok {
-			vars.Info("关闭定时器管理器，当前定时器数量: %d", mgr.GetTimerCount())
-			mgr.Close()
-		}
+	timerManagerMap.Range(func(mgr *TimerManager, value bool) bool {
+		vars.Info("关闭定时器管理器，当前定时器数量: %d", mgr.GetTimerCount())
+		mgr.Close()
 		// timerManagerMap.Delete(key)
 		return true
 	})

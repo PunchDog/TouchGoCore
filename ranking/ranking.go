@@ -7,6 +7,7 @@ import (
 	"os"
 	"sync"
 	"time"
+	"touchgocore/syncmap"
 )
 
 // 跳跃表最大层数
@@ -387,13 +388,14 @@ func (sl *SkipList) foreach(do func(int64, interface{})) {
 type RankTree struct {
 	Sl *SkipList
 	//EntryMapping map[int64]*RankInfo
-	EntryMapping sync.Map
+	EntryMapping *syncmap.Map[int64, *RankInfo]
 	// 读写锁，保护跳跃表的并发访问
 	rwMutex sync.RWMutex
 }
 
 func NewRankTree() *RankTree {
 	rt := new(RankTree)
+	rt.EntryMapping = syncmap.NewMap[int64, *RankInfo]()
 	rt.Sl = newSkipList()
 	//rt.EntryMapping = make(map[int64]*RankInfo)
 	return rt
@@ -406,8 +408,7 @@ func (rt *RankTree) AddRankInfo(uid int64, val int64, timestamp int64) {
 	defer rt.rwMutex.Unlock()
 
 	var info *RankInfo
-	if tempV, has := rt.EntryMapping.Load(uid); has {
-		info = tempV.(*RankInfo)
+	if info, has := rt.EntryMapping.Load(uid); has {
 		if info.Value == val {
 			return // 相同值，不需要更新
 		}
@@ -433,8 +434,7 @@ func (rt *RankTree) RemoveRankInfo(uid int64) bool {
 	rt.rwMutex.Lock()
 	defer rt.rwMutex.Unlock()
 
-	if tempV, has := rt.EntryMapping.Load(uid); has {
-		info := tempV.(*RankInfo)
+	if info, has := rt.EntryMapping.Load(uid); has {
 		rt.Sl.remove(info.Value, info)
 		rt.EntryMapping.Delete(uid)
 		return true
@@ -454,10 +454,8 @@ func (rt *RankTree) QueryRankInfo(uid int64) *RankInfo {
 	rt.rwMutex.RLock()
 	defer rt.rwMutex.RUnlock()
 
-	var info *RankInfo
-	if tempV, has := rt.EntryMapping.Load(uid); has {
-		info = tempV.(*RankInfo)
-	} else {
+	info, has := rt.EntryMapping.Load(uid)
+	if !has {
 		return nil
 	}
 	info.Rank = rt.Sl.rank(info.Value, info) + 1
@@ -616,8 +614,7 @@ func saveRankTrees(rts map[int64]*RankTree) []DbRankInfo {
 	infos := make([]DbRankInfo, 0)
 	RTSLock.RLock()
 	for Type, rt := range rts {
-		rt.EntryMapping.Range(func(key, tempV interface{}) bool {
-			entry := tempV.(*RankInfo)
+		rt.EntryMapping.Range(func(key int64, entry *RankInfo) bool {
 			info := DbRankInfo{
 				Type:      Type,
 				Id:        entry.ID,

@@ -3,7 +3,6 @@ package db
 import (
 	"fmt"
 	"strconv"
-	"sync"
 
 	"touchgocore/config"
 
@@ -18,7 +17,6 @@ type RedisConfigModel struct {
 
 type Redis struct {
 	redisClient *redis.Client
-	LockCnt     *sync.Map
 	config      *RedisConfigModel
 }
 
@@ -30,7 +28,6 @@ func NewRedis(config *config.RedisConfig) (*Redis, error) {
 }
 
 func (this *Redis) connect() error {
-	this.LockCnt = &sync.Map{}
 	str := this.config.Host + "-" + strconv.Itoa(this.config.Db) + "-" + this.config.Password
 	if this.connectOnly(str) {
 		// 如果同事还有其他协程创建连接成功了

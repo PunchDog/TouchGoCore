@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"sync"
 	"sync/atomic"
+	"touchgocore/syncmap"
 	"touchgocore/vars"
 )
 
@@ -46,10 +47,12 @@ const (
 	CallTelegramMsg  = "TelegramMsg"
 )
 
-var DefaultCallFunc = &CallFunction{}
+var DefaultCallFunc = &CallFunction{
+	fn: syncmap.NewAny(),
+}
 
 type CallFunction struct {
-	fn    sync.Map        // key -> 函数列表映射
+	fn    *syncmap.MapAny // key -> 函数列表映射
 	retCh []reflect.Value // 返回值收集
 	retMu sync.Mutex      // 返回值保护锁
 	bRet  atomic.Bool     // 是否收集返回值（使用原子操作）

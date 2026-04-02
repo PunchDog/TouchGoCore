@@ -1,6 +1,7 @@
 package lua
 
 import (
+	"context"
 	"fmt"
 	"reflect"
 	"touchgocore/syncmap"
@@ -9,10 +10,19 @@ import (
 	rt "github.com/arnodel/golua/runtime"
 )
 
-// GoToLuaValue 将 Go 值转换为 arnodel/golua 的 rt.Value
-// 支持类型：string, int/uint系列, bool, float32/64, *LuaTable, *syncmap.Map, 以及可转换为 table 的类型
-// 注意: 此函数不再依赖 CGO，使用纯 Go 实现的 arnodel/golua
+// GoToLuaValue 将 Go 值转换为 arnodel/golua 的 rt.Value（向后兼容）
 func GoToLuaValue(val interface{}) rt.Value {
+	return GoToLuaValueWithContext(context.Background(), val)
+}
+
+// GoToLuaValueWithContext 使用上下文将 Go 值转换为 arnodel/golua 的 rt.Value
+func GoToLuaValueWithContext(ctx context.Context, val interface{}) rt.Value {
+	select {
+	case <-ctx.Done():
+		return rt.NilValue
+	default:
+	}
+
 	if val == nil {
 		return rt.NilValue
 	}
@@ -21,15 +31,9 @@ func GoToLuaValue(val interface{}) rt.Value {
 	case string:
 		return rt.StringValue(v)
 	case int, int8, int16, int32, int64:
-		d := int64(0)
-		val1 := reflect.ValueOf(val).Convert(reflect.ValueOf(d).Type())
-		reflect.ValueOf(&d).Elem().Set(val1)
-		return rt.IntValue(d)
+		return rt.IntValue(reflect.ValueOf(val).Int())
 	case uint, uint8, uint16, uint32, uint64:
-		d := int64(0)
-		val1 := reflect.ValueOf(val).Convert(reflect.ValueOf(d).Type())
-		reflect.ValueOf(&d).Elem().Set(val1)
-		return rt.IntValue(d)
+		return rt.IntValue(int64(reflect.ValueOf(val).Uint()))
 	case bool:
 		return rt.BoolValue(v)
 	case float32:
@@ -48,31 +52,52 @@ func GoToLuaValue(val interface{}) rt.Value {
 		}
 		return rt.NilValue
 	default:
-		// 尝试将其他类型转换为 table，使用 defer recover 防止 panic
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					// 类型转换失败，忽略
-				}
-			}()
-			tbl := newTable(val)
-			if tbl.HaveData() {
-				return
-			}
-		}()
+		// 尝试将其他类型转换为 table
+		if tbl := convertToTable(ctx, val); tbl != nil && tbl.HaveData() {
+			return rt.TableValue(tbl.ToTable())
+		}
 		return rt.NilValue
 	}
 }
 
-// LuaToGoValue 将 arnodel/golua 的 rt.Value 转换为 Go 值
-// 支持类型：boolean, string, number, table, nil
-// table 可转换为 *LuaTable
+// convertToTable 尝试将任意类型转换为 LuaTable
+func convertToTable(ctx context.Context, val interface{}) *LuaTable {
+	if val == nil {
+		return nil
+	}
+
+	select {
+	case <-ctx.Done():
+		return nil
+	default:
+	}
+
+	defer func() {
+		if r := recover(); r != nil {
+			// 类型转换失败，忽略
+		}
+	}()
+
+	return newTable(val)
+}
+
+// LuaToGoValue 将 arnodel/golua 的 rt.Value 转换为 Go 值（向后兼容）
 func LuaToGoValue(v rt.Value) interface{} {
+	return LuaToGoValueWithContext(context.Background(), v)
+}
+
+// LuaToGoValueWithContext 使用上下文将 arnodel/golua 的 rt.Value 转换为 Go 值
+func LuaToGoValueWithContext(ctx context.Context, v rt.Value) interface{} {
+	select {
+	case <-ctx.Done():
+		return nil
+	default:
+	}
+
 	if v.IsNil() {
 		return nil
 	}
 
-	// 使用 Try 系列方法检查类型
 	if b, ok := v.TryBool(); ok {
 		return b
 	}
@@ -86,15 +111,25 @@ func LuaToGoValue(v rt.Value) interface{} {
 		return f
 	}
 	if t, ok := v.TryTable(); ok {
-		return tableFromRuntime(t)
+		return tableFromRuntime(ctx, t)
 	}
 
 	return nil
 }
 
-// LuaToReflectValue 将 Lua 值转换为指定 Go 类型的反射值
-// 用于函数参数的类型转换
+// LuaToReflectValue 将 Lua 值转换为指定 Go 类型的反射值（向后兼容）
 func LuaToReflectValue(v rt.Value, targetType reflect.Type) (reflect.Value, error) {
+	return LuaToReflectValueWithContext(context.Background(), v, targetType)
+}
+
+// LuaToReflectValueWithContext 使用上下文将 Lua 值转换为指定 Go 类型的反射值
+func LuaToReflectValueWithContext(ctx context.Context, v rt.Value, targetType reflect.Type) (reflect.Value, error) {
+	select {
+	case <-ctx.Done():
+		return reflect.Value{}, ctx.Err()
+	default:
+	}
+
 	if v.IsNil() {
 		return reflect.Zero(targetType), nil
 	}
@@ -104,27 +139,27 @@ func LuaToReflectValue(v rt.Value, targetType reflect.Type) (reflect.Value, erro
 		if b, ok := v.TryBool(); ok {
 			return reflect.ValueOf(b), nil
 		}
-		return reflect.Value{}, fmt.Errorf("类型转换错误: 无法将 Lua 值转换为 Go bool 类型")
+		return reflect.Value{}, fmt.Errorf("cannot convert Lua value to Go bool")
 
 	case reflect.String:
 		if s, ok := v.TryString(); ok {
 			return reflect.ValueOf(s), nil
 		}
-		return reflect.Value{}, fmt.Errorf("类型转换错误: 无法将 Lua 值转换为 Go string 类型")
+		return reflect.Value{}, fmt.Errorf("cannot convert Lua value to Go string")
 
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
 		if i, ok := v.TryInt(); ok {
 			converted := util.ConvertToKind(float64(i), targetType.Kind())
 			return reflect.ValueOf(converted).Convert(targetType), nil
 		}
-		return reflect.Value{}, fmt.Errorf("类型转换错误: 无法将 Lua 值转换为 Go %s 类型", targetType.Kind())
+		return reflect.Value{}, fmt.Errorf("cannot convert Lua value to Go %s", targetType.Kind())
 
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
 		if i, ok := v.TryInt(); ok {
 			converted := util.ConvertToKind(float64(i), targetType.Kind())
 			return reflect.ValueOf(converted).Convert(targetType), nil
 		}
-		return reflect.Value{}, fmt.Errorf("类型转换错误: 无法将 Lua 值转换为 Go %s 类型", targetType.Kind())
+		return reflect.Value{}, fmt.Errorf("cannot convert Lua value to Go %s", targetType.Kind())
 
 	case reflect.Float32, reflect.Float64:
 		var num float64
@@ -133,33 +168,20 @@ func LuaToReflectValue(v rt.Value, targetType reflect.Type) (reflect.Value, erro
 		} else if i, ok := v.TryInt(); ok {
 			num = float64(i)
 		} else {
-			return reflect.Value{}, fmt.Errorf("类型转换错误: 无法将 Lua 值转换为 Go %s 类型", targetType.Kind())
+			return reflect.Value{}, fmt.Errorf("cannot convert Lua value to Go %s", targetType.Kind())
 		}
 		return reflect.ValueOf(num).Convert(targetType), nil
 
 	case reflect.Interface:
-		// 返回 interface{} 类型
-		if b, ok := v.TryBool(); ok {
-			return reflect.ValueOf(b), nil
-		} else if s, ok := v.TryString(); ok {
-			return reflect.ValueOf(s), nil
-		} else if i, ok := v.TryInt(); ok {
-			return reflect.ValueOf(i), nil
-		} else if f, ok := v.TryFloat(); ok {
-			return reflect.ValueOf(f), nil
-		} else if t, ok := v.TryTable(); ok {
-			tbl := tableFromRuntime(t)
-			return reflect.ValueOf(tbl), nil
-		}
-		return reflect.ValueOf(nil), nil
+		return reflect.ValueOf(LuaToGoValueWithContext(ctx, v)), nil
 
 	default:
-		return reflect.Value{}, fmt.Errorf("类型转换错误: 不支持的 Go 类型 %s", targetType.Kind())
+		return reflect.Value{}, fmt.Errorf("unsupported Go type %s", targetType.Kind())
 	}
 }
 
 // tableFromRuntime 从 arnodel/golua 的 rt.Table 转换为 *LuaTable
-func tableFromRuntime(tbl *rt.Table) *LuaTable {
+func tableFromRuntime(ctx context.Context, tbl *rt.Table) *LuaTable {
 	if tbl == nil {
 		return nil
 	}
@@ -169,19 +191,25 @@ func tableFromRuntime(tbl *rt.Table) *LuaTable {
 	// 使用 Next 遍历 table
 	var k rt.Value = rt.NilValue
 	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		default:
+		}
+
 		key, val, ok := tbl.Next(k)
 		if !ok || key == rt.NilValue {
 			break
 		}
 
-		goKey := LuaToGoValue(key)
-		goValue := LuaToGoValue(val)
-
+		goKey := LuaToGoValueWithContext(ctx, key)
+		
 		// 检查值是否是嵌套 table
 		if t, ok := val.TryTable(); ok {
-			nestedTbl := tableFromRuntime(t)
+			nestedTbl := tableFromRuntime(ctx, t)
 			result.Set(goKey, nestedTbl)
 		} else {
+			goValue := LuaToGoValueWithContext(ctx, val)
 			result.Set(goKey, goValue)
 		}
 
@@ -189,15 +217,4 @@ func tableFromRuntime(tbl *rt.Table) *LuaTable {
 	}
 
 	return result
-}
-
-// PushValue 保持向后兼容的函数（已废弃，建议使用 GoToLuaValue）
-// 这个函数将在内部调用 GoToLuaValue
-// 注意: 新版本不再接受 *lua.State 参数，改为直接返回 rt.Value
-func PushValue(L interface{}, val interface{}) bool {
-	// 为了向后兼容，我们接受第一个参数但不使用
-	// 在完全迁移后，可以移除此函数或改为仅返回 rt.Value
-	_ = L
-	_ = GoToLuaValue(val)
-	return true
 }

@@ -2,26 +2,38 @@ package lua
 
 import (
 	"fmt"
+	"sync"
 	"touchgocore/syncmap"
 )
 
 // LuaTable 扩展方法 - 支持更多 key 类型
 
+// pathCacheEntry 路径解析缓存条目
+type pathCacheEntry struct {
+	keys  []interface{}
+	error error
+}
+
+var (
+	pathCache     sync.Map // map[string]*pathCacheEntry
+	cacheMaxSize = 1000   // 最大缓存条目数
+)
+
 // GetByPath 通过路径获取嵌套值
 // 示例: GetByPath("player.stats.health")
-func (this *LuaTable) GetByPath(path string) (interface{}, bool) {
-	if this.tbl == nil {
+func (lt *LuaTable) GetByPath(path string) (interface{}, bool) {
+	if lt.tbl == nil {
 		return nil, false
 	}
 
-	// 解析路径（支持点号分隔）
-	keys := parsePath(path)
-	if len(keys) == 0 {
+	// 从缓存获取解析结果
+	entry := getPathFromCache(path)
+	if entry.error != nil {
 		return nil, false
 	}
 
-	var current interface{} = this
-	for _, key := range keys {
+	var current interface{} = lt
+	for _, key := range entry.keys {
 		if tbl, exists := current.(*LuaTable); exists {
 			val, ok := tbl.Get(key)
 			if !ok {
@@ -37,20 +49,25 @@ func (this *LuaTable) GetByPath(path string) (interface{}, bool) {
 }
 
 // SetByPath 通过路径设置嵌套值
-func (this *LuaTable) SetByPath(path string, value interface{}) error {
-	if this.tbl == nil {
-		this.tbl = syncmap.NewAny()
+func (lt *LuaTable) SetByPath(path string, value interface{}) error {
+	if lt.tbl == nil {
+		lt.tbl = syncmap.NewAny()
 	}
 
-	keys := parsePath(path)
-	if len(keys) == 0 {
-		return fmt.Errorf("无效的路径")
+	// 从缓存获取解析结果
+	entry := getPathFromCache(path)
+	if entry.error != nil {
+		return entry.error
+	}
+
+	if len(entry.keys) == 0 {
+		return fmt.Errorf("invalid path")
 	}
 
 	// 遍历路径，创建嵌套结构
-	var current *LuaTable = this
-	for i, key := range keys {
-		isLast := i == len(keys)-1
+	var current *LuaTable = lt
+	for i, key := range entry.keys {
+		isLast := i == len(entry.keys)-1
 
 		if isLast {
 			// 最后一个 key，设置值
@@ -61,11 +78,9 @@ func (this *LuaTable) SetByPath(path string, value interface{}) error {
 			var next *LuaTable
 
 			if !exists {
-				// 创建新的嵌套 table
 				next = newTable(nil)
 				current.SetTableData(key, next)
 			} else {
-				// 已存在，检查是否是 LuaTable
 				next, isTable := val.(*LuaTable)
 				if !isTable {
 					// 不是 table，需要替换
@@ -79,6 +94,45 @@ func (this *LuaTable) SetByPath(path string, value interface{}) error {
 	}
 
 	return nil
+}
+
+// getPathFromCache 从缓存获取路径解析结果
+func getPathFromCache(path string) *pathCacheEntry {
+	if v, ok := pathCache.Load(path); ok {
+		return v.(*pathCacheEntry)
+	}
+
+	// 解析并缓存
+	keys := parsePath(path)
+	entry := &pathCacheEntry{keys: keys, error: nil}
+	pathCache.Store(path, entry)
+
+	// 简单的缓存清理策略（如果缓存过大）
+	if cleanupCache() {
+		// 清理后重新缓存
+		pathCache.Store(path, entry)
+	}
+
+	return entry
+}
+
+// cleanupCache 清理缓存（简化版LRU）
+func cleanupCache() bool {
+	count := 0
+	pathCache.Range(func(_, _ interface{}) bool {
+		count++
+		if count > cacheMaxSize {
+			return false // 停止遍历，需要清理
+		}
+		return true
+	})
+
+	if count > cacheMaxSize {
+		// 清理旧缓存（简化版：全部清空）
+		pathCache = sync.Map{}
+		return true
+	}
+	return false
 }
 
 // parsePath 解析路径字符串

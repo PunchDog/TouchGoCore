@@ -1,8 +1,10 @@
 package lua
 
 import (
+	"context"
 	"fmt"
 	"reflect"
+	"sync"
 	"touchgocore/syncmap"
 	"touchgocore/util"
 	"touchgocore/vars"
@@ -10,40 +12,34 @@ import (
 	rt "github.com/arnodel/golua/runtime"
 )
 
-// 注册类接口
+// ILuaClassInterface 注册类接口（保持向后兼容）
 type ILuaClassInterface interface {
 	Init(id int64, luascript *LuaScript)
 	Delete()
 	Update()
 }
 
-// 注册类接口基类
-type ILuaClassObject struct {
+// ILuaClassObject 注册类接口基类（保持向后兼容）
+type ILuaClassObject struct{}
+
+func (l *ILuaClassObject) Delete() {
 }
 
-func (this *ILuaClassObject) Delete() {
+func (l *ILuaClassObject) Update() {
 }
-
-func (this *ILuaClassObject) Update() {
-}
-
-// ////////////////////////////////////////////////////////////////////////////////////////////////////
-// ////////////////////////////////////////////////////////////////////////////////////////////////////
-// ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 // userDataMeta 元数据，用于关联 Go 对象和 Lua userdata
 type userDataMeta struct {
 	uid    int64
 	script *LuaScript
-	// 缓存反射信息，避免重复反射
-	reflectType  reflect.Type
-	reflectValue reflect.Value
 }
 
 // ClassRegistry 类注册信息
 type ClassRegistry struct {
 	Name        string
 	reflectType reflect.Type
+	methodCache map[string]reflect.Method
+	methodMutex sync.RWMutex
 }
 
 // 全局类注册表，避免重复创建
@@ -51,60 +47,92 @@ var (
 	classRegistryMap = syncmap.NewAny() // key: className, value: *ClassRegistry
 )
 
-// methodCallback 表示一个方法回调
+// getMethod 获取缓存的反射方法
+func (cr *ClassRegistry) getMethod(methodName string) (reflect.Method, bool) {
+	cr.methodMutex.RLock()
+	method, ok := cr.methodCache[methodName]
+	cr.methodMutex.RUnlock()
+	return method, ok
+}
+
+// buildMethodCache 构建方法缓存
+func (cr *ClassRegistry) buildMethodCache() {
+	cr.methodMutex.Lock()
+	defer cr.methodMutex.Unlock()
+
+	if cr.methodCache != nil {
+		return // 已经构建过
+	}
+
+	cr.methodCache = make(map[string]reflect.Method)
+	for i := 0; i < cr.reflectType.NumMethod(); i++ {
+		method := cr.reflectType.Method(i)
+		if method.PkgPath == "" { // 只导出方法
+			cr.methodCache[method.Name] = method
+		}
+	}
+}
+
+// methodCallback 方法回调闭包
 type methodCallback struct {
 	methodName string
+	ctx        context.Context
 }
 
 // callBack 处理 Lua 到 Go 的方法调用
 func (mc *methodCallback) callBack(t *rt.Thread, c *rt.GoCont) (rt.Cont, error) {
+	select {
+	case <-mc.ctx.Done():
+		return nil, fmt.Errorf("Lua script is closed")
+	default:
+	}
+
 	// 获取第一个参数（对象本身）
 	arg0 := c.Arg(0)
 
 	// 检查是否是 UserData
 	userData, ok := arg0.TryUserData()
 	if !ok {
-		vars.Error("LUA回调%s: 第一个参数不是 UserData", mc.methodName)
-		return nil, fmt.Errorf("无效的 userdata")
+		return nil, fmt.Errorf("invalid userdata: not a userdata type")
 	}
 	if userData == nil {
-		vars.Error("LUA回调%s: userdata为空", mc.methodName)
 		return c.Next(), nil
 	}
 
 	meta, ok := userData.Value().(*userDataMeta)
 	if !ok {
-		vars.Error("LUA回调%s: userdata 元数据类型错误", mc.methodName)
-		return c.Next(), nil
+		return nil, fmt.Errorf("invalid userdata metadata type")
 	}
 
 	// 从 syncmap 中获取实际对象
 	dataRaw, ok := meta.script.registeredObjects.Load(meta.uid)
 	if !ok {
-		vars.Error("LUA回调%s: 找不到uid=%d的对象", mc.methodName, meta.uid)
+		vars.Error("object not found: uid=%d", meta.uid)
 		return c.Next(), nil
 	}
 
 	data, ok := dataRaw.(ILuaClassInterface)
 	if !ok {
-		vars.Error("LUA回调%s: uid=%d的对象未实现ILuaClassInterface", mc.methodName, meta.uid)
+		vars.Error("object does not implement ILuaClassInterface: uid=%d", meta.uid)
 		return c.Next(), nil
 	}
 
 	// 获取类注册信息
-	className, _ := util.GetClassName(data)
+	className, err := util.GetClassName(data)
+	if err != nil {
+		return nil, fmt.Errorf("get class name failed: %w", err)
+	}
+
 	registryRaw, ok := classRegistryMap.Load(className)
 	if !ok {
-		vars.Error("LUA回调%s: 类 %s 未注册", mc.methodName, className)
-		return c.Next(), nil
+		return nil, fmt.Errorf("class '%s' not registered", className)
 	}
 	registry := registryRaw.(*ClassRegistry)
 
-	// 直接通过反射获取方法
-	method, ok := registry.reflectType.MethodByName(mc.methodName)
+	// 从缓存获取方法
+	method, ok := registry.getMethod(mc.methodName)
 	if !ok {
-		vars.Error("LUA回调%s: 方法不存在", mc.methodName)
-		return c.Next(), nil
+		return nil, fmt.Errorf("method '%s' not found in class '%s'", mc.methodName, className)
 	}
 
 	// 处理输入参数
@@ -116,10 +144,9 @@ func (mc *methodCallback) callBack(t *rt.Thread, c *rt.GoCont) (rt.Cont, error) 
 		luaIdx := i + 1
 		paramType := method.Type.In(i)
 		argVal := c.Arg(luaIdx)
-		argValue, err := LuaToReflectValue(argVal, paramType)
+		argValue, err := LuaToReflectValueWithContext(mc.ctx, argVal, paramType)
 		if err != nil {
-			vars.Error("LUA回调%s: 参数%d转换失败: %v", mc.methodName, i+1, err)
-			return nil, err
+			return nil, fmt.Errorf("parameter %d conversion failed: %w", i+1, err)
 		}
 		args = append(args, argValue)
 	}
@@ -131,11 +158,10 @@ func (mc *methodCallback) callBack(t *rt.Thread, c *rt.GoCont) (rt.Cont, error) 
 	next := c.Next()
 	for i, result := range resultValues {
 		if result.Kind() == reflect.Invalid {
-			vars.Error("LUA回调函数%s返回值%d无效", mc.methodName, i+1)
-			return nil, fmt.Errorf("无效的返回值")
+			return nil, fmt.Errorf("return value %d is invalid", i+1)
 		}
 
-		luaValue := GoToLuaValue(result.Interface())
+		luaValue := GoToLuaValueWithContext(mc.ctx, result.Interface())
 		t.Push1(next, luaValue)
 	}
 
@@ -143,16 +169,17 @@ func (mc *methodCallback) callBack(t *rt.Thread, c *rt.GoCont) (rt.Cont, error) 
 }
 
 // registerClass 注册一个 Go 类到 Lua 脚本
-func registerClass(class ILuaClassInterface, script *LuaScript) error {
-	script.nextObjectID++
-
-	// 获取类名和方法列表
-	className, _ := util.GetClassName(class)
+func registerClass(ctx context.Context, class ILuaClassInterface, script *LuaScript) error {
+	// 获取类名
+	className, err := util.GetClassName(class)
+	if err != nil {
+		return fmt.Errorf("get class name failed: %w", err)
+	}
 
 	// 检查是否已存在同名类（避免重复注册）
 	existing := script.env.Get(rt.StringValue(className))
 	if existing != rt.NilValue {
-		vars.Info("类 %s 已注册，跳过重复注册", className)
+		vars.Info("class '%s' already registered, skipping", className)
 		return nil
 	}
 
@@ -167,34 +194,33 @@ func registerClass(class ILuaClassInterface, script *LuaScript) error {
 		registry = &ClassRegistry{
 			Name:        className,
 			reflectType: classType,
+			methodCache: nil, // 延迟构建
 		}
 		classRegistryMap.Store(className, registry)
-		vars.Info("注册 Lua 类: %s", className)
+		registry.buildMethodCache() // 立即构建方法缓存
+		vars.Info("registered Lua class: %s with %d methods", className, len(registry.methodCache))
 	}
 
 	// 创建类构造函数
 	constructor := func(t *rt.Thread, c *rt.GoCont) (rt.Cont, error) {
-		// 创建新实例
 		classType := reflect.TypeOf(class).Elem()
 		cls := reflect.New(classType).Interface().(ILuaClassInterface)
 
-		// 初始化对象
-		cls.Init(script.nextObjectID, script)
+		// 初始化对象（调用旧版Init方法以保持兼容）
+		cls.Init(script.UID, script)
 
 		// 存储到 syncmap 中
-		script.registeredObjects.Store(script.nextObjectID, cls)
+		script.registeredObjects.Store(script.UID, cls)
 
 		// 创建元数据
 		meta := &userDataMeta{
-			uid:         script.nextObjectID,
-			script:      script,
-			reflectType: reflect.TypeOf(cls),
+			uid:    script.UID,
+			script: script,
 		}
 
-		// 创建 UserData（使用空元表，稍后设置）
+		// 创建 UserData
 		userData := rt.NewUserData(meta, nil)
 
-		// 返回 userdata
 		next := c.Next()
 		t.Push1(next, rt.UserDataValue(userData))
 		return next, nil
@@ -205,10 +231,7 @@ func registerClass(class ILuaClassInterface, script *LuaScript) error {
 		arg0 := c.Arg(0)
 
 		userData, ok := arg0.TryUserData()
-		if !ok {
-			return c.Next(), nil
-		}
-		if userData == nil {
+		if !ok || userData == nil {
 			return c.Next(), nil
 		}
 
@@ -220,9 +243,8 @@ func registerClass(class ILuaClassInterface, script *LuaScript) error {
 		// 从 syncmap 中获取并删除对象
 		if dataRaw, ok := meta.script.registeredObjects.Load(meta.uid); ok {
 			if data, ok := dataRaw.(ILuaClassInterface); ok {
-				// 调用对象的 Delete 方法
+				// 调用旧版Delete方法以保持兼容
 				data.Delete()
-				// 从 map 中删除
 				meta.script.registeredObjects.Delete(meta.uid)
 			}
 		}
@@ -232,22 +254,19 @@ func registerClass(class ILuaClassInterface, script *LuaScript) error {
 
 	// 创建 __index 元方法
 	indexMethod := func(t *rt.Thread, c *rt.GoCont) (rt.Cont, error) {
-		// 检查第二个参数是否是字符串（方法名）
 		arg1 := c.Arg(1)
-
 		methodName, ok := arg1.TryString()
 		if !ok {
 			return c.Next(), nil
 		}
 
-		// 直接通过反射检查方法是否存在
-		_, ok = registry.reflectType.MethodByName(methodName)
-		if !ok {
+		// 从缓存检查方法是否存在
+		if _, ok := registry.getMethod(methodName); !ok {
 			return c.Next(), nil
 		}
 
 		// 创建方法闭包
-		methodMeta := &methodCallback{methodName: methodName}
+		methodMeta := &methodCallback{methodName: methodName, ctx: ctx}
 		methodFunc := rt.NewGoFunction(methodMeta.callBack, methodName, 1, false)
 
 		next := c.Next()
@@ -268,7 +287,7 @@ func registerClass(class ILuaClassInterface, script *LuaScript) error {
 	// 注册 __index 元方法
 	script.runtime.SetEnv(metaTable, "__index", rt.FunctionValue(rt.NewGoFunction(indexMethod, "__index", 2, false)))
 
-	// 注册 __tostring 元方法（用于调试）
+	// 注册 __tostring 元方法
 	tostringFunc := rt.NewGoFunction(func(t *rt.Thread, c *rt.GoCont) (rt.Cont, error) {
 		next := c.Next()
 		t.Push1(next, rt.StringValue(fmt.Sprintf("%s userdata", className)))
@@ -276,19 +295,12 @@ func registerClass(class ILuaClassInterface, script *LuaScript) error {
 	}, "__tostring", 1, false)
 	script.runtime.SetEnv(metaTable, "__tostring", rt.FunctionValue(tostringFunc))
 
-	// 注册所有方法到元表
-	methodCount := 0
-	for i := 0; i < registry.reflectType.NumMethod(); i++ {
-		method := registry.reflectType.Method(i)
-		if method.PkgPath == "" { // 只导出方法
-			methodMeta := &methodCallback{methodName: method.Name}
-			methodFunc := rt.NewGoFunction(methodMeta.callBack, method.Name, 1, false)
-			script.runtime.SetEnv(metaTable, method.Name, rt.FunctionValue(methodFunc))
-			methodCount++
-		}
+	// 注册所有方法到元表（从缓存）
+	for methodName := range registry.methodCache {
+		methodMeta := &methodCallback{methodName: methodName, ctx: ctx}
+		methodFunc := rt.NewGoFunction(methodMeta.callBack, methodName, 1, false)
+		script.runtime.SetEnv(metaTable, methodName, rt.FunctionValue(methodFunc))
 	}
-
-	vars.Info("成功注册 Lua 类: %s, 方法数: %d", className, methodCount)
 
 	return nil
 }

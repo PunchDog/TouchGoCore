@@ -7,67 +7,38 @@ import (
 	"touchgocore/vars"
 )
 
-// Lua 内置函数：info
+// info Lua 内置函数：输出 info 日志
 func info(t *rt.Thread, c *rt.GoCont) (rt.Cont, error) {
-	err := c.CheckNArgs(1)
-	if err != nil {
-		return nil, err
-	}
-
 	msg, err := c.StringArg(0)
 	if err != nil {
 		return nil, err
 	}
-
 	vars.Info("%s", msg)
-
-	// 无返回值
 	return c.Next(), nil
 }
 
-// Lua 内置函数：debug
+// debug Lua 内置函数：输出 debug 日志
 func debug(t *rt.Thread, c *rt.GoCont) (rt.Cont, error) {
-	err := c.CheckNArgs(1)
-	if err != nil {
-		return nil, err
-	}
-
 	msg, err := c.StringArg(0)
 	if err != nil {
 		return nil, err
 	}
-
 	vars.Debug("%s", msg)
-
-	// 无返回值
 	return c.Next(), nil
 }
 
-// Lua 内置函数：error
+// error1 Lua 内置函数：输出 error 日志
 func error1(t *rt.Thread, c *rt.GoCont) (rt.Cont, error) {
-	err := c.CheckNArgs(1)
-	if err != nil {
-		return nil, err
-	}
-
 	msg, err := c.StringArg(0)
 	if err != nil {
 		return nil, err
 	}
-
 	vars.Error("%s", msg)
-
-	// 无返回值
 	return c.Next(), nil
 }
 
-// Lua 内置函数：dofile
+// dofile Lua 内置函数：加载并执行 Lua 文件
 func dofile(t *rt.Thread, c *rt.GoCont) (rt.Cont, error) {
-	err := c.CheckNArgs(1)
-	if err != nil {
-		return nil, err
-	}
-
 	filePath, err := c.StringArg(0)
 	if err != nil {
 		return nil, err
@@ -76,46 +47,41 @@ func dofile(t *rt.Thread, c *rt.GoCont) (rt.Cont, error) {
 	// 读取并编译文件
 	source, err := os.ReadFile(filePath)
 	if err != nil {
-		// 返回 (false, error message)
-		next := c.Next()
-		t.Push1(next, rt.BoolValue(false))
-		t.Push1(next, rt.StringValue(err.Error()))
-		return next, nil
+		return pushErrorResult(t, c, err)
 	}
 
 	chunk, err := t.CompileAndLoadLuaChunk(filePath, source, rt.TableValue(t.GlobalEnv()))
 	if err != nil {
-		// 返回 (false, error message)
-		next := c.Next()
-		t.Push1(next, rt.BoolValue(false))
-		t.Push1(next, rt.StringValue(err.Error()))
-		return next, nil
+		return pushErrorResult(t, c, err)
 	}
 
 	// 执行脚本
 	_, err = rt.Call1(t.MainThread(), rt.FunctionValue(chunk))
 	if err != nil {
-		// 返回 (false, error message)
-		next := c.Next()
-		t.Push1(next, rt.BoolValue(false))
-		t.Push1(next, rt.StringValue(err.Error()))
-		return next, nil
+		return pushErrorResult(t, c, err)
 	}
 
-	// 返回 (true, "ok")
+	return pushSuccessResult(t, c)
+}
+
+// pushErrorResult 推送错误结果到 Lua 栈
+func pushErrorResult(t *rt.Thread, c *rt.GoCont, err error) (rt.Cont, error) {
+	next := c.Next()
+	t.Push1(next, rt.BoolValue(false))
+	t.Push1(next, rt.StringValue(err.Error()))
+	return next, nil
+}
+
+// pushSuccessResult 推送成功结果到 Lua 栈
+func pushSuccessResult(t *rt.Thread, c *rt.GoCont) (rt.Cont, error) {
 	next := c.Next()
 	t.Push1(next, rt.BoolValue(true))
 	t.Push1(next, rt.StringValue("ok"))
 	return next, nil
 }
 
-// GetLuaFiles 获取指定路径下所有 Lua 文件
+// getpathluafile Lua 内置函数：获取指定路径下所有 Lua 文件
 func getpathluafile(t *rt.Thread, c *rt.GoCont) (rt.Cont, error) {
-	err := c.CheckNArgs(1)
-	if err != nil {
-		return nil, err
-	}
-
 	path, err := c.StringArg(0)
 	if err != nil {
 		return nil, err
@@ -129,7 +95,6 @@ func getpathluafile(t *rt.Thread, c *rt.GoCont) (rt.Cont, error) {
 		t.SetTable(tbl, rt.IntValue(int64(i+1)), rt.StringValue(file))
 	}
 
-	// 返回 table
 	next := c.Next()
 	t.Push1(next, rt.TableValue(tbl))
 	return next, nil

@@ -1,16 +1,22 @@
 package lua
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"sync"
 	"time"
 
 	rt "github.com/arnodel/golua/runtime"
+	"touchgocore/syncmap"
 	"touchgocore/vars"
 )
 
-// ScriptReloadCallback 热重载回调函数类型
-type ScriptReloadCallback func(script *LuaScript, success bool, err error)
+// ScriptReloadCallback 热重载回调函数类型（新版本）
+type ScriptReloadCallback func(ctx context.Context, script *LuaScript, success bool, err error)
+
+// ScriptReloadCallbackOld 热重载回调函数类型（旧版本，向后兼容）
+type ScriptReloadCallbackOld func(script *LuaScript, success bool, err error)
 
 // ScriptWatcher 监控 Lua 脚本文件变化
 type ScriptWatcher struct {
@@ -18,43 +24,69 @@ type ScriptWatcher struct {
 	script       *LuaScript
 	fileModTime  time.Time
 	running      bool
+	mu           sync.RWMutex
 	stopChan     chan struct{}
-	dependencies map[string]time.Time // 依赖文件路径 -> 修改时间
+	dependencies map[string]time.Time
 	callbacks    []ScriptReloadCallback
+	callbacksOld []ScriptReloadCallbackOld // 旧版本回调列表
+	ctx          context.Context
+	cancel       context.CancelFunc
 }
 
-// NewScriptWatcher 创建脚本监视器
+// NewScriptWatcher 创建脚本监视器（向后兼容）
 func NewScriptWatcher(script *LuaScript) *ScriptWatcher {
+	return NewScriptWatcherWithContext(context.Background(), script)
+}
+
+// NewScriptWatcherWithContext 使用上下文创建脚本监视器
+func NewScriptWatcherWithContext(ctx context.Context, script *LuaScript) *ScriptWatcher {
+	watcherCtx, cancel := context.WithCancel(ctx)
 	return &ScriptWatcher{
-		scriptPath:   script.initScriptPath,
-		script:       script,
-		stopChan:     make(chan struct{}),
-		dependencies: make(map[string]time.Time),
-		callbacks:    make([]ScriptReloadCallback, 0),
+		scriptPath:    script.initScriptPath,
+		script:        script,
+		stopChan:      make(chan struct{}),
+		dependencies:  make(map[string]time.Time),
+		callbacks:     make([]ScriptReloadCallback, 0),
+		callbacksOld: make([]ScriptReloadCallbackOld, 0),
+		ctx:           watcherCtx,
+		cancel:        cancel,
 	}
 }
 
 // AddDependency 添加依赖文件
 func (sw *ScriptWatcher) AddDependency(depPath string) {
+	sw.mu.Lock()
+	defer sw.mu.Unlock()
+	
 	sw.dependencies[depPath] = time.Time{}
-	// 初始化依赖文件的修改时间
 	if info, err := os.Stat(depPath); err == nil {
 		sw.dependencies[depPath] = info.ModTime()
 	}
 }
 
-// AddCallback 添加热重载回调
-func (sw *ScriptWatcher) AddCallback(callback ScriptReloadCallback) {
+// AddCallback 添加热重载回调（旧版本）
+func (sw *ScriptWatcher) AddCallback(callback ScriptReloadCallbackOld) {
+	sw.mu.Lock()
+	defer sw.mu.Unlock()
+	sw.callbacksOld = append(sw.callbacksOld, callback)
+}
+
+// AddCallbackWithContext 添加热重载回调（新版本）
+func (sw *ScriptWatcher) AddCallbackWithContext(callback ScriptReloadCallback) {
+	sw.mu.Lock()
+	defer sw.mu.Unlock()
 	sw.callbacks = append(sw.callbacks, callback)
 }
 
 // Start 开始监控脚本变化
 func (sw *ScriptWatcher) Start() {
+	sw.mu.Lock()
 	if sw.running {
+		sw.mu.Unlock()
 		return
 	}
-
 	sw.running = true
+	sw.mu.Unlock()
 
 	// 初始化修改时间
 	if info, err := os.Stat(sw.scriptPath); err == nil {
@@ -62,29 +94,40 @@ func (sw *ScriptWatcher) Start() {
 	}
 
 	// 初始化依赖文件的修改时间
+	sw.mu.Lock()
 	for depPath := range sw.dependencies {
 		if info, err := os.Stat(depPath); err == nil {
 			sw.dependencies[depPath] = info.ModTime()
 		}
 	}
+	sw.mu.Unlock()
 
 	// 启动监控 goroutine
 	go sw.watch()
-	vars.Info("开始监控 Lua 脚本: %s", sw.scriptPath)
-	if len(sw.dependencies) > 0 {
-		vars.Info("监控 %d 个依赖文件", len(sw.dependencies))
+	vars.Info("started watching Lua script: %s", sw.scriptPath)
+	sw.mu.RLock()
+	depCount := len(sw.dependencies)
+	sw.mu.RUnlock()
+	if depCount > 0 {
+		vars.Info("watching %d dependency files", depCount)
 	}
 }
 
 // Stop 停止监控
 func (sw *ScriptWatcher) Stop() {
+	sw.mu.Lock()
 	if !sw.running {
+		sw.mu.Unlock()
 		return
 	}
-
 	sw.running = false
+	sw.mu.Unlock()
+
+	if sw.cancel != nil {
+		sw.cancel()
+	}
 	close(sw.stopChan)
-	vars.Info("停止监控 Lua 脚本")
+	vars.Info("stopped watching Lua script")
 }
 
 // watch 监控文件变化
@@ -99,6 +142,8 @@ func (sw *ScriptWatcher) watch() {
 				sw.reloadScript()
 			}
 		case <-sw.stopChan:
+			return
+		case <-sw.ctx.Done():
 			return
 		}
 	}
@@ -117,13 +162,13 @@ func (sw *ScriptWatcher) checkFileChange() bool {
 	}
 
 	// 检查依赖文件
+	sw.mu.RLock()
+	defer sw.mu.RUnlock()
 	for depPath, modTime := range sw.dependencies {
 		depInfo, err := os.Stat(depPath)
 		if err != nil {
-			// 依赖文件不存在，视为变化
-			return true
+			return true // 依赖文件不存在，视为变化
 		}
-
 		if depInfo.ModTime().After(modTime) {
 			return true
 		}
@@ -134,38 +179,52 @@ func (sw *ScriptWatcher) checkFileChange() bool {
 
 // reloadScript 重新加载脚本
 func (sw *ScriptWatcher) reloadScript() {
-	vars.Info("检测到 Lua 脚本修改，准备重新加载...")
+	vars.Info("detected Lua script modification, reloading...")
 
-	// 备份当前状态
+	sw.mu.Lock()
 	oldScript := sw.script
-	registeredObjectsCopy := oldScript.registeredObjects
+	sw.mu.Unlock()
 
-	// 停止旧脚本
+	// 深拷贝注册的对象
+	objectsCopy := copyRegisteredObjects(oldScript.registeredObjects)
+
+	// 停止旧脚本（但不删除对象）
 	oldScript.Close()
 
 	// 创建新脚本
-	newScript, err := NewLuaScript(sw.scriptPath)
+	newScript, err := NewLuaScriptWithContext(sw.ctx, sw.scriptPath)
 	if err != nil {
-		vars.Error("重新加载 Lua 脚本失败: %v", err)
+		vars.Error("reload Lua script failed: %v", err)
 		// 恢复旧脚本
+		sw.mu.Lock()
 		sw.script = oldScript
+		sw.mu.Unlock()
+		
+		oldScript.ctx = sw.ctx
 		oldScript.Init()
 
 		// 触发回调
-		for _, callback := range sw.callbacks {
+		sw.mu.RLock()
+		callbacks := sw.callbacks
+		callbacksOld := sw.callbacksOld
+		sw.mu.RUnlock()
+		
+		for _, callback := range callbacks {
+			callback(sw.ctx, oldScript, false, err)
+		}
+		for _, callback := range callbacksOld {
 			callback(oldScript, false, err)
 		}
 		return
 	}
 
-	// 恢复注册的对象
-	registeredObjectsCopy.Range(func(key, value interface{}) bool {
-		newScript.registeredObjects.Store(key, value)
-		return true
-	})
+	// 恢复注册的对象（深拷贝）
+	restoreRegisteredObjects(newScript, objectsCopy)
 
 	// 更新脚本引用
+	sw.mu.Lock()
 	sw.script = newScript
+	sw.mu.Unlock()
 
 	// 更新修改时间
 	if info, err := os.Stat(sw.scriptPath); err == nil {
@@ -173,28 +232,63 @@ func (sw *ScriptWatcher) reloadScript() {
 	}
 
 	// 更新依赖文件的修改时间
+	sw.mu.Lock()
 	for depPath := range sw.dependencies {
 		if info, err := os.Stat(depPath); err == nil {
 			sw.dependencies[depPath] = info.ModTime()
 		}
 	}
+	sw.mu.Unlock()
 
-	vars.Info("Lua 脚本重新加载成功")
+	vars.Info("Lua script reloaded successfully")
 
 	// 触发回调
-	for _, callback := range sw.callbacks {
+	sw.mu.RLock()
+	callbacks := sw.callbacks
+	callbacksOld := sw.callbacksOld
+	sw.mu.RUnlock()
+	
+	for _, callback := range callbacks {
+		callback(sw.ctx, newScript, true, nil)
+	}
+	for _, callback := range callbacksOld {
 		callback(newScript, true, nil)
 	}
 }
 
+// copyRegisteredObjects 深拷贝注册对象
+func copyRegisteredObjects(src *syncmap.MapAny) *syncmap.MapAny {
+	dst := syncmap.NewAny()
+	src.Range(func(key, value interface{}) bool {
+		dst.Store(key, value)
+		return true
+	})
+	return dst
+}
+
+// restoreRegisteredObjects 恢复注册对象
+func restoreRegisteredObjects(dst *LuaScript, src *syncmap.MapAny) {
+	src.Range(func(key, value interface{}) bool {
+		dst.registeredObjects.Store(key, value)
+		return true
+	})
+}
+
 // GetScript 获取当前脚本
 func (sw *ScriptWatcher) GetScript() *LuaScript {
+	sw.mu.RLock()
+	defer sw.mu.RUnlock()
 	return sw.script
 }
 
-// EnableHotReload 启用热重载功能
+// EnableHotReload 启用热重载功能（向后兼容）
 func EnableHotReload(script *LuaScript) *ScriptWatcher {
-	watcher := NewScriptWatcher(script)
+	return EnableHotReloadWithContext(context.Background(), script)
+}
+
+// EnableHotReloadWithContext 使用上下文启用热重载功能
+func EnableHotReloadWithContext(ctx context.Context, script *LuaScript) *ScriptWatcher {
+	watcher := NewScriptWatcherWithContext(ctx, script)
 	watcher.Start()
 	return watcher
 }
@@ -206,18 +300,26 @@ func DisableHotReload(watcher *ScriptWatcher) {
 	}
 }
 
-// ReloadScript 手动重新加载脚本
+// ReloadScript 手动重新加载脚本（向后兼容）
 func (ls *LuaScript) ReloadScript() error {
-	vars.Info("手动重新加载 Lua 脚本: %s", ls.initScriptPath)
+	return ls.ReloadScriptWithContext(context.Background())
+}
 
-	// 保存注册的对象
-	registeredObjectsCopy := ls.registeredObjects
+// ReloadScriptWithContext 使用上下文手动重新加载脚本
+func (ls *LuaScript) ReloadScriptWithContext(ctx context.Context) error {
+	vars.Info("manually reloading Lua script: %s", ls.initScriptPath)
+
+	// 深拷贝注册的对象
+	objectsCopy := copyRegisteredObjects(ls.registeredObjects)
 
 	// 关闭旧状态
 	ls.Close()
 
 	// 重新初始化
-	ls.Init()
+	ls.ctx = ctx
+	if err := ls.Init(); err != nil {
+		return err
+	}
 
 	// 重新注册函数
 	for funcName, function := range registeredFuncs {
@@ -226,35 +328,31 @@ func (ls *LuaScript) ReloadScript() error {
 
 	// 重新注册类
 	for class := range registeredClasses {
-		if err := registerClass(class, ls); err != nil {
-			vars.Error("注册 Lua 类失败: %v", err)
+		if err := registerClassWithContext(ctx, class, ls); err != nil {
+			vars.Error("register Lua class failed: %v", err)
 		}
 	}
 
 	// 读取并编译脚本文件
 	source, err := os.ReadFile(ls.initScriptPath)
 	if err != nil {
-		return fmt.Errorf("读取 Lua 脚本文件失败: %w", err)
+		return fmt.Errorf("read Lua script file failed: %w", err)
 	}
 
 	chunk, err := ls.runtime.CompileAndLoadLuaChunk("main", source, rt.TableValue(ls.env))
 	if err != nil {
-		return fmt.Errorf("编译 Lua 脚本失败: %w", err)
+		return fmt.Errorf("compile Lua script failed: %w", err)
 	}
 
 	// 执行主脚本
-	_, err = rt.Call1(ls.thread, rt.FunctionValue(chunk))
-	if err != nil {
-		return fmt.Errorf("执行 Lua 脚本失败: %w", err)
+	if _, err = rt.Call1(ls.thread, rt.FunctionValue(chunk)); err != nil {
+		return fmt.Errorf("execute Lua script failed: %w", err)
 	}
 
 	// 恢复注册的对象
-	registeredObjectsCopy.Range(func(key, value interface{}) bool {
-		ls.registeredObjects.Store(key, value)
-		return true
-	})
+	restoreRegisteredObjects(ls, objectsCopy)
 
-	vars.Info("Lua 脚本重新加载成功")
+	vars.Info("Lua script reloaded successfully")
 	return nil
 }
 
@@ -262,53 +360,86 @@ func (ls *LuaScript) ReloadScript() error {
 type MultiFileWatcher struct {
 	watchers map[string]*ScriptWatcher
 	running  bool
+	mu       sync.RWMutex
 	stopChan chan struct{}
+	ctx      context.Context
+	cancel   context.CancelFunc
 }
 
-// NewMultiFileWatcher 创建多文件监视器
+// NewMultiFileWatcher 创建多文件监视器（向后兼容）
 func NewMultiFileWatcher() *MultiFileWatcher {
+	return NewMultiFileWatcherWithContext(context.Background())
+}
+
+// NewMultiFileWatcherWithContext 使用上下文创建多文件监视器
+func NewMultiFileWatcherWithContext(ctx context.Context) *MultiFileWatcher {
+	watcherCtx, cancel := context.WithCancel(ctx)
 	return &MultiFileWatcher{
 		watchers: make(map[string]*ScriptWatcher),
 		stopChan: make(chan struct{}),
+		ctx:      watcherCtx,
+		cancel:   cancel,
 	}
 }
 
 // AddScript 添加要监控的脚本
 func (mfw *MultiFileWatcher) AddScript(script *LuaScript) {
+	mfw.mu.Lock()
+	defer mfw.mu.Unlock()
 	watcher := NewScriptWatcher(script)
+	watcher.ctx = mfw.ctx
+	watcher.cancel = mfw.cancel
 	mfw.watchers[script.initScriptPath] = watcher
 }
 
 // Start 开始监控
 func (mfw *MultiFileWatcher) Start() {
+	mfw.mu.Lock()
+	defer mfw.mu.Unlock()
+	
 	if mfw.running {
 		return
 	}
-
 	mfw.running = true
+
 	for _, watcher := range mfw.watchers {
 		watcher.Start()
 	}
-	vars.Info("开始监控 %d 个 Lua 脚本文件", len(mfw.watchers))
+	vars.Info("started watching %d Lua script files", len(mfw.watchers))
 }
 
 // Stop 停止监控
 func (mfw *MultiFileWatcher) Stop() {
+	mfw.mu.Lock()
+	defer mfw.mu.Unlock()
+	
 	if !mfw.running {
 		return
 	}
-
 	mfw.running = false
+
+	if mfw.cancel != nil {
+		mfw.cancel()
+	}
 	for _, watcher := range mfw.watchers {
 		watcher.Stop()
 	}
-	vars.Info("停止监控 Lua 脚本文件")
+	close(mfw.stopChan)
+	vars.Info("stopped watching Lua script files")
 }
 
-// ReloadAll 重新加载所有脚本
+// ReloadAll 重新加载所有脚本（向后兼容）
 func (mfw *MultiFileWatcher) ReloadAll() error {
+	return mfw.ReloadAllWithContext(context.Background())
+}
+
+// ReloadAllWithContext 使用上下文重新加载所有脚本
+func (mfw *MultiFileWatcher) ReloadAllWithContext(ctx context.Context) error {
+	mfw.mu.RLock()
+	defer mfw.mu.RUnlock()
+	
 	for _, watcher := range mfw.watchers {
-		if err := watcher.script.ReloadScript(); err != nil {
+		if err := watcher.script.ReloadScriptWithContext(ctx); err != nil {
 			return err
 		}
 	}
@@ -317,6 +448,9 @@ func (mfw *MultiFileWatcher) ReloadAll() error {
 
 // GetScriptByPath 根据路径获取脚本
 func (mfw *MultiFileWatcher) GetScriptByPath(path string) (*LuaScript, bool) {
+	mfw.mu.RLock()
+	defer mfw.mu.RUnlock()
+	
 	watcher, ok := mfw.watchers[path]
 	if !ok {
 		return nil, false

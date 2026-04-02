@@ -1,6 +1,7 @@
 package lua
 
 import (
+	"context"
 	"reflect"
 	"touchgocore/syncmap"
 
@@ -107,7 +108,7 @@ func isNestedStructure(v interface{}) bool {
 }
 
 // tableFromRuntimeV2 从 arnodel/golua 的 rt.Table 转换为 *LuaTable (内部版本)
-func tableFromRuntimeV2(tbl *rt.Table) *LuaTable {
+func tableFromRuntimeV2(ctx context.Context, tbl *rt.Table) *LuaTable {
 	if tbl == nil {
 		return nil
 	}
@@ -122,12 +123,12 @@ func tableFromRuntimeV2(tbl *rt.Table) *LuaTable {
 			break
 		}
 
-		goKey := LuaToGoValue(key)
-		goValue := LuaToGoValue(val)
+		goKey := LuaToGoValueWithContext(ctx, key)
+		goValue := LuaToGoValueWithContext(ctx, val)
 
 		// 检查值是否是嵌套 table
 		if t, ok := val.TryTable(); ok {
-			nestedTbl := tableFromRuntimeV2(t)
+			nestedTbl := tableFromRuntimeV2(ctx, t)
 			result.Set(goKey, nestedTbl)
 		} else {
 			result.Set(goKey, goValue)
@@ -180,22 +181,27 @@ func (this *LuaTable) SetTableData(key, val interface{}) {
 }
 
 // ToTable 转换为 arnodel/golua 的 rt.Table
-func (this *LuaTable) ToTable() *rt.Table {
-	if this.tbl == nil {
+func (lt *LuaTable) ToTable() *rt.Table {
+	return lt.ToTableWithContext(context.Background())
+}
+
+// ToTableWithContext 使用上下文转换为 arnodel/golua 的 rt.Table
+func (lt *LuaTable) ToTableWithContext(ctx context.Context) *rt.Table {
+	if lt.tbl == nil {
 		return rt.NewTable()
 	}
 
 	tbl := rt.NewTable()
-	this.tbl.Range(func(key, value interface{}) bool {
-		luaKey := GoToLuaValue(key)
+	lt.tbl.Range(func(key, value interface{}) bool {
+		luaKey := GoToLuaValueWithContext(ctx, key)
 
 		// 检查值是否是嵌套 LuaTable
 		if nestedTbl, ok := value.(*LuaTable); ok && nestedTbl != nil {
-			nestedTable := nestedTbl.ToTable()
+			nestedTable := nestedTbl.ToTableWithContext(ctx)
 			luaValue := rt.TableValue(nestedTable)
 			tbl.Set(luaKey, luaValue)
 		} else {
-			luaValue := GoToLuaValue(value)
+			luaValue := GoToLuaValueWithContext(ctx, value)
 			tbl.Set(luaKey, luaValue)
 		}
 

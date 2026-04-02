@@ -93,7 +93,7 @@ type Npc struct {
 // Init 创建NPC实例
 // @param id NPC唯一标识
 // @param lua Lua脚本实例
-func (n *Npc) Init(id int64, lua *lua.LuaScript) {
+func (n *Npc) Init(id int64, luascript *lua.LuaScript) {
 	n.ID = uint32(id)
 	n.Shop = syncmap.NewMap[int, []*ShopItem]()
 	n.Dialog = syncmap.NewMap[int, *DialogItem]()

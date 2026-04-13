@@ -41,12 +41,12 @@ type luaTimer struct {
 // Tick 执行定时更新
 func (lt *luaTimer) Tick() {
 	tick := lt.tick.Add(1)
-	
+
 	// 定期触发垃圾回收
 	if tick%GCTickCount == 0 {
 		runtime.GC()
 	}
-	
+
 	// 使用工作池并发更新对象
 	lt.updateObjectsConcurrently(lt.ctx)
 }
@@ -56,32 +56,32 @@ func (lt *luaTimer) updateObjectsConcurrently(ctx context.Context) {
 	var workerCount int
 	maxWorkers := runtime.NumCPU()
 	sem := make(chan struct{}, maxWorkers)
-	
+
 	lt.luaScript.registeredObjects.Range(func(key, value interface{}) bool {
 		select {
 		case <-ctx.Done():
 			return false
 		default:
 		}
-		
+
 		obj, ok := value.(ILuaClassInterface)
 		if !ok {
 			return true
 		}
-		
+
 		workerCount++
 		sem <- struct{}{}
-		
+
 		go func(k interface{}, o ILuaClassInterface) {
 			defer func() { <-sem }()
-			
+
 			// 调用旧版Update方法以保持兼容
 			o.Update()
 		}(key, obj)
-		
+
 		return true
 	})
-	
+
 	// 等待所有worker完成
 	for i := 0; i < workerCount; i++ {
 		<-sem
@@ -130,7 +130,7 @@ func (ls *LuaScript) Close() {
 	if ls.cancel != nil {
 		ls.cancel()
 	}
-	
+
 	if ls.runtime != nil {
 		if ls.timer != nil {
 			ls.timer.Remove()
@@ -288,12 +288,12 @@ func RegisterLuaClass(class ILuaClassInterface) error {
 	if class == nil {
 		return fmt.Errorf("cannot register nil class")
 	}
-	
+
 	className, err := util.GetClassName(class)
 	if err != nil {
 		return fmt.Errorf("get class name failed: %w", err)
 	}
-	
+
 	if registeredClasses == nil {
 		registeredClasses = make(map[ILuaClassInterface]bool)
 	}
@@ -334,7 +334,7 @@ func StopLua() {
 func registerDefaultFunctions(ls *LuaScript) error {
 	ls.runtime.SetEnvGoFunc(ls.env, "info", info, 1, false)
 	ls.runtime.SetEnvGoFunc(ls.env, "debug", debug, 1, false)
-	ls.runtime.SetEnvGoFunc(ls.env, "error1", error1, 1, false)
+	ls.runtime.SetEnvGoFunc(ls.env, "error", error1, 1, false)
 	ls.runtime.SetEnvGoFunc(ls.env, "dofile", dofile, 1, false)
 	ls.runtime.SetEnvGoFunc(ls.env, "getpathluafile", getpathluafile, 1, false)
 	return nil

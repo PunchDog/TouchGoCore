@@ -181,6 +181,7 @@ func NewApp(serverName string) (*App, error) {
 	// 注册服务（按依赖顺序）
 	app.registerServices()
 
+	globalApp = app
 	return app, nil
 }
 
@@ -381,8 +382,4 @@ var globalApp *App
 
 func GetApp() *App {
 	return globalApp
-}
-
-func SetApp(app *App) {
-	globalApp = app
 }

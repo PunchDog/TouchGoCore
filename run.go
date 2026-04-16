@@ -41,9 +41,6 @@ func Run(serverName string) {
 		os.Exit(1)
 	}
 
-	// 保存全局单例（向后兼容）
-	SetApp(app)
-
 	// 启动所有服务
 	if err := app.Start(); err != nil {
 		vars.Error("启动失败: %v", err)

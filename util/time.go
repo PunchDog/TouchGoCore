@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// 当前使用的时钟
+// 当前使用的时钟,主要用于如果测试修改系统时间的时候，不用真调系统时间，只需要改这里的时间偏移就能达到改系统时间的伪效果
 func CurrentTime() time.Time {
 	return time.Now()
 }

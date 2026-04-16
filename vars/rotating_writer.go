@@ -7,6 +7,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -244,14 +245,10 @@ func (w *RotatingFileWriter) cleanupOldBackups() {
 		})
 	}
 
-	// 按修改时间降序排序（最新的在前）
-	for i := 0; i < len(files)-1; i++ {
-		for j := i + 1; j < len(files); j++ {
-			if files[i].modTime.Before(files[j].modTime) {
-				files[i], files[j] = files[j], files[i]
-			}
-		}
-	}
+	// 按修改时间降序排序（最新的在前），使用标准库排序
+	sort.Slice(files, func(i, j int) bool {
+		return files[i].modTime.After(files[j].modTime)
+	})
 
 	// 删除超过maxBackups的文件
 	if len(files) > w.maxBackups {

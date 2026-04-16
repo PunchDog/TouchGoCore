@@ -9,6 +9,7 @@ import (
 	"unicode"
 
 	"touchgocore/go-swd/algorithm"
+	"touchgocore/go-swd/common"
 	"touchgocore/go-swd/config"
 	"touchgocore/go-swd/core"
 	"touchgocore/go-swd/detector/preprocessor"
@@ -32,8 +33,8 @@ type detector struct {
 	wordCount        int                          // 词库规模
 	avgWordLength    float64                      // 平均词长，用于预分配
 
-	// Rune 缓存：减少重复的 []rune(text) 转换
-	runeCache sync.Map // map[string][]rune
+	// Rune 缓存：减少重复的 []rune(text) 转换（使用 LRU 缓存替代 sync.Map，防止内存泄漏）
+	runeCache *common.LRUCache[string, []rune]
 
 	// 词库快照缓存：用于读操作，提升并发性能（读写分离）
 	wordsCache atomic.Value // map[string]category.Category
@@ -105,6 +106,7 @@ func NewDetectorWithConfig(options *core.SWDOptions, cfg *config.MappingConfig) 
 		options:          options,
 		config:           cfg,
 		cacheUpdated:     atomic.Bool{},
+		runeCache:        common.NewLRUCache[string, []rune](1024), // LRU 缓存容量 1024
 	}
 
 	// 初始化词库缓存
@@ -249,21 +251,21 @@ func (d *detector) getSecondaryAlgorithm() (core.Algorithm, error) {
 	return d.secondary, nil
 }
 
-// getRunes 获取文本的 rune 切片，使用缓存优化
+// getRunes 获取文本的 rune 切片，使用 LRU 缓存优化（有容量限制，防止内存泄漏）
 func (d *detector) getRunes(text string) []rune {
 	// 短文本直接转换，避免缓存开销
 	if len(text) < textLengthThreshold {
 		return []rune(text)
 	}
 
-	// 尝试从缓存获取
-	if cached, ok := d.runeCache.Load(text); ok {
-		return cached.([]rune)
+	// 尝试从 LRU 缓存获取
+	if cached, ok := d.runeCache.Get(text); ok {
+		return cached
 	}
 
 	// 转换并缓存
 	runes := []rune(text)
-	d.runeCache.Store(text, runes)
+	d.runeCache.Put(text, runes)
 	return runes
 }
 

@@ -105,15 +105,14 @@ func (this *defaultCall) OnClose(client *Client) {
 }
 
 func RegisterCall(className string, factoryFunc any) {
+	// 优化：在注册时一次性解析类型，避免 Pool.New 每次调用 reflect.TypeOf
+	typ := reflect.TypeOf(factoryFunc)
+	if typ.Kind() == reflect.Ptr {
+		typ = typ.Elem()
+	}
 	clientcall.Store(className, &sync.Pool{
 		New: func() any {
-			// 使用反射创建新的ICall实例
-			typ := reflect.TypeOf(factoryFunc)
-			if typ.Kind() == reflect.Ptr {
-				typ = typ.Elem()
-			}
-			newCall := reflect.New(typ).Interface()
-			return newCall
+			return reflect.New(typ).Interface()
 		},
 	})
 }

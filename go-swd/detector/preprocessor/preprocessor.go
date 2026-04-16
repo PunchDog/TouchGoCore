@@ -2,6 +2,7 @@ package preprocessor
 
 import (
 	"regexp"
+	"sync"
 	"unicode"
 
 	"touchgocore/go-swd/common"
@@ -11,6 +12,20 @@ import (
 	"touchgocore/go-swd/types/pinyin"
 	"touchgocore/go-swd/types/similar"
 )
+
+// 预编译正则表达式（包级别，只编译一次）
+var (
+	pinyinRegex     *regexp.Regexp
+	pinyinRegexOnce sync.Once
+)
+
+// getPinyinRegex 获取预编译的拼音正则表达式
+func getPinyinRegex() *regexp.Regexp {
+	pinyinRegexOnce.Do(func() {
+		pinyinRegex = regexp.MustCompile(`[a-z]+`)
+	})
+	return pinyinRegex
+}
 
 // Preprocessor 文本预处理器
 type Preprocessor struct {
@@ -179,13 +194,13 @@ func (p *Preprocessor) DetectAndReplacePinyin(text string) []string {
 		return []string{text}
 	}
 
-	// 拼音正则表达式：匹配连续的小写英文字母
-	pinyinRegex := regexp.MustCompile(`[a-z]+`)
+	// 拼音正则表达式：匹配连续的小写英文字母（使用预编译正则）
+	re := getPinyinRegex()
 
 	results := make([]string, 0, 1)
 	results = append(results, text)
 
-	matches := pinyinRegex.FindAllStringIndex(text, -1)
+	matches := re.FindAllStringIndex(text, -1)
 
 	// 处理所有拼音匹配
 	for _, match := range matches {

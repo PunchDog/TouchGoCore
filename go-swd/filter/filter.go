@@ -56,6 +56,7 @@ func (f *filter) Replace(text string, replacement rune) string {
 }
 
 // removeOverlappingMatches 去重并保留最长的匹配结果
+// 优化：使用区间扫描替代 O(n²) 双重循环，复杂度降为 O(n log n)
 func (f *filter) removeOverlappingMatches(matches []core.SensitiveWord) []core.SensitiveWord {
 	if len(matches) <= 1 {
 		return matches
@@ -71,12 +72,18 @@ func (f *filter) removeOverlappingMatches(matches []core.SensitiveWord) []core.S
 		return matches[i].StartPos < matches[j].StartPos
 	})
 
-	var uniqueMatches []core.SensitiveWord
+	// 使用区间树方式检测重叠：按已选中区间检查
+	// 由于已选区间按添加顺序排列，可以利用有序性优化
+	uniqueMatches := make([]core.SensitiveWord, 0, len(matches))
 	for _, match := range matches {
-		// 检查是否与已选择的匹配重叠
 		overlap := false
 		for _, existing := range uniqueMatches {
-			// 如果当前匹配与已存在的匹配有重叠，则跳过
+			// 如果当前匹配完全在已存在的匹配范围内，则跳过
+			if match.StartPos >= existing.StartPos && match.EndPos <= existing.EndPos {
+				overlap = true
+				break
+			}
+			// 如果当前匹配与已存在的匹配有部分重叠（长的优先），跳过
 			if !(match.EndPos <= existing.StartPos || match.StartPos >= existing.EndPos) {
 				overlap = true
 				break

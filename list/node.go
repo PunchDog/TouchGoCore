@@ -142,7 +142,7 @@ func (n *Node) Remove() {
 	}
 
 	// 如果是链表遍历期间，需要删除的节点先缓存下来，等遍历结束后再删除
-	if list.dellock {
+	if list.rangeCount.Load() > 0 {
 		list.rangeDelList = append(list.rangeDelList, n)
 		return
 	}

@@ -518,14 +518,13 @@ func Shutdown() error {
 
 // Debug 调试级别日志（异步写入，不阻塞业务逻辑）
 func Debug(msg string, args ...any) {
-	formattedMsg := msg
-	if len(args) > 0 {
-		formattedMsg = fmt.Sprintf(msg, args...)
-	}
-
 	// 优先使用异步Channel日志
 	if chLogger := GetChannelLogger(); chLogger != nil && chLogger.IsEnabled() {
-		chLogger.LogAsyncSimple(slog.LevelDebug, formattedMsg)
+		if len(args) > 0 {
+			chLogger.LogAsyncSimple(slog.LevelDebug, fmt.Sprintf(msg, args...))
+		} else {
+			chLogger.LogAsyncSimple(slog.LevelDebug, msg)
+		}
 		return
 	}
 
@@ -535,14 +534,13 @@ func Debug(msg string, args ...any) {
 
 // Info 信息级别日志（异步写入，不阻塞业务逻辑）
 func Info(msg string, args ...any) {
-	formattedMsg := msg
-	if len(args) > 0 {
-		formattedMsg = fmt.Sprintf(msg, args...)
-	}
-
 	// 优先使用异步Channel日志
 	if chLogger := GetChannelLogger(); chLogger != nil && chLogger.IsEnabled() {
-		chLogger.LogAsyncSimple(slog.LevelInfo, formattedMsg)
+		if len(args) > 0 {
+			chLogger.LogAsyncSimple(slog.LevelInfo, fmt.Sprintf(msg, args...))
+		} else {
+			chLogger.LogAsyncSimple(slog.LevelInfo, msg)
+		}
 		return
 	}
 
@@ -552,14 +550,13 @@ func Info(msg string, args ...any) {
 
 // Warn 警告级别日志（异步写入，不阻塞业务逻辑）
 func Warning(msg string, args ...any) {
-	formattedMsg := msg
-	if len(args) > 0 {
-		formattedMsg = fmt.Sprintf(msg, args...)
-	}
-
 	// 优先使用异步Channel日志
 	if chLogger := GetChannelLogger(); chLogger != nil && chLogger.IsEnabled() {
-		chLogger.LogAsyncSimple(slog.LevelWarn, formattedMsg)
+		if len(args) > 0 {
+			chLogger.LogAsyncSimple(slog.LevelWarn, fmt.Sprintf(msg, args...))
+		} else {
+			chLogger.LogAsyncSimple(slog.LevelWarn, msg)
+		}
 		return
 	}
 
@@ -569,14 +566,13 @@ func Warning(msg string, args ...any) {
 
 // Error 错误级别日志（异步写入，不阻塞业务逻辑）
 func Error(msg string, args ...any) {
-	formattedMsg := msg
-	if len(args) > 0 {
-		formattedMsg = fmt.Sprintf(msg, args...)
-	}
-
 	// 优先使用异步Channel日志
 	if chLogger := GetChannelLogger(); chLogger != nil && chLogger.IsEnabled() {
-		chLogger.LogAsyncSimple(slog.LevelError, formattedMsg)
+		if len(args) > 0 {
+			chLogger.LogAsyncSimple(slog.LevelError, fmt.Sprintf(msg, args...))
+		} else {
+			chLogger.LogAsyncSimple(slog.LevelError, msg)
+		}
 		return
 	}
 

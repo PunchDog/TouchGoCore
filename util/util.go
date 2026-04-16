@@ -4,14 +4,15 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"fmt"
-	"math/rand"
 	"net"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
+	"touchgocore/random"
 )
 
 type IPInfo struct {
@@ -30,26 +31,37 @@ type IPData struct {
 	Isp       string `json:"isp"`
 }
 
-// 随机64位
+// 全局线程安全随机数生成器（避免每次调用创建新实例）
+var (
+	globalRand     *random.Random
+	globalRandOnce sync.Once
+)
+
+// initGlobalRand 初始化全局随机数生成器
+func initGlobalRand() {
+	globalRand = random.New(time.Now().UnixNano())
+}
+
+// 随机64位（优化：使用全局随机数生成器，避免每次创建 rand.Rand）
 func RandInt(max int64) int64 {
 	if max == 0 {
 		return 0
 	}
-	rr := rand.New(rand.NewSource(time.Now().UnixNano() * rand.Int63n(9999)))
-	return rr.Int63n(max)
+	globalRandOnce.Do(initGlobalRand)
+	return globalRand.NextInt64()
 }
 
-// 随机范围
+// 随机范围（优化：使用全局随机数生成器）
 func RandRange(max int64, min int64) (ret int64) {
-	random := rand.New(rand.NewSource(time.Now().UnixNano()))
+	globalRandOnce.Do(initGlobalRand)
 	if max-min == 0 {
 		ret = min
 	} else if max-min > 0 {
-		ret = int64(random.Intn(int(max-min)) + int(min))
+		ret = int64(globalRand.NextInt64()%(max-min) + int64(min))
 	} else {
 		// max-min < 0
 		min = min + 1
-		ret = int64(random.Intn(int(min-max)) + int(max))
+		ret = int64(globalRand.NextInt64()%(min-max) + int64(max))
 	}
 	return
 }
@@ -273,17 +285,46 @@ func (this NumberSortDesc[T]) Swap(i, j int) {
 	this[i], this[j] = this[j], this[i]
 }
 
+// getNumber 将字符串转换为数值类型（优化：使用类型断言替代反射，避免 reflect 开销）
 func getNumber[T any](v string) T {
 	var d T
-	switch any(d).(type) {
-	case uint, uint8, uint16, uint32, uint64, int, int8, int16, int32, int64:
+	switch any(&d).(type) {
+	case *uint:
+		num, _ := strconv.ParseUint(v, 10, 64)
+		*any(&d).(*uint) = uint(num)
+	case *uint8:
+		num, _ := strconv.ParseUint(v, 10, 64)
+		*any(&d).(*uint8) = uint8(num)
+	case *uint16:
+		num, _ := strconv.ParseUint(v, 10, 64)
+		*any(&d).(*uint16) = uint16(num)
+	case *uint32:
+		num, _ := strconv.ParseUint(v, 10, 64)
+		*any(&d).(*uint32) = uint32(num)
+	case *uint64:
+		num, _ := strconv.ParseUint(v, 10, 64)
+		*any(&d).(*uint64) = num
+	case *int:
 		num, _ := strconv.ParseInt(v, 10, 64)
-		val := reflect.ValueOf(num).Convert(reflect.ValueOf(d).Type())
-		reflect.ValueOf(&d).Elem().Set(val)
-	case float32, float64:
-		num, _ := strconv.ParseFloat(v, 10)
-		val := reflect.ValueOf(num).Convert(reflect.ValueOf(d).Type())
-		reflect.ValueOf(&d).Elem().Set(val)
+		*any(&d).(*int) = int(num)
+	case *int8:
+		num, _ := strconv.ParseInt(v, 10, 64)
+		*any(&d).(*int8) = int8(num)
+	case *int16:
+		num, _ := strconv.ParseInt(v, 10, 64)
+		*any(&d).(*int16) = int16(num)
+	case *int32:
+		num, _ := strconv.ParseInt(v, 10, 64)
+		*any(&d).(*int32) = int32(num)
+	case *int64:
+		num, _ := strconv.ParseInt(v, 10, 64)
+		*any(&d).(*int64) = num
+	case *float32:
+		num, _ := strconv.ParseFloat(v, 32)
+		*any(&d).(*float32) = float32(num)
+	case *float64:
+		num, _ := strconv.ParseFloat(v, 64)
+		*any(&d).(*float64) = num
 	}
 	return d
 }

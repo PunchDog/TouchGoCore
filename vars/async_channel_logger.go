@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -358,23 +359,34 @@ func (b *batchEntries) size() int {
 	return size
 }
 
-// writeBatch 写入一批日志
+// writeBatch 写入一批日志（优化：合并为单次 Write 调用，减少系统调用开销）
 func (a *AsyncLoggerChannel) writeBatch(batch *batchEntries) {
+	// 估算总大小，减少扩容
+	estSize := 0
 	for _, entry := range batch.entries {
-		// 格式化并写入
-		line := a.formatEntry(entry)
-		if _, err := a.writer.Write([]byte(line)); err != nil {
-			fmt.Fprintf(os.Stderr, "async log write error: %v\n", err)
-		} else {
-			a.written.Add(1)
-			a.stats.TotalWritten++
-		}
+		estSize += len(entry.msg) + 64 // 消息 + 估算头部
+	}
+
+	var buf strings.Builder
+	buf.Grow(estSize)
+
+	for _, entry := range batch.entries {
+		buf.WriteString(a.formatEntry(entry))
+	}
+
+	// 单次 Write 调用
+	data := buf.String()
+	if _, err := a.writer.Write([]byte(data)); err != nil {
+		fmt.Fprintf(os.Stderr, "async log write error: %v\n", err)
+	} else {
+		writtenCount := int64(len(batch.entries))
+		a.written.Add(writtenCount)
+		a.stats.TotalWritten += writtenCount
 	}
 }
 
-// formatEntry 格式化日志条目
+// formatEntry 格式化日志条目（使用 strings.Builder 优化字符串拼接）
 func (a *AsyncLoggerChannel) formatEntry(entry logEntry) string {
-	// 简单的文本格式（实际使用中可以自定义）
 	levelStr := "INFO"
 	switch entry.level {
 	case slog.LevelDebug:
@@ -385,15 +397,34 @@ func (a *AsyncLoggerChannel) formatEntry(entry logEntry) string {
 		levelStr = "ERROR"
 	}
 
+	// 估算容量：时间(19) + 空格 + 级别(5) + 括号 + 消息 + 换行
+	estLen := 32 + len(entry.msg)
 	if len(entry.attrs) > 0 {
-		attrsStr := ""
 		for _, attr := range entry.attrs {
-			attrsStr += fmt.Sprintf(" %s=%v", attr.Key, attr.Value.Any())
+			estLen += len(attr.Key) + 16
 		}
-		return fmt.Sprintf("%s %s [%s]%s\n", entry.time.Format(time.DateTime), levelStr, entry.msg, attrsStr)
 	}
 
-	return fmt.Sprintf("%s %s [%s]\n", entry.time.Format(time.DateTime), levelStr, entry.msg)
+	var sb strings.Builder
+	sb.Grow(estLen)
+	sb.WriteString(entry.time.Format(time.DateTime))
+	sb.WriteByte(' ')
+	sb.WriteString(levelStr)
+	sb.WriteString(" [")
+	sb.WriteString(entry.msg)
+	sb.WriteByte(']')
+
+	if len(entry.attrs) > 0 {
+		for _, attr := range entry.attrs {
+			sb.WriteByte(' ')
+			sb.WriteString(attr.Key)
+			sb.WriteByte('=')
+			fmt.Fprintf(&sb, "%v", attr.Value.Any())
+		}
+	}
+
+	sb.WriteByte('\n')
+	return sb.String()
 }
 
 // ==================== 带Channel的日志管理器 ====================

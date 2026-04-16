@@ -8,6 +8,7 @@ import (
 	"path"
 	"runtime"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -113,10 +114,12 @@ func initLogger() {
 	vars.Run(path.Join(config.GetBasePath(), "/log"), config.ServerName_, config.Cfg_.LogLevel)
 
 	centerstr := "*         Service:[" + config.ServerName_ + "] Version:[" + util.Version + "]         *"
-	var showsr string
+	var sb strings.Builder
+	sb.Grow(len(centerstr))
 	for range len(centerstr) {
-		showsr = showsr + "*"
+		sb.WriteByte('*')
 	}
+	showsr := sb.String()
 	vars.Info("%s", showsr)
 	vars.Info("%s", centerstr)
 	vars.Info("%s", showsr)

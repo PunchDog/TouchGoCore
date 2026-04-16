@@ -18,10 +18,18 @@ import (
 	"go.mongodb.org/mongo-driver/mongo/readpref"
 )
 
+// 默认数据库操作超时时间
+const defaultDBTimeout = 5 * time.Second
+
 type DbOperate struct {
 	session *mongo.Client
 	dbName  string
 	url     string
+}
+
+// newTimeoutContext 创建带超时的 context，替代 context.Background()
+func newTimeoutContext() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), defaultDBTimeout)
 }
 
 func (db *DbOperate) GetDbSession() *mongo.Client {
@@ -74,13 +82,17 @@ func (dbo *DbOperate) newMongoDB(cfg *config.MongoDBConfig) error {
 	}
 
 	// 判断服务是不是可用
-	err = dbo.session.Ping(context.Background(), readpref.Primary())
+	pingCtx, pingCancel := newTimeoutContext()
+	defer pingCancel()
+	err = dbo.session.Ping(pingCtx, readpref.Primary())
 	if err != nil {
 		return err
 	}
 
 	//添加查询索引
 	if len(cfg.InitDBTableIndex) > 0 {
+		indexCtx, indexCancel := newTimeoutContext()
+		defer indexCancel()
 		opts := options.CreateIndexes().SetMaxTime(10 * time.Second)
 		for _, table := range cfg.InitDBTableIndex {
 			models := make([]mongo.IndexModel, 0)
@@ -90,7 +102,7 @@ func (dbo *DbOperate) newMongoDB(cfg *config.MongoDBConfig) error {
 					Options: options.Index().SetName(str),
 				})
 			}
-			if _, err := dbo.session.Database(dbo.dbName).Collection(table.TableName).Indexes().CreateMany(context.Background(), models, opts); err != nil {
+			if _, err := dbo.session.Database(dbo.dbName).Collection(table.TableName).Indexes().CreateMany(indexCtx, models, opts); err != nil {
 				vars.Error("创建MongoDB索引失败: table=%s, err=%v", table.TableName, err)
 				return fmt.Errorf("创建MongoDB索引失败: %w", err)
 			}
@@ -105,7 +117,9 @@ func (dbo *DbOperate) newMongoDB(cfg *config.MongoDBConfig) error {
 
 func (dbo *DbOperate) DBClose() {
 	if dbo.session != nil {
-		dbo.session.Disconnect(context.Background())
+		ctx, cancel := newTimeoutContext()
+		defer cancel()
+		dbo.session.Disconnect(ctx)
 		dbo.session = nil
 		vars.Info("Disconnect %s mongodb...", dbo.url)
 	}
@@ -116,8 +130,10 @@ func (dbo *DbOperate) Insert(name string, doc interface{}) error {
 	if dbo.session == nil {
 		return errors.New("DbOperate Invalid session.")
 	}
+	ctx, cancel := newTimeoutContext()
+	defer cancel()
 	c := dbo.session.Database(dbo.dbName).Collection(name)
-	_, err := c.InsertOne(context.Background(), doc)
+	_, err := c.InsertOne(ctx, doc)
 	return err
 }
 
@@ -126,10 +142,11 @@ func (dbo *DbOperate) Update(name string, cond interface{}, change interface{}) 
 	if dbo.session == nil {
 		return errors.New("DbOperate Invalid session..")
 	}
-
+	ctx, cancel := newTimeoutContext()
+	defer cancel()
 	collection := dbo.session.Database(dbo.dbName).Collection(name)
 
-	_, err := collection.UpdateOne(context.Background(), cond, bson.M{"$set": change})
+	_, err := collection.UpdateOne(ctx, cond, bson.M{"$set": change})
 	return err
 }
 
@@ -139,9 +156,10 @@ func (dbo *DbOperate) UpdateInsert(name string, cond interface{}, doc interface{
 	if dbo.session == nil {
 		return errors.New("DbOperate Invalid session.")
 	}
-
+	ctx, cancel := newTimeoutContext()
+	defer cancel()
 	collection := dbo.session.Database(dbo.dbName).Collection(name)
-	_, err := collection.UpdateOne(context.Background(), cond, bson.M{"$set": doc}, options.Update().SetUpsert(true))
+	_, err := collection.UpdateOne(ctx, cond, bson.M{"$set": doc}, options.Update().SetUpsert(true))
 	if nil != err {
 		vars.Error("UpdateInsert failed name is:%s. cond is:%v", name, cond)
 	}
@@ -154,10 +172,11 @@ func (dbo *DbOperate) RemoveOne(name string, cond_name string, cond_value int64)
 	if dbo.session == nil {
 		return errors.New("DbOperate Invalid session.")
 	}
-
+	ctx, cancel := newTimeoutContext()
+	defer cancel()
 	collection := dbo.session.Database(dbo.dbName).Collection(name)
 
-	_, err := collection.DeleteOne(context.Background(), bson.M{cond_name: cond_value})
+	_, err := collection.DeleteOne(ctx, bson.M{cond_name: cond_value})
 
 	return err
 }
@@ -168,9 +187,10 @@ func (dbo *DbOperate) RemoveOneByCond(name string, cond interface{}) error {
 	if dbo.session == nil {
 		return errors.New("DbOperate Invalid session.")
 	}
-
+	ctx, cancel := newTimeoutContext()
+	defer cancel()
 	collection := dbo.session.Database(dbo.dbName).Collection(name)
-	_, err := collection.DeleteOne(context.Background(), cond, nil)
+	_, err := collection.DeleteOne(ctx, cond, nil)
 
 	return err
 
@@ -181,9 +201,10 @@ func (dbo *DbOperate) RemoveAll(name string, cond interface{}) error {
 	if dbo.session == nil {
 		return errors.New("DbOperate Invalid session.")
 	}
-
+	ctx, cancel := newTimeoutContext()
+	defer cancel()
 	collection := dbo.session.Database(dbo.dbName).Collection(name)
-	_, err := collection.DeleteMany(context.Background(), cond)
+	_, err := collection.DeleteMany(ctx, cond)
 	if nil != err && mongo.ErrNilDocument != err {
 		vars.Debug("DbOperate.RemoveAll failed : %s, %v", name, cond)
 		return err
@@ -198,11 +219,12 @@ func (dbo *DbOperate) DBFindOne(name string, query interface{}, resHandler func(
 	if dbo.session == nil {
 		return errors.New("DBFindOne Invalid session.")
 	}
-
+	ctx, cancel := newTimeoutContext()
+	defer cancel()
 	collection := dbo.session.Database(dbo.dbName).Collection(name)
 
 	var m bson.M
-	err := collection.FindOne(context.Background(), query).Decode(&m)
+	err := collection.FindOne(ctx, query).Decode(&m)
 
 	if err != nil {
 		return err
@@ -221,17 +243,19 @@ func (dbo *DbOperate) DBFindAll(name string, query interface{}, resHandler func(
 	if dbo.session == nil {
 		return errors.New("DbOperate Invalid session.")
 	}
+	ctx, cancel := newTimeoutContext()
+	defer cancel()
 	vars.Debug("[DbOperate.DBFindAll] dbo.dbName = %v, dbo.url= %v", dbo.dbName, dbo.url)
 	collection := dbo.session.Database(dbo.dbName).Collection(name)
-	qCursor, err := collection.Find(context.Background(), query)
+	qCursor, err := collection.Find(ctx, query)
 	if err != nil {
 		return err
 	}
-	defer qCursor.Close(context.Background())
+	defer qCursor.Close(ctx)
 
 	vars.Debug("[DBFindAll] name:%s,query:%v, q:%b", name, query, qCursor)
 
-	for qCursor.TryNext(context.Background()) {
+	for qCursor.TryNext(ctx) {
 		if nil != resHandler {
 			var doc bson.M
 			qCursor.Decode(&doc)
@@ -252,7 +276,8 @@ func (dbo *DbOperate) DBFindAllEx(name string, query interface{}, resHandler fun
 	if dbo.session == nil {
 		return errors.New("DbOperate Invalid session.")
 	}
-
+	ctx, cancel := newTimeoutContext()
+	defer cancel()
 	collection := dbo.session.Database(dbo.dbName).Collection(name)
 
 	//sortCond 查询结果进行排序
@@ -263,12 +288,12 @@ func (dbo *DbOperate) DBFindAllEx(name string, query interface{}, resHandler fun
 	if projection != nil {
 		opts.SetProjection(projection)
 	}
-	qCursor, err := collection.Find(context.Background(), query, opts)
+	qCursor, err := collection.Find(ctx, query, opts)
 	if err != nil && err != mongo.ErrNoDocuments {
 		return err
 	}
 	if qCursor != nil {
-		defer qCursor.Close(context.Background())
+		defer qCursor.Close(ctx)
 	}
 
 	err = qCursor.Err()
@@ -287,10 +312,12 @@ func (dbo *DbOperate) FindAndModify(name string, query interface{}, change inter
 	if dbo.session == nil {
 		return errors.New("DbOperate Invalid session.")
 	}
+	ctx, cancel := newTimeoutContext()
+	defer cancel()
 	collection := dbo.session.Database(dbo.dbName).Collection(name)
 
 	opts := options.FindOneAndUpdate().SetReturnDocument(options.After).SetUpsert(upsert)
-	err := collection.FindOneAndUpdate(context.Background(), query, change, opts).Decode(val)
+	err := collection.FindOneAndUpdate(ctx, query, change, opts).Decode(val)
 	return err
 }
 
@@ -299,14 +326,15 @@ func (dbo *DbOperate) FindAll(name string, query interface{}, resHandler func(*m
 	if dbo.session == nil {
 		return errors.New("DbOperate Invalid session.")
 	}
-
+	ctx, cancel := newTimeoutContext()
+	defer cancel()
 	collection := dbo.session.Database(dbo.dbName).Collection(name)
-	qCursor, err := collection.Find(context.Background(), query)
+	qCursor, err := collection.Find(ctx, query)
 	if err != nil && err != mongo.ErrNoDocuments {
 		return err
 	}
 	if qCursor != nil {
-		defer qCursor.Close(context.Background())
+		defer qCursor.Close(ctx)
 	}
 
 	err = qCursor.Err()
@@ -325,9 +353,11 @@ func (dbo *DbOperate) FindOne(name string, query interface{}, ret interface{}) e
 	if dbo.session == nil {
 		return errors.New("DbOperate Invalid session.")
 	}
+	ctx, cancel := newTimeoutContext()
+	defer cancel()
 	collection := dbo.session.Database(dbo.dbName).Collection(name)
 
-	return collection.FindOne(context.Background(), query).Decode(&ret)
+	return collection.FindOne(ctx, query).Decode(&ret)
 }
 
 /* name 表名,  query 条件 */
@@ -335,8 +365,10 @@ func (dbo *DbOperate) Delete(name string, query interface{}) error {
 	if dbo.session == nil {
 		return errors.New("DbOperate Invalid session.")
 	}
+	ctx, cancel := newTimeoutContext()
+	defer cancel()
 	collection := dbo.session.Database(dbo.dbName).Collection(name)
-	_, err := collection.DeleteOne(context.Background(), query)
+	_, err := collection.DeleteOne(ctx, query)
 
 	return err
 }
@@ -347,7 +379,8 @@ func (dbo *DbOperate) CreateGridFile(filename string, data []byte) error {
 	if dbo.session == nil {
 		return errors.New("DbOperate Invalid session.")
 	}
-
+	ctx, cancel := newTimeoutContext()
+	defer cancel()
 	vars.Debug("[DbOperate.CreateGridFile] dbo.dbName:%v filename:%v", dbo.dbName, filename)
 	bucket, err := gridfs.NewBucket(dbo.session.Database(dbo.dbName))
 
@@ -366,8 +399,8 @@ func (dbo *DbOperate) CreateGridFile(filename string, data []byte) error {
 		vars.Error("[CreateGridFile] bucket.Find(%s) err = %+v ", filename, err)
 		return err
 	}
-	defer qCursor.Close(context.Background())
-	for qCursor.TryNext(context.Background()) {
+	defer qCursor.Close(ctx)
+	for qCursor.TryNext(ctx) {
 		var doc bson.M
 		qCursor.Decode(&doc)
 		primid := doc["_id"].(primitive.ObjectID)
@@ -384,7 +417,6 @@ func (dbo *DbOperate) OpenGridFile(filename string) ([]byte, error) {
 		vars.Debug("[DbOperate.OpenGridFile] name:%s,dbo.session == nil", filename)
 		return nil, errors.New("DbOperate Invalid session.")
 	}
-
 	bucket, err := gridfs.NewBucket(dbo.session.Database(dbo.dbName))
 
 	if err != nil {
@@ -408,9 +440,11 @@ func (dbo *DbOperate) BulkInsert(name string, documents []interface{}) error {
 	if dbo.session == nil {
 		return errors.New("DbOperate Invalid session.")
 	}
+	ctx, cancel := newTimeoutContext()
+	defer cancel()
 	collection := dbo.session.Database(dbo.dbName).Collection(name)
 
-	_, err := collection.InsertMany(context.Background(), documents)
+	_, err := collection.InsertMany(ctx, documents)
 	return err
 }
 
@@ -419,9 +453,10 @@ func (dbo *DbOperate) BulkUpdate(name string, models []mongo.WriteModel) error {
 	if dbo.session == nil {
 		return errors.New("DbOperate Invalid session.")
 	}
-
+	ctx, cancel := newTimeoutContext()
+	defer cancel()
 	collection := dbo.session.Database(dbo.dbName).Collection(name)
 	opts := options.BulkWrite().SetOrdered(false).SetBypassDocumentValidation(true)
-	_, err := collection.BulkWrite(context.Background(), models, opts)
+	_, err := collection.BulkWrite(ctx, models, opts)
 	return err
 }

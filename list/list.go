@@ -14,7 +14,7 @@ type List struct {
 	tail         INode           //尾节点
 	len          int             //长度
 	rangeDelList []INode         //删除列表
-	dellock      bool            //删除锁
+	rangeCount   atomic.Int32    //正在遍历的goroutine计数（替代 dellock bool，线程安全）
 	nextID       atomic.Int64    //下一个节点ID（使用原子操作）
 	nodeMap      map[int64]INode //节点ID映射，支持O(1)查询
 }
@@ -115,34 +115,37 @@ func (l *List) Get(id int64) INode {
 	return l.nodeMap[id]
 }
 
-// 遍历
+// 遍历（优化：使用快照遍历，避免遍历期间持锁导致死锁和竞态条件）
 func (l *List) Range(f func(INode) bool) {
-	l.mu.Lock()
-	l.dellock = true
-	l.mu.Unlock()
-
+	// 标记遍历进行中（原子计数，支持嵌套/并发遍历）
+	l.rangeCount.Add(1)
 	defer func() {
-		l.mu.Lock()
-		l.dellock = false
-		for _, node := range l.rangeDelList {
-			if n := node.GetNode(); n != nil {
-				l.removeNodeLocked(n)
+		// 遍历结束，处理延迟删除列表
+		if l.rangeCount.Add(-1) == 0 {
+			l.mu.Lock()
+			defer l.mu.Unlock()
+			for _, node := range l.rangeDelList {
+				if n := node.GetNode(); n != nil {
+					l.removeNodeLocked(n)
+				}
 			}
+			l.rangeDelList = nil // 清空引用，防止内存泄漏
 		}
-		l.rangeDelList = nil // 清空引用，防止内存泄漏
-		l.mu.Unlock()
 	}()
 
-	// 使用读锁遍历，提高并发性能
+	// 获取快照：在锁内复制节点列表，锁外遍历
 	l.mu.RLock()
-	node := l.head
+	snapshot := make([]INode, 0, l.len)
+	for node := l.head; node != nil; node = node.GetNode().next {
+		snapshot = append(snapshot, node)
+	}
 	l.mu.RUnlock()
 
-	for node != nil {
+	// 在无锁状态下遍历快照，避免死锁和竞态
+	for _, node := range snapshot {
 		if condition := f(node); !condition {
 			break
 		}
-		node = node.GetNode().next
 	}
 }
 

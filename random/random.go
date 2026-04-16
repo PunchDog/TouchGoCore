@@ -27,8 +27,7 @@ const (
 // MersenneTwister implements the Mersenne Twister MT19937-64 algorithm.
 // This is a pseudorandom number generator with a period of 2^19937-1.
 //
-// Thread-safe for concurrent reads (Int63, Uint64, Float64, etc.).
-// Seed and Reseed are mutually exclusive with read operations.
+// Thread-safe for concurrent use via mutex protection.
 //
 // Example:
 //
@@ -36,7 +35,7 @@ const (
 //	mt := NewMersenneTwister(&seed)
 //	rand := mt.Int63()
 type MersenneTwister struct {
-	mu    sync.RWMutex
+	mu    sync.Mutex
 	mt    [N]uint64
 	index int
 	seed  *int64
@@ -121,15 +120,11 @@ func (mt *MersenneTwister) twist() {
 
 // nextUint64 generates the next random uint64 value.
 // Returns the raw random number without applying bit masking.
-// Must be called with read lock held.
+// Must be called with lock held.
 func (mt *MersenneTwister) nextUint64() uint64 {
 	// Regenerate if we've exhausted the state array
 	if mt.index >= N {
-		mt.mu.RUnlock()
-		mt.mu.Lock()
 		mt.twist()
-		mt.mu.Unlock()
-		mt.mu.RLock()
 	}
 
 	y := mt.mt[mt.index]
@@ -147,14 +142,12 @@ func (mt *MersenneTwister) nextUint64() uint64 {
 // Uint64 returns a pseudo-random 64-bit unsigned integer value.
 // This is the core random number generator.
 func (mt *MersenneTwister) Uint64() uint64 {
-	mt.mu.RLock()
-	defer mt.mu.RUnlock()
+	mt.mu.Lock()
+	defer mt.mu.Unlock()
 
 	result := mt.nextUint64()
 
 	// Update seed tracking (for compatibility with original implementation)
-	// Note: This is not part of the standard MT19937-64 algorithm
-	// but is preserved for backward compatibility
 	*mt.seed += int64(result & 0xffff)
 
 	return result

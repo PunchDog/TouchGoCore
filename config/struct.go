@@ -57,6 +57,13 @@ type WebsocketConfig struct {
 	CheckOrigin bool `json:"check_origin"`
 	// 内网连接是否跳过 Origin 验证
 	SkipOriginForIntranet bool `json:"skip_origin_for_intranet"`
+	// Worker Pool 配置
+	WorkerPoolSize int  `json:"worker_pool_size"` // Worker 数量，0 表示串行模式（默认），>0 启用并行
+	ShardByKey     bool `json:"shard_by_key"`     // 是否按 UID 分片（保证同 UID 消息顺序性）
+	// 认证配置
+	AuthTokenHeader   string `json:"auth_token_header"`   // 认证 Token 的 HTTP 头名称（默认 "X-Auth-Token"），为空则不验证
+	AuthTokenQuery    string `json:"auth_token_query"`    // 认证 Token 的 URL 查询参数名（默认 "token"），为空则不从 query 读取
+	AuthIntranetSkip  bool   `json:"auth_intranet_skip"`  // 内网连接是否跳过认证
 }
 
 type RpcAddr struct {
@@ -108,5 +115,11 @@ type ServerConfig struct {
 	MaxMsgSize    int    `json:"max_msg_size"`   // 最大消息大小
 	WriteBuffer   int    `json:"write_buffer"`   // 写缓冲大小
 	ReadBuffer    int    `json:"read_buffer"`    // 读缓冲大小
-	Backpressure bool   `json:"backpressure"`   // 是否启用背压
+	Backpressure  bool   `json:"backpressure"`   // 是否启用背压
+}
+
+// Metrics 监控配置
+type MetricsConfig struct {
+	Enabled bool `json:"enabled"` // 是否启用 Prometheus 监控
+	Port    int  `json:"port"`    // metrics HTTP 端口（默认 9090）
 }

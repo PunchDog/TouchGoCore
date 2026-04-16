@@ -1,6 +1,8 @@
 package rpc
 
 import (
+	"context"
+	"fmt"
 	"touchgocore/config"
 	"touchgocore/syncmap"
 	"touchgocore/vars"
@@ -25,25 +27,20 @@ func Run() {
 	clientCount := len(cfg.Client)
 	vars.Info("开始启动RPC服务: 服务器%d个, 客户端%d个", serverCount, clientCount)
 
-	// 启动服务器监听
+	// 初始化服务发现（默认使用静态配置）
+	InitDiscovery(NewStaticDiscovery(cfg.Server, cfg.Client))
+
+	// 启动服务器监听（通过服务发现解析端点）
 	for _, v := range cfg.Server {
 		if v.Name == "" || v.Addr == "" || v.Port <= 0 {
 			vars.Error("RPC服务器配置无效: Name=%s, Addr=%s, Port=%d", v.Name, v.Addr, v.Port)
 			continue
 		}
-		// 如果全局启用了 TLS 且配置了跳过内网 TLS，先检查配置
-		useTLS := v.UseTLS
-		if config.Cfg_.Rpc != nil && config.Cfg_.Rpc.TLS != nil && config.Cfg_.Rpc.TLS.Enable && config.Cfg_.Rpc.TLS.SkipForIntranet {
-			// 如果服务器配置中 UseTLS 为 false，表示这是内网服务器，不使用 TLS
-			useTLS = v.UseTLS
-		} else if config.Cfg_.Rpc != nil && config.Cfg_.Rpc.TLS != nil && config.Cfg_.Rpc.TLS.Enable {
-			// 全局启用 TLS
-			useTLS = true
-		}
+		useTLS := resolveTLSConfig(v.UseTLS)
 		StartGrpcServer(v.Name, v.Addr, v.Port, useTLS)
 	}
 
-	// 启动客户端连接
+	// 启动客户端连接（通过服务发现解析端点）
 	clientSuccess := 0
 	for _, v := range cfg.Client {
 		if v.Name == "" || v.Addr == "" || v.Port <= 0 {
@@ -57,7 +54,32 @@ func Run() {
 	vars.Info("RPC服务启动完成: 服务器%d个, 客户端%d个 (成功连接%d个)", serverCount, clientCount, clientSuccess)
 }
 
+// resolveTLSConfig 统一解析TLS配置
+func resolveTLSConfig(defaultTLS bool) bool {
+	if config.Cfg_.Rpc != nil && config.Cfg_.Rpc.TLS != nil && config.Cfg_.Rpc.TLS.Enable {
+		if config.Cfg_.Rpc.TLS.SkipForIntranet {
+			return defaultTLS
+		}
+		return true
+	}
+	return defaultTLS
+}
+
+// ResolveService 通过服务发现解析服务端点（供业务层使用）
+func ResolveService(ctx context.Context, serviceName string) ([]*ServiceEndpoint, error) {
+	dm := GetDiscovery()
+	if dm == nil {
+		return nil, fmt.Errorf("service discovery not initialized")
+	}
+	return dm.Resolve(ctx, serviceName)
+}
+
 func Stop() {
+	// 关闭服务发现
+	if dm := GetDiscovery(); dm != nil {
+		dm.Close()
+	}
+
 	// 停止所有RPC服务器
 	serverCount := 0
 	service_.Range(func(key string, v1 *RpcServer) bool {

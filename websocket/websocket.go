@@ -34,6 +34,27 @@ const (
 	BACKPRESSURE_THRESHOLD = 0.9
 )
 
+// ============ 认证函数注册 ============
+
+// AuthFunc WebSocket连接认证函数
+// 返回 true 表示认证通过，false 表示拒绝连接
+// token: 从请求中提取的认证令牌
+// remoteAddr: 客户端IP地址
+type AuthFunc func(token string, remoteAddr string) bool
+
+var wsAuthFunc AuthFunc = nil
+
+// SetAuthFunc 注册WebSocket连接认证函数
+// 业务层应在启动前调用此函数注册自定义认证逻辑
+func SetAuthFunc(fn AuthFunc) {
+	wsAuthFunc = fn
+}
+
+// GetAuthFunc 获取当前注册的认证函数
+func GetAuthFunc() AuthFunc {
+	return wsAuthFunc
+}
+
 var (
 	closeCh              chan bool          = nil
 	msgQueue             chan *msgQueueType = nil
@@ -45,6 +66,7 @@ var (
 	dropMessageOnFull    bool                 = false
 	workerPoolEnabled    bool                 = false // 是否启用 Worker Pool
 	workerPoolSize       int                  = 0     // Worker 数量
+	shardByKey           bool                 = false // 是否按UID分片
 	workerPoolQueues     []chan *msgQueueType         // Worker 消息队列
 	workerPoolStop       chan struct{}                // Worker Pool 停止信号
 	workerPoolWaitGroup  sync.WaitGroup               // Worker 等待组
@@ -121,6 +143,21 @@ func Run() {
 		},
 	}
 
+	// 读取 Worker Pool 配置
+	workerPoolSize = config.Cfg_.Ws.WorkerPoolSize
+	if workerPoolSize > 0 {
+		workerPoolEnabled = true
+		shardByKey = config.Cfg_.Ws.ShardByKey
+		if shardByKey {
+			vars.Info("WebSocket Worker Pool 启用: %d workers, 按UID分片", workerPoolSize)
+		} else {
+			vars.Info("WebSocket Worker Pool 启用: %d workers, 非分片模式", workerPoolSize)
+		}
+		initWorkerPool()
+	} else {
+		vars.Info("WebSocket 串行处理模式")
+	}
+
 	//启动监听
 	for _, port := range config.Cfg_.Ws.Port {
 		err := ListenAndServe(port.Port, port.CallbackClassName)
@@ -158,31 +195,117 @@ func Tick() {
 
 			//关闭消息队列
 			close(msgQueue)
+
+			//停止 Worker Pool
+			if workerPoolEnabled {
+				stopWorkerPool()
+			}
 			return
 		case read_msg := <-msgQueue:
-			// 处理消息队列
-			if client, h := clientMap.Load(read_msg.uid); h {
-				// 检查客户端是否已关闭，防止竞态条件
-				if client.IsClose() {
-					continue
-				}
-				pbmsg := util.PasreFSMessage(read_msg.data)
-				if pbmsg != nil {
-					// ============ 改进：更新统计 ============
-					if client != nil {
-						client.UpdateStatsFromMessage(read_msg.data)
-					}
-					client.OnMessage(client, pbmsg)
-				} else {
-					// ============ 改进：记录解析错误 ============
-					UpdateErrorStats()
-					vars.Error("解析消息失败，客户端: %d", read_msg.uid)
-				}
-			} else {
-				// ============ 改进：记录客户端未找到错误 ============
-				UpdateErrorStats()
-				vars.Error("客户端未找到: %d", read_msg.uid)
+			// Worker Pool 模式：按UID分片分发到不同Worker
+			if workerPoolEnabled {
+				dispatchToWorker(read_msg)
+				continue
 			}
+
+			// 串行模式：直接处理
+			processMessage(read_msg)
+		}
+	}
+}
+
+// processMessage 处理单条消息（从Tick中提取，便于Worker Pool复用）
+func processMessage(read_msg *msgQueueType) {
+	if client, h := clientMap.Load(read_msg.uid); h {
+		// 检查客户端是否已关闭，防止竞态条件
+		if client.IsClose() {
+			return
+		}
+		pbmsg := util.PasreFSMessage(read_msg.data)
+		if pbmsg != nil {
+			if client != nil {
+				client.UpdateStatsFromMessage(read_msg.data)
+			}
+			client.OnMessage(client, pbmsg)
+		} else {
+			UpdateErrorStats()
+			vars.Error("解析消息失败，客户端: %d", read_msg.uid)
+		}
+	} else {
+		UpdateErrorStats()
+		vars.Error("客户端未找到: %d", read_msg.uid)
+	}
+}
+
+// initWorkerPool 初始化 Worker Pool
+func initWorkerPool() {
+	workerPoolQueues = make([]chan *msgQueueType, workerPoolSize)
+	workerPoolStats = make([]*workerStats, workerPoolSize)
+	workerPoolStop = make(chan struct{})
+
+	for i := 0; i < workerPoolSize; i++ {
+		workerPoolQueues[i] = make(chan *msgQueueType, 1024)
+		workerPoolStats[i] = &workerStats{
+			WorkerID: i,
+		}
+		workerPoolStats[i].Running.Store(true)
+
+		workerPoolWaitGroup.Add(1)
+		go workerLoop(i, workerPoolQueues[i])
+	}
+}
+
+// stopWorkerPool 停止 Worker Pool
+func stopWorkerPool() {
+	close(workerPoolStop)
+	workerPoolWaitGroup.Wait()
+	vars.Info("WebSocket Worker Pool 已停止")
+}
+
+// dispatchToWorker 将消息分发到对应的Worker
+func dispatchToWorker(msg *msgQueueType) {
+	var workerIdx int
+	if shardByKey {
+		// 按UID分片：保证同一UID的消息由同一Worker处理，保证顺序性
+		workerIdx = int(msg.uid % int64(workerPoolSize))
+	} else {
+		// 轮询模式：均匀分配
+		workerIdx = int(serverStats.totalMessages.Load() % int64(workerPoolSize))
+	}
+
+	UpdateMessageStats()
+
+	select {
+	case workerPoolQueues[workerIdx] <- msg:
+		// 发送成功
+	default:
+		// Worker队列满，回退到当前goroutine处理
+		workerPoolStats[workerIdx].Errors.Add(1)
+		vars.Warning("Worker[%d]队列满，回退到同步处理", workerIdx)
+		processMessage(msg)
+	}
+}
+
+// workerLoop Worker处理循环
+func workerLoop(workerID int, queue chan *msgQueueType) {
+	defer workerPoolWaitGroup.Done()
+
+	for {
+		select {
+		case <-workerPoolStop:
+			// 处理剩余消息
+			for len(queue) > 0 {
+				msg := <-queue
+				processMessage(msg)
+				workerPoolStats[workerID].Messages.Add(1)
+			}
+			workerPoolStats[workerID].Running.Store(false)
+			return
+
+		case msg := <-queue:
+			processMessage(msg)
+			workerPoolStats[workerID].Messages.Add(1)
+			workerPoolStats[workerID].LastMessageAt = time.Now()
 		}
 	}
 }

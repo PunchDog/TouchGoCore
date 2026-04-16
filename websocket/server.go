@@ -131,6 +131,35 @@ func getClientIP(r *http.Request) string {
 	return ip
 }
 
+// extractAuthToken 从请求中提取认证令牌
+// 优先从 HTTP Header 读取，其次从 URL Query 参数读取
+func extractAuthToken(c *gin.Context) string {
+	wsCfg := config.Cfg_.Ws
+	if wsCfg == nil {
+		return ""
+	}
+
+	// 从 Header 读取
+	headerName := wsCfg.AuthTokenHeader
+	if headerName == "" {
+		headerName = "X-Auth-Token"
+	}
+	if token := c.GetHeader(headerName); token != "" {
+		return token
+	}
+
+	// 从 URL Query 参数读取
+	queryName := wsCfg.AuthTokenQuery
+	if queryName == "" {
+		queryName = "token"
+	}
+	if token := c.Query(queryName); token != "" {
+		return token
+	}
+
+	return ""
+}
+
 // 监听端口
 func ListenAndServe(port int, className string) error {
 	// 初始化 upgrader（只执行一次）
@@ -150,6 +179,31 @@ func ListenAndServe(port int, className string) error {
 				vars.Error("WebSocket处理发生panic错误: %v", err)
 			}
 		}()
+
+		// ========== 连接认证 ==========
+		if authFn := GetAuthFunc(); authFn != nil {
+			clientIP := getClientIP(c.Request)
+
+			// 内网连接跳过认证
+			if config.Cfg_.Ws.AuthIntranetSkip && util.IsIntranetIP(clientIP) {
+				// 内网IP跳过
+			} else {
+				// 从配置的 Header 或 Query 参数中提取 Token
+				token := extractAuthToken(c)
+				if token == "" {
+					vars.Warning("WebSocket连接认证失败: 缺少认证令牌, IP=%s", clientIP)
+					c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required", "code": 401})
+					return
+				}
+				if !authFn(token, clientIP) {
+					vars.Warning("WebSocket连接认证失败: 令牌无效, IP=%s", clientIP)
+					c.JSON(http.StatusForbidden, gin.H{"error": "authentication failed", "code": 403})
+					return
+				}
+			}
+		}
+		// ========== 认证结束 ==========
+
 		var (
 			wsConn *websocket.Conn
 			err    error

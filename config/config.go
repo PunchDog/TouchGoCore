@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path"
 
@@ -26,6 +25,7 @@ type Cfg struct {
 	Rpc       *RpcConfig       `json:"rpc"`        // gRPC 配置
 	Telegram  *TelegramConfig  `json:"telegram"`   //telegram配置
 	Server    *ServerConfig    `json:"server"`     // 服务器全局配置
+	Metrics   *MetricsConfig   `json:"metrics"`    // Prometheus 监控配置
 	//其他配置
 	Other interface{} `json:"other_data"` //其他配置,需要自行传入想要的数据模型
 }
@@ -48,22 +48,36 @@ func init() {
 	}
 }
 
+// Load 加载配置文件（兼容旧接口，内部调用LoadWithError）
 func (this *Cfg) Load(cfgname string) {
+	if err := this.LoadWithError(cfgname); err != nil {
+		panic(err)
+	}
+}
+
+// LoadWithError 加载配置文件（返回error而非panic）
+// 推荐使用此方法替代Load，便于上层决定错误处理策略
+func (this *Cfg) LoadWithError(cfgname string) error {
 	var path1 string
 	if p, err := ini.Load(_defaultFile); err == nil {
 		path1 = path.Join(_basePath, "/conf/", p.GetString(cfgname, "ini", ""))
 	}
 
-	file, err := ioutil.ReadFile(path1)
+	if path1 == "" {
+		return fmt.Errorf("配置文件路径为空, 服务器名: %s", cfgname)
+	}
+
+	file, err := os.ReadFile(path1)
 	if err != nil {
-		panic("读取启动配置出错:" + err.Error())
+		return fmt.Errorf("读取启动配置出错: %w", err)
 	}
 	fmt.Println(string(file))
 
-	err = json.Unmarshal(file, &this)
-	if err != nil {
-		panic("解析配置出错:" + path1 + ":" + err.Error())
+	if err := json.Unmarshal(file, this); err != nil {
+		return fmt.Errorf("解析配置出错[%s]: %w", path1, err)
 	}
+
+	return nil
 }
 
 var (

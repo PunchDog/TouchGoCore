@@ -1,12 +1,14 @@
 package db
 
 import (
+	"context"
 	"fmt"
 	"strconv"
+	"time"
 
 	"touchgocore/config"
 
-	"github.com/go-redis/redis/v7"
+	"github.com/redis/go-redis/v9"
 )
 
 type RedisConfigModel struct {
@@ -16,10 +18,12 @@ type RedisConfigModel struct {
 }
 
 type Redis struct {
-	redisClient *redis.Client
+	redisClient redis.Cmdable // 使用接口，兼容单机和集群模式
 	config      *RedisConfigModel
+	isCluster   bool
 }
 
+// NewRedis 创建Redis连接（支持单机和集群模式）
 func NewRedis(config *config.RedisConfig) (*Redis, error) {
 	this := new(Redis)
 	configModel := &RedisConfigModel{config.Host, config.Db, config.Password}
@@ -30,46 +34,153 @@ func NewRedis(config *config.RedisConfig) (*Redis, error) {
 func (this *Redis) connect() error {
 	str := this.config.Host + "-" + strconv.Itoa(this.config.Db) + "-" + this.config.Password
 	if this.connectOnly(str) {
-		// 如果同事还有其他协程创建连接成功了
 		return nil
 	}
 
+	// 判断是否为集群模式：多个地址用逗号分隔
+	if isClusterMode(this.config.Host) {
+		return this.connectCluster(str)
+	}
+	return this.connectStandalone(str)
+}
+
+// isClusterMode 判断是否为集群模式（多地址用逗号分隔）
+func isClusterMode(host string) bool {
+	for i := 0; i < len(host); i++ {
+		if host[i] == ',' {
+			return true
+		}
+	}
+	return false
+}
+
+// connectStandalone 单机模式连接
+func (this *Redis) connectStandalone(connKey string) error {
 	client := redis.NewClient(&redis.Options{
-		Addr:     this.config.Host,
-		Password: this.config.Password,
-		DB:       this.config.Db,
+		Addr:         this.config.Host,
+		Password:     this.config.Password,
+		DB:           this.config.Db,
+		DialTimeout:  5 * time.Second,
+		ReadTimeout:  3 * time.Second,
+		WriteTimeout: 3 * time.Second,
+		PoolSize:     10,
+		MinIdleConns: 5,
 	})
 
-	// 通过 cient.Ping() 来检查是否成功连接到了 redis 服务器
-	_, err := client.Ping().Result()
-	if err != nil {
-		fmt.Println(err)
-		return err
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if _, err := client.Ping(ctx).Result(); err != nil {
+		return fmt.Errorf("redis单机连接失败: %w", err)
 	}
 
 	this.redisClient = client
-	_DbMap.Store(str, client)
+	this.isCluster = false
+	_DbMap.Store(connKey, client)
 	return nil
 }
 
-// 使用有已有的连接资源
+// connectCluster 集群模式连接
+func (this *Redis) connectCluster(connKey string) error {
+	client := redis.NewClusterClient(&redis.ClusterOptions{
+		Addrs:        splitAddrs(this.config.Host),
+		Password:     this.config.Password,
+		DialTimeout:  5 * time.Second,
+		ReadTimeout:  3 * time.Second,
+		WriteTimeout: 3 * time.Second,
+		PoolSize:     10,
+		MinIdleConns: 5,
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if _, err := client.Ping(ctx).Result(); err != nil {
+		return fmt.Errorf("redis集群连接失败: %w", err)
+	}
+
+	this.redisClient = client
+	this.isCluster = true
+	_DbMap.Store(connKey, client)
+	return nil
+}
+
+// splitAddrs 将逗号分隔的地址字符串拆分为地址切片
+func splitAddrs(host string) []string {
+	var addrs []string
+	start := 0
+	for i := 0; i <= len(host); i++ {
+		if i == len(host) || host[i] == ',' {
+			addr := host[start:i]
+			if addr != "" {
+				addrs = append(addrs, addr)
+			}
+			start = i + 1
+		}
+	}
+	return addrs
+}
+
+// 使用已有的连接资源
 func (this *Redis) connectOnly(dataSourceName string) bool {
 	if v, ok := _DbMap.Load(dataSourceName); ok {
-		this.redisClient = v.(*redis.Client)
+		this.redisClient = v.(redis.Cmdable)
+		// 检查是否为集群客户端
+		if _, ok := v.(*redis.ClusterClient); ok {
+			this.isCluster = true
+		}
 		return true
 	}
 	return false
 }
 
 func (this *Redis) FlushAll() {
-	this.redisClient.FlushAll()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	this.redisClient.FlushAll(ctx)
 }
 
 func (this *Redis) Close() {
-	this.redisClient.Close()
+	if this.isCluster {
+		if cc, ok := this.redisClient.(*redis.ClusterClient); ok {
+			cc.Close()
+		}
+	} else {
+		if sc, ok := this.redisClient.(*redis.Client); ok {
+			sc.Close()
+		}
+	}
 	this.redisClient = nil
 }
 
-func (this *Redis) Get() *redis.Client {
+// Get 获取原始Redis客户端（返回redis.Cmdable接口，兼容单机和集群）
+func (this *Redis) Get() redis.Cmdable {
 	return this.redisClient
+}
+
+// GetStandaloneClient 获取单机客户端（仅单机模式可用）
+func (this *Redis) GetStandaloneClient() *redis.Client {
+	if this.isCluster {
+		return nil
+	}
+	if sc, ok := this.redisClient.(*redis.Client); ok {
+		return sc
+	}
+	return nil
+}
+
+// GetClusterClient 获取集群客户端（仅集群模式可用）
+func (this *Redis) GetClusterClient() *redis.ClusterClient {
+	if !this.isCluster {
+		return nil
+	}
+	if cc, ok := this.redisClient.(*redis.ClusterClient); ok {
+		return cc
+	}
+	return nil
+}
+
+// IsCluster 返回是否为集群模式
+func (this *Redis) IsCluster() bool {
+	return this.isCluster
 }

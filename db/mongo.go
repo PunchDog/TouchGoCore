@@ -91,8 +91,10 @@ func (dbo *DbOperate) newMongoDB(cfg *config.MongoDBConfig) error {
 				})
 			}
 			if _, err := dbo.session.Database(dbo.dbName).Collection(table.TableName).Indexes().CreateMany(context.Background(), models, opts); err != nil {
-				panic(err)
+				vars.Error("创建MongoDB索引失败: table=%s, err=%v", table.TableName, err)
+				return fmt.Errorf("创建MongoDB索引失败: %w", err)
 			}
+			vars.Info("创建MongoDB索引成功: table=%s, indexes=%v", table.TableName, table.Index)
 		}
 	}
 
@@ -222,12 +224,12 @@ func (dbo *DbOperate) DBFindAll(name string, query interface{}, resHandler func(
 	vars.Debug("[DbOperate.DBFindAll] dbo.dbName = %v, dbo.url= %v", dbo.dbName, dbo.url)
 	collection := dbo.session.Database(dbo.dbName).Collection(name)
 	qCursor, err := collection.Find(context.Background(), query)
-
-	vars.Debug("[DBFindAll] name:%s,query:%v, q:%b", name, query, qCursor)
-
 	if err != nil {
 		return err
 	}
+	defer qCursor.Close(context.Background())
+
+	vars.Debug("[DBFindAll] name:%s,query:%v, q:%b", name, query, qCursor)
 
 	for qCursor.TryNext(context.Background()) {
 		if nil != resHandler {
@@ -265,6 +267,9 @@ func (dbo *DbOperate) DBFindAllEx(name string, query interface{}, resHandler fun
 	if err != nil && err != mongo.ErrNoDocuments {
 		return err
 	}
+	if qCursor != nil {
+		defer qCursor.Close(context.Background())
+	}
 
 	err = qCursor.Err()
 	if err != nil && err != mongo.ErrNoDocuments {
@@ -297,9 +302,11 @@ func (dbo *DbOperate) FindAll(name string, query interface{}, resHandler func(*m
 
 	collection := dbo.session.Database(dbo.dbName).Collection(name)
 	qCursor, err := collection.Find(context.Background(), query)
-
 	if err != nil && err != mongo.ErrNoDocuments {
 		return err
+	}
+	if qCursor != nil {
+		defer qCursor.Close(context.Background())
 	}
 
 	err = qCursor.Err()
@@ -359,6 +366,7 @@ func (dbo *DbOperate) CreateGridFile(filename string, data []byte) error {
 		vars.Error("[CreateGridFile] bucket.Find(%s) err = %+v ", filename, err)
 		return err
 	}
+	defer qCursor.Close(context.Background())
 	for qCursor.TryNext(context.Background()) {
 		var doc bson.M
 		qCursor.Decode(&doc)

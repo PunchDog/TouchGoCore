@@ -52,19 +52,27 @@ var DefaultCallFunc = &CallFunction{
 }
 
 type CallFunction struct {
-	fn    *syncmap.MapAny // key -> 函数列表映射
-	retCh []reflect.Value // 返回值收集
-	retMu sync.Mutex      // 返回值保护锁
-	bRet  atomic.Bool     // 是否收集返回值（使用原子操作）
+	fn *syncmap.MapAny // key -> 函数列表映射
+	// Deprecated: retCh/retMu/bRet 存在竞态条件，请使用 DoWithRet 替代
+	retCh []reflect.Value // 返回值收集（已废弃，保留向后兼容）
+	retMu sync.Mutex      // 返回值保护锁（已废弃）
+	bRet  atomic.Bool     // 是否收集返回值（已废弃）
 }
 
-// 需要取返回值的数据，所以这里需要特殊处理
+// SetDoRet 标记后续 Do 调用需要收集返回值
+//
+// Deprecated: 存在竞态条件，并发调用 Do 时返回值可能错乱。
+// 请使用 DoWithRet 替代，DoWithRet 是线程安全的。
 func (c *CallFunction) SetDoRet() {
 	c.retMu.Lock()
-	c.retCh = make([]reflect.Value, 0, 16) // 预分配空间
+	c.retCh = make([]reflect.Value, 0, 16)
 	c.retMu.Unlock()
 	c.bRet.Store(true)
 }
+
+// GetRet 获取收集到的返回值
+//
+// Deprecated: 存在竞态条件，请使用 DoWithRet 替代。
 func (c *CallFunction) GetRet() []reflect.Value {
 	c.retMu.Lock()
 	defer c.retMu.Unlock()
@@ -150,6 +158,9 @@ func callFunctionArgs(fn interface{}, args ...interface{}) ([]reflect.Value, err
 }
 
 // 使用回调函数
+//
+// 注意：当 bRet 为 true 时，Do 会将返回值写入共享的 retCh，
+// 这在并发场景下不安全。推荐使用 DoWithRet 获取返回值。
 func (c *CallFunction) Do(key any, values ...any) (ok bool) {
 	defer func() {
 		if err := recover(); err != nil {

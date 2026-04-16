@@ -6,6 +6,7 @@ import (
 	"os"
 	"reflect"
 	"runtime"
+	"sync"
 	"sync/atomic"
 	"touchgocore/config"
 	"touchgocore/localtimer"
@@ -21,13 +22,16 @@ import (
 var (
 	defaultLua     *LuaScript = nil
 	luaInstances   map[int64]*LuaScript
+	luaInstancesMu sync.RWMutex // 保护 luaInstances 的并发访问
 	nextInstanceID atomic.Int64
 )
 
 // 注册的函数和类
 var (
-	registeredFuncs   map[string]func(t *rt.Thread, c *rt.GoCont) (rt.Cont, error)
-	registeredClasses map[ILuaClassInterface]bool
+	registeredFuncs     map[string]func(t *rt.Thread, c *rt.GoCont) (rt.Cont, error)
+	registeredFuncsMu   sync.RWMutex // 保护 registeredFuncs 的并发访问
+	registeredClasses   map[ILuaClassInterface]bool
+	registeredClassesMu sync.RWMutex // 保护 registeredClasses 的并发访问
 )
 
 // luaTimer 定时器结构
@@ -214,16 +218,20 @@ func NewLuaScriptWithContext(ctx context.Context, initluapath string) (*LuaScrip
 	}
 
 	// 初始化注册的函数
+	registeredFuncsMu.RLock()
 	for funcName, function := range registeredFuncs {
 		p.runtime.SetEnvGoFunc(p.env, funcName, function, 1, false)
 	}
+	registeredFuncsMu.RUnlock()
 
 	// 注册类
+	registeredClassesMu.RLock()
 	for class := range registeredClasses {
 		if err := registerClassWithContext(ctx, class, p); err != nil {
 			vars.Error("register Lua class failed: %v", err)
 		}
 	}
+	registeredClassesMu.RUnlock()
 
 	// 读取并编译脚本文件
 	source, err := os.ReadFile(p.initScriptPath)
@@ -253,7 +261,9 @@ func NewLuaScriptWithContext(ctx context.Context, initluapath string) (*LuaScrip
 
 	// 加入管理列表
 	instanceID := nextInstanceID.Add(1)
+	luaInstancesMu.Lock()
 	luaInstances[instanceID] = p
+	luaInstancesMu.Unlock()
 	p.UID = instanceID
 	return p, nil
 }
@@ -265,14 +275,20 @@ func Call(funcName string, args ...interface{}) ([]interface{}, error) {
 
 // CallWithContext 使用上下文调用默认 Lua 实例的函数
 func CallWithContext(ctx context.Context, funcName string, args ...interface{}) ([]interface{}, error) {
-	if defaultLua == nil {
+	luaInstancesMu.RLock()
+	dl := defaultLua
+	luaInstancesMu.RUnlock()
+	if dl == nil {
 		return nil, fmt.Errorf("Lua service not started")
 	}
-	return defaultLua.CallWithContext(ctx, funcName, args...)
+	return dl.CallWithContext(ctx, funcName, args...)
 }
 
 // RegisterLuaFunc 注册全局函数到所有 Lua 实例
 func RegisterLuaFunc(funcName string, function func(t *rt.Thread, c *rt.GoCont) (rt.Cont, error)) error {
+	registeredFuncsMu.Lock()
+	defer registeredFuncsMu.Unlock()
+
 	if registeredFuncs == nil {
 		registeredFuncs = make(map[string]func(t *rt.Thread, c *rt.GoCont) (rt.Cont, error))
 	}
@@ -294,6 +310,9 @@ func RegisterLuaClass(class ILuaClassInterface) error {
 		return fmt.Errorf("get class name failed: %w", err)
 	}
 
+	registeredClassesMu.Lock()
+	defer registeredClassesMu.Unlock()
+
 	if registeredClasses == nil {
 		registeredClasses = make(map[ILuaClassInterface]bool)
 	}
@@ -311,18 +330,29 @@ func RunLua() error {
 		return nil
 	}
 
+	luaInstancesMu.Lock()
 	luaInstances = make(map[int64]*LuaScript)
+	luaInstancesMu.Unlock()
+
 	var err error
-	defaultLua, err = NewLuaScript(config.Cfg_.Lua)
+	dl, err := NewLuaScript(config.Cfg_.Lua)
 	if err != nil {
 		return fmt.Errorf("create Lua script failed: %w", err)
 	}
+
+	luaInstancesMu.Lock()
+	defaultLua = dl
+	luaInstancesMu.Unlock()
+
 	vars.Info("Lua service started successfully")
 	return nil
 }
 
 // StopLua 关闭所有的定时器
 func StopLua() {
+	luaInstancesMu.Lock()
+	defer luaInstancesMu.Unlock()
+
 	for _, ls := range luaInstances {
 		ls.Close()
 	}

@@ -12,6 +12,13 @@ local DialogType = {
     TASK     = "task",    -- 任务
 }
 
+-- 普通说话随机模式
+local NormalRandMode = {
+    OFF      = "off",     -- 不随机，使用固定text
+    ONCE     = "once",    -- 创建时随机选一条（后续固定）
+    EVERY    = "every",   -- 每次触发对话都重新随机
+}
+
 -- 商店选择模式
 local ShopMode = {
     DIRECT   = "direct",  -- 直接打开单个商店
@@ -87,10 +94,33 @@ local createNpc = function(config)
     -- 设置对话数据
     if config.dialogs then
         for dialogId, dialogData in pairs(config.dialogs) do
+            local text = dialogData.text or ""
+            local dialogType = dialogData.type or DialogType.NORMAL
+
+            -- 普通说话类型: 支持随机文本
+            -- 当 dialogData.texts 为数组时，根据 rand_mode 决定随机策略
+            -- rand_mode = "off"/nil  → 不随机，仍使用 text 字段
+            -- rand_mode = "once"     → 创建时随机选一条
+            -- rand_mode = "every"    → 每次对话都随机（通过param1传递texts数组）
+            if dialogType == DialogType.NORMAL and type(dialogData.texts) == "table" and #dialogData.texts > 0 then
+                local randMode = dialogData.rand_mode or NormalRandMode.ONCE
+                if randMode == NormalRandMode.ONCE then
+                    -- 创建时随机选一条，之后固定
+                    text = dialogData.texts[math.random(#dialogData.texts)]
+                elseif randMode == NormalRandMode.EVERY then
+                    -- 每次触发时随机: text设为第一条（占位），texts数组存入param1
+                    text = dialogData.texts[1]
+                    if not dialogData.param1 then
+                        dialogData.param1 = dialogData.texts
+                    end
+                end
+                -- rand_mode == "off" 时不做任何处理
+            end
+
             npc:AddDialog(
                 dialogId,
-                dialogData.text or "",
-                dialogData.type or DialogType.NORMAL,
+                text,
+                dialogType,
                 dialogData.param1,
                 dialogData.param2,
                 dialogData.param3
@@ -123,9 +153,27 @@ local testNpcConfig = {
 
     -- 对话列表 (dialog_id => 对话配置)
     dialogs = {
-        -- 普通说话: 直接显示文字气泡
+        -- 普通说话: 随机文本（创建时随机选一条）
         [0] = {
-            text = "今天天气真好",
+            texts = {
+                "今天天气真好",
+                "欢迎来到我们的村庄",
+                "最近有什么新鲜事吗？",
+                "你看起来很精神啊！",
+            },
+            rand_mode = NormalRandMode.ONCE,  -- 创建时随机，后续固定
+            type = DialogType.NORMAL,
+        },
+
+        -- 普通说话: 每次触发都随机
+        [6] = {
+            texts = {
+                "哼，别来烦我！",
+                "我今天心情不好...",
+                "走开走开！",
+                "别挡路！",
+            },
+            rand_mode = NormalRandMode.EVERY,  -- 每次对话都重新随机
             type = DialogType.NORMAL,
         },
 
@@ -233,7 +281,7 @@ local function createMultipleNpcs()
         direction = 2,
         map_id = 1001,
         dialogs = {
-            [0] = { text = "站住!请出示通行证", type = DialogType.NORMAL },
+            [0] = { texts = {"站住!请出示通行证", "谁在那边?"}, rand_mode = NormalRandMode.ONCE, type = DialogType.NORMAL },
             [1] = { text = "关闭", type = DialogType.CLOSE },
         },
     })
@@ -247,7 +295,7 @@ local function createMultipleNpcs()
         map_id = 1001,
         points = {{300, 400}, {350, 400}, {350, 450}, {300, 450}},
         dialogs = {
-            [0] = { text = "收购!收购!最新鲜的货物!", type = DialogType.NORMAL },
+            [0] = { texts = {"收购!收购!最新鲜的货物!", "便宜卖了!便宜卖了!"}, rand_mode = NormalRandMode.ONCE, type = DialogType.NORMAL },
             [1] = { text = "打开商店", type = DialogType.SHOP, param1 = ShopMode.DIRECT, param2 = {10} },
             [99] = { text = "下次再来", type = DialogType.CLOSE },
         },
@@ -266,7 +314,7 @@ local function createMultipleNpcs()
         direction = 1,
         map_id = 1001,
         dialogs = {
-            [0] = { text = "想去哪里旅行?", type = DialogType.NORMAL },
+            [0] = { texts = {"想去哪里旅行?", "远方在召唤你!"}, rand_mode = NormalRandMode.EVERY, type = DialogType.NORMAL },
             [1] = { text = "去主城", type = DialogType.SEND, param1 = 1, param2 = {1, 500, 500} },
             [2] = { text = "去野外", type = DialogType.SEND, param1 = 1, param2 = {2, 100, 100} },
             [99] = { text = "算了", type = DialogType.CLOSE },

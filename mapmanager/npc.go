@@ -5,6 +5,7 @@ import (
 
 	lua "touchgocore/golua"
 	"touchgocore/syncmap"
+	"touchgocore/util"
 	"touchgocore/vars"
 )
 
@@ -258,6 +259,35 @@ func (n *Npc) GetDialog(dialogId int) (*DialogItem, bool) {
 		return nil, false
 	}
 	return item, true
+}
+
+// GetDialogText 获取对话文本（支持随机文本）
+// 当对话类型为 normal 且 param1 为字符串数组时，每次调用随机返回一条文本
+// 否则返回固定 Text 字段
+func (n *Npc) GetDialogText(dialogId int) string {
+	item, ok := n.GetDialog(dialogId)
+	if !ok {
+		return ""
+	}
+	return item.GetDisplayText()
+}
+
+// GetDisplayText 获取对话项的显示文本
+// 支持 NORMAL 类型的随机文本：当 Param1 为 []string 时随机选一条
+func (d *DialogItem) GetDisplayText() string {
+	// 仅 NORMAL 类型支持随机文本
+	if d.Type == DialogTypeNormal {
+		if texts, ok := d.Param1.([]string); ok && len(texts) > 0 {
+			return texts[util.RandInt(int64(len(texts)))]
+		}
+		// Lua 传递的可能是 []any 类型
+		if texts, ok := d.Param1.([]any); ok && len(texts) > 0 {
+			if s, ok := texts[util.RandInt(int64(len(texts)))].(string); ok {
+				return s
+			}
+		}
+	}
+	return d.Text
 }
 
 // GetDefaultDialog 获取默认对话项(对话ID最小的)

@@ -9,9 +9,8 @@ import (
 )
 
 // 当前使用的时钟
-func CurrentTime() *time.Time {
-	tm := time.Now()
-	return &tm
+func CurrentTime() time.Time {
+	return time.Now()
 }
 
 // 时间工具函数部分保持不变（已优化命名和错误处理）

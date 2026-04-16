@@ -106,7 +106,7 @@ func TestFilterPerformance(t *testing.T) {
 			text := generateTestText(length)
 
 			// 测量替换时间
-			start := *util.CurrentTime()
+			start := util.CurrentTime()
 			result := f.ReplaceWithAsterisk(text)
 			elapsed := time.Since(start)
 
@@ -120,7 +120,7 @@ func TestFilterPerformance(t *testing.T) {
 		concurrency := 10
 		text := generateTestText(1000)
 
-		start := *util.CurrentTime()
+		start := util.CurrentTime()
 		var wg sync.WaitGroup
 		for i := 0; i < concurrency; i++ {
 			wg.Add(1)

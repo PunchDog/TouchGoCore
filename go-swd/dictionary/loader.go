@@ -150,8 +150,8 @@ func (l *Loader) NotifyObservers() {
 // notifyObserversIfNeeded 根据条件通知观察者（并发执行）
 func (l *Loader) notifyObserversIfNeeded(force bool) {
 	if !force {
-		lastNotify := l.lastNotifyTime.Load().(*time.Time)
-		if util.CurrentTime().Sub(*lastNotify) < l.notifyInterval {
+		lastNotify := l.lastNotifyTime.Load().(time.Time)
+		if util.CurrentTime().Sub(lastNotify) < l.notifyInterval {
 			return
 		}
 	}

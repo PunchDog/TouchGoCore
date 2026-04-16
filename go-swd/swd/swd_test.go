@@ -468,7 +468,7 @@ func TestSWD_Performance(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			start := *util.CurrentTime()
+			start := util.CurrentTime()
 			for i := 0; i < tt.numTests; i++ {
 				_ = swd.Detect(tt.text)
 			}

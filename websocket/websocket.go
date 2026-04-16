@@ -304,7 +304,7 @@ func workerLoop(workerID int, queue chan *msgQueueType) {
 		case msg := <-queue:
 			processMessage(msg)
 			workerPoolStats[workerID].Messages.Add(1)
-			workerPoolStats[workerID].LastMessageAt = *util.CurrentTime()
+			workerPoolStats[workerID].LastMessageAt = util.CurrentTime()
 		}
 	}
 }

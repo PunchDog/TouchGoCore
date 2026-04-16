@@ -82,8 +82,8 @@ func (c *Client) connectionDial(url string) error {
 			c.msgChan = make(chan []byte, DEFAULT_WRITE_BUFFER_SIZE)
 
 			// ============ 改进：初始化统计 ============
-			c.stats.connectTime = *util.CurrentTime()
-			c.stats.lastActivity.Store(*util.CurrentTime())
+			c.stats.connectTime = util.CurrentTime()
+			c.stats.lastActivity.Store(util.CurrentTime())
 
 			return nil
 		}
@@ -131,7 +131,7 @@ func (c *Client) handleLoop() {
 				// ============ 改进：更新统计 ============
 				c.stats.messagesSent.Add(1)
 				c.stats.bytesSent.Add(int64(len(msg)))
-				c.stats.lastActivity.Store(*util.CurrentTime())
+				c.stats.lastActivity.Store(util.CurrentTime())
 			} else {
 				return
 			}
@@ -156,7 +156,7 @@ func (c *Client) readLoop() {
 				// ============ 改进：更新统计 ============
 				c.stats.messagesReceived.Add(1)
 				c.stats.bytesReceived.Add(int64(len(data)))
-				c.stats.lastActivity.Store(*util.CurrentTime())
+				c.stats.lastActivity.Store(util.CurrentTime())
 			}
 		} else {
 			return
@@ -316,8 +316,8 @@ func NewClient(connType interface{}, remoteAddr string, className string) (*Clie
 	client.iCallName = className
 
 	// ============ 改进：初始化统计 ============
-	client.stats.connectTime = *util.CurrentTime()
-	client.stats.lastActivity.Store(*util.CurrentTime())
+	client.stats.connectTime = util.CurrentTime()
+	client.stats.lastActivity.Store(util.CurrentTime())
 
 	defer func() {
 		if err != nil {
@@ -404,6 +404,6 @@ func (c *Client) GetStats() ClientStats {
 func (c *Client) UpdateStatsFromMessage(data []byte) {
 	c.stats.messagesReceived.Add(1)
 	c.stats.bytesReceived.Add(int64(len(data)))
-	c.stats.lastActivity.Store(*util.CurrentTime())
+	c.stats.lastActivity.Store(util.CurrentTime())
 	UpdateMessageStats()
 }

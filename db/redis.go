@@ -1,4 +1,4 @@
-package db
+﻿package db
 
 import (
 	"context"
@@ -125,9 +125,18 @@ func splitAddrs(host string) []string {
 func (this *Redis) connectOnly(dataSourceName string) bool {
 	if v, ok := _DbMap.Load(dataSourceName); ok {
 		this.redisClient = v.(redis.Cmdable)
-		// 检查是否为集群客户端
-		if _, ok := v.(*redis.ClusterClient); ok {
+		switch v.(type) {
+		case *redis.ClusterClient:
 			this.isCluster = true
+		case *redis.Client:
+			this.isCluster = false
+		default:
+			// 未知类型，通过类型断言推断
+			if _, ok := v.(*redis.ClusterClient); ok {
+				this.isCluster = true
+			} else {
+				this.isCluster = false
+			}
 		}
 		return true
 	}

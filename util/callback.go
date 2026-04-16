@@ -1,4 +1,4 @@
-package util
+﻿package util
 
 import (
 	"fmt"
@@ -164,7 +164,7 @@ func callFunctionArgs(fn interface{}, args ...interface{}) ([]reflect.Value, err
 func (c *CallFunction) Do(key any, values ...any) (ok bool) {
 	defer func() {
 		if err := recover(); err != nil {
-			vars.Error("调用回调函数失败", "key", key, "err", err)
+			vars.Error("调用回调函数失败: %v", err)
 			ok = false
 		}
 	}()
@@ -174,7 +174,7 @@ func (c *CallFunction) Do(key any, values ...any) (ok bool) {
 		for _, fn := range funcs {
 			args, err := callFunctionArgs(fn, values...)
 			if err != nil {
-				vars.Debug("参数转换失败", "函数", fn, "参数", values, "error", err)
+				vars.Debug("参数转换失败: %v", err)
 				continue
 			}
 			method := reflect.ValueOf(fn)
@@ -195,7 +195,7 @@ func (c *CallFunction) Do(key any, values ...any) (ok bool) {
 func (c *CallFunction) DoWithRet(key any, values ...any) ([]reflect.Value, bool) {
 	defer func() {
 		if err := recover(); err != nil {
-			vars.Error("调用回调函数失败", "key", key, "err", err)
+			vars.Error("调用回调函数失败: %v", err)
 		}
 	}()
 
@@ -206,7 +206,7 @@ func (c *CallFunction) DoWithRet(key any, values ...any) ([]reflect.Value, bool)
 		for _, fn := range funcs {
 			args, err := callFunctionArgs(fn, values...)
 			if err != nil {
-				vars.Debug("参数转换失败", "函数", fn, "参数", values, "error", err)
+				vars.Debug("参数转换失败: %v", err)
 				continue
 			}
 			method := reflect.ValueOf(fn)

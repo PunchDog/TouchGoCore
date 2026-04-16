@@ -1,4 +1,4 @@
-package rpc
+﻿package rpc
 
 import (
 	"context"
@@ -111,11 +111,13 @@ func (s *RpcServer) Msg(stream message.Grpc_MsgServer) error {
 // 发送消息
 func (s *RpcServer) Send(name string, pb1, pb2 int32, pb proto.Message) error {
 	rsp := util.NewFSMessage(pb1, pb2, pb)
-	if st1, h := s.nametoclientstream.Load(name); h {
-		st := st1.(message.Grpc_MsgServer)
-		if err := st.Send(rsp); err != nil {
-			return fmt.Errorf("发送gRPC响应错误: %v", err)
-		}
+	st1, h := s.nametoclientstream.Load(name)
+	if !h {
+		return fmt.Errorf("gRPC Send: 未找到客户端流[name=%s]", name)
+	}
+	st := st1.(message.Grpc_MsgServer)
+	if err := st.Send(rsp); err != nil {
+		return fmt.Errorf("发送gRPC响应错误: %v", err)
 	}
 	return nil
 }
@@ -162,16 +164,26 @@ func (s *RpcServer) handleChanel() {
 			// 在新的 goroutine 中处理消息，以便可以超时控制
 			go func() {
 				key := fmt.Sprintf("%s:%d:%d", util.CallRpcMsg, msg.protol1, msg.protol2)
-				// 使用独立的 CallFunction 实例，避免全局单例并发问题
-				s.callFunc.SetDoRet()
-				bret := s.callFunc.Do(key, msg)
-				if bret {
-					// 获取返回值
-					res := s.callFunc.GetRet()
+				// 检查上下文是否已超时，避免无意义计算
+				select {
+				case <-ctx.Done():
+					select {
+					case resultCh <- struct {
+						bret bool
+						res  []reflect.Value
+					}{bret: false, res: nil}:
+					default:
+						// resultCh 可能已满（超时分支已写入），安全丢弃
+					}
+					return
+				default:
+				}
+				results, ok := s.callFunc.DoWithRet(key, msg)
+				if ok && len(results) > 0 {
 					resultCh <- struct {
 						bret bool
 						res  []reflect.Value
-					}{bret: true, res: res}
+					}{bret: true, res: results}
 				} else {
 					resultCh <- struct {
 						bret bool

@@ -17,7 +17,7 @@ import (
 
 type IPInfo struct {
 	Code int    `json:"code"`
-	Data IPData `json:"data`
+	Data IPData `json:"data"`
 }
 type IPData struct {
 	Country   string `json:"country"`

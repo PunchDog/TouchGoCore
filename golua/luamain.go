@@ -1,4 +1,4 @@
-package lua
+﻿package lua
 
 import (
 	"context"
@@ -55,16 +55,15 @@ func (lt *luaTimer) Tick() {
 	lt.updateObjectsConcurrently(lt.ctx)
 }
 
-// updateObjectsConcurrently 并发更新对象
 func (lt *luaTimer) updateObjectsConcurrently(ctx context.Context) {
-	var workerCount int
 	maxWorkers := runtime.NumCPU()
-	sem := make(chan struct{}, maxWorkers)
+	sem := make(chan struct{}, maxWorkers) // 有缓冲，避免启动过多 goroutine 时阻塞
+	var launched atomic.Int64             // 使用原子计数器，避免 workerCount 的竞态
 
 	lt.luaScript.registeredObjects.Range(func(key, value interface{}) bool {
 		select {
 		case <-ctx.Done():
-			return false
+			return false // 取消遍历，避免继续启动新的 goroutine
 		default:
 		}
 
@@ -73,21 +72,19 @@ func (lt *luaTimer) updateObjectsConcurrently(ctx context.Context) {
 			return true
 		}
 
-		workerCount++
-		sem <- struct{}{}
+		launched.Add(1)
+		sem <- struct{}{} // 不会阻塞，因为通道有 maxWorkers 缓冲
 
-		go func(k interface{}, o ILuaClassInterface) {
+		go func(o ILuaClassInterface) {
 			defer func() { <-sem }()
-
-			// 调用旧版Update方法以保持兼容
 			o.Update()
-		}(key, obj)
+		}(obj)
 
 		return true
 	})
 
-	// 等待所有worker完成
-	for i := 0; i < workerCount; i++ {
+	// 等待所有已启动的 worker 完成
+	for i := int64(0); i < launched.Load(); i++ {
 		<-sem
 	}
 }

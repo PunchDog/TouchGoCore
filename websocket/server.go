@@ -1,4 +1,4 @@
-package websocket
+﻿package websocket
 
 import (
 	"net"
@@ -222,10 +222,11 @@ func ListenAndServe(port int, className string) error {
 			classNameFromContext = className // 如果不存在，使用传入的className
 		}
 		classNameStr := classNameFromContext.(string)
-
-		_, err = NewClient(wsConn, getClientIP(c.Request), classNameStr)
-		if err != nil {
+		// NewClient 成功后会接管 wsConn 的生命周期（包括错误时的关闭）。
+		// 若 NewClient 返回错误，说明客户端未通过认证或初始化失败，此时手动关闭连接。
+		if _, err = NewClient(wsConn, getClientIP(c.Request), classNameStr); err != nil {
 			vars.Error("创建WebSocket客户端失败: %v", err)
+			wsConn.Close()
 			return
 		}
 	})
@@ -255,3 +256,4 @@ func ListenAndServe(port int, className string) error {
 func IsIntranetIP(ip string) bool {
 	return util.IsIntranetIP(ip)
 }
+

@@ -18,6 +18,7 @@ import (
 	"touchgocore/go-swd/config"
 	"touchgocore/go-swd/core"
 	"touchgocore/go-swd/types/category"
+	"touchgocore/util"
 )
 
 // Loader 实现core.Loader接口
@@ -35,7 +36,7 @@ func NewLoader() *Loader {
 		notifyBatchSize: 100,
 		notifyInterval:  time.Millisecond * 100,
 	}
-	l.lastNotifyTime.Store(time.Now())
+	l.lastNotifyTime.Store(util.CurrentTime())
 	return l
 }
 
@@ -149,8 +150,8 @@ func (l *Loader) NotifyObservers() {
 // notifyObserversIfNeeded 根据条件通知观察者（并发执行）
 func (l *Loader) notifyObserversIfNeeded(force bool) {
 	if !force {
-		lastNotify := l.lastNotifyTime.Load().(time.Time)
-		if time.Since(lastNotify) < l.notifyInterval {
+		lastNotify := l.lastNotifyTime.Load().(*time.Time)
+		if util.CurrentTime().Sub(*lastNotify) < l.notifyInterval {
 			return
 		}
 	}
@@ -183,7 +184,7 @@ func (l *Loader) notifyObserversIfNeeded(force bool) {
 	}
 	wg.Wait()
 
-	l.lastNotifyTime.Store(time.Now())
+	l.lastNotifyTime.Store(util.CurrentTime())
 }
 
 // AddWord 添加单个敏感词

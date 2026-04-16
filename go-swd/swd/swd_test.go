@@ -9,6 +9,7 @@ import (
 
 	"touchgocore/go-swd/core"
 	"touchgocore/go-swd/types/category"
+	"touchgocore/util"
 )
 
 // TestNew 测试创建SWD实例
@@ -467,7 +468,7 @@ func TestSWD_Performance(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			start := time.Now()
+			start := *util.CurrentTime()
 			for i := 0; i < tt.numTests; i++ {
 				_ = swd.Detect(tt.text)
 			}

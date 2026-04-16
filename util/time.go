@@ -8,15 +8,21 @@ import (
 	"time"
 )
 
+// 当前使用的时钟
+func CurrentTime() *time.Time {
+	tm := time.Now()
+	return &tm
+}
+
 // 时间工具函数部分保持不变（已优化命名和错误处理）
 // CurrentMS 返回当前毫秒时间戳
 func CurrentMS() int64 {
-	return time.Now().UnixMilli()
+	return CurrentTime().UnixMilli()
 }
 
 // CurrentS 返回当前秒时间戳
 func CurrentS() int64 {
-	return time.Now().Unix()
+	return CurrentTime().Unix()
 }
 
 // MSToTimeString 毫秒转时间字符串

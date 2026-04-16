@@ -146,7 +146,7 @@ func (t *Timer) Init(interval, count int64, self TimerInterface) error {
 	}
 
 	t.uid = 0
-	t.nextTime = time.Now().UTC().UnixMilli() + interval
+	t.nextTime = util.CurrentMS() + interval
 	t.interval = interval
 	t.count = count
 	if count == InfiniteCount {
@@ -199,7 +199,7 @@ func (t *Timer) HasNext() bool {
 		}
 	}
 
-	t.nextTime = time.Now().UTC().UnixMilli() + t.interval
+	t.nextTime = util.CurrentMS() + t.interval
 	return true
 }
 
@@ -226,7 +226,7 @@ func (t *Timer) IsActive() bool {
 // calculateType 根据间隔计算定时器类型
 func (t *Timer) calculateType(interval int64) TimerType {
 	if interval == -CountCorrectionValue {
-		interval = t.nextTime - time.Now().UTC().UnixMilli()
+		interval = t.nextTime - util.CurrentMS()
 	}
 
 	switch {
@@ -507,7 +507,7 @@ func (m *TimerManager) processWheelTick(wheel *TimerWheel, wheelType TimerType) 
 	wheel.wheelLock.Lock()
 	defer wheel.wheelLock.Unlock()
 
-	currentTime := time.Now().UTC().UnixMilli()
+	currentTime := util.CurrentMS()
 
 	wheel.tickWheel.Range(func(node list.INode) bool {
 		timer := node.(TimerInterface)
@@ -563,7 +563,7 @@ func (m *TimerManager) cleanupWheel(wheel *TimerWheel) {
 	wheel.wheelLock.Lock()
 	defer wheel.wheelLock.Unlock()
 
-	currentTime := time.Now().UTC().UnixMilli()
+	currentTime := util.CurrentMS()
 
 	// 执行所有已过期的定时器
 	wheel.tickWheel.Range(func(node list.INode) bool {

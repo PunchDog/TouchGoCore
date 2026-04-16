@@ -4,6 +4,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"touchgocore/util"
 	"touchgocore/vars"
 )
 
@@ -32,8 +33,8 @@ func NewList() *List {
 // generateNextID 生成下一个节点ID，使用原子操作保证并发安全
 func (l *List) generateNextID() int64 {
 	//如果nextID和当前时间相差1秒，就用当前时间作为新的iD,否则+1
-	if time.Now().UnixMilli()-l.nextID.Load()/int64(time.Millisecond) >= 1000 {
-		l.nextID.Store(time.Now().UnixNano())
+	if util.CurrentMS()-l.nextID.Load()/int64(time.Millisecond) >= 1000 {
+		l.nextID.Store(util.CurrentTime().UnixNano() + 1)
 	}
 	return l.nextID.Add(1)
 }

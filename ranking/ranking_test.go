@@ -2,21 +2,22 @@ package ranking
 
 import (
 	"testing"
-	"time"
+
+	"touchgocore/util"
 )
 
 func BenchmarkRankTree_AddRankInfo(b *testing.B) {
 	rt := NewRankTree()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		rt.AddRankInfo(int64(i), int64(i), time.Now().UnixNano())
+		rt.AddRankInfo(int64(i), int64(i), util.CurrentMS()*1e6)
 	}
 }
 
 func BenchmarkRankTree_QueryRankInfo(b *testing.B) {
 	rt := NewRankTree()
 	for i := 0; i < 10000; i++ {
-		rt.AddRankInfo(int64(i), int64(i), time.Now().UnixNano())
+		rt.AddRankInfo(int64(i), int64(i), util.CurrentMS()*1e6)
 	}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -27,7 +28,7 @@ func BenchmarkRankTree_QueryRankInfo(b *testing.B) {
 func BenchmarkRankTree_QueryByRankRange(b *testing.B) {
 	rt := NewRankTree()
 	for i := 0; i < 10000; i++ {
-		rt.AddRankInfo(int64(i), int64(i), time.Now().UnixNano())
+		rt.AddRankInfo(int64(i), int64(i), util.CurrentMS()*1e6)
 	}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -38,18 +39,18 @@ func BenchmarkRankTree_QueryByRankRange(b *testing.B) {
 func BenchmarkRankTree_UpdateRankInfo(b *testing.B) {
 	rt := NewRankTree()
 	for i := 0; i < 10000; i++ {
-		rt.AddRankInfo(int64(i), int64(i), time.Now().UnixNano())
+		rt.AddRankInfo(int64(i), int64(i), util.CurrentMS()*1e6)
 	}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		rt.UpdateRankInfo(int64(i % 10000), int64(i), time.Now().UnixNano())
+		rt.UpdateRankInfo(int64(i % 10000), int64(i), util.CurrentMS()*1e6)
 	}
 }
 
 func BenchmarkRankTree_RemoveRankInfo(b *testing.B) {
 	rt := NewRankTree()
 	for i := 0; i < 10000; i++ {
-		rt.AddRankInfo(int64(i), int64(i), time.Now().UnixNano())
+		rt.AddRankInfo(int64(i), int64(i), util.CurrentMS()*1e6)
 	}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -61,9 +62,9 @@ func TestRankTree_Basic(t *testing.T) {
 	rt := NewRankTree()
 	
 	// 测试添加排名信息
-	rt.AddRankInfo(1, 100, time.Now().UnixNano())
-	rt.AddRankInfo(2, 200, time.Now().UnixNano())
-	rt.AddRankInfo(3, 150, time.Now().UnixNano())
+	rt.AddRankInfo(1, 100, util.CurrentMS()*1e6)
+	rt.AddRankInfo(2, 200, util.CurrentMS()*1e6)
+	rt.AddRankInfo(3, 150, util.CurrentMS()*1e6)
 	
 	// 测试查询排名
 	info := rt.QueryRankInfo(1)
@@ -88,7 +89,7 @@ func TestRankTree_Basic(t *testing.T) {
 	}
 	
 	// 测试更新排名
-	rt.UpdateRankInfo(1, 250, time.Now().UnixNano())
+	rt.UpdateRankInfo(1, 250, util.CurrentMS()*1e6)
 	info = rt.QueryRankInfo(1)
 	if info == nil || info.Rank != 1 {
 		t.Errorf("Expected rank 1 for uid 1 after update, got %d", info.Rank)

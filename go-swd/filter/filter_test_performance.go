@@ -9,6 +9,7 @@ import (
 	"touchgocore/go-swd/core"
 	"touchgocore/go-swd/detector"
 	"touchgocore/go-swd/types/category"
+	"touchgocore/util"
 )
 
 // TestFilterCorrectness 测试过滤器的正确性
@@ -105,7 +106,7 @@ func TestFilterPerformance(t *testing.T) {
 			text := generateTestText(length)
 
 			// 测量替换时间
-			start := time.Now()
+			start := *util.CurrentTime()
 			result := f.ReplaceWithAsterisk(text)
 			elapsed := time.Since(start)
 
@@ -119,7 +120,7 @@ func TestFilterPerformance(t *testing.T) {
 		concurrency := 10
 		text := generateTestText(1000)
 
-		start := time.Now()
+		start := *util.CurrentTime()
 		var wg sync.WaitGroup
 		for i := 0; i < concurrency; i++ {
 			wg.Add(1)

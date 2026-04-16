@@ -82,8 +82,8 @@ func (c *Client) connectionDial(url string) error {
 			c.msgChan = make(chan []byte, DEFAULT_WRITE_BUFFER_SIZE)
 
 			// ============ 改进：初始化统计 ============
-			c.stats.connectTime = time.Now()
-			c.stats.lastActivity.Store(time.Now())
+			c.stats.connectTime = *util.CurrentTime()
+			c.stats.lastActivity.Store(*util.CurrentTime())
 
 			return nil
 		}
@@ -116,7 +116,7 @@ func (c *Client) handleLoop() {
 			}
 			if c.Connected() {
 				// 设置写超时
-				if err := c.wsConnect.SetWriteDeadline(time.Now().Add(writeTimeout)); err != nil {
+				if err := c.wsConnect.SetWriteDeadline(util.CurrentTime().Add(writeTimeout)); err != nil {
 					vars.Error("设置写超时失败: %v, 客户端地址: %s", err, c.remoteAddr)
 					c.Close("设置写超时失败")
 					return
@@ -131,7 +131,7 @@ func (c *Client) handleLoop() {
 				// ============ 改进：更新统计 ============
 				c.stats.messagesSent.Add(1)
 				c.stats.bytesSent.Add(int64(len(msg)))
-				c.stats.lastActivity.Store(time.Now())
+				c.stats.lastActivity.Store(*util.CurrentTime())
 			} else {
 				return
 			}
@@ -156,7 +156,7 @@ func (c *Client) readLoop() {
 				// ============ 改进：更新统计 ============
 				c.stats.messagesReceived.Add(1)
 				c.stats.bytesReceived.Add(int64(len(data)))
-				c.stats.lastActivity.Store(time.Now())
+				c.stats.lastActivity.Store(*util.CurrentTime())
 			}
 		} else {
 			return
@@ -289,11 +289,11 @@ func (c *Client) SendMsg(msg ...any) {
 
 // 修改InitConnection为NewClient
 func NewClient(connType interface{}, remoteAddr string, className string) (*Client, error) {
-	if maxUID == 0 || maxUID > time.Now().UnixNano()+1 {
-		maxUID = time.Now().UnixNano() + 1
-	} else {
-		maxUID++
+	if maxUID == 0 || maxUID > util.CurrentTime().UnixNano()+1 {
+		maxUID = util.CurrentTime().UnixNano()
+		atomic.StoreInt64(&maxUID, util.CurrentTime().UnixNano())
 	}
+	atomic.AddInt64(&maxUID, 1)
 
 	var client *Client = nil
 	var err error = nil
@@ -316,8 +316,8 @@ func NewClient(connType interface{}, remoteAddr string, className string) (*Clie
 	client.iCallName = className
 
 	// ============ 改进：初始化统计 ============
-	client.stats.connectTime = time.Now()
-	client.stats.lastActivity.Store(time.Now())
+	client.stats.connectTime = *util.CurrentTime()
+	client.stats.lastActivity.Store(*util.CurrentTime())
 
 	defer func() {
 		if err != nil {
@@ -404,6 +404,6 @@ func (c *Client) GetStats() ClientStats {
 func (c *Client) UpdateStatsFromMessage(data []byte) {
 	c.stats.messagesReceived.Add(1)
 	c.stats.bytesReceived.Add(int64(len(data)))
-	c.stats.lastActivity.Store(time.Now())
+	c.stats.lastActivity.Store(*util.CurrentTime())
 	UpdateMessageStats()
 }

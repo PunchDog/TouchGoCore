@@ -3,10 +3,9 @@ package ranking
 import (
 	"encoding/gob"
 	"log"
-	"math/rand"
 	"os"
 	"sync"
-	"time"
+	"touchgocore/random"
 	"touchgocore/syncmap"
 )
 
@@ -14,11 +13,7 @@ import (
 const SkipListMaxLevel = 32
 
 // 随机概率
-const SkipListProbability = 0.25
-
-// 包级别的随机数生成器，线程安全
-var randSource = rand.NewSource(time.Now().UnixNano())
-var randGen = rand.New(randSource)
+const SkipListProbability = 250
 
 // RankInfo 排名信息结构体
 type RankInfo struct {
@@ -103,7 +98,7 @@ func newSkipList() *SkipList {
 
 func randomLevel() int32 {
 	lvl := int32(1)
-	for randGen.Float32() < SkipListProbability && lvl < SkipListMaxLevel {
+	for random.NextInt64()%10000 < SkipListProbability && lvl < SkipListMaxLevel {
 		lvl++
 	}
 	return lvl

@@ -147,11 +147,6 @@ func CurrentMS() int64 {
 	return CurrentTime().UnixMilli()
 }
 
-// CurrentS 返回当前秒时间戳
-func CurrentS() int64 {
-	return CurrentTime().Unix()
-}
-
 // MSToTimeString 毫秒转时间字符串
 func MSToTimeString(ms int64) string {
 	return time.UnixMilli(ms).Format("2006-01-02 15:04:05")

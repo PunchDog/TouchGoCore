@@ -101,3 +101,75 @@ func Stop() {
 	})
 	vars.Info("RPC服务停止: 服务器%d个, 客户端%d个", serverCount, clientCount)
 }
+
+// ==================== 全局访问方法（供外部使用）====================
+
+// GetRpcClient 根据名称获取 RPC 客户端实例
+func GetRpcClient(name string) *RpcClient {
+	if rpcClient_ == nil {
+		return nil
+	}
+	client, ok := rpcClient_.Load(name)
+	if !ok {
+		return nil
+	}
+	return client
+}
+
+// GetRpcServer 根据名称获取 RPC 服务端实例
+func GetRpcServer(name string) *RpcServer {
+	if service_ == nil {
+		return nil
+	}
+	srv, ok := service_.Load(name)
+	if !ok {
+		return nil
+	}
+	return srv
+}
+
+// SetClientCallbacks 为指定客户端设置回调接口
+func SetClientCallbacks(clientName string, callbacks *ClientCallbacks) bool {
+	client := GetRpcClient(clientName)
+	if client == nil {
+		return false
+	}
+	client.SetCallbacks(callbacks)
+	return true
+}
+
+// SetServerCallbacks 为指定服务端设置回调接口
+func SetServerCallbacks(serverName string, callbacks *ServerCallbacks) bool {
+	server := GetRpcServer(serverName)
+	if server == nil {
+		return false
+	}
+	server.SetCallbacks(callbacks)
+	return true
+}
+
+// GetAllRpcClients 获取所有 RPC 客户端实例
+func GetAllRpcClients() map[string]*RpcClient {
+	result := make(map[string]*RpcClient)
+	if rpcClient_ == nil {
+		return result
+	}
+	rpcClient_.Range(func(key string, value *RpcClient) bool {
+		result[key] = value
+		return true
+	})
+	return result
+}
+
+// GetAllRpcServers 获取所有 RPC 服务端实例
+func GetAllRpcServers() map[string]*RpcServer {
+	result := make(map[string]*RpcServer)
+	if service_ == nil {
+		return result
+	}
+	service_.Range(func(key string, value *RpcServer) bool {
+		result[key] = value
+		return true
+	})
+	return result
+}

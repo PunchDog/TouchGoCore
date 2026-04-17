@@ -50,13 +50,22 @@ type RpcClient struct {
 	useTLS bool
 	// 超时配置
 	timeout time.Duration
+	// 回调接口
+	callbacks *ClientCallbacks
 }
 
 func (c *RpcClient) Tick() {
+	// 触发重连回调
+	if c.callbacks != nil && c.callbacks.OnReconnecting != nil {
+		c.callbacks.OnReconnecting(c.serverName, 0)
+	}
+
 	// 断线重连，链接上了就从计时器里移除
 	conn, err := newClient(c.fullAddr, c.useTLS)
 	if err != nil {
 		vars.Error("RPC客户端连接失败[%s]: %v", c.fullAddr, err)
+		// 触发错误回调
+		c.triggerOnError(err)
 		return
 	}
 	c.conn.Store(conn)
@@ -64,11 +73,18 @@ func (c *RpcClient) Tick() {
 	// 重置流状态
 	c.streamValid.Store(false)
 	c.Remove()
+
+	// 触发连接成功回调
+	c.triggerOnConnected()
 }
 
 // markDisconnected 标记连接断开，并启动重连定时器
 func (c *RpcClient) markDisconnected() {
 	c.connStatus.Store(false)
+
+	// 触发断开连接回调
+	c.triggerOnDisconnected(nil)
+
 	localtimer.AddTimer(c)
 }
 
@@ -127,14 +143,21 @@ func (c *RpcClient) sendWithStream(ctx context.Context, stream message.Grpc_MsgC
 		// 流失效，需要重建
 		c.streamValid.Store(false)
 		c.markDisconnected()
+		// 触发错误回调
+		c.triggerOnError(err)
 		return
 	}
+
+	// 触发消息发送成功回调
+	c.triggerOnMessageSent(protocol1, protocol2, pb)
 
 	recv, err := stream.Recv()
 	if err != nil {
 		vars.Error("RPC客户端接收失败[%s] 协议:%d:%d: %v", c.fullAddr, protocol1, protocol2, err)
 		// 流失效，需要重建
 		c.streamValid.Store(false)
+		// 触发错误回调
+		c.triggerOnError(err)
 		return
 	}
 	if callfunc != nil {
@@ -149,6 +172,13 @@ func (c *RpcClient) sendWithStream(ctx context.Context, stream message.Grpc_MsgC
 				vars.Error("RPC客户端回调类型不匹配[%s] 期望:%v 实际:%v", c.fullAddr, pb1Type, reflect.TypeOf(res))
 			}
 		}
+
+		// 触发消息接收回调（传递解析后的响应）
+		c.triggerOnMessageReceived(protocol1, protocol2, res)
+	} else {
+		// 无回调函数时，也触发消息接收回调（传递原始响应）
+		res := util.PasreFSMessage(recv)
+		c.triggerOnMessageReceived(protocol1, protocol2, res)
 	}
 }
 
@@ -206,6 +236,7 @@ func NewRpcClient(servername, addr string, port int) *RpcClient {
 	client.serverName = servername
 	client.useTLS = useTLS
 	client.timeout = 30 * time.Second // 默认超时 30 秒
+	client.callbacks = NewClientCallbacks() // 初始化回调接口
 
 	conn, err := newClient(client.fullAddr, useTLS)
 	if err == nil {
@@ -221,4 +252,53 @@ func NewRpcClient(servername, addr string, port int) *RpcClient {
 
 	rpcClient_.Store(servername, client)
 	return client
+}
+
+// ==================== 回调触发方法（内部使用）====================
+
+// triggerOnConnected 触发连接成功回调
+func (c *RpcClient) triggerOnConnected() {
+	if c.callbacks != nil && c.callbacks.OnConnected != nil {
+		c.callbacks.OnConnected(c.serverName)
+	}
+}
+
+// triggerOnDisconnected 触发断开连接回调
+func (c *RpcClient) triggerOnDisconnected(err error) {
+	if c.callbacks != nil && c.callbacks.OnDisconnected != nil {
+		c.callbacks.OnDisconnected(c.serverName, err)
+	}
+}
+
+// triggerOnError 触发错误回调
+func (c *RpcClient) triggerOnError(err error) {
+	if c.callbacks != nil && c.callbacks.OnError != nil {
+		c.callbacks.OnError(c.serverName, err)
+	}
+}
+
+// triggerOnMessageSent 触发消息发送成功回调
+func (c *RpcClient) triggerOnMessageSent(protocol1, protocol2 int32, req proto.Message) {
+	if c.callbacks != nil && c.callbacks.OnMessageSent != nil {
+		c.callbacks.OnMessageSent(c.serverName, protocol1, protocol2, req)
+	}
+}
+
+// triggerOnMessageReceived 触发消息接收回调
+func (c *RpcClient) triggerOnMessageReceived(protocol1, protocol2 int32, resp proto.Message) {
+	if c.callbacks != nil && c.callbacks.OnMessageReceived != nil {
+		c.callbacks.OnMessageReceived(c.serverName, protocol1, protocol2, resp)
+	}
+}
+
+// ==================== 公共方法：回调接口管理 ====================
+
+// SetCallbacks 设置客户端回调接口
+func (c *RpcClient) SetCallbacks(callbacks *ClientCallbacks) {
+	c.callbacks = callbacks
+}
+
+// GetCallbacks 获取客户端回调接口
+func (c *RpcClient) GetCallbacks() *ClientCallbacks {
+	return c.callbacks
 }

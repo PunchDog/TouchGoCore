@@ -21,7 +21,7 @@ func GetLuaTable() *LuaTable {
 	return luaTablePool.Get().(*LuaTable)
 }
 
-// PutLuaTable 将 LuaTable 返回到池中（向后兼容）
+// PutLuaTable 将 LuaTable 返回到池中（Deprecated: 请使用 PutLuaTableWithContext）
 func PutLuaTable(tbl *LuaTable) {
 	PutLuaTableWithContext(context.Background(), tbl)
 }
@@ -42,14 +42,14 @@ func PutLuaTableWithContext(ctx context.Context, tbl *LuaTable) {
 	}
 }
 
-// GetLuaTableWithCapacity 从池中获取指定容量的 LuaTable
+// GetLuaTableWithCapacity 从池中获取指定容量的 LuaTable（Deprecated: 功能未实现）
 func GetLuaTableWithCapacity(capacity int) *LuaTable {
 	tbl := GetLuaTable()
 	// TODO: 如果syncmap支持预分配容量，可以在这里实现
 	return tbl
 }
 
-// NewLuaTablePooled 使用池化方式创建 LuaTable（向后兼容）
+// NewLuaTablePooled 使用池化方式创建 LuaTable（Deprecated: 请使用 NewLuaTablePooledWithContext）
 func NewLuaTablePooled(data interface{}) *LuaTable {
 	return NewLuaTablePooledWithContext(context.Background(), data)
 }

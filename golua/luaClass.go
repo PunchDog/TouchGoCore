@@ -120,7 +120,7 @@ func (mc *methodCallback) callBack(t *rt.Thread, c *rt.GoCont) (rt.Cont, error) 
 	// 获取类注册信息
 	className, err := util.GetClassName(data)
 	if err != nil {
-		return nil, fmt.Errorf("get class name failed: %w", err)
+		return nil, fmt.Errorf("get class name failed: %v", err)
 	}
 
 	registryRaw, ok := classRegistryMap.Load(className)

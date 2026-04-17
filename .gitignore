@@ -21,3 +21,4 @@ example/*/*_debug_*
 example/*/*/*.log
 .workbuddy/*
 vars/logs/*.log
+.trae/documents/*

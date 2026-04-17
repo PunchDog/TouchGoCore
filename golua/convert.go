@@ -53,7 +53,7 @@ func GoToLuaValueWithContext(ctx context.Context, val interface{}) rt.Value {
 		return rt.NilValue
 	default:
 		// 尝试将其他类型转换为 table
-		if tbl := convertToTable(ctx, val); tbl != nil && tbl.HaveData() {
+		if tbl := convertToTable(ctx, val); tbl != nil && tbl.HasData() {
 			return rt.TableValue(tbl.ToTable())
 		}
 		return rt.NilValue

@@ -71,7 +71,7 @@ func (lt *LuaTable) SetByPath(path string, value interface{}) error {
 
 		if isLast {
 			// 最后一个 key，设置值
-			current.SetTableData(key, value)
+			current.Set(key, value)
 		} else {
 			// 获取或创建嵌套 table
 			val, exists := current.Get(key)
@@ -79,13 +79,13 @@ func (lt *LuaTable) SetByPath(path string, value interface{}) error {
 
 			if !exists {
 				next = newTable(nil)
-				current.SetTableData(key, next)
+				current.Set(key, next)
 			} else {
 				next, isTable := val.(*LuaTable)
 				if !isTable {
 					// 不是 table，需要替换
 					next = newTable(nil)
-					current.SetTableData(key, next)
+					current.Set(key, next)
 				}
 			}
 
@@ -264,7 +264,7 @@ func (this *LuaTable) Filter(predicate func(key, value interface{}) bool) *LuaTa
 	if this.tbl != nil {
 		this.tbl.Range(func(key, value interface{}) bool {
 			if predicate(key, value) {
-				result.SetTableData(key, value)
+				result.Set(key, value)
 			}
 			return true
 		})
@@ -280,7 +280,7 @@ func (this *LuaTable) Map(fn func(key, value interface{}) (interface{}, interfac
 	if this.tbl != nil {
 		this.tbl.Range(func(key, value interface{}) bool {
 			newKey, newValue := fn(key, value)
-			result.SetTableData(newKey, newValue)
+			result.Set(newKey, newValue)
 			return true
 		})
 	}
@@ -296,9 +296,9 @@ func (this *LuaTable) Copy() *LuaTable {
 		this.tbl.Range(func(key, value interface{}) bool {
 			// 递归拷贝嵌套 table
 			if nested, ok := value.(*LuaTable); ok {
-				result.SetTableData(key, nested.Copy())
+				result.Set(key, nested.Copy())
 			} else {
-				result.SetTableData(key, value)
+				result.Set(key, value)
 			}
 			return true
 		})
@@ -313,7 +313,7 @@ func (this *LuaTable) Clone() *LuaTable {
 
 	if this.tbl != nil {
 		this.tbl.Range(func(key, value interface{}) bool {
-			result.SetTableData(key, value)
+			result.Set(key, value)
 			return true
 		})
 	}

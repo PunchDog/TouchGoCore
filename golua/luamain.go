@@ -18,6 +18,33 @@ import (
 	rt "github.com/arnodel/golua/runtime"
 )
 
+// Lua 定时器和垃圾回收配置
+var (
+	UpdateIntervalMs = getUpdateIntervalMs()
+	GCTickCount      = getGCTickCount()
+)
+
+// getUpdateIntervalMs 从配置获取更新间隔
+func getUpdateIntervalMs() int64 {
+	if config.Cfg_ != nil && config.Cfg_.LuaConfig != nil && config.Cfg_.LuaConfig.UpdateInterval > 0 {
+		return config.Cfg_.LuaConfig.UpdateInterval
+	}
+	return 1000 // 默认 1 秒
+}
+
+// getGCTickCount 从配置获取 GC tick 计数
+func getGCTickCount() int64 {
+	if config.Cfg_ != nil && config.Cfg_.LuaConfig != nil && config.Cfg_.LuaConfig.GCTickCount > 0 {
+		return config.Cfg_.LuaConfig.GCTickCount
+	}
+	return 1800 // 默认 30 分钟 (30 * 60)
+}
+
+// Lua 文件扩展名
+const (
+	LuaFileExt = ".lua"
+)
+
 // 全局 Lua 实例管理
 var (
 	defaultLua     *LuaScript = nil
@@ -58,7 +85,7 @@ func (lt *luaTimer) Tick() {
 func (lt *luaTimer) updateObjectsConcurrently(ctx context.Context) {
 	maxWorkers := runtime.NumCPU()
 	sem := make(chan struct{}, maxWorkers) // 有缓冲，避免启动过多 goroutine 时阻塞
-	var launched atomic.Int64             // 使用原子计数器，避免 workerCount 的竞态
+	var launched atomic.Int64              // 使用原子计数器，避免 workerCount 的竞态
 
 	lt.luaScript.registeredObjects.Range(func(key, value interface{}) bool {
 		select {
@@ -304,7 +331,7 @@ func RegisterLuaClass(class ILuaClassInterface) error {
 
 	className, err := util.GetClassName(class)
 	if err != nil {
-		return fmt.Errorf("get class name failed: %w", err)
+		return fmt.Errorf("get class name failed: %v", err)
 	}
 
 	registeredClassesMu.Lock()
@@ -372,7 +399,7 @@ func registerClassWithContext(ctx context.Context, class ILuaClassInterface, scr
 	// 获取类名
 	className, err := util.GetClassName(class)
 	if err != nil {
-		return fmt.Errorf("get class name failed: %w", err)
+		return fmt.Errorf("get class name failed: %v", err)
 	}
 
 	// 检查是否已存在同名类（避免重复注册）
@@ -502,4 +529,18 @@ func registerClassWithContext(ctx context.Context, class ILuaClassInterface, scr
 	}
 
 	return nil
+}
+
+// Run 启动 Lua 服务（公开接口）
+func Run() {
+	if config.Cfg_.Lua == "off" {
+		vars.Info("不启动lua服务")
+		return
+	}
+	RunLua()
+}
+
+// Stop 关闭所有的定时器（公开接口）
+func Stop() {
+	StopLua()
 }

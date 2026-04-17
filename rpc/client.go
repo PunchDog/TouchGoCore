@@ -3,7 +3,6 @@ package rpc
 import (
 	"context"
 	"crypto/tls"
-	"crypto/x509"
 	"reflect"
 	"strconv"
 	"sync"
@@ -151,26 +150,6 @@ func (c *RpcClient) sendWithStream(ctx context.Context, stream message.Grpc_MsgC
 			}
 		}
 	}
-}
-
-// loadTLSConfig 加载 TLS 配置
-func loadTLSConfig(certFile, keyFile string) (*tls.Config, error) {
-	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
-	if err != nil {
-		return nil, err
-	}
-	return &tls.Config{
-		Certificates:       []tls.Certificate{cert},
-		InsecureSkipVerify: true, // 生产环境应为 false
-	}, nil
-}
-
-// loadSystemCertPool 加载系统根证书
-func loadSystemCertPool() (*x509.CertPool, error) {
-	certPool := x509.NewCertPool()
-	// 加载系统根证书（Windows 下需要单独处理）
-	// 这里可以添加更多证书加载逻辑
-	return certPool, nil
 }
 
 func newClient(addr string, useTLS bool) (*grpc.ClientConn, error) {

@@ -1,4 +1,4 @@
-﻿package rpc
+package rpc
 
 import (
 	"context"
@@ -123,7 +123,7 @@ func (s *RpcServer) Send(name string, pb1, pb2 int32, pb proto.Message) error {
 }
 
 // 解析数据
-func (s *RpcServer) readChanel() {
+func (s *RpcServer) readChannel() {
 	for {
 		select {
 		case <-s.done:
@@ -143,7 +143,7 @@ func (s *RpcServer) readChanel() {
 }
 
 // 操作数据
-func (s *RpcServer) handleChanel() {
+func (s *RpcServer) handleChannel() {
 	// 消息处理超时，默认5秒
 	const timeout = 5 * time.Second
 
@@ -302,8 +302,8 @@ func StartGrpcServer(name, ip string, port int, useTLS bool) {
 		}
 	}(service)
 
-	go service.readChanel()
-	go service.handleChanel()
+	go service.readChannel()
+	go service.handleChannel()
 
 	service_.Store(name, service)
 	vars.Info("gRPC服务启动成功,端口:%d", port)

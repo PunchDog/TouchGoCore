@@ -8,93 +8,92 @@ import (
 	rt "github.com/arnodel/golua/runtime"
 )
 
-// newTable 从 Go 数据创建 LuaTable 对象
-func newTable(data interface{}) *LuaTable {
-	tbl := &LuaTable{}
+// populateTable 填充 LuaTable 数据（内部辅助函数）
+func populateTable(tbl *LuaTable, data interface{}) {
 	if data == nil {
-		return tbl
+		return
 	}
 
-	// 根据数据类型转换
 	switch v := data.(type) {
 	case []string:
 		for _, item := range v {
-			tbl.AddListData(item)
+			tbl.Append(item)
 		}
 	case []int64:
 		for _, item := range v {
-			tbl.AddListData(item)
+			tbl.Append(item)
 		}
 	case []float64:
 		for _, item := range v {
-			tbl.AddListData(item)
+			tbl.Append(item)
 		}
 	case []interface{}:
 		for _, item := range v {
-			tbl.AddListData(item)
+			tbl.Append(item)
 		}
 	case map[interface{}]interface{}:
 		for key, value := range v {
-			tbl.SetTableData(key, value)
+			tbl.Set(key, value)
 		}
 	case map[string]string:
 		for key, value := range v {
-			tbl.SetTableData(key, value)
+			tbl.Set(key, value)
 		}
 	case map[string]int64:
 		for key, value := range v {
-			tbl.SetTableData(key, value)
+			tbl.Set(key, value)
 		}
 	case map[int64]int64:
 		for key, value := range v {
-			tbl.SetTableData(key, value)
+			tbl.Set(key, value)
 		}
 	case map[int64]string:
 		for key, value := range v {
-			tbl.SetTableData(key, value)
+			tbl.Set(key, value)
 		}
 	case map[string]interface{}:
-		// 支持嵌套 map[string]interface{}
 		for key, value := range v {
-			// 递归处理嵌套结构
 			if isNestedStructure(value) {
-				tbl.SetTableData(key, newTable(value))
+				tbl.Set(key, newTable(value))
 			} else {
-				tbl.SetTableData(key, value)
+				tbl.Set(key, value)
 			}
 		}
 	case []map[string]interface{}:
-		// 支持嵌套数组
 		for i, item := range v {
-			tbl.SetTableData(i+1, newTable(item))
+			tbl.Set(i+1, newTable(item))
 		}
 	default:
-		// 尝试反射处理其他类型
 		rv := reflect.ValueOf(v)
 		if rv.Kind() == reflect.Slice || rv.Kind() == reflect.Array {
 			length := rv.Len()
 			for i := 0; i < length; i++ {
 				elem := rv.Index(i).Interface()
 				if isNestedStructure(elem) {
-					tbl.AddListData(newTable(elem))
+					tbl.Append(newTable(elem))
 				} else {
-					tbl.AddListData(elem)
+					tbl.Append(elem)
 				}
 			}
 		} else if rv.Kind() == reflect.Map {
-			// 通用 map 处理
 			iter := rv.MapRange()
 			for iter.Next() {
 				key := iter.Key().Interface()
 				value := iter.Value().Interface()
 				if isNestedStructure(value) {
-					tbl.SetTableData(key, newTable(value))
+					tbl.Set(key, newTable(value))
 				} else {
-					tbl.SetTableData(key, value)
+					tbl.Set(key, value)
 				}
 			}
 		}
 	}
+}
+
+// newTable 从 Go 数据创建 LuaTable 对象
+func newTable(data interface{}) *LuaTable {
+	tbl := &LuaTable{}
+	populateTable(tbl, data)
 	return tbl
 }
 
@@ -107,8 +106,8 @@ func isNestedStructure(v interface{}) bool {
 	return rv.Kind() == reflect.Map || rv.Kind() == reflect.Slice || rv.Kind() == reflect.Array
 }
 
-// tableFromRuntimeV2 从 arnodel/golua 的 rt.Table 转换为 *LuaTable (内部版本)
-func tableFromRuntimeV2(ctx context.Context, tbl *rt.Table) *LuaTable {
+// tableFromRuntime 从 arnodel/golua 的 rt.Table 转换为 *LuaTable
+func tableFromRuntime(ctx context.Context, tbl *rt.Table) *LuaTable {
 	if tbl == nil {
 		return nil
 	}
@@ -124,13 +123,13 @@ func tableFromRuntimeV2(ctx context.Context, tbl *rt.Table) *LuaTable {
 		}
 
 		goKey := LuaToGoValueWithContext(ctx, key)
-		goValue := LuaToGoValueWithContext(ctx, val)
 
 		// 检查值是否是嵌套 table
 		if t, ok := val.TryTable(); ok {
-			nestedTbl := tableFromRuntimeV2(ctx, t)
+			nestedTbl := tableFromRuntime(ctx, t)
 			result.Set(goKey, nestedTbl)
 		} else {
+			goValue := LuaToGoValueWithContext(ctx, val)
 			result.Set(goKey, goValue)
 		}
 
@@ -149,7 +148,7 @@ func (this *LuaTable) HasData() bool {
 	return this.tbl != nil && this.tbl.Length() > 0
 }
 
-// HaveData 检查 table 是否有数据（兼容性别名）
+// HaveData 检查 table 是否有数据（Deprecated: 请使用 HasData）
 func (this *LuaTable) HaveData() bool {
 	return this.HasData()
 }
@@ -162,7 +161,7 @@ func (this *LuaTable) Append(val interface{}) {
 	this.Set(this.tbl.Length()+1, val)
 }
 
-// AddListData 添加列表元素（兼容性别名）
+// AddListData 添加列表元素（Deprecated: 请使用 Append）
 func (this *LuaTable) AddListData(val interface{}) {
 	this.Append(val)
 }
@@ -175,7 +174,7 @@ func (this *LuaTable) Set(key, val interface{}) {
 	this.tbl.Store(key, val)
 }
 
-// SetTableData 设置键值对（兼容性别名）
+// SetTableData 设置键值对（Deprecated: 请使用 Set）
 func (this *LuaTable) SetTableData(key, val interface{}) {
 	this.Set(key, val)
 }
@@ -228,7 +227,7 @@ func (this *LuaTable) SubTable(key interface{}) *LuaTable {
 	return data.(*LuaTable)
 }
 
-// AddTableData 获取或创建嵌套 table（兼容性别名）
+// AddTableData 获取或创建嵌套 table（Deprecated: 请使用 SubTable）
 func (this *LuaTable) AddTableData(key interface{}) *LuaTable {
 	return this.SubTable(key)
 }
@@ -239,4 +238,147 @@ func (this *LuaTable) Length() int {
 		return 0
 	}
 	return this.tbl.Length()
+}
+
+// Get 获取 table 中的值
+func (this *LuaTable) Get(key interface{}) (interface{}, bool) {
+	if this.tbl == nil {
+		return nil, false
+	}
+	return this.tbl.Load(key)
+}
+
+// GetInt 获取 int64 类型的值
+func (this *LuaTable) GetInt(key interface{}) (int64, bool) {
+	val, ok := this.Get(key)
+	if !ok {
+		return 0, false
+	}
+	switch v := val.(type) {
+	case int64:
+		return v, true
+	case float64:
+		return int64(v), true
+	case int:
+		return int64(v), true
+	default:
+		return 0, false
+	}
+}
+
+// GetString 获取 string 类型的值
+func (this *LuaTable) GetString(key interface{}) (string, bool) {
+	val, ok := this.Get(key)
+	if !ok {
+		return "", false
+	}
+	if str, ok := val.(string); ok {
+		return str, true
+	}
+	return "", false
+}
+
+// GetTable 获取嵌套的 LuaTable
+func (this *LuaTable) GetTable(key interface{}) (*LuaTable, bool) {
+	val, ok := this.Get(key)
+	if !ok {
+		return nil, false
+	}
+	if tbl, ok := val.(*LuaTable); ok {
+		return tbl, true
+	}
+	return nil, false
+}
+
+// GetArray 获取数组形式的值
+func (this *LuaTable) GetArray() []interface{} {
+	if this.tbl == nil {
+		return nil
+	}
+
+	arr := make([]interface{}, 0, this.tbl.Length())
+	this.tbl.Range(func(key, value interface{}) bool {
+		if idx, ok := key.(int64); ok && idx > 0 {
+			if int(idx-1) < len(arr) {
+				arr[idx-1] = value
+			} else {
+				arr = append(arr, value)
+			}
+		}
+		return true
+	})
+	return arr
+}
+
+// Keys 获取所有 key
+func (this *LuaTable) Keys() []interface{} {
+	if this.tbl == nil {
+		return nil
+	}
+
+	keys := make([]interface{}, 0)
+	this.tbl.Range(func(key, _ interface{}) bool {
+		keys = append(keys, key)
+		return true
+	})
+	return keys
+}
+
+// Values 获取所有 value
+func (this *LuaTable) Values() []interface{} {
+	if this.tbl == nil {
+		return nil
+	}
+
+	values := make([]interface{}, 0)
+	this.tbl.Range(func(_, value interface{}) bool {
+		values = append(values, value)
+		return true
+	})
+	return values
+}
+
+// Len 返回 table 长度（Deprecated: 请使用 Length）
+func (this *LuaTable) Len() int {
+	return this.Length()
+}
+
+// ToMap 转换为 map[string]interface{}（仅限 string key）
+func (this *LuaTable) ToMap() map[string]interface{} {
+	if this.tbl == nil {
+		return nil
+	}
+
+	result := make(map[string]interface{})
+	this.tbl.Range(func(key, value interface{}) bool {
+		if k, ok := key.(string); ok {
+			if nestedTbl, ok := value.(*LuaTable); ok {
+				result[k] = nestedTbl.ToMap()
+			} else {
+				result[k] = value
+			}
+		}
+		return true
+	})
+	return result
+}
+
+// Merge 合并另一个 LuaTable
+func (this *LuaTable) Merge(other *LuaTable) {
+	if this.tbl == nil {
+		this.tbl = syncmap.NewAny()
+	}
+	if other.tbl != nil {
+		other.tbl.Range(func(key, value interface{}) bool {
+			this.tbl.Store(key, value)
+			return true
+		})
+	}
+}
+
+// Clear 清空 table
+func (this *LuaTable) Clear() {
+	if this.tbl != nil {
+		this.tbl.ClearAll(nil)
+	}
 }

@@ -33,7 +33,7 @@ func PutLuaTableWithContext(ctx context.Context, tbl *LuaTable) {
 		return
 	default:
 	}
-	
+
 	if tbl != nil && tbl.tbl != nil {
 		// 清空 table 数据
 		tbl.tbl.ClearAll(nil)
@@ -63,50 +63,6 @@ func NewLuaTablePooledWithContext(ctx context.Context, data interface{}) *LuaTab
 	}
 
 	tbl := GetLuaTable()
-
-	if data == nil {
-		return tbl
-	}
-
-	// 填充数据
-	switch v := data.(type) {
-	case []string:
-		for _, item := range v {
-			tbl.AddListData(item)
-		}
-	case []int64:
-		for _, item := range v {
-			tbl.AddListData(item)
-		}
-	case []float64:
-		for _, item := range v {
-			tbl.AddListData(item)
-		}
-	case []interface{}:
-		for _, item := range v {
-			tbl.AddListData(item)
-		}
-	case map[interface{}]interface{}:
-		for key, value := range v {
-			tbl.SetTableData(key, value)
-		}
-	case map[string]string:
-		for key, value := range v {
-			tbl.SetTableData(key, value)
-		}
-	case map[string]int64:
-		for key, value := range v {
-			tbl.SetTableData(key, value)
-		}
-	case map[int64]int64:
-		for key, value := range v {
-			tbl.SetTableData(key, value)
-		}
-	case map[int64]string:
-		for key, value := range v {
-			tbl.SetTableData(key, value)
-		}
-	}
-
+	populateTable(tbl, data)
 	return tbl
 }

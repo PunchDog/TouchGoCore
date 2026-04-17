@@ -180,41 +180,4 @@ func LuaToReflectValueWithContext(ctx context.Context, v rt.Value, targetType re
 	}
 }
 
-// tableFromRuntime 从 arnodel/golua 的 rt.Table 转换为 *LuaTable
-func tableFromRuntime(ctx context.Context, tbl *rt.Table) *LuaTable {
-	if tbl == nil {
-		return nil
-	}
-
-	result := newTable(nil)
-
-	// 使用 Next 遍历 table
-	var k rt.Value = rt.NilValue
-	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		default:
-		}
-
-		key, val, ok := tbl.Next(k)
-		if !ok || key == rt.NilValue {
-			break
-		}
-
-		goKey := LuaToGoValueWithContext(ctx, key)
-		
-		// 检查值是否是嵌套 table
-		if t, ok := val.TryTable(); ok {
-			nestedTbl := tableFromRuntime(ctx, t)
-			result.Set(goKey, nestedTbl)
-		} else {
-			goValue := LuaToGoValueWithContext(ctx, val)
-			result.Set(goKey, goValue)
-		}
-
-		k = key
-	}
-
-	return result
-}
+// tableFromRuntime 从 arnodel/golua 的 rt.Table 转换为 *LuaTable（在 luatable.go 中实现）

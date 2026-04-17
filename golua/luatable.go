@@ -148,11 +148,6 @@ func (this *LuaTable) HasData() bool {
 	return this.tbl != nil && this.tbl.Length() > 0
 }
 
-// HaveData 检查 table 是否有数据（Deprecated: 请使用 HasData）
-func (this *LuaTable) HaveData() bool {
-	return this.HasData()
-}
-
 // Append 添加列表元素
 func (this *LuaTable) Append(val interface{}) {
 	if this.tbl == nil {
@@ -161,22 +156,12 @@ func (this *LuaTable) Append(val interface{}) {
 	this.Set(this.tbl.Length()+1, val)
 }
 
-// AddListData 添加列表元素（Deprecated: 请使用 Append）
-func (this *LuaTable) AddListData(val interface{}) {
-	this.Append(val)
-}
-
 // Set 设置键值对
 func (this *LuaTable) Set(key, val interface{}) {
 	if this.tbl == nil {
 		this.tbl = syncmap.NewAny()
 	}
 	this.tbl.Store(key, val)
-}
-
-// SetTableData 设置键值对（Deprecated: 请使用 Set）
-func (this *LuaTable) SetTableData(key, val interface{}) {
-	this.Set(key, val)
 }
 
 // ToTable 转换为 arnodel/golua 的 rt.Table
@@ -225,11 +210,6 @@ func (this *LuaTable) SubTable(key interface{}) *LuaTable {
 	}
 	data, _ := this.tbl.LoadOrStore(key, newTable(nil))
 	return data.(*LuaTable)
-}
-
-// AddTableData 获取或创建嵌套 table（Deprecated: 请使用 SubTable）
-func (this *LuaTable) AddTableData(key interface{}) *LuaTable {
-	return this.SubTable(key)
 }
 
 // Length 返回 table 长度
@@ -336,11 +316,6 @@ func (this *LuaTable) Values() []interface{} {
 		return true
 	})
 	return values
-}
-
-// Len 返回 table 长度（Deprecated: 请使用 Length）
-func (this *LuaTable) Len() int {
-	return this.Length()
 }
 
 // ToMap 转换为 map[string]interface{}（仅限 string key）

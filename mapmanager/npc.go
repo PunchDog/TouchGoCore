@@ -76,11 +76,10 @@ type Npc struct {
 	Name      string `json:"name"`      // NPC名称
 	Shape     string `json:"shape"`     // 外观资源ID
 	Direction int8   `json:"direction"` // 朝向(0-7,代表8个方向)
-	AutoMove  bool   `json:"auto_move"` // 是否自动行走
 
 	// 位置与移动
 	MapID    uint32     `json:"map_id"`     // 所属地图ID
-	MapPoint [][2]int16 `json:"map_points"` // 巡逻路径点
+	MapPoint [][3]int32 `json:"map_points"` // 巡逻路径点
 
 	// 交互数据
 	Shop   *syncmap.Map[int, []*ShopItem] `json:"-"` // 商店数据 (shopId => []*ShopItem)
@@ -128,11 +127,6 @@ func (n *Npc) SetDirection(direction int8) {
 	n.Direction = direction
 }
 
-// SetAutoMove 设置是否自动移动
-func (n *Npc) SetAutoMove(autoMove bool) {
-	n.AutoMove = autoMove
-}
-
 // SetMapId 设置所属地图并注册NPC
 // @param mapId 地图ID
 func (n *Npc) SetMapId(mapId uint32) {
@@ -151,13 +145,14 @@ func (n *Npc) SetMapId(mapId uint32) {
 // AddMapPoint 添加巡逻路径点
 // @param x X坐标
 // @param y Y坐标
-func (n *Npc) AddMapPoint(x, y int16) {
-	point := [2]int16{x, y}
+// @param z Z坐标
+func (n *Npc) AddMapPoint(x, y, z int32) {
+	point := [3]int32{x, y, z}
 	n.MapPoint = append(n.MapPoint, point)
 }
 
 // GetPathPoints 获取所有路径点
-func (n *Npc) GetPathPoints() [][2]int16 {
+func (n *Npc) GetPathPoints() [][3]int32 {
 	return n.MapPoint
 }
 
@@ -360,9 +355,9 @@ func (n *Npc) Validate() []string {
 	if n.MapID <= 0 {
 		errors = append(errors, "NPC所属地图未设置")
 	}
-	if n.AutoMove && len(n.MapPoint) == 0 {
-		errors = append(errors, "自动移动NPC必须配置路径点")
-	}
+	// if len(n.MapPoint) == 0 {
+	// 	errors = append(errors, "自动移动NPC必须配置路径点")
+	// }
 
 	return errors
 }

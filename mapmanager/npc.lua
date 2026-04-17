@@ -3,34 +3,34 @@
 -- ============================================================================
 -- 对话类型常量
 local DialogType = {
-    NORMAL   = "normal",   -- 普通说话
-    DIALOG   = "dialog",  -- 对话框(带选项)
-    SHOP     = "shop",    -- 商店
-    PRIVATE  = "private", -- 密语/关键字触发
-    SEND     = "send",    -- 传送
-    CLOSE    = "close",   -- 关闭对话框
-    TASK     = "task",    -- 任务
+    NORMAL  = "normal",   -- 普通说话
+    DIALOG  = "dialog",   -- 对话框(带选项)
+    SHOP    = "shop",     -- 商店
+    PRIVATE = "private",  -- 密语/关键字触发
+    SEND    = "send",     -- 传送
+    CLOSE   = "close",    -- 关闭对话框
+    TASK    = "task",     -- 任务
 }
 
 -- 普通说话随机模式
 local NormalRandMode = {
-    OFF      = "off",     -- 不随机，使用固定text
-    ONCE     = "once",    -- 创建时随机选一条（后续固定）
-    EVERY    = "every",   -- 每次触发对话都重新随机
+    OFF   = "off",      -- 不随机，使用固定text
+    ONCE  = "once",     -- 创建时随机选一条（后续固定）
+    EVERY = "every",    -- 每次触发对话都重新随机
 }
 
 -- 商店选择模式
 local ShopMode = {
-    DIRECT   = "direct",  -- 直接打开单个商店
-    RAND     = "rand",    -- 随机选择一个商店
-    FIXED    = "fixed",   -- 显示多个商店按钮供选择
+    DIRECT = "direct",   -- 直接打开单个商店
+    RAND   = "rand",     -- 随机选择一个商店
+    FIXED  = "fixed",    -- 显示多个商店按钮供选择
 }
 
 -- 限购刷新类型
 local RefreshType = {
-    DAY      = "day",     -- 每日刷新
-    WEEK     = "week",    -- 每周刷新
-    NEVER    = "0",       -- 不刷新(不限购)
+    DAY   = "day",     -- 每日刷新
+    WEEK  = "week",    -- 每周刷新
+    NEVER = "0",       -- 不刷新(不限购)
 }
 
 -- ============================================================================
@@ -59,7 +59,6 @@ local createNpc = function(config)
     npc:SetName(config.name or ("NPC_" .. config.id))
     npc:SetShape(config.shape or "default")
     npc:SetDirection(config.direction or 1)
-    npc:SetAutoMove(config.auto_move or false)
     npc:SetMapId(config.map_id or 0)
 
     -- 设置移动路径点
@@ -68,8 +67,9 @@ local createNpc = function(config)
         for _, point in ipairs(config.points) do
             local x = tonumber(point[1]) or 0
             local y = tonumber(point[2]) or 0
+            local z = tonumber(point[3]) or 0
             -- 修复: 只传递2个参数 (原代码错误地传了3个)
-            npc:AddMapPoint(x, y)
+            npc:AddMapPoint(x, y, z)
         end
     end
 
@@ -80,11 +80,11 @@ local createNpc = function(config)
                 for _, item in ipairs(items) do
                     npc:AddShop(
                         shopId,
-                        item[1] or 0,   -- item_id
-                        item[2] or 0,   -- cost_type
-                        item[3] or 0,   -- cost
-                        item[4] or 0,   -- max_buy_cnt
-                        item[5] or "0"  -- refresh_type
+                        item[1] or 0,  -- item_id
+                        item[2] or 0,  -- cost_type
+                        item[3] or 0,  -- cost
+                        item[4] or 0,  -- max_buy_cnt
+                        item[5] or "0" -- refresh_type
                     )
                 end
             end
@@ -136,23 +136,22 @@ end
 -- ============================================================================
 local testNpcConfig = {
     -- 基础信息
-    id          = 1,
-    name        = "测试NPC",
-    shape       = "test001",
-    direction   = 1,
-    auto_move   = true,
-    map_id      = 1001,
+    id        = 1,
+    name      = "测试NPC",
+    shape     = "test001",
+    direction = 1,
+    map_id    = 1001,
 
-    -- 移动路径点 (x, y 坐标对)
-    points = {
-        {100, 100},
-        {200, 200},
-        {100, 100},
-        {200, 200},
+    -- 移动路径点 (x, y, z 坐标对)
+    points    = {
+        { 100, 100, 0 },
+        { 200, 200, 0 },
+        { 100, 100, 0 },
+        { 200, 200, 0 },
     },
 
     -- 对话列表 (dialog_id => 对话配置)
-    dialogs = {
+    dialogs   = {
         -- 普通说话: 随机文本（创建时随机选一条）
         [0] = {
             texts = {
@@ -161,7 +160,7 @@ local testNpcConfig = {
                 "最近有什么新鲜事吗？",
                 "你看起来很精神啊！",
             },
-            rand_mode = NormalRandMode.ONCE,  -- 创建时随机，后续固定
+            rand_mode = NormalRandMode.ONCE, -- 创建时随机，后续固定
             type = DialogType.NORMAL,
         },
 
@@ -173,7 +172,7 @@ local testNpcConfig = {
                 "走开走开！",
                 "别挡路！",
             },
-            rand_mode = NormalRandMode.EVERY,  -- 每次对话都重新随机
+            rand_mode = NormalRandMode.EVERY, -- 每次对话都重新随机
             type = DialogType.NORMAL,
         },
 
@@ -184,8 +183,8 @@ local testNpcConfig = {
             -- param1: 对话选项列表
             -- 格式: {{前置对话ID, 前置对话执行次数, 目标对话ID}, ...}
             param1 = {
-                {0, 0, 10},   -- 前置条件满足则显示选项
-                {0, 0, 11},
+                { 0, 0, 10 }, -- 前置条件满足则显示选项
+                { 0, 0, 11 },
             },
         },
 
@@ -193,45 +192,45 @@ local testNpcConfig = {
         [2] = {
             text = "欢迎光临商店!",
             type = DialogType.SHOP,
-            param1 = ShopMode.RAND,    -- 选择模式: direct/rand/fixed
-            param2 = {1, 2},            -- 商店ID列表
+            param1 = ShopMode.RAND, -- 选择模式: direct/rand/fixed
+            param2 = { 1, 2 },      -- 商店ID列表
         },
 
         -- 关键字触发: 密语类型
         [3] = {
             text = "密语内容",
             type = DialogType.PRIVATE,
-            param1 = "密语内容",         -- 关键字
-            param2 = 2,                -- 触发后跳转的对话ID
+            param1 = "密语内容", -- 关键字
+            param2 = 2, -- 触发后跳转的对话ID
         },
 
         -- 传送NPC: 传送玩家到指定位置
         [4] = {
             text = "要传送到主城吗?",
             type = DialogType.SEND,
-            param1 = 0,                -- 0=传送NPC到目标位置, 1=传送玩家
-            param2 = {1001, 100, 1000}, -- {地图ID, X坐标, Y坐标}
+            param1 = 0,                 -- 0=传送NPC到目标位置, 1=传送玩家
+            param2 = { 1001, 100, 1000 }, -- {地图ID, X坐标, Y坐标}
         },
 
         -- 任务NPC
         [5] = {
             text = "这里有个任务要交给你",
             type = DialogType.TASK,
-            param1 = 1001,             -- 任务ID
+            param1 = 1001, -- 任务ID
         },
 
         -- 选项A: 打开商店
         [10] = {
             text = "打开商店",
             type = DialogType.DIALOG,
-            param1 = {{0, 0, 2}},      -- 选择后跳转到对话ID=2
+            param1 = { { 0, 0, 2 } }, -- 选择后跳转到对话ID=2
         },
 
         -- 选项B: 接受任务
         [11] = {
             text = "接受任务",
             type = DialogType.DIALOG,
-            param1 = {{0, 0, 5}},
+            param1 = { { 0, 0, 5 } },
         },
 
         -- 关闭对话框
@@ -242,15 +241,15 @@ local testNpcConfig = {
     },
 
     -- 商店配置 (shop_id => 商品列表)
-    shops = {
+    shops     = {
         -- 商店1: 武器店
         [1] = {
-            {2001, 1000, 10000, 99, RefreshType.DAY},   -- {物品ID, 货币类型, 价格, 限购数量, 刷新类型}
-            {2002, 1000, 15000, 5,  RefreshType.WEEK},
+            { 2001, 1000, 10000, 99, RefreshType.DAY }, -- {物品ID, 货币类型, 价格, 限购数量, 刷新类型}
+            { 2002, 1000, 15000, 5,  RefreshType.WEEK },
         },
         -- 商店2: 防具店
         [2] = {
-            {3001, 1000, 20000, 10, RefreshType.DAY},
+            { 3001, 1000, 20000, 10, RefreshType.DAY },
         },
     },
 }

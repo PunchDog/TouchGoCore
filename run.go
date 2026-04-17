@@ -92,6 +92,7 @@ func loadConfigOnly(serverName string) error {
 		util.DEBUG = p.GetString("GLOBAL", "debug", "false") == "true"
 		util.Fps, _ = strconv.Atoi(p.GetString("GLOBAL", "fps", "120"))
 		util.Version = p.GetString(serverName, "Version", "1.0")
+		util.GameGroup = p.GetString("GLOBAL", "GameGroup", "default")
 	}
 
 	return nil

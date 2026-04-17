@@ -11,3 +11,4 @@ const (
 var DEBUG bool
 var Fps int
 var Version string
+var GameGroup string

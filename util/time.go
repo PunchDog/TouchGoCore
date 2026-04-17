@@ -1,16 +1,144 @@
 package util
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"regexp"
 	"strconv"
 	"time"
+	"touchgocore/vars"
+
+	"github.com/redis/go-redis/v9"
 )
 
-// 当前使用的时钟,主要用于如果测试修改系统时间的时候，不用真调系统时间，只需要改这里的时间偏移就能达到改系统时间的伪效果
+const (
+	// VirtualTimeKey Redis 中存储虚拟时间配置的 Key
+	VirtualTimeKey = "game:virtual_time"
+	// FieldRealTime    Redis Hash 中的真实时间字段名
+	FieldRealTime = "real_time"
+	// FieldVirtualTime Redis Hash 中的虚拟时间字段名
+	FieldVirtualTime = "virtual_time"
+)
+
+// virtualTimeHolder 保存 Redis 客户端的全局变量
+var (
+	redisClient redis.Cmdable
+)
+
+// VirtualTimeData 虚拟时间数据结构
+type VirtualTimeData struct {
+	RealTime    int64 // 记录时的真实时间（Unix 毫秒）
+	VirtualTime int64 // 记录时的虚拟时间（Unix 毫秒）
+}
+
+func virtualTimeKey() string {
+	return fmt.Sprintf("%s:%s", VirtualTimeKey, GameGroup)
+}
+
+// GetVirtualTimeData 获取 Redis 中存储的虚拟时间数据
+// 返回 nil 表示未找到或出错，使用真实时间
+func GetVirtualTimeData(ctx context.Context) (*VirtualTimeData, error) {
+	if redisClient == nil {
+		return nil, errors.New("redis client not initialized")
+	}
+
+	// 使用 HGETALL 获取所有字段
+	result, err := redisClient.HGetAll(ctx, virtualTimeKey()).Result()
+	if err != nil {
+		return nil, fmt.Errorf("get virtual time from redis: %w", err)
+	}
+
+	// 如果 Hash 不存在，返回 nil
+	if len(result) == 0 {
+		return nil, fmt.Errorf("get virtual time result from redis is 0")
+	}
+
+	realTime, err := strconv.ParseInt(result[FieldRealTime], 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("parse real_time: %w", err)
+	}
+
+	virtualTime, err := strconv.ParseInt(result[FieldVirtualTime], 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("parse virtual_time: %w", err)
+	}
+
+	return &VirtualTimeData{
+		RealTime:    realTime,
+		VirtualTime: virtualTime,
+	}, nil
+}
+
+// SetVirtualTimeData 设置虚拟时间数据到 Redis
+// realTime: 当前的真实时间（Unix 毫秒）
+// virtualTime: 虚拟时间（Unix 毫秒）
+func SetVirtualTimeData(ctx context.Context, realTime, virtualTime int64) error {
+	if redisClient == nil {
+		return errors.New("redis client not initialized")
+	}
+
+	err := redisClient.HSet(ctx, virtualTimeKey(), map[string]any{
+		FieldRealTime:    realTime,
+		FieldVirtualTime: virtualTime,
+	}).Err()
+	if err != nil {
+		return fmt.Errorf("set virtual time to redis: %w", err)
+	}
+
+	return nil
+}
+
+// CalculateVirtualTime 根据 Redis 中的虚拟时间数据计算当前虚拟时间
+// 公式：虚拟时间 = 记录虚拟时间 + (当前真实时间 - 记录真实时间)
+// 如果 Redis 中没有虚拟时间配置，返回当前真实时间
+func CalculateVirtualTime(ctx context.Context) (time.Time, error) {
+	// 获取当前真实时间
+	nowReal := time.Now().UnixMilli()
+
+	// 获取 Redis 中的虚拟时间数据
+	data, err := GetVirtualTimeData(ctx)
+	if err != nil {
+		return time.Now(), err
+	}
+
+	// 计算偏移量
+	offset := nowReal - data.RealTime
+
+	// 计算虚拟时间
+	virtualMs := data.VirtualTime + offset
+
+	return time.UnixMilli(virtualMs), nil
+}
+
+// CurrentTime 返回当前时间，支持虚拟时间
+// 如果 Redis 中配置了虚拟时间，则返回虚拟时间；否则返回真实时间
 func CurrentTime() time.Time {
-	return time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	virtualTime, err := CalculateVirtualTime(ctx)
+	if err != nil {
+		// 如果出错或返回零值，使用真实时间
+		return time.Now()
+	}
+	return virtualTime
+}
+
+// ResetVirtualTime 重置虚拟时间为真实时间
+func ResetVirtualTime(ctx context.Context) error {
+	if redisClient == nil {
+		return errors.New("redis client not initialized")
+	}
+
+	return redisClient.Del(ctx, VirtualTimeKey).Err()
+}
+
+// InitVirtualTime 初始化虚拟时间模块（应在应用启动时调用）
+// 从 App 实例获取 Redis 客户端并设置到 util 包中
+func InitVirtualTime(client redis.Cmdable) {
+	redisClient = client
+	vars.Info("虚拟时间模块初始化redis")
 }
 
 // 时间工具函数部分保持不变（已优化命名和错误处理）

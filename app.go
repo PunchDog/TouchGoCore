@@ -216,6 +216,9 @@ func (app *App) initDatabase() error {
 		}
 		app.Redis = redis
 		vars.Info("加载redis配置成功")
+
+		// 初始化虚拟时间模块
+		util.InitVirtualTime(redis.Get())
 	} else {
 		return fmt.Errorf("加载配置出错,没有redis配置")
 	}

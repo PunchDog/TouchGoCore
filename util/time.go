@@ -71,8 +71,8 @@ func GetVirtualTimeData(ctx context.Context) (*VirtualTimeData, error) {
 }
 
 // SetVirtualTimeData 设置虚拟时间数据到 Redis
-// realTime: 当前的真实时间（Unix 毫秒）
-// virtualTime: 虚拟时间（Unix 毫秒）
+// realTime: 当前的真实时间（Unix 纳秒）
+// virtualTime: 虚拟时间（Unix 纳秒）
 func SetVirtualTimeData(ctx context.Context, realTime, virtualTime int64) error {
 	if redisClient == nil {
 		return errors.New("redis client not initialized")
@@ -94,7 +94,7 @@ func SetVirtualTimeData(ctx context.Context, realTime, virtualTime int64) error 
 // 如果 Redis 中没有虚拟时间配置，返回当前真实时间
 func CalculateVirtualTime(ctx context.Context) (time.Time, error) {
 	// 获取当前真实时间
-	nowReal := time.Now().UnixMilli()
+	nowReal := time.Now().UnixNano()
 
 	// 获取 Redis 中的虚拟时间数据
 	data, err := GetVirtualTimeData(ctx)
@@ -108,7 +108,7 @@ func CalculateVirtualTime(ctx context.Context) (time.Time, error) {
 	// 计算虚拟时间
 	virtualMs := data.VirtualTime + offset
 
-	return time.UnixMilli(virtualMs), nil
+	return time.Unix(0, virtualMs), nil
 }
 
 // CurrentTime 返回当前时间，支持虚拟时间

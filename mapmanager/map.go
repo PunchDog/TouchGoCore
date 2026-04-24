@@ -77,3 +77,7 @@ func RunMap() {
 	lua.RegisterLuaClass(&Npc{})
 	vars.Info("读取地图完成!")
 }
+
+func GetMap(id uint32) (*Map, bool) {
+	return _maplist.Load(id)
+}

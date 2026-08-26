@@ -16,8 +16,7 @@ type Cfg struct {
 	Mongo     *MongoDBConfig   `json:"mongo"`
 	Ip        string           `json:"ip"`         //端口所在IP，如果没填，就获取本地内网IP
 	Ws        *WebsocketConfig `json:"ws"`         //websocket启动模式:off不启动;:1234启动监听详细配置
-	Lua       string           `json:"lua"`        //off不启动，填写lua文件的相对路径启动lua
-	LuaConfig *LuaConfig       `json:"lua_config"` // Lua 详细配置
+	LuaConfig *LuaConfig       `json:"lua_config"` // Lua 详细配置,如果没有就不启动lua
 	LogLevel  string           `json:"log_level"`  //日志等级，off为不开,其次为INFO,DEBUG,WARN,ERROR
 	MapPath   string           `json:"map_path"`   //地图配置位置
 	Web       *WebConfig       `json:"web"`        //web配置
@@ -33,7 +32,6 @@ type Cfg struct {
 func init() {
 	Cfg_ = &Cfg{
 		Ws:       nil,
-		Lua:      "off",
 		LogLevel: "info",
 		MapPath:  "off",
 		Ip:       "",

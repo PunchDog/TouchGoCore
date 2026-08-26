@@ -38,27 +38,6 @@
         "httpport": 1000,
         "static": "文件夹路径"
     },
-    "这里是基础配置": "",
-    "rpc_port": {
-        "rpc_port说明": "rpc_port是监听端口,如果不填,则不开rpc服务",
-        "server说明": "作为服务器监听端口",
-        "server": [
-            {
-                "name": "其他服来连接时查询的名字，通过这个名字查找端口",
-                "port": 7000,
-                "adr说明": "其他服来连接这个服务器时使用的IP",
-                "addr": "127.0.0.1"
-            }
-        ],
-        "client说明": "作为客户端连接的端口",
-        "client": [
-            {
-                "name": "其他服来连接时查询的名字，通过这个名字查找端口",
-                "port": 7000,
-                "addr": "127.0.0.1"
-            }
-        ]
-    },
     "ws": {
         "说明:": "这里是websocket配置,作为服务器监听配置,多个端口用|分割",
         "port": [
@@ -69,9 +48,83 @@
             }
         ],
         "url": "ws",
-        "inurl": "inws"
+        "inurl": "inws",
+        "allowed_origins": [
+            "https://example.com"
+        ],
+        "check_origin": true,
+        "skip_origin_for_intranet": true,
+        "worker_pool_size": 0,
+        "shard_by_key": false,
+        "auth_token_header": "X-Auth-Token",
+        "auth_token_query": "token",
+        "auth_intranet_skip": true
     },
-    "lua": "off",
+    "rpc_port": {
+        "rpc_port说明": "rpc_port是监听端口,如果不填,则不开rpc服务",
+        "server说明": "作为服务器监听端口",
+        "server": [
+            {
+                "name": "其他服来连接时查询的名字，通过这个名字查找端口",
+                "port": 7000,
+                "adr说明": "其他服来连接这个服务器时使用的IP",
+                "addr": "127.0.0.1",
+                "use_tls": false
+            }
+        ],
+        "client说明": "作为客户端连接的端口",
+        "client": [
+            {
+                "name": "其他服来连接时查询的名字，通过这个名字查找端口",
+                "port": 7000,
+                "addr": "127.0.0.1",
+                "use_tls": false
+            }
+        ],
+        "tls": {
+            "tls说明": "RpcConfig 的 TLS 配置，仅当 server/client 的 use_tls 为 true 时生效",
+            "cert_file": "conf/server.crt",
+            "key_file": "conf/server.key",
+            "enable": false,
+            "skip_for_intranet": true
+        }
+    },
+    "telegram": {
+        "telegram说明": "Telegram 机器人配置（可选，不填 Cfg.Telegram 为 nil 则不启用）",
+        "bot_token": "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11",
+        "game_url": "https://t.me/your_bot?start=",
+        "game_banner_url": "https://example.com/banner.png",
+        "game_description": "游戏简介",
+        "game_to_short": {
+            "game_1": "g1",
+            "game_2": "g2"
+        }
+    },
+    "lua_config": {
+        "lua_config说明": "Lua 运行时详细配置，需配合顶层 lua 字段指向脚本路径使用",
+        "script_path": "lua/main.lua",
+        "enable": "on",
+        "update_interval": 5000,
+        "gc_tick_count": 1000,
+        "max_memory_mb": 128
+    },
+    "server": {
+        "server说明": "服务器全局配置",
+        "debug": false,
+        "fps": 30,
+        "version": "1.0.0",
+        "max_msg_size": 1048576,
+        "write_buffer": 4096,
+        "read_buffer": 4096,
+        "backpressure": true
+    },
+    "metrics": {
+        "metrics说明": "Prometheus 监控配置",
+        "enabled": false,
+        "port": 9090
+    },
     "log_level": "日志等级,off为不开,其次为INFO,DEBUG,WARN,ERROR",
-    "map_path": "off"
+    "map_path": "off",
+    "ip": "",
+    "ip说明": "端口所在IP(config.go 顶层字段)，不填则获取本地内网IP"
 }

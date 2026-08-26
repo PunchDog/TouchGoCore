@@ -349,7 +349,7 @@ func RegisterLuaClass(class ILuaClassInterface) error {
 
 // RunLua 启动 Lua 服务
 func RunLua() error {
-	if config.Cfg_.Lua == "off" {
+	if config.Cfg_.LuaConfig == nil {
 		vars.Info("Lua service disabled")
 		return nil
 	}
@@ -359,7 +359,7 @@ func RunLua() error {
 	luaInstancesMu.Unlock()
 
 	var err error
-	dl, err := NewLuaScript(config.Cfg_.Lua)
+	dl, err := NewLuaScript(config.Cfg_.LuaConfig.ScriptPath)
 	if err != nil {
 		return fmt.Errorf("create Lua script failed: %w", err)
 	}
@@ -533,7 +533,7 @@ func registerClassWithContext(ctx context.Context, class ILuaClassInterface, scr
 
 // Run 启动 Lua 服务（公开接口）
 func Run() {
-	if config.Cfg_.Lua == "off" {
+	if config.Cfg_.LuaConfig == nil {
 		vars.Info("不启动lua服务")
 		return
 	}

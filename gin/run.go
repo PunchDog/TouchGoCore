@@ -20,8 +20,8 @@ var routerMap = make(map[string]func(ctx *gin.Context))
 
 // methodCacheEntry 缓存反射方法调用信息
 type methodCacheEntry struct {
-	method      reflect.Value // 缓存的反射方法值
-	argType     reflect.Type  // 参数类型（*http.Request 或 *gin.Context）
+	method      reflect.Value  // 缓存的反射方法值
+	argType     reflect.Type   // 参数类型（*http.Request 或 *gin.Context）
 	returnKinds []reflect.Kind // 返回值类型缓存
 }
 
@@ -59,17 +59,30 @@ func getMethodCacheEntry(rcvr reflect.Value, sname, mname string) (*methodCacheE
 
 // ==================== 路由注册 ====================
 
+// 注册路由时必须传入类型：比如GET，POST
+type IRouterInterface interface {
+	RouterType() []string
+}
+
 // RegisterRouter 将一个struct中所有的函数注册到gin中
 // 支持两种函数签名：
 //   - func (this *class) MethodName(request *http.Request) any
 //   - func (this *class) MethodName(ctx *gin.Context) any  (推荐，可获取更多上下文)
-func RegisterRouter(class interface{}) {
+func RegisterRouter(class IRouterInterface) {
 	sname, mnames := util.GetClassName(class)
 	rcvr := reflect.ValueOf(class)
 
 	for _, mname := range mnames {
+		//这个是类型，不进行router注册
+		if mname == "RouterType" {
+			continue
+		}
+
 		mnameCopy := mname // 闭包捕获
 		callbackmsg := fmt.Sprintf("/%s/%s", strings.ToLower(sname), strings.ToLower(mnameCopy))
+		if s := class.RouterType(); s != nil && len(s) > 0 { //设置了只注册哪些监控
+			callbackmsg += "|" + strings.Join(s, "&&")
+		}
 
 		// 预热方法缓存
 		if _, err := getMethodCacheEntry(rcvr, sname, mnameCopy); err != nil {
@@ -146,7 +159,23 @@ func Run() {
 
 	//将注册到这里的函数注册进去
 	for router, fn := range routerMap {
-		ginServer.Any(router, fn)
+		r := strings.Split(router, "|")
+		if len(r) == 1 { //全部注册
+			ginServer.Any(router, fn)
+		} else {
+			ss := strings.Split(r[1], "&&")
+			for _, v := range ss {
+				if v == "GET" {
+					ginServer.GET(r[0], fn)
+				}
+				if v == "POST" {
+					ginServer.POST(r[0], fn)
+				}
+				if v == "PUT" {
+					ginServer.PUT(r[0], fn)
+				}
+			}
+		}
 	}
 
 	//挂静态文件夹

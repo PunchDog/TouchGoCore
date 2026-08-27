@@ -194,7 +194,7 @@ func (app *App) loadConfig() error {
 	if err := config.Cfg_.LoadWithError(app.ServerName); err != nil {
 		return err
 	}
-
+	config.ServerName_ = app.ServerName
 	app.Cfg = config.Cfg_
 
 	//读取INI

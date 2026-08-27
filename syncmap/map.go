@@ -116,6 +116,18 @@ func (m *Map[K, V]) Range(fn func(k K, v V) bool) {
 	}
 }
 
+func (m *Map[K, V]) List(sortFunc func(d1, d2 V) bool) []V {
+	pairs := make([]V, 0, len(m.mp))
+	for _, v := range m.mp {
+		pairs = append(pairs, v)
+	}
+
+	sort.Slice(pairs, func(i, j int) bool {
+		return sortFunc(pairs[i], pairs[j])
+	})
+	return pairs
+}
+
 // RangeBySort iterates over key-value pairs in sorted order.
 // If sortFunc is nil, behaves like Range.
 // sortFunc should compare values: return true if d1 should come before d2.

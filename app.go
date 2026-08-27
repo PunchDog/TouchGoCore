@@ -7,6 +7,7 @@ import (
 	"os/signal"
 	"path"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -23,6 +24,8 @@ import (
 	"touchgocore/util"
 	"touchgocore/vars"
 	"touchgocore/websocket"
+
+	"touchgocore/ini"
 )
 
 // ==================== 依赖注入容器 ====================
@@ -187,7 +190,22 @@ func NewApp(serverName string) (*App, error) {
 
 // loadConfig 加载配置
 func (app *App) loadConfig() error {
-	return loadConfigOnly(app.ServerName)
+	// 使用改进后的Load方法（返回error而非panic）
+	if err := config.Cfg_.LoadWithError(app.ServerName); err != nil {
+		return err
+	}
+
+	app.Cfg = config.Cfg_
+
+	//读取INI
+	if p, err := ini.Load(config.GetDefaultFie()); err == nil {
+		util.DEBUG = p.GetString("GLOBAL", "debug", "false") == "true"
+		util.Fps, _ = strconv.Atoi(p.GetString("GLOBAL", "fps", "120"))
+		util.Version = p.GetString(app.ServerName, "Version", "1.0")
+		util.GameGroup = p.GetString("GLOBAL", "GameGroup", "default")
+	}
+
+	return nil
 }
 
 // initLogger 初始化日志系统

@@ -110,6 +110,9 @@ func RegisterCall(className string, factoryFunc any) {
 	if typ.Kind() == reflect.Ptr {
 		typ = typ.Elem()
 	}
+	if clientcall == nil {
+		clientcall = new(syncmap.Map[string, *sync.Pool])
+	}
 	clientcall.Store(className, &sync.Pool{
 		New: func() any {
 			return reflect.New(typ).Interface()

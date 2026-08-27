@@ -7,13 +7,11 @@ import (
 	"os/signal"
 	"path"
 	"runtime"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	"touchgocore/config"
-	"touchgocore/ini"
 	"touchgocore/util"
 	"touchgocore/vars"
 )
@@ -73,37 +71,6 @@ func signalProcHandler() {
 // closeServer 兼容旧的无App容器的关闭逻辑（不应再被主动调用）
 func closeServer() {
 	vars.Info("关闭完成,退出服务器")
-}
-
-// ==================== 配置加载辅助函数 ====================
-// 以下函数由 App.loadConfig 调用，保留为独立函数以便复用
-
-// loadConfigOnly 仅加载配置（不初始化日志和数据库，由App容器统一管理）
-func loadConfigOnly(serverName string) error {
-	config.ServerName_ = serverName
-
-	// 使用改进后的Load方法（返回error而非panic）
-	if err := config.Cfg_.LoadWithError(serverName); err != nil {
-		return err
-	}
-
-	//读取INI
-	if p, err := ini.Load(config.GetDefaultFie()); err == nil {
-		util.DEBUG = p.GetString("GLOBAL", "debug", "false") == "true"
-		util.Fps, _ = strconv.Atoi(p.GetString("GLOBAL", "fps", "120"))
-		util.Version = p.GetString(serverName, "Version", "1.0")
-		util.GameGroup = p.GetString("GLOBAL", "GameGroup", "default")
-	}
-
-	return nil
-}
-
-// ==================== 旧版独立函数（向后兼容，新代码请使用 App 容器） ====================
-
-// loadConfig 加载配置文件（旧版，保留向后兼容）
-// Deprecated: 请使用 App 容器的 NewApp() 代替
-func loadConfig(serverName string) error {
-	return loadConfigOnly(serverName)
 }
 
 // initLogger 初始化日志系统（旧版，保留向后兼容）

@@ -203,6 +203,8 @@ func (app *App) loadConfig() error {
 		util.Fps, _ = strconv.Atoi(p.GetString("GLOBAL", "fps", "120"))
 		util.Version = p.GetString(app.ServerName, "Version", "1.0")
 		util.GameGroup = p.GetString("GLOBAL", "GameGroup", "default")
+		//告诉具体代码加载
+		util.DefaultCallFunc.Do("loadini", p)
 	}
 
 	return nil

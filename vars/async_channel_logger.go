@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -45,35 +46,65 @@ type logEntry struct {
 	time    time.Time
 	attrs   []slog.Attr
 	context context.Context
+	file    string // 调用者文件路径（新增）
+	line    int    // 调用者行号（新增）
+}
+
+// getCaller 获取业务调用者的文件路径与行号。
+// 通过遍历调用栈，跳过本包（vars）内部函数帧，
+// 返回第一个不属于 vars 包的调用者——即真正发起日志的业务代码位置。
+// 相比固定 skip 深度，本方案不受函数内联、调用链中间层增减影响，更稳健。
+func getCaller() (string, int) {
+	for depth := 1; depth < 16; depth++ {
+		pc, file, line, ok := runtime.Caller(depth)
+		if !ok {
+			break
+		}
+		fn := runtime.FuncForPC(pc)
+		if fn == nil {
+			continue
+		}
+		name := fn.Name()
+		// 跳过 vars 包内部函数帧（含 getCaller 本身、Enqueue、Info 便捷函数等）
+		if strings.Contains(name, "/vars.") || strings.HasPrefix(name, "touchgocore/vars.") {
+			continue
+		}
+		// Windows 下统一使用反斜杠路径，与系统文件路径风格一致
+		if runtime.GOOS == "windows" {
+			file = strings.ReplaceAll(file, "/", "\\")
+		}
+		return file, line
+	}
+	return "", 0
 }
 
 // AsyncLoggerChannel 异步日志Channel
 // 使用专用的goroutine处理日志写入，避免阻塞业务逻辑
 type AsyncLoggerChannel struct {
-	config     AsyncChannelConfig
-	input      chan logEntry          // 日志输入channel
-	writer     io.Writer              // 实际写入器
-	closed     atomic.Bool           // 关闭标志
-	stopping   atomic.Bool           // 正在停止中
-	wg         sync.WaitGroup        // goroutine同步
-	mu         sync.RWMutex          // 统计信息锁
-	stats      AsyncChannelStats     // 统计信息
-	dropped    atomic.Int64          // 丢弃的日志数
-	queued     atomic.Int64          // 入队日志数
-	written    atomic.Int64          // 写入日志数
-	flushSig   chan chan struct{}     // 刷新信号（使用chan chan实现回调）
-	batchPool  sync.Pool             // 批处理对象池
+	config    AsyncChannelConfig
+	input     chan logEntry      // 日志输入channel
+	writer    io.Writer          // 实际写入器
+	closed    atomic.Bool        // 关闭标志
+	stopping  atomic.Bool        // 正在停止中
+	wg        sync.WaitGroup     // goroutine同步
+	mu        sync.RWMutex       // 统计信息锁
+	stats     AsyncChannelStats  // 统计信息
+	dropped   atomic.Int64       // 丢弃的日志数
+	queued    atomic.Int64       // 入队日志数
+	written   atomic.Int64       // 写入日志数
+	flushSig  chan chan struct{} // 刷新信号（使用chan chan实现回调）
+	batchPool sync.Pool          // 批处理对象池
 }
 
 // AsyncChannelStats 异步日志统计
 type AsyncChannelStats struct {
-	TotalEnqueued int64     // 总入队数
-	TotalWritten  int64     // 总写入数
-	TotalDropped  int64     // 总丢弃数
-	QueuePeak     int64     // 队列峰值
-	BufferUsed    int       // 当前缓冲区使用
+	TotalEnqueued int64         // 总入队数
+	TotalWritten  int64         // 总写入数
+	TotalDropped  int64         // 总丢弃数
+	QueuePeak     int64         // 队列峰值
+	BufferUsed    int           // 当前缓冲区使用
 	WriteLatency  time.Duration // 最近写入延迟
-	LastFlush     time.Time // 上次刷新时间
+	LastFlush     time.Time     // 上次刷新时间
 }
 
 // NewAsyncLoggerChannel 创建异步日志Channel
@@ -124,12 +155,16 @@ func (a *AsyncLoggerChannel) Enqueue(level slog.Level, msg string, attrs []slog.
 		return false
 	}
 
+	file, line := getCaller()
+
 	entry := logEntry{
 		level:   level,
 		msg:     msg,
 		time:    time.Now(),
 		attrs:   attrs,
 		context: ctx,
+		file:    file,
+		line:    line,
 	}
 
 	// 原子计数
@@ -397,8 +432,8 @@ func (a *AsyncLoggerChannel) formatEntry(entry logEntry) string {
 		levelStr = "ERROR"
 	}
 
-	// 估算容量：时间(19) + 空格 + 级别(5) + 括号 + 消息 + 换行
-	estLen := 32 + len(entry.msg)
+	// 估算容量：时间(19) + 空格 + 级别(5) + 括号 + 文件路径(估) + 消息 + 换行
+	estLen := 32 + len(entry.file) + 8 + len(entry.msg)
 	if len(entry.attrs) > 0 {
 		for _, attr := range entry.attrs {
 			estLen += len(attr.Key) + 16
@@ -411,6 +446,12 @@ func (a *AsyncLoggerChannel) formatEntry(entry logEntry) string {
 	sb.WriteByte(' ')
 	sb.WriteString(levelStr)
 	sb.WriteString(" [")
+	if entry.file != "" {
+		sb.WriteString(entry.file)
+		sb.WriteByte(':')
+		sb.WriteString(fmt.Sprintf("%d", entry.line))
+		sb.WriteByte(' ')
+	}
 	sb.WriteString(entry.msg)
 	sb.WriteByte(']')
 

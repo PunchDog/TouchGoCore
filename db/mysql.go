@@ -26,6 +26,10 @@ var gormPool *syncmap.MapAny = syncmap.NewAny()
 
 // NewDbMysql 创建 MySQL 数据库连接
 func NewDbMysql(cfg *config.MySqlDBConfig) (*DbMysql, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("无效的mysql配置")
+	}
+
 	dsn := buildDSN(cfg)
 
 	// 尝试从连接池获取

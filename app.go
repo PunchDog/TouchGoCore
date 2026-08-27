@@ -237,9 +237,10 @@ func (app *App) initDatabase() error {
 
 		// 初始化虚拟时间模块
 		util.InitVirtualTime(redis.Get())
-	} else {
-		return fmt.Errorf("加载配置出错,没有redis配置")
 	}
+	// } else {
+	// 	return fmt.Errorf("加载配置出错,没有redis配置")
+	// }
 
 	// MySQL（可选）
 	if app.Cfg.MySql != nil {

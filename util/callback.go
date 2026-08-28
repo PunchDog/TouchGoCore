@@ -45,6 +45,7 @@ const (
 	CallWebSocketMsg = "WebSocketMsg"
 	CallRpcMsg       = "RpcMsg"
 	CallTelegramMsg  = "TelegramMsg"
+	CallLoadIni      = "loadini"
 )
 
 var DefaultCallFunc = &CallFunction{

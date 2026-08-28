@@ -204,7 +204,7 @@ func (app *App) loadConfig() error {
 		util.Version = p.GetString(app.ServerName, "Version", "1.0")
 		util.GameGroup = p.GetString("GLOBAL", "GameGroup", "default")
 		//告诉具体代码加载
-		util.DefaultCallFunc.Do("loadini", p)
+		util.DefaultCallFunc.Do(util.CallLoadIni, p)
 	}
 
 	return nil

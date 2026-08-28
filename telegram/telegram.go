@@ -25,6 +25,8 @@ const (
 	MaxButtonsPerRow = 2
 )
 
+var globalBot *tgbotapi.BotAPI
+
 func init() {
 	util.DefaultCallFunc.Register(util.CallTelegramMsg+"StartMessage", startMessage)
 }
@@ -73,6 +75,11 @@ func startMessage(bot *tgbotapi.BotAPI, chatID int64, desc, bannerURL string) er
 		return err
 	}
 	return nil
+}
+
+// 发送消息
+func SendMessage(chatID int64, desc string) error {
+	return startMessage(globalBot, chatID, desc, "")
 }
 
 // 处理文本消息
@@ -144,6 +151,9 @@ func (t *telegramTimer) Tick() {
 
 // 机器人监听代码
 func TelegramStart() {
+	//其他位置设置了key,就用其他地方设置的替换
+	util.DefaultCallFunc.Do(util.CallTelegramMsg+"BotKey", &config.Cfg_.Telegram.BotToken)
+
 	if config.Cfg_.Telegram == nil || config.Cfg_.Telegram.BotToken == "" {
 		vars.Info("不启动Telegram")
 		return
@@ -155,6 +165,7 @@ func TelegramStart() {
 		return
 	}
 
+	globalBot = bot
 	bot.Debug = true
 	vars.Info("Authorized on account: %s", bot.Self.UserName)
 

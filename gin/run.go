@@ -11,6 +11,7 @@ import (
 	"touchgocore/util"
 	"touchgocore/vars"
 
+	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 )
 
@@ -156,6 +157,18 @@ func Run() {
 			"code":  500,
 		})
 	}))
+
+	// 允许所有来源（开发环境用，生产环境建议指定具体域名）
+	ginServer.Use(cors.Default())
+
+	// // 或者自定义配置（推荐）
+	// r.Use(cors.New(cors.Config{
+	// 	AllowOrigins:     []string{"http://localhost:3000"}, // 前端地址
+	// 	AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+	// 	AllowHeaders:     []string{"Origin", "Content-Type", "Authorization"},
+	// 	ExposeHeaders:    []string{"Content-Length"},
+	// 	AllowCredentials: true,
+	// }))
 
 	//将注册到这里的函数注册进去
 	for router, fn := range routerMap {

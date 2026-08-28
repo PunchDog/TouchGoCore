@@ -32,6 +32,11 @@ func init() {
 }
 
 func startMessage(bot *tgbotapi.BotAPI, chatID int64, desc, bannerURL string) error {
+	if bot == nil {
+		vars.Error("bot未初始化")
+		return fmt.Errorf("bot未初始化")
+	}
+
 	// 构建游戏链接
 	vars.Info("telegram start game link: %v", config.Cfg_.Telegram.GameToShort)
 

@@ -84,7 +84,13 @@ func startMessage(bot *tgbotapi.BotAPI, chatID int64, desc, bannerURL string) er
 
 // 发送消息
 func SendMessage(chatID int64, desc string) error {
-	return startMessage(globalBot, chatID, desc, "")
+	msg := tgbotapi.NewMessage(chatID, desc)
+	// 发送消息
+	if _, err := globalBot.Send(msg); err != nil {
+		vars.Error("telegram send message error: %v", err)
+		return err
+	}
+	return nil
 }
 
 // 处理文本消息

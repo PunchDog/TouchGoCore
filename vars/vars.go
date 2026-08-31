@@ -516,12 +516,41 @@ func Shutdown() error {
 	return globalLogger.Close()
 }
 
-// formatLogMsg 统一格式化日志消息（处理带占位符的格式化参数）
+// hasFormatVerbs 判断字符串是否包含 fmt 风格的格式化占位符（如 %s、%d）。
+// 连续的 %% 表示字面的百分号，不算作占位符。
+func hasFormatVerbs(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] == '%' {
+			if i+1 < len(s) && s[i+1] == '%' {
+				i++ // 跳过的转义百分号 %%
+				continue
+			}
+			return true
+		}
+	}
+	return false
+}
+
+// formatLogMsg 统一格式化日志消息：
+//   - 首参含 %s 等格式化占位符时，按 fmt.Sprintf 处理；
+//   - 首参不含占位符时，将所有参数按顺序直接拼接（以空格分隔），避免多余参数被丢弃。
 func formatLogMsg(msg string, args ...any) string {
-	if len(args) > 0 {
+	if len(args) == 0 {
+		return msg
+	}
+	if hasFormatVerbs(msg) {
 		return fmt.Sprintf(msg, args...)
 	}
-	return msg
+
+	// 无格式化占位符：将所有参数直接拼接（首参 + 各参数，空格分隔）
+	var sb strings.Builder
+	sb.Grow(len(msg) + len(args)*16)
+	sb.WriteString(msg)
+	for _, a := range args {
+		sb.WriteByte(' ')
+		sb.WriteString(fmt.Sprint(a))
+	}
+	return sb.String()
 }
 
 // consoleLevelPrefix 返回命令行输出使用的级别前缀

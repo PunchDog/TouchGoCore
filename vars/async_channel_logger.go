@@ -479,6 +479,8 @@ type ChannelLoggerManager struct {
 	isEnabled   atomic.Bool
 	mu          sync.RWMutex
 	writer      io.WriteCloser
+	writeLevel  atomic.Int32 // 文件写入的最低级别（低于该级别的日志不写入文件）；off 时用高哨兵值禁用
+	off         atomic.Bool  // 日志级别是否被配置为 off（完全静默）
 }
 
 // NewChannelLoggerManager 创建基于Channel的日志管理器
@@ -502,6 +504,10 @@ func NewChannelLoggerManager(cfg LogConfig) (*ChannelLoggerManager, error) {
 func (m *ChannelLoggerManager) init() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	// 解析并记录文件写入级别与 off 状态（供 Info/Warning/Error 等函数按等级过滤文件写入）
+	m.writeLevel.Store(int32(parseLogLevel(m.config.LogLevel)))
+	m.off.Store(strings.EqualFold(m.config.LogLevel, LogLevelOff))
 
 	// 检查是否禁用
 	if m.config.Async && m.config.AsyncBufferSize > 0 {
@@ -647,6 +653,35 @@ func (m *ChannelLoggerManager) Close() error {
 // IsEnabled 检查是否启用
 func (m *ChannelLoggerManager) IsEnabled() bool {
 	return m.isEnabled.Load()
+}
+
+// parseLogLevel 将配置字符串解析为 slog.Level。
+// off 返回高于所有真实级别的值，用于禁用一切文件写入。
+func parseLogLevel(level string) slog.Level {
+	switch strings.ToUpper(level) {
+	case "DEBUG":
+		return slog.LevelDebug
+	case "INFO":
+		return slog.LevelInfo
+	case "WARN", "WARNING":
+		return slog.LevelWarn
+	case "ERROR":
+		return slog.LevelError
+	case "OFF":
+		return slog.Level(1000) // 高于任何真实日志级别，表示不写入文件
+	default:
+		return slog.LevelInfo
+	}
+}
+
+// IsOff 判断日志级别是否被配置为 off（完全静默，命令行与文件均不输出）
+func (m *ChannelLoggerManager) IsOff() bool {
+	return m.off.Load()
+}
+
+// ShouldWriteFile 判断给定级别是否达到文件写入的最低级别（低于则不写文件）
+func (m *ChannelLoggerManager) ShouldWriteFile(level slog.Level) bool {
+	return level >= slog.Level(m.writeLevel.Load())
 }
 
 // GetStats 获取Channel统计

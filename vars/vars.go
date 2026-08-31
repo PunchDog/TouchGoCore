@@ -516,68 +516,90 @@ func Shutdown() error {
 	return globalLogger.Close()
 }
 
-// Debug 调试级别日志（异步写入，不阻塞业务逻辑）
+// formatLogMsg 统一格式化日志消息（处理带占位符的格式化参数）
+func formatLogMsg(msg string, args ...any) string {
+	if len(args) > 0 {
+		return fmt.Sprintf(msg, args...)
+	}
+	return msg
+}
+
+// consoleLevelPrefix 返回命令行输出使用的级别前缀
+func consoleLevelPrefix(level slog.Level) string {
+	switch level {
+	case slog.LevelDebug:
+		return "[DEBUG]"
+	case slog.LevelInfo:
+		return "[INFO]"
+	case slog.LevelWarn:
+		return "[WARN]"
+	case slog.LevelError:
+		return "[ERROR]"
+	default:
+		return "[INFO]"
+	}
+}
+
+// printToConsole 优先将日志同步输出到命令行（立即可见，便于实时观察）。
+// 不受日志级别限制；级别过滤仅作用于后续的 log 文件写入。
+func printToConsole(level slog.Level, msg string) {
+	ts := time.Now().Format("15:04:05")
+	fmt.Printf("%s %s %s\n", ts, consoleLevelPrefix(level), msg)
+}
+
+// writeToFile 按配置日志级别将日志异步写入 log 文件；
+// 级别不足、日志器未启用或级别为 off 时跳过（不写文件，但命令行已先行输出）。
+func writeToFile(level slog.Level, msg string) {
+	ch := GetChannelLogger()
+	if ch == nil || !ch.IsEnabled() {
+		// 回退到旧版日志器（其内部已按等级过滤）
+		logWithLevel(level, "%s", msg)
+		return
+	}
+	if ch.IsOff() || !ch.ShouldWriteFile(level) {
+		return
+	}
+	ch.LogAsyncSimple(level, msg)
+}
+
+// Debug 调试级别日志：优先输出到命令行，其次按等级写入 log 文件
 func Debug(msg string, args ...any) {
-	// 优先使用异步Channel日志
-	if chLogger := GetChannelLogger(); chLogger != nil && chLogger.IsEnabled() {
-		if len(args) > 0 {
-			chLogger.LogAsyncSimple(slog.LevelDebug, fmt.Sprintf(msg, args...))
-		} else {
-			chLogger.LogAsyncSimple(slog.LevelDebug, msg)
-		}
-		return
+	if ch := GetChannelLogger(); ch != nil && ch.IsOff() {
+		return // off 完全静默
 	}
-
-	// Fallback: 旧版日志
-	logWithLevel(slog.LevelDebug, msg, args...)
+	formatted := formatLogMsg(msg, args...)
+	printToConsole(slog.LevelDebug, formatted)
+	writeToFile(slog.LevelDebug, formatted)
 }
 
-// Info 信息级别日志（异步写入，不阻塞业务逻辑）
+// Info 信息级别日志：优先输出到命令行，其次按等级写入 log 文件
 func Info(msg string, args ...any) {
-	// 优先使用异步Channel日志
-	if chLogger := GetChannelLogger(); chLogger != nil && chLogger.IsEnabled() {
-		if len(args) > 0 {
-			chLogger.LogAsyncSimple(slog.LevelInfo, fmt.Sprintf(msg, args...))
-		} else {
-			chLogger.LogAsyncSimple(slog.LevelInfo, msg)
-		}
-		return
+	if ch := GetChannelLogger(); ch != nil && ch.IsOff() {
+		return // off 完全静默
 	}
-
-	// Fallback: 旧版日志
-	logWithLevel(slog.LevelInfo, msg, args...)
+	formatted := formatLogMsg(msg, args...)
+	printToConsole(slog.LevelInfo, formatted)
+	writeToFile(slog.LevelInfo, formatted)
 }
 
-// Warn 警告级别日志（异步写入，不阻塞业务逻辑）
+// Warning 警告级别日志：优先输出到命令行，其次按等级写入 log 文件
 func Warning(msg string, args ...any) {
-	// 优先使用异步Channel日志
-	if chLogger := GetChannelLogger(); chLogger != nil && chLogger.IsEnabled() {
-		if len(args) > 0 {
-			chLogger.LogAsyncSimple(slog.LevelWarn, fmt.Sprintf(msg, args...))
-		} else {
-			chLogger.LogAsyncSimple(slog.LevelWarn, msg)
-		}
-		return
+	if ch := GetChannelLogger(); ch != nil && ch.IsOff() {
+		return // off 完全静默
 	}
-
-	// Fallback: 旧版日志
-	logWithLevel(slog.LevelWarn, msg, args...)
+	formatted := formatLogMsg(msg, args...)
+	printToConsole(slog.LevelWarn, formatted)
+	writeToFile(slog.LevelWarn, formatted)
 }
 
-// Error 错误级别日志（异步写入，不阻塞业务逻辑）
+// Error 错误级别日志：优先输出到命令行，其次按等级写入 log 文件
 func Error(msg string, args ...any) {
-	// 优先使用异步Channel日志
-	if chLogger := GetChannelLogger(); chLogger != nil && chLogger.IsEnabled() {
-		if len(args) > 0 {
-			chLogger.LogAsyncSimple(slog.LevelError, fmt.Sprintf(msg, args...))
-		} else {
-			chLogger.LogAsyncSimple(slog.LevelError, msg)
-		}
-		return
+	if ch := GetChannelLogger(); ch != nil && ch.IsOff() {
+		return // off 完全静默
 	}
-
-	// Fallback: 旧版日志
-	logWithLevel(slog.LevelError, msg, args...)
+	formatted := formatLogMsg(msg, args...)
+	printToConsole(slog.LevelError, formatted)
+	writeToFile(slog.LevelError, formatted)
 }
 
 // logWithLevel 统一的日志记录函数

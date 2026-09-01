@@ -75,6 +75,10 @@ func ResolveService(ctx context.Context, serviceName string) ([]*ServiceEndpoint
 }
 
 func Stop() {
+	if config.Cfg_.RpcPort == nil {
+		return
+	}
+
 	// 关闭服务发现
 	if dm := GetDiscovery(); dm != nil {
 		dm.Close()

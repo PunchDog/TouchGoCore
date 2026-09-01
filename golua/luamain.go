@@ -63,7 +63,7 @@ var (
 
 // luaTimer 定时器结构
 type luaTimer struct {
-	localtimer.TimerInterface
+	localtimer.Timer
 	tick      atomic.Int64
 	luaScript *LuaScript
 	ctx       context.Context

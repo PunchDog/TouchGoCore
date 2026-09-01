@@ -261,7 +261,7 @@ func (s *RpcServer) Stop() {
 	vars.Info("RPC服务器停止[%s]", s.name)
 }
 
-func StartGrpcServer(name, ip string, port int, useTLS bool) {
+func StartGrpcServer(name string, port int, useTLS bool) {
 	addr := "[::]:" + strconv.Itoa(port)
 	lis, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -317,7 +317,7 @@ func StartGrpcServer(name, ip string, port int, useTLS bool) {
 		done:               make(chan struct{}),
 		callFunc:           &util.CallFunction{}, // 创建独立的 CallFunction 实例
 		nametoclientstream: syncmap.NewMap[string, message.Grpc_MsgServer](),
-		callbacks:          NewServerCallbacks(),  // 初始化回调接口
+		callbacks:          NewServerCallbacks(), // 初始化回调接口
 	}
 
 	message.RegisterGrpcServer(service.service, service)

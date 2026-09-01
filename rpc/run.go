@@ -32,12 +32,12 @@ func Run() {
 
 	// 启动服务器监听（通过服务发现解析端点）
 	for _, v := range cfg.Server {
-		if v.Name == "" || v.Addr == "" || v.Port <= 0 {
+		if v.Name == "" || v.Port <= 0 {
 			vars.Error("RPC服务器配置无效: Name=%s, Addr=%s, Port=%d", v.Name, v.Addr, v.Port)
 			continue
 		}
 		useTLS := resolveTLSConfig(v.UseTLS)
-		StartGrpcServer(v.Name, v.Addr, v.Port, useTLS)
+		StartGrpcServer(v.Name, v.Port, useTLS)
 	}
 
 	// 启动客户端连接（通过服务发现解析端点）

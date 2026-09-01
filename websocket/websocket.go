@@ -246,7 +246,7 @@ func initWorkerPool() {
 	workerPoolStop = make(chan struct{})
 
 	for i := 0; i < workerPoolSize; i++ {
-		workerPoolQueues[i] = make(chan *msgQueueType, 1024)
+		workerPoolQueues[i] = make(chan *msgQueueType, 102400)
 		workerPoolStats[i] = &workerStats{
 			WorkerID: i,
 		}

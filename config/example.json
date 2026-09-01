@@ -124,7 +124,5 @@
         "port": 9090
     },
     "log_level": "日志等级,off为不开,其次为INFO,DEBUG,WARN,ERROR",
-    "map_path": "off",
-    "ip": "",
-    "ip说明": "端口所在IP(config.go 顶层字段)，不填则获取本地内网IP"
+    "map_path": "off"
 }

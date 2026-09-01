@@ -14,7 +14,6 @@ type Cfg struct {
 	Redis     *RedisConfig     `json:"redis"`
 	MySql     *MySqlDBConfig   `json:"mysql"`
 	Mongo     *MongoDBConfig   `json:"mongo"`
-	Ip        string           `json:"ip"`         //端口所在IP，如果没填，就获取本地内网IP
 	Ws        *WebsocketConfig `json:"ws"`         //websocket启动模式:off不启动;:1234启动监听详细配置
 	LuaConfig *LuaConfig       `json:"lua_config"` // Lua 详细配置,如果没有就不启动lua
 	LogLevel  string           `json:"log_level"`  //日志等级，off为不开,其次为INFO,DEBUG,WARN,ERROR
@@ -34,7 +33,6 @@ func init() {
 		Ws:       nil,
 		LogLevel: "info",
 		MapPath:  "off",
-		Ip:       "",
 		RpcPort:  nil,
 		Other:    nil,
 		Telegram: nil,

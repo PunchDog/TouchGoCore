@@ -80,8 +80,6 @@ type TimerInterface interface {
 	RemoveFromManager(cleanPool bool)
 	// IsActive 检查定时器是否活跃
 	IsActive() bool
-	//定时器UID
-	Uid() int64
 }
 
 // TimerPool 为定时器提供类型安全的对象池管理
@@ -141,16 +139,11 @@ type Timer struct {
 	isActive atomic.Bool // 是否活跃
 }
 
-func (t *Timer) Uid() int64 {
-	return t.uid
-}
-
 // Init 初始化定时器
 func (t *Timer) Init(interval, count int64, self TimerInterface) error {
 	if interval <= 0 {
 		return ErrTimerInvalidInterval
 	}
-
 	t.uid = 0
 	t.nextTime = util.CurrentMS() + interval
 	t.interval = interval

@@ -329,8 +329,10 @@ func (m *TimerManager) AddTimer(timer TimerInterface) error {
 		return ErrTimerNilParent
 	}
 
-	// 分配唯一ID
-	parent.uid = m.maxTimerUID.Add(1)
+	// 没有分配时，分配唯一ID
+	if parent.uid == 0 {
+		parent.uid = m.maxTimerUID.Add(1)
+	}
 	parent.mgr = m
 
 	// 清理现有定时器

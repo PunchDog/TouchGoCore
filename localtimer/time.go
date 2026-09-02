@@ -144,7 +144,7 @@ func (t *Timer) Init(interval, count int64, self TimerInterface) error {
 	if interval <= 0 {
 		return ErrTimerInvalidInterval
 	}
-	t.uid = 0
+	// t.uid = 0
 	t.nextTime = util.CurrentMS() + interval
 	t.interval = interval
 	t.count = count
@@ -337,6 +337,10 @@ func (m *TimerManager) AddTimer(timer TimerInterface) error {
 
 	// 清理现有定时器
 	timer.RemoveFromManager(false)
+	// 重新进入调度，恢复活跃状态：
+	// RemoveFromManager 内部会 CAS 将 isActive 置为 false，
+	// 若不恢复，handleTimerAdd 会因 !IsActive() 直接丢弃定时器，导致 Tick 永远不被调用
+	parent.isActive.Store(true)
 
 	// 选择合适的时间轮
 	wheelType := parent.GetType()
@@ -457,35 +461,37 @@ func NewTimerManager() *TimerManager {
 
 // runWheel 运行时间轮循环
 func (m *TimerManager) runWheel(wheel *TimerWheel, wheelType TimerType) {
-	defer func() {
-		if err := recover(); err != nil {
-			vars.Error("时间轮运行发生panic错误: %v, 类型: %s", err, wheelType.String())
-		}
-	}()
-
 	ticker := time.NewTicker(time.Duration(wheel.wheelConfig) * time.Millisecond)
 	defer ticker.Stop()
 
 	vars.Info("启动时间轮: %s (精度: %dms)", wheelType.String(), wheel.wheelConfig)
 
 	for wheel.isRunning.Load() {
-		select {
-		case <-m.closeChan:
-			wheel.isRunning.Store(false)
-			m.cleanupWheel(wheel)
-			vars.Info("时间轮停止: %s", wheelType.String())
-			return
+		// recover 放在循环内：避免单次 panic 直接杀死时间轮协程，导致后续所有定时器失效
+		func() {
+			defer func() {
+				if err := recover(); err != nil {
+					vars.Error("时间轮运行发生panic错误: %v, 类型: %s", err, wheelType.String())
+				}
+			}()
 
-		case timer, ok := <-wheel.addTimerChan:
-			if !ok {
-				// 通道已关闭
-				continue
+			select {
+			case <-m.closeChan:
+				wheel.isRunning.Store(false)
+				m.cleanupWheel(wheel)
+				vars.Info("时间轮停止: %s", wheelType.String())
+
+			case timer, ok := <-wheel.addTimerChan:
+				if !ok {
+					// 通道已关闭
+					return
+				}
+				m.handleTimerAdd(wheel, timer)
+
+			case <-ticker.C:
+				m.processWheelTick(wheel, wheelType)
 			}
-			m.handleTimerAdd(wheel, timer)
-
-		case <-ticker.C:
-			m.processWheelTick(wheel, wheelType)
-		}
+		}()
 	}
 }
 
@@ -527,13 +533,16 @@ func (m *TimerManager) processWheelTick(wheel *TimerWheel, wheelType TimerType) 
 			select {
 			case timerChannel <- timer:
 			default:
-				// 通道已满，直接执行
-				timer.Tick()
-				if timer.HasNext() {
-					if err := m.AddTimer(timer); err != nil {
-						vars.Error("重新调度定时器失败: %v", err)
+				// 通道已满，异步执行：当前持有 wheelLock，
+				// 同步调用 Tick（内部可能再次 AddTimer 加锁）会导致死锁
+				go func() {
+					timer.Tick()
+					if timer.HasNext() {
+						if err := m.AddTimer(timer); err != nil {
+							vars.Error("重新调度定时器失败: %v", err)
+						}
 					}
-				}
+				}()
 			}
 		} else {
 			// 检查是否需要迁移到更精确的时间轮
@@ -648,12 +657,21 @@ func TimeTick() {
 				return
 			}
 
-			timer.Tick()
-			if timer.HasNext() {
-				if err := AddTimer(timer); err != nil {
-					vars.Error("重新调度定时器失败: %v", err)
+			// recover 放在循环内：避免用户 Tick 内 panic 杀死消费协程，导致所有定时器失效
+			func() {
+				defer func() {
+					if err := recover(); err != nil {
+						vars.Error("定时器滴答处理发生panic错误: %v", err)
+					}
+				}()
+
+				timer.Tick()
+				if timer.HasNext() {
+					if err := AddTimer(timer); err != nil {
+						vars.Error("重新调度定时器失败: %v", err)
+					}
 				}
-			}
+			}()
 		case <-closech:
 			return
 		}

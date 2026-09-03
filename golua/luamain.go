@@ -1,4 +1,4 @@
-﻿package lua
+package lua
 
 import (
 	"context"
@@ -49,8 +49,9 @@ const (
 var (
 	defaultLua     *LuaScript = nil
 	luaInstances   map[int64]*LuaScript
-	luaInstancesMu sync.RWMutex // 保护 luaInstances 的并发访问
+	luaInstancesMu sync.RWMutex
 	nextInstanceID atomic.Int64
+	luaParentCtx   context.Context = context.Background()
 )
 
 // 注册的函数和类
@@ -79,41 +80,25 @@ func (lt *luaTimer) Tick() {
 	}
 
 	// 使用工作池并发更新对象
-	lt.updateObjectsConcurrently(lt.ctx)
+	lt.updateObjects(lt.ctx)
 }
 
-func (lt *luaTimer) updateObjectsConcurrently(ctx context.Context) {
-	maxWorkers := runtime.NumCPU()
-	sem := make(chan struct{}, maxWorkers) // 有缓冲，避免启动过多 goroutine 时阻塞
-	var launched atomic.Int64              // 使用原子计数器，避免 workerCount 的竞态
-
+func (lt *luaTimer) updateObjects(ctx context.Context) {
 	lt.luaScript.registeredObjects.Range(func(key, value interface{}) bool {
-		select {
-		case <-ctx.Done():
-			return false // 取消遍历，避免继续启动新的 goroutine
-		default:
+		if ctx != nil {
+			select {
+			case <-ctx.Done():
+				return false
+			default:
+			}
 		}
-
 		obj, ok := value.(ILuaClassInterface)
 		if !ok {
 			return true
 		}
-
-		launched.Add(1)
-		sem <- struct{}{} // 不会阻塞，因为通道有 maxWorkers 缓冲
-
-		go func(o ILuaClassInterface) {
-			defer func() { <-sem }()
-			o.Update()
-		}(obj)
-
+		obj.Update()
 		return true
 	})
-
-	// 等待所有已启动的 worker 完成
-	for i := int64(0); i < launched.Load(); i++ {
-		<-sem
-	}
 }
 
 // LuaScript Lua脚本实例
@@ -135,7 +120,11 @@ func (ls *LuaScript) Init() error {
 	ls.Close()
 
 	// 创建上下文
-	ls.ctx, ls.cancel = context.WithCancel(context.Background())
+	parent := luaParentCtx
+	if parent == nil {
+		parent = context.Background()
+	}
+	ls.ctx, ls.cancel = context.WithCancel(parent)
 
 	// 创建新的运行时
 	ls.runtime = rt.New(os.Stdout)
@@ -532,12 +521,16 @@ func registerClassWithContext(ctx context.Context, class ILuaClassInterface, scr
 }
 
 // Run 启动 Lua 服务（公开接口）
-func Run() {
+func Run(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	luaParentCtx = ctx
 	if config.Cfg_.LuaConfig == nil {
 		vars.Info("不启动lua服务")
-		return
+		return nil
 	}
-	RunLua()
+	return RunLua()
 }
 
 // Stop 关闭所有的定时器（公开接口）

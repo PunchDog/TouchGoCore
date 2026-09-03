@@ -28,6 +28,7 @@ type Head struct {
 	Protocol1 *int32  `protobuf:"varint,1,opt,name=protocol1" json:"protocol1,omitempty"`
 	Protocol2 *int32  `protobuf:"varint,2,opt,name=protocol2" json:"protocol2,omitempty"`
 	Cmd       *string `protobuf:"bytes,3,opt,name=cmd" json:"cmd,omitempty"`
+	RequestId *uint64 `protobuf:"varint,4,opt,name=request_id,json=requestId" json:"request_id,omitempty"`
 }
 
 func (x *Head) Reset() {
@@ -81,6 +82,13 @@ func (x *Head) GetCmd() string {
 		return *x.Cmd
 	}
 	return ""
+}
+
+func (x *Head) GetRequestId() uint64 {
+	if x != nil && x.RequestId != nil {
+		return *x.RequestId
+	}
+	return 0
 }
 
 type FSMessage struct {

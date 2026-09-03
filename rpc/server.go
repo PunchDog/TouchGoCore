@@ -8,6 +8,7 @@ import (
 	"net"
 	"reflect"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"time"
 	"touchgocore/config"
@@ -17,9 +18,11 @@ import (
 	"touchgocore/vars"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -32,6 +35,7 @@ type msginfo struct {
 	clientNameKey string
 	protol1       int32
 	protol2       int32
+	requestID     uint64
 }
 
 type RpcServer struct {
@@ -43,27 +47,30 @@ type RpcServer struct {
 	handlechannel      chan *msginfo
 	done               chan struct{}
 	stopped            atomic.Bool
+	closeOnce          sync.Once
+	handlerSem         chan struct{}
 	// 使用独立的 CallFunction 实例，避免全局单例并发问题
 	callFunc *util.CallFunction
 	// 回调接口
 	callbacks *ServerCallbacks
+	// 正在执行的 handler 数量（超时后仍可能未退出，需业务接 ctx）
+	inFlight atomic.Int64
 }
 
 func (s *RpcServer) Msg(stream message.Grpc_MsgServer) error {
 	md, ok := metadata.FromIncomingContext(stream.Context())
 	if !ok {
 		vars.Error("gRPC连接错误,没有元数据")
-		return nil
+		return status.Error(codes.Unauthenticated, "missing metadata")
 	}
-	//获取元数据
 	clientName := md.Get("client-name")
 	if len(clientName) == 0 {
 		vars.Error("gRPC连接错误,没有客户端名称")
-		return fmt.Errorf("gRPC连接错误: 没有客户端名称")
+		return status.Error(codes.Unauthenticated, "missing client-name")
 	}
 	if clientName[0] == "" {
 		vars.Error("gRPC连接错误,没有客户端名称")
-		return fmt.Errorf("gRPC连接错误: 没有客户端名称")
+		return status.Error(codes.Unauthenticated, "empty client-name")
 	}
 	// 客户端名称作为key
 	clientNameKey := clientName[0]
@@ -101,12 +108,17 @@ func (s *RpcServer) Msg(stream message.Grpc_MsgServer) error {
 		default:
 		}
 
+		var reqID uint64
+		if msg.GetHead() != nil {
+			reqID = msg.GetHead().GetRequestId()
+		}
 		select {
 		case s.readchannel <- &msginfo{
 			req:           msg,
 			clientNameKey: clientNameKey,
 			protol1:       msg.GetHead().GetProtocol1(),
 			protol2:       msg.GetHead().GetProtocol2(),
+			requestID:     reqID,
 		}:
 			// 发送成功
 		case <-s.done:
@@ -122,12 +134,16 @@ func (s *RpcServer) Msg(stream message.Grpc_MsgServer) error {
 
 // 发送消息
 func (s *RpcServer) Send(name string, pb1, pb2 int32, pb proto.Message) error {
-	// 触发发送响应前回调（可阻止发送）
+	return s.SendWithRequestID(name, pb1, pb2, 0, pb)
+}
+
+// SendWithRequestID 发送响应并回填 request_id（0 表示旧客户端兼容串行模式）
+func (s *RpcServer) SendWithRequestID(name string, pb1, pb2 int32, requestID uint64, pb proto.Message) error {
 	if !s.triggerOnSendResponse(name, pb1, pb2, pb) {
 		return fmt.Errorf("gRPC Send: 回调阻止了发送 [name=%s]", name)
 	}
 
-	rsp := util.NewFSMessage(pb1, pb2, pb)
+	rsp := util.NewFSMessageWithID(pb1, pb2, requestID, pb)
 	st1, h := s.nametoclientstream.Load(name)
 	if !h {
 		return fmt.Errorf("gRPC Send: 未找到客户端流[name=%s]", name)
@@ -153,6 +169,7 @@ func (s *RpcServer) readChannel() {
 					clientNameKey: msg.clientNameKey,
 					protol1:       msg.protol1,
 					protol2:       msg.protol2,
+					requestID:     msg.requestID,
 				}
 			}
 		}
@@ -168,20 +185,33 @@ func (s *RpcServer) handleChannel() {
 		select {
 		case <-s.done:
 			return
+		case <-rpcRunCtx.Done():
+			return
 		case msg := <-s.handlechannel:
-			// 为每个消息处理创建超时上下文
-			ctx, cancel := context.WithTimeout(context.Background(), timeout)
+			parent := rpcRunCtx
+			if parent == nil {
+				parent = context.Background()
+			}
+			ctx, cancel := context.WithTimeout(parent, timeout)
 
-			// 使用通道来接收处理结果
 			resultCh := make(chan struct {
 				bret bool
 				res  []reflect.Value
 			}, 1)
 
-			// 在新的 goroutine 中处理消息，以便可以超时控制
+			select {
+			case s.handlerSem <- struct{}{}:
+			case <-s.done:
+				cancel()
+				return
+			}
+
+			// handler 必须接受 context.Context 为首参，超时才能取消阻塞 IO
+			s.inFlight.Add(1)
 			go func() {
+				defer s.inFlight.Add(-1)
+				defer func() { <-s.handlerSem }()
 				key := fmt.Sprintf("%s:%d:%d", util.CallRpcMsg, msg.protol1, msg.protol2)
-				// 检查上下文是否已超时，避免无意义计算
 				select {
 				case <-ctx.Done():
 					select {
@@ -190,12 +220,11 @@ func (s *RpcServer) handleChannel() {
 						res  []reflect.Value
 					}{bret: false, res: nil}:
 					default:
-						// resultCh 可能已满（超时分支已写入），安全丢弃
 					}
 					return
 				default:
 				}
-				results, ok := s.callFunc.DoWithRet(key, msg)
+				results, ok := s.callFunc.DoWithRetCtx(ctx, key, msg)
 				if ok && len(results) > 0 {
 					resultCh <- struct {
 						bret bool
@@ -212,18 +241,16 @@ func (s *RpcServer) handleChannel() {
 			// 等待处理结果或超时
 			select {
 			case <-ctx.Done():
-				// 超时或取消
 				cancel()
-				vars.Error("处理gRPC请求超时,协议号:%d:%d, 客户端:%s",
-					msg.protol1, msg.protol2, msg.clientNameKey)
-				// 清理 goroutine（它会在完成后退出）
+				vars.Error("处理gRPC请求超时,协议号:%d:%d, 客户端:%s, in-flight=%d（回调须接受 context.Context）",
+					msg.protol1, msg.protol2, msg.clientNameKey, s.inFlight.Load())
 
 			case result := <-resultCh:
 				cancel()
 				if result.bret {
 					if len(result.res) > 0 {
 						rsp := result.res[0].Interface().(proto.Message)
-						s.Send(msg.clientNameKey, msg.protol1, msg.protol2, rsp)
+						s.SendWithRequestID(msg.clientNameKey, msg.protol1, msg.protol2, msg.requestID, rsp)
 
 						// 触发消息处理成功回调
 						s.triggerOnMessageProcessed(msg.clientNameKey, msg.protol1, msg.protol2, rsp, true)
@@ -247,45 +274,77 @@ func (s *RpcServer) handleChannel() {
 }
 
 // 关闭服务
+func (s *RpcServer) closeDone() {
+	s.closeOnce.Do(func() {
+		close(s.done)
+	})
+}
+
 func (s *RpcServer) Stop() {
-	if s.stopped.Load() {
+	if !s.stopped.CompareAndSwap(false, true) {
 		return
 	}
-	s.stopped.Store(true)
-	close(s.done)
-	s.service.Stop()
+	s.closeDone()
+	if s.service != nil {
+		done := make(chan struct{})
+		go func() {
+			s.service.GracefulStop()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			s.service.Stop()
+		}
+	}
 
-	// 触发服务停止回调
 	s.triggerOnServerStopped()
 
 	vars.Info("RPC服务器停止[%s]", s.name)
 }
 
-func StartGrpcServer(name string, port int, useTLS bool) {
+func StartGrpcServer(name string, port int, useTLS bool) error {
 	addr := "[::]:" + strconv.Itoa(port)
 	lis, err := net.Listen("tcp", addr)
 	if err != nil {
 		vars.Error("gRPC监听失败[%s]: %v", addr, err)
-		return
+		return err
 	}
 
 	// 检查 TLS 配置
 	var serverOptions []grpc.ServerOption
 
-	if useTLS && config.Cfg_ != nil && config.Cfg_.Rpc != nil && config.Cfg_.Rpc.TLS != nil {
-		cert, err := tls.LoadX509KeyPair(config.Cfg_.Rpc.TLS.CertFile, config.Cfg_.Rpc.TLS.KeyFile)
-		if err != nil {
-			vars.Error("gRPC加载TLS证书失败[%s]: %v", addr, err)
-			return
+	if useTLS && config.Cfg_ != nil {
+		rpc := config.Cfg_.Rpc
+		if rpc == nil {
+			rpc = config.Cfg_.RpcPort
 		}
-		tlsConfig := &tls.Config{
-			Certificates: []tls.Certificate{cert},
-			MinVersion:   tls.VersionTLS12,
+		if rpc != nil && rpc.TLS != nil {
+			cert, err := tls.LoadX509KeyPair(rpc.TLS.CertFile, rpc.TLS.KeyFile)
+			if err != nil {
+				vars.Error("gRPC加载TLS证书失败[%s]: %v", addr, err)
+				return err
+			}
+			tlsConfig := &tls.Config{
+				Certificates: []tls.Certificate{cert},
+				MinVersion:   tls.VersionTLS12,
+			}
+			if authMode() == "mtls" {
+				tlsConfig, err = mtlsServerTLS(tlsConfig)
+				if err != nil {
+					vars.Error("gRPC mTLS 配置失败[%s]: %v", addr, err)
+					return err
+				}
+			}
+			serverOptions = append(serverOptions, grpc.Creds(credentials.NewTLS(tlsConfig)))
 		}
-		serverOptions = append(serverOptions, grpc.Creds(credentials.NewTLS(tlsConfig)))
 	}
 
+	warnInsecureRPC(name, useTLS)
+
 	serverOptions = append(serverOptions,
+		grpc.ChainUnaryInterceptor(authUnaryInterceptor),
+		grpc.ChainStreamInterceptor(authStreamInterceptor),
 		grpc.KeepaliveParams(keepalive.ServerParameters{
 			// MaxConnectionIdle 和 MaxConnectionAge 设为 0 表示无限制，永不主动断开
 			MaxConnectionIdle:     0,                // 不因空闲断开
@@ -304,10 +363,6 @@ func StartGrpcServer(name string, port int, useTLS bool) {
 
 	vars.Info("gRPC监听已启动[%s]，服务器名称:%s, TLS: %v", addr, name, useTLS)
 
-	if !useTLS {
-		vars.Warning("gRPC服务器[%s]未启用TLS，请确保是内网环境", name)
-	}
-
 	s := grpc.NewServer(serverOptions...)
 	service := &RpcServer{
 		name:               name,
@@ -315,9 +370,10 @@ func StartGrpcServer(name string, port int, useTLS bool) {
 		readchannel:        make(chan *msginfo, MAX_CHANNEL_SIZE),
 		handlechannel:      make(chan *msginfo, MAX_CHANNEL_SIZE),
 		done:               make(chan struct{}),
-		callFunc:           &util.CallFunction{}, // 创建独立的 CallFunction 实例
+		callFunc:           &util.CallFunction{},
 		nametoclientstream: syncmap.NewMap[string, message.Grpc_MsgServer](),
-		callbacks:          NewServerCallbacks(), // 初始化回调接口
+		callbacks:          NewServerCallbacks(),
+		handlerSem:         make(chan struct{}, 256),
 	}
 
 	message.RegisterGrpcServer(service.service, service)
@@ -327,8 +383,7 @@ func StartGrpcServer(name string, port int, useTLS bool) {
 		if err := s.service.Serve(lis); err != nil {
 			vars.Error("gRPC服务启动失败[%s]: %v", s.name, err)
 			service_.Delete(s.name)
-			// 通知处理goroutine退出
-			close(s.done)
+			s.closeDone()
 			return
 		}
 	}(service)
@@ -341,6 +396,7 @@ func StartGrpcServer(name string, port int, useTLS bool) {
 
 	// 触发服务启动回调
 	service.triggerOnServerStarted()
+	return nil
 }
 
 // ==================== 回调触发方法（内部使用）====================

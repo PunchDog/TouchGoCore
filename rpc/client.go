@@ -45,7 +45,10 @@ type RpcClient struct {
 	// 流复用: 客户端流
 	stream      atomic.Value // *grpc.ClientStream
 	streamMu    sync.Mutex
+	sendMu      sync.Mutex
 	streamValid atomic.Bool
+	nextReqID   atomic.Uint64
+	pending     sync.Map // uint64 -> chan *message.FSMessage
 	// TLS 配置
 	useTLS bool
 	// 超时配置
@@ -89,7 +92,6 @@ func (c *RpcClient) markDisconnected() {
 }
 
 func (c *RpcClient) SendMsg(protocol1, protocol2 int32, pb proto.Message, callfunc func(pb1 proto.Message)) {
-	// 从原子值获取连接
 	connVal := c.conn.Load()
 	if connVal == nil {
 		vars.Error("RPC客户端连接未就绪[%s]，协议:%d:%d", c.fullAddr, protocol1, protocol2)
@@ -98,97 +100,138 @@ func (c *RpcClient) SendMsg(protocol1, protocol2 int32, pb proto.Message, callfu
 	}
 	conn := connVal.(*grpc.ClientConn)
 
-	// 客户端 context 创建（带超时）
 	ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
 	defer cancel()
-	md := metadata.Pairs("client-name", c.serverName)
-	ctx = metadata.NewOutgoingContext(ctx, md)
+	ctx = metadata.NewOutgoingContext(ctx, clientAuthMetadata(c.serverName))
 
-	// 尝试复用流
-	c.streamMu.Lock()
-	if c.streamValid.Load() {
-		if streamVal := c.stream.Load(); streamVal != nil {
-			stream := streamVal.(message.Grpc_MsgClient)
-			c.streamMu.Unlock()
-			c.sendWithStream(ctx, stream, protocol1, protocol2, pb, callfunc)
-			return
-		}
-	}
-	c.streamMu.Unlock()
-
-	// 创建新流
-	client := message.NewGrpcClient(conn)
-	stream, err := client.Msg(ctx)
+	stream, err := c.ensureStream(ctx, conn)
 	if err != nil {
 		vars.Error("RPC客户端创建流失败[%s] 协议:%d:%d: %v", c.fullAddr, protocol1, protocol2, err)
 		c.markDisconnected()
 		return
 	}
 
-	// 保存流以供复用
-	c.streamMu.Lock()
-	c.stream.Store(stream)
-	c.streamValid.Store(true)
-	c.streamMu.Unlock()
+	reqID := c.nextReqID.Add(1)
+	waitCh := make(chan *message.FSMessage, 1)
+	c.pending.Store(reqID, waitCh)
+	defer c.pending.Delete(reqID)
 
-	c.sendWithStream(ctx, stream, protocol1, protocol2, pb, callfunc)
-}
-
-// sendWithStream 使用流发送消息
-func (c *RpcClient) sendWithStream(ctx context.Context, stream message.Grpc_MsgClient, protocol1, protocol2 int32, pb proto.Message, callfunc func(pb1 proto.Message)) {
-	req := util.NewFSMessage(protocol1, protocol2, pb)
-	err := stream.Send(req)
+	req := util.NewFSMessageWithID(protocol1, protocol2, reqID, pb)
+	c.sendMu.Lock()
+	err = stream.Send(req)
+	c.sendMu.Unlock()
 	if err != nil {
 		vars.Error("RPC客户端发送失败[%s] 协议:%d:%d: %v", c.fullAddr, protocol1, protocol2, err)
-		// 流失效，需要重建
 		c.streamValid.Store(false)
 		c.markDisconnected()
-		// 触发错误回调
 		c.triggerOnError(err)
 		return
 	}
-
-	// 触发消息发送成功回调
 	c.triggerOnMessageSent(protocol1, protocol2, pb)
 
-	recv, err := stream.Recv()
-	if err != nil {
-		vars.Error("RPC客户端接收失败[%s] 协议:%d:%d: %v", c.fullAddr, protocol1, protocol2, err)
-		// 流失效，需要重建
-		c.streamValid.Store(false)
-		// 触发错误回调
-		c.triggerOnError(err)
+	var recv *message.FSMessage
+	select {
+	case recv = <-waitCh:
+	case <-ctx.Done():
+		vars.Error("RPC客户端等待响应超时[%s] 协议:%d:%d request_id=%d", c.fullAddr, protocol1, protocol2, reqID)
 		return
 	}
-	if callfunc != nil {
-		res := util.PasreFSMessage(recv)
-		if res != nil && callfunc != nil {
-			// 判断 res 和 pb1 是否相同类型
-			reflectType := reflect.TypeOf(callfunc)
-			pb1Type := reflectType.In(0)
-			if reflect.TypeOf(res) == pb1Type {
-				callfunc(res)
-			} else {
-				vars.Error("RPC客户端回调类型不匹配[%s] 期望:%v 实际:%v", c.fullAddr, pb1Type, reflect.TypeOf(res))
+	c.dispatchRecv(protocol1, protocol2, recv, callfunc)
+}
+
+func (c *RpcClient) ensureStream(ctx context.Context, conn *grpc.ClientConn) (message.Grpc_MsgClient, error) {
+	c.streamMu.Lock()
+	defer c.streamMu.Unlock()
+	if c.streamValid.Load() {
+		if streamVal := c.stream.Load(); streamVal != nil {
+			return streamVal.(message.Grpc_MsgClient), nil
+		}
+	}
+	client := message.NewGrpcClient(conn)
+	stream, err := client.Msg(ctx)
+	if err != nil {
+		return nil, err
+	}
+	c.stream.Store(stream)
+	c.streamValid.Store(true)
+	go c.recvLoop(stream)
+	return stream, nil
+}
+
+func (c *RpcClient) recvLoop(stream message.Grpc_MsgClient) {
+	for {
+		recv, err := stream.Recv()
+		if err != nil {
+			c.streamValid.Store(false)
+			c.triggerOnError(err)
+			c.failAllPending()
+			return
+		}
+		rid := uint64(0)
+		if recv.GetHead() != nil {
+			rid = recv.GetHead().GetRequestId()
+		}
+		if rid != 0 {
+			if ch, ok := c.pending.Load(rid); ok {
+				select {
+				case ch.(chan *message.FSMessage) <- recv:
+				default:
+				}
+				continue
 			}
 		}
-
-		// 触发消息接收回调（传递解析后的响应）
-		c.triggerOnMessageReceived(protocol1, protocol2, res)
-	} else {
-		// 无回调函数时，也触发消息接收回调（传递原始响应）
-		res := util.PasreFSMessage(recv)
-		c.triggerOnMessageReceived(protocol1, protocol2, res)
+		// request_id=0：旧服务端兼容，投递给任意一个等待中的请求
+		delivered := false
+		c.pending.Range(func(_, value any) bool {
+			select {
+			case value.(chan *message.FSMessage) <- recv:
+				delivered = true
+				return false
+			default:
+				return true
+			}
+		})
+		if !delivered {
+			vars.Error("RPC客户端收到无法关联的响应[%s] request_id=%d", c.fullAddr, rid)
+		}
 	}
+}
+
+func (c *RpcClient) failAllPending() {
+	c.pending.Range(func(key, _ any) bool {
+		c.pending.Delete(key)
+		return true
+	})
+}
+
+func (c *RpcClient) dispatchRecv(protocol1, protocol2 int32, recv *message.FSMessage, callfunc func(pb1 proto.Message)) {
+	res := util.PasreFSMessage(recv)
+	if callfunc != nil && res != nil {
+		reflectType := reflect.TypeOf(callfunc)
+		pb1Type := reflectType.In(0)
+		if reflect.TypeOf(res) == pb1Type {
+			callfunc(res)
+		} else {
+			vars.Error("RPC客户端回调类型不匹配[%s] 期望:%v 实际:%v", c.fullAddr, pb1Type, reflect.TypeOf(res))
+		}
+	}
+	c.triggerOnMessageReceived(protocol1, protocol2, res)
 }
 
 func newClient(addr string, useTLS bool) (*grpc.ClientConn, error) {
 	var opts []grpc.DialOption
 
 	if useTLS {
-		// 加载 TLS 配置
 		tlsConfig := &tls.Config{
 			InsecureSkipVerify: false,
+			MinVersion:         tls.VersionTLS12,
+		}
+		if authMode() == "mtls" {
+			var err error
+			tlsConfig, err = mtlsClientTLS()
+			if err != nil {
+				return nil, err
+			}
 		}
 		opts = append(opts, grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig)))
 	} else {
@@ -235,7 +278,7 @@ func NewRpcClient(servername, addr string, port int) *RpcClient {
 	client.fullAddr = addr + ":" + strconv.Itoa(port)
 	client.serverName = servername
 	client.useTLS = useTLS
-	client.timeout = 30 * time.Second // 默认超时 30 秒
+	client.timeout = 30 * time.Second       // 默认超时 30 秒
 	client.callbacks = NewClientCallbacks() // 初始化回调接口
 
 	conn, err := newClient(client.fullAddr, useTLS)

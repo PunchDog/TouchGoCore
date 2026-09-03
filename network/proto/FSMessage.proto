@@ -7,6 +7,7 @@ message Head {
 	optional int32 protocol1 = 1;
 	optional int32 protocol2 = 2;
 	optional string cmd = 3;
+	optional uint64 request_id = 4;
 }
 
 message FSMessage {

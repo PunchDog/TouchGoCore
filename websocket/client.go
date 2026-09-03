@@ -77,6 +77,7 @@ func (c *Client) connectionDial(url string) error {
 		wsConn, _, err := websocket.DefaultDialer.Dial(url, nil)
 		if err == nil {
 			c.wsConnect = wsConn
+			wsConn.SetReadLimit(1 << 20)
 			c.remoteAddr = url
 			c.closeCh = make(chan bool, 1)
 			c.msgChan = make(chan []byte, DEFAULT_WRITE_BUFFER_SIZE)
@@ -151,12 +152,14 @@ func (c *Client) readLoop() {
 	for c.Connected() {
 		if _, data, err := c.wsConnect.ReadMessage(); err == nil {
 			if c.Connected() {
-				msgQueue <- &msgQueueType{uid: c.UID, data: data}
-
-				// ============ 改进：更新统计 ============
-				c.stats.messagesReceived.Add(1)
-				c.stats.bytesReceived.Add(int64(len(data)))
-				c.stats.lastActivity.Store(util.CurrentTime())
+				select {
+				case msgQueue <- &msgQueueType{uid: c.UID, data: data}:
+					c.stats.messagesReceived.Add(1)
+					c.stats.bytesReceived.Add(int64(len(data)))
+					c.stats.lastActivity.Store(util.CurrentTime())
+				case <-closeCh:
+					return
+				}
 			}
 		} else {
 			return
@@ -203,6 +206,7 @@ func (c *Client) Close(reason string) {
 		close(c.msgChan)
 
 		// 清理客户端资源
+		addr := c.remoteAddr
 		c.wsConnect = nil
 		c.remoteAddr = ""
 		c.UID = 0
@@ -224,7 +228,7 @@ func (c *Client) Close(reason string) {
 			clientpool.Put(c)
 		}
 
-		vars.Info("%s 连接关闭，原因：%s", c.remoteAddr, reason)
+		vars.Info("%s 连接关闭，原因：%s", addr, reason)
 
 		// ============ 改进：更新服务器统计 ============
 		UpdateConnectionStats(false)
@@ -267,31 +271,46 @@ func (c *Client) SendMsg(msg ...any) {
 			return
 		}
 	} else if l == 3 {
-		// 使用的是 protobuf，传入数据 cmd1, cmd2, proto message
-		if v, ok := msg[2].(proto.Message); ok {
-			pb := util.NewFSMessage(msg[0].(int32), msg[1].(int32), v)
-			data, err := proto.Marshal(pb)
-			if err != nil {
-				vars.Error("打包数据失败: %v", err)
-				c.stats.errors.Add(1)
-				return
-			}
-			select {
-			case c.msgChan <- data:
-			default:
-				vars.Error("WebSocket 发送通道已满，丢弃消息: client=%s", c.remoteAddr)
-				c.stats.errors.Add(1)
-			}
+		p1, ok1 := msg[0].(int32)
+		p2, ok2 := msg[1].(int32)
+		v, ok3 := msg[2].(proto.Message)
+		if !ok1 || !ok2 || !ok3 {
+			vars.Error("WebSocket SendMsg 参数类型错误, 需要 (int32, int32, proto.Message)")
+			c.stats.errors.Add(1)
 			return
 		}
+		pb := util.NewFSMessage(p1, p2, v)
+		if pb == nil {
+			c.stats.errors.Add(1)
+			return
+		}
+		data, err := proto.Marshal(pb)
+		if err != nil {
+			vars.Error("打包数据失败: %v", err)
+			c.stats.errors.Add(1)
+			return
+		}
+		select {
+		case c.msgChan <- data:
+		default:
+			vars.Error("WebSocket 发送通道已满，丢弃消息: client=%s", c.remoteAddr)
+			c.stats.errors.Add(1)
+		}
+		return
 	}
 }
 
 // 修改InitConnection为NewClient
 func NewClient(connType interface{}, remoteAddr string, className string) (*Client, error) {
-	if maxUID == 0 || maxUID > util.CurrentTime().UnixNano()+1 {
-		maxUID = util.CurrentTime().UnixNano()
-		atomic.StoreInt64(&maxUID, util.CurrentTime().UnixNano())
+	now := util.CurrentTime().UnixNano()
+	for {
+		cur := atomic.LoadInt64(&maxUID)
+		if cur != 0 && cur <= now+1 {
+			break
+		}
+		if atomic.CompareAndSwapInt64(&maxUID, cur, now) {
+			break
+		}
 	}
 	atomic.AddInt64(&maxUID, 1)
 
@@ -309,7 +328,7 @@ func NewClient(connType interface{}, remoteAddr string, className string) (*Clie
 		// 原子标志自动初始化为 false
 	}
 
-	client.UID = maxUID
+	client.UID = atomic.LoadInt64(&maxUID)
 	client.remoteAddr = remoteAddr
 	client.closeCh = make(chan bool, 1)
 	client.msgChan = make(chan []byte, DEFAULT_WRITE_BUFFER_SIZE)
@@ -335,6 +354,7 @@ func NewClient(connType interface{}, remoteAddr string, className string) (*Clie
 		}
 	case *websocket.Conn: // 服务端接收连接模式
 		client.wsConnect = v
+		v.SetReadLimit(1 << 20)
 	default:
 		return nil, errors.New("无效的连接类型参数")
 	}

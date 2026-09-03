@@ -1,14 +1,17 @@
 package mapmanager
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"os"
+	"sync"
 	lua "touchgocore/golua"
 	"touchgocore/syncmap"
 
+	"touchgocore/corectx"
 	"touchgocore/util"
 
-	"touchgocore/config"
 	"touchgocore/vars"
 )
 
@@ -41,43 +44,58 @@ type Map struct {
 	Node [][]*MapNode `json:"node"`
 	// NPC列表
 	Npc []*Npc
+	mu  sync.Mutex
 }
 
-func (this *Map) Load(path string) {
+func (this *Map) Load(path string) error {
 	file, err := os.ReadFile(path)
 	if err != nil {
-		panic("读取启动配置出错:" + err.Error())
+		return fmt.Errorf("读取启动配置出错: %w", err)
 	}
 	err = json.Unmarshal(file, &this)
 	if err != nil {
-		panic("解析配置出错:" + path + ":" + err.Error())
+		return fmt.Errorf("解析配置出错 %s: %w", path, err)
 	}
 	if _, ok := _maplist.LoadOrStore(this.MapId, this); ok {
-		panic("加载地图配置出错:" + path + ":已经有相同ID的地图了")
+		return fmt.Errorf("加载地图配置出错:%s:已经有相同ID的地图了", path)
 	}
 
 	vars.Info("加载地图 %s 成功!", path)
+	return nil
 }
 
-func RunMap() {
-	if config.Cfg_.MapPath == "off" || config.Cfg_.MapPath == "" {
+func RunMap(ctx context.Context) error {
+	cfg := corectx.CfgFrom(ctx)
+	if cfg == nil || cfg.MapPath == "off" || cfg.MapPath == "" {
 		vars.Info("不启动地图功能")
-		return
+		return nil
 	}
 
-	pathlist := util.GetPathFile(config.Cfg_.MapPath, nil)
+	pathlist := util.GetPathFile(cfg.MapPath, nil)
 
-	//加载所有地图
+	var errs []error
 	for _, filepath := range pathlist {
 		maps := &Map{}
-		maps.Load(filepath)
+		if err := maps.Load(filepath); err != nil {
+			vars.Error("加载地图失败: %v", err)
+			errs = append(errs, err)
+		}
 	}
 
-	//创建lua NPC类
 	lua.RegisterLuaClass(&Npc{})
 	vars.Info("读取地图完成!")
+	if len(errs) > 0 {
+		return fmt.Errorf("部分地图加载失败: %v", errs)
+	}
+	return nil
 }
 
 func GetMap(id uint32) (*Map, bool) {
 	return _maplist.Load(id)
+}
+
+func StopMap(_ context.Context) {
+	if _maplist != nil {
+		_maplist.Clear()
+	}
 }

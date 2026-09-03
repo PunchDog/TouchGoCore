@@ -16,11 +16,11 @@ import (
 
 // ServiceEndpoint 代表一个服务端点
 type ServiceEndpoint struct {
-	Name    string // 服务名称
-	Addr    string // IP地址
-	Port    int    // 端口
-	UseTLS  bool   // 是否使用TLS
-	Meta    map[string]string // 元数据（可用于权重、区域等）
+	Name   string            // 服务名称
+	Addr   string            // IP地址
+	Port   int               // 端口
+	UseTLS bool              // 是否使用TLS
+	Meta   map[string]string // 元数据（可用于权重、区域等）
 }
 
 // ServiceDiscovery 服务发现接口
@@ -125,22 +125,12 @@ func (dd *DNSDiscovery) Resolve(ctx context.Context, serviceName string) ([]*Ser
 	resolveCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	var addrs []string
-	var err error
-
-	done := make(chan struct{})
-	go func() {
-		addrs, err = net.LookupHost(host)
-		close(done)
-	}()
-
-	select {
-	case <-resolveCtx.Done():
-		return nil, fmt.Errorf("DNS resolution timeout for %s", host)
-	case <-done:
-		if err != nil {
-			return nil, fmt.Errorf("DNS resolution failed for %s: %w", host, err)
+	addrs, err := net.DefaultResolver.LookupHost(resolveCtx, host)
+	if err != nil {
+		if resolveCtx.Err() != nil {
+			return nil, fmt.Errorf("DNS resolution timeout for %s", host)
 		}
+		return nil, fmt.Errorf("DNS resolution failed for %s: %w", host, err)
 	}
 
 	endpoints := make([]*ServiceEndpoint, 0, len(addrs))

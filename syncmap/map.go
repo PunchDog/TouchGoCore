@@ -117,10 +117,12 @@ func (m *Map[K, V]) Range(fn func(k K, v V) bool) {
 }
 
 func (m *Map[K, V]) List(sortFunc func(d1, d2 V) bool) []V {
+	m.mu.RLock()
 	pairs := make([]V, 0, len(m.mp))
 	for _, v := range m.mp {
 		pairs = append(pairs, v)
 	}
+	m.mu.RUnlock()
 
 	sort.Slice(pairs, func(i, j int) bool {
 		return sortFunc(pairs[i], pairs[j])

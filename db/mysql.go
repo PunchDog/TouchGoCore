@@ -99,6 +99,9 @@ func (m *DbMysql) Close() error {
 	if err != nil {
 		return err
 	}
+	if m.config != nil {
+		gormPool.Delete(buildDSN(m.config))
+	}
 	return sqlDB.Close()
 }
 
@@ -238,7 +241,24 @@ func (m *DbMysql) Exists(model interface{}, whereClause interface{}, args ...int
 
 // Sum 计算字段总和
 // 示例: total, _ := mysqlDB.Sum(&Order{}, "amount", "status = ?", "paid")
+func safeSQLColumn(column string) error {
+	if column == "" {
+		return fmt.Errorf("invalid column name")
+	}
+	for i := 0; i < len(column); i++ {
+		c := column[i]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '.' {
+			continue
+		}
+		return fmt.Errorf("invalid column name: %s", column)
+	}
+	return nil
+}
+
 func (m *DbMysql) Sum(model interface{}, column string, whereClause interface{}, args ...interface{}) (float64, error) {
+	if err := safeSQLColumn(column); err != nil {
+		return 0, err
+	}
 	var result float64
 	query := m.gormDB.Model(model).Select(fmt.Sprintf("COALESCE(SUM(%s), 0)", column))
 	if len(args) > 0 {
@@ -253,6 +273,9 @@ func (m *DbMysql) Sum(model interface{}, column string, whereClause interface{},
 // Avg 计算字段平均值
 // 示例: avg, _ := mysqlDB.Avg(&Order{}, "amount")
 func (m *DbMysql) Avg(model interface{}, column string, whereClause interface{}, args ...interface{}) (float64, error) {
+	if err := safeSQLColumn(column); err != nil {
+		return 0, err
+	}
 	var result float64
 	query := m.gormDB.Model(model).Select(fmt.Sprintf("COALESCE(AVG(%s), 0)", column))
 	if len(args) > 0 {
@@ -267,6 +290,9 @@ func (m *DbMysql) Avg(model interface{}, column string, whereClause interface{},
 // Max 获取字段最大值
 // 示例: max, _ := mysqlDB.Max(&Order{}, "amount")
 func (m *DbMysql) Max(model interface{}, column string, whereClause interface{}, args ...interface{}) (interface{}, error) {
+	if err := safeSQLColumn(column); err != nil {
+		return nil, err
+	}
 	var result interface{}
 	query := m.gormDB.Model(model).Select(fmt.Sprintf("MAX(%s)", column))
 	if len(args) > 0 {
@@ -281,6 +307,9 @@ func (m *DbMysql) Max(model interface{}, column string, whereClause interface{},
 // Min 获取字段最小值
 // 示例: min, _ := mysqlDB.Min(&Order{}, "amount")
 func (m *DbMysql) Min(model interface{}, column string, whereClause interface{}, args ...interface{}) (interface{}, error) {
+	if err := safeSQLColumn(column); err != nil {
+		return nil, err
+	}
 	var result interface{}
 	query := m.gormDB.Model(model).Select(fmt.Sprintf("MIN(%s)", column))
 	if len(args) > 0 {

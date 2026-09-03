@@ -45,10 +45,12 @@ func (this *DbOperate) connectOnly(dataSourceName string) bool {
 	return false
 }
 
-func NewMongoDB(cfg *config.MongoDBConfig) (dbo *DbOperate, err error) {
-	dbo = new(DbOperate)
-	dbo.newMongoDB(cfg)
-	return dbo, err
+func NewMongoDB(cfg *config.MongoDBConfig) (*DbOperate, error) {
+	dbo := new(DbOperate)
+	if err := dbo.newMongoDB(cfg); err != nil {
+		return nil, err
+	}
+	return dbo, nil
 }
 
 func (dbo *DbOperate) newMongoDB(cfg *config.MongoDBConfig) error {
@@ -62,7 +64,7 @@ func (dbo *DbOperate) newMongoDB(cfg *config.MongoDBConfig) error {
 		url += fmt.Sprintf("?replicaSet=%s", cfg.ReplicaSetName)
 	}
 
-	vars.Info("DbOperate mongodb connect url:%v.", url)
+	vars.Info("DbOperate mongodb connecting host:%s db:%s", cfg.Host, cfg.DBName)
 
 	dbo.dbName = cfg.DBName
 	dbo.url = url
@@ -119,9 +121,12 @@ func (dbo *DbOperate) DBClose() {
 	if dbo.session != nil {
 		ctx, cancel := newTimeoutContext()
 		defer cancel()
-		dbo.session.Disconnect(ctx)
+		_ = dbo.session.Disconnect(ctx)
+		if dbo.url != "" {
+			_DbMap.Delete(dbo.url)
+		}
 		dbo.session = nil
-		vars.Info("Disconnect %s mongodb...", dbo.url)
+		vars.Info("Disconnect mongodb host/db closed")
 	}
 }
 
@@ -357,7 +362,7 @@ func (dbo *DbOperate) FindOne(name string, query interface{}, ret interface{}) e
 	defer cancel()
 	collection := dbo.session.Database(dbo.dbName).Collection(name)
 
-	return collection.FindOne(ctx, query).Decode(&ret)
+	return collection.FindOne(ctx, query).Decode(ret)
 }
 
 /* name 表名,  query 条件 */

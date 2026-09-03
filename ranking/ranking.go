@@ -105,6 +105,9 @@ func randomLevel() int32 {
 }
 
 func (sl *SkipList) insert(key int64, val *RankInfo) {
+	if sl == nil || sl.Header == nil || val == nil {
+		return
+	}
 	var update [SkipListMaxLevel]*SkipListNode
 	var rank [SkipListMaxLevel]int32
 	x := sl.Header
@@ -390,10 +393,17 @@ type RankTree struct {
 
 func NewRankTree() *RankTree {
 	rt := new(RankTree)
-	rt.EntryMapping = syncmap.NewMap[int64, *RankInfo]()
-	rt.Sl = newSkipList()
-	//rt.EntryMapping = make(map[int64]*RankInfo)
+	rt.ensure()
 	return rt
+}
+
+func (rt *RankTree) ensure() {
+	if rt.EntryMapping == nil {
+		rt.EntryMapping = syncmap.NewMap[int64, *RankInfo]()
+	}
+	if rt.Sl == nil || rt.Sl.Header == nil {
+		rt.Sl = newSkipList()
+	}
 }
 
 // 添加新排名信息
@@ -401,9 +411,11 @@ func (rt *RankTree) AddRankInfo(uid int64, val int64, timestamp int64) {
 	// 写操作，需要互斥锁
 	rt.rwMutex.Lock()
 	defer rt.rwMutex.Unlock()
+	rt.ensure()
 
 	var info *RankInfo
-	if info, has := rt.EntryMapping.Load(uid); has {
+	if loaded, has := rt.EntryMapping.Load(uid); has {
+		info = loaded
 		if info.Value == val {
 			return // 相同值，不需要更新
 		}
@@ -428,6 +440,7 @@ func (rt *RankTree) RemoveRankInfo(uid int64) bool {
 	// 写操作，需要互斥锁
 	rt.rwMutex.Lock()
 	defer rt.rwMutex.Unlock()
+	rt.ensure()
 
 	if info, has := rt.EntryMapping.Load(uid); has {
 		rt.Sl.remove(info.Value, info)
@@ -448,6 +461,9 @@ func (rt *RankTree) QueryRankInfo(uid int64) *RankInfo {
 	// 读操作，需要读锁
 	rt.rwMutex.RLock()
 	defer rt.rwMutex.RUnlock()
+	if rt.Sl == nil || rt.EntryMapping == nil {
+		return nil
+	}
 
 	info, has := rt.EntryMapping.Load(uid)
 	if !has {
@@ -512,7 +528,7 @@ func LoadRanking(filename string) *RankTree {
 	// 先解码排名信息数量
 	var count int32
 	if err := dec.Decode(&count); err != nil {
-		log.Fatalln("Load Ranking count error:", err.Error())
+		log.Println("Load Ranking count error:", err.Error())
 		return nil
 	}
 
@@ -523,7 +539,7 @@ func LoadRanking(filename string) *RankTree {
 	for i := int32(0); i < count; i++ {
 		var info RankInfo
 		if err := dec.Decode(&info); err != nil {
-			log.Fatalln("Load Ranking info error:", err.Error())
+			log.Println("Load Ranking info error:", err.Error())
 			return nil
 		}
 		// 重新构建跳跃表
@@ -538,7 +554,7 @@ func LoadRanking(filename string) *RankTree {
 func SaveRanking(rt *RankTree, filename string) bool {
 	f, err := os.OpenFile(filename, os.O_WRONLY|os.O_CREATE, 0666)
 	if err != nil {
-		log.Fatalln(err.Error())
+		log.Println(err.Error())
 		return false
 	}
 	defer f.Close()
@@ -646,6 +662,11 @@ func Save() []DbRankInfo {
 }
 
 func GetRankTree(rtype int64) *RankTree {
+	RTSLock.Lock()
+	defer RTSLock.Unlock()
+	if RTS == nil {
+		RTS = make(map[int64]*RankTree)
+	}
 	rt, ok := RTS[rtype]
 	if !ok {
 		rt = NewRankTree()
@@ -654,21 +675,28 @@ func GetRankTree(rtype int64) *RankTree {
 	return rt
 }
 
-// 获取所有的排行榜
-func GetAllRankTree() *map[int64]*RankTree {
-	return &RTS
+func GetAllRankTree() map[int64]*RankTree {
+	RTSLock.RLock()
+	defer RTSLock.RUnlock()
+	cp := make(map[int64]*RankTree, len(RTS))
+	for k, v := range RTS {
+		cp[k] = v
+	}
+	return cp
 }
 
 func HasRankTree(rtype int64) bool {
+	RTSLock.RLock()
+	defer RTSLock.RUnlock()
 	_, ok := RTS[rtype]
-	if !ok {
-		return false
-	}
-
-	return true
+	return ok
 }
 
 func ResetRankTree(rtype int64) {
-	delete(RTS, rtype)
+	RTSLock.Lock()
+	defer RTSLock.Unlock()
+	if RTS == nil {
+		RTS = make(map[int64]*RankTree)
+	}
 	RTS[rtype] = NewRankTree()
 }

@@ -126,7 +126,7 @@ func GetPathFile(path string, filter []string) []string {
 	//获取当前目录下的文件或目录名(包含路径)
 	filepathNames, err := filepath.Glob(path + "*")
 	if err != nil {
-		panic(err)
+		return nil
 	}
 
 	strRetList := []string{}

@@ -1,13 +1,16 @@
 package gin
 
 import (
+	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"reflect"
 	"strconv"
 	"strings"
 	"sync"
-	"touchgocore/config"
+	"time"
+	"touchgocore/corectx"
 	"touchgocore/util"
 	"touchgocore/vars"
 
@@ -15,7 +18,11 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-var routerMap = make(map[string]func(ctx *gin.Context))
+var (
+	routerMap  = make(map[string]func(ctx *gin.Context))
+	httpServer *http.Server
+	httpMu     sync.Mutex
+)
 
 // ==================== 方法缓存优化 ====================
 
@@ -142,14 +149,17 @@ func sendResponse(ctx *gin.Context, result []reflect.Value, returnKinds []reflec
 // ==================== 服务器启动 ====================
 
 // Run 启动Gin HTTP服务
-func Run() {
-	if config.Cfg_.Web == nil || config.Cfg_.Web.HTTPPort == 0 {
+func Run(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	cfg := corectx.CfgFrom(ctx)
+	if cfg == nil || cfg.Web == nil || cfg.Web.HTTPPort == 0 {
 		vars.Error("web服务未开启")
-		return
+		return nil
 	}
 	ginServer := gin.Default()
 
-	// 添加 Recovery 中间件（防止handler panic导致整个服务崩溃）
 	ginServer.Use(gin.CustomRecovery(func(c *gin.Context, recovered interface{}) {
 		vars.Error("HTTP请求处理panic: %v, 路径: %s", recovered, c.Request.URL.Path)
 		c.JSON(http.StatusInternalServerError, gin.H{
@@ -158,22 +168,24 @@ func Run() {
 		})
 	}))
 
-	// 允许所有来源（开发环境用，生产环境建议指定具体域名）
-	ginServer.Use(cors.Default())
+	origins := []string{}
+	if cfg.Web != nil {
+		origins = cfg.Web.AllowOrigins
+	}
+	if len(origins) == 0 {
+		vars.Warning("Gin CORS 未配置 allow_origins，拒绝跨域请求")
+	} else if len(origins) == 1 && origins[0] == "*" {
+		ginServer.Use(cors.Default())
+	} else {
+		corsCfg := cors.DefaultConfig()
+		corsCfg.AllowOrigins = origins
+		corsCfg.AllowCredentials = false
+		ginServer.Use(cors.New(corsCfg))
+	}
 
-	// // 或者自定义配置（推荐）
-	// r.Use(cors.New(cors.Config{
-	// 	AllowOrigins:     []string{"http://localhost:3000"}, // 前端地址
-	// 	AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-	// 	AllowHeaders:     []string{"Origin", "Content-Type", "Authorization"},
-	// 	ExposeHeaders:    []string{"Content-Length"},
-	// 	AllowCredentials: true,
-	// }))
-
-	//将注册到这里的函数注册进去
 	for router, fn := range routerMap {
 		r := strings.Split(router, "|")
-		if len(r) == 1 { //全部注册
+		if len(r) == 1 {
 			ginServer.Any(router, fn)
 		} else {
 			ss := strings.Split(r[1], "&&")
@@ -191,17 +203,55 @@ func Run() {
 		}
 	}
 
-	//挂静态文件夹
-	if config.Cfg_.Web.Static != nil {
-		ginServer.Static("/static", *config.Cfg_.Web.Static)
+	if cfg.Web.Static != nil {
+		ginServer.Static("/static", *cfg.Web.Static)
 	}
 
-	// 异步启动Gin服务器，避免阻塞主流程
+	addr := "[::]:" + strconv.Itoa(cfg.Web.HTTPPort)
+	srv := &http.Server{
+		Addr:    addr,
+		Handler: ginServer,
+		BaseContext: func(_ net.Listener) context.Context {
+			return ctx
+		},
+	}
+	httpMu.Lock()
+	httpServer = srv
+	httpMu.Unlock()
+
+	useTLS := cfg.Web.TLS != nil && cfg.Web.TLS.Enable
+	errCh := make(chan error, 1)
 	go func() {
-		addr := "[::]:" + strconv.Itoa(config.Cfg_.Web.HTTPPort)
-		if err := ginServer.Run(addr); err != nil {
+		var err error
+		if useTLS {
+			err = srv.ListenAndServeTLS(cfg.Web.TLS.CertFile, cfg.Web.TLS.KeyFile)
+		} else {
+			err = srv.ListenAndServe()
+		}
+		if err != nil && err != http.ErrServerClosed {
 			vars.Error("web服务运行出错:%v", err)
+			errCh <- err
 		}
 	}()
-	vars.Info("web服务启动成功,端口:%d", config.Cfg_.Web.HTTPPort)
+	select {
+	case err := <-errCh:
+		return err
+	case <-time.After(100 * time.Millisecond):
+	}
+	if useTLS {
+		vars.Info("web服务启动成功(HTTPS),端口:%d", cfg.Web.HTTPPort)
+	} else {
+		vars.Info("web服务启动成功,端口:%d", cfg.Web.HTTPPort)
+	}
+	return nil
+}
+
+func Stop(ctx context.Context) error {
+	httpMu.Lock()
+	srv := httpServer
+	httpMu.Unlock()
+	if srv == nil {
+		return nil
+	}
+	return srv.Shutdown(ctx)
 }

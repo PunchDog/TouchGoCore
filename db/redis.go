@@ -1,4 +1,4 @@
-﻿package db
+package db
 
 import (
 	"context"
@@ -160,6 +160,10 @@ func (this *Redis) Close() {
 		}
 	}
 	this.redisClient = nil
+	if this.config != nil {
+		str := this.config.Host + "-" + strconv.Itoa(this.config.Db) + "-" + this.config.Password
+		_DbMap.Delete(str)
+	}
 }
 
 // Get 获取原始Redis客户端（返回redis.Cmdable接口，兼容单机和集群）

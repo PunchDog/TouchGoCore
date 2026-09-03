@@ -133,9 +133,12 @@ func (n *Npc) SetMapId(mapId uint32) {
 	n.MapID = mapId
 	maps, ok := _maplist.Load(mapId)
 	if !ok {
-		panic(fmt.Sprintf("[NPC] 配置在未知的地图上: mapId=%d, npcId=%d", mapId, n.ID))
+		vars.Error("[NPC] 配置在未知的地图上: mapId=%d, npcId=%d", mapId, n.ID)
+		return
 	}
+	maps.mu.Lock()
 	maps.Npc = append(maps.Npc, n)
+	maps.mu.Unlock()
 }
 
 // ============================================================================

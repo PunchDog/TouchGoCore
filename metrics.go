@@ -17,8 +17,9 @@ import (
 // ==================== Prometheus 监控指标 ====================
 
 var (
-	// once 确保 Prometheus 注册只执行一次
-	promOnce sync.Once
+	promOnce        sync.Once
+	metricsServer   *http.Server
+	metricsServerMu sync.Mutex
 
 	// 全局 Registry（使用自定义Registry避免与其他库冲突）
 	registry = prometheus.NewRegistry()
@@ -156,6 +157,10 @@ func StartMetricsServer(port int) {
 		Handler: mux,
 	}
 
+	metricsServerMu.Lock()
+	metricsServer = server
+	metricsServerMu.Unlock()
+
 	go func() {
 		vars.Info("Prometheus metrics 服务器启动, 端口: %d", port)
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -171,11 +176,11 @@ var WSMetrics = wsMetrics{}
 
 type wsMetrics struct{}
 
-func (wsMetrics) SetConnections(n float64)  { wsConnectionsGauge.Set(n) }
-func (wsMetrics) IncConnection()            { wsConnectionsGauge.Inc() }
-func (wsMetrics) DecConnection()            { wsConnectionsGauge.Dec() }
+func (wsMetrics) SetConnections(n float64)     { wsConnectionsGauge.Set(n) }
+func (wsMetrics) IncConnection()               { wsConnectionsGauge.Inc() }
+func (wsMetrics) DecConnection()               { wsConnectionsGauge.Dec() }
 func (wsMetrics) IncMessages(direction string) { wsMessagesCounter.WithLabelValues(direction).Inc() }
-func (wsMetrics) IncErrors(errType string)   { wsErrorsCounter.WithLabelValues(errType).Inc() }
+func (wsMetrics) IncErrors(errType string)     { wsErrorsCounter.WithLabelValues(errType).Inc() }
 
 // RPCMetrics gRPC指标便捷操作
 var RPCMetrics = rpcMetrics{}
@@ -210,14 +215,16 @@ var TimerMetrics = timerMetrics{}
 type timerMetrics struct{}
 
 func (timerMetrics) SetActive(n float64) { timerActiveGauge.Set(n) }
-func (timerMetrics) IncExecutions(timerType string) { timerExecCounter.WithLabelValues(timerType).Inc() }
+func (timerMetrics) IncExecutions(timerType string) {
+	timerExecCounter.WithLabelValues(timerType).Inc()
+}
 
 // LuaMetrics Lua指标便捷操作
 var LuaMetrics = luaMetrics{}
 
 type luaMetrics struct{}
 
-func (luaMetrics) SetInstances(n float64) { luaInstancesGauge.Set(n) }
+func (luaMetrics) SetInstances(n float64)   { luaInstancesGauge.Set(n) }
 func (luaMetrics) IncCalls(funcName string) { luaCallCounter.WithLabelValues(funcName).Inc() }
 func (luaMetrics) ObserveCallLatency(funcName string, duration time.Duration) {
 	luaCallLatency.WithLabelValues(funcName).Observe(duration.Seconds())
@@ -262,6 +269,15 @@ func StartMetrics(cfg *config.MetricsConfig) {
 
 // ShutdownMetrics 关闭 metrics 服务器
 func ShutdownMetrics(ctx context.Context) {
-	// 如果需要优雅关闭 metrics 服务器，可在此实现
+	metricsServerMu.Lock()
+	srv := metricsServer
+	metricsServerMu.Unlock()
+	if srv == nil {
+		return
+	}
+	if err := srv.Shutdown(ctx); err != nil {
+		vars.Error("Prometheus metrics 关闭失败: %v", err)
+		return
+	}
 	vars.Info("Prometheus metrics 服务器关闭")
 }

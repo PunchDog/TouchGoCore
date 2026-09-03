@@ -1,6 +1,7 @@
 package telegram
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -9,7 +10,10 @@ import (
 	"fmt"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
+	"time"
 	"touchgocore/config"
 	"touchgocore/localtimer"
 	"touchgocore/util"
@@ -25,7 +29,12 @@ const (
 	MaxButtonsPerRow = 2
 )
 
-var globalBot *tgbotapi.BotAPI
+var (
+	globalBot  *tgbotapi.BotAPI
+	closeCh    chan any
+	stopOnce   sync.Once
+	telegramWG sync.WaitGroup
+)
 
 func init() {
 	util.DefaultCallFunc.Register(util.CallTelegramMsg+"StartMessage", SendPhotoMessage)
@@ -151,8 +160,6 @@ func handleCallback(bot *tgbotapi.BotAPI, callback *tgbotapi.CallbackQuery) {
 	}
 }
 
-var closeCh chan any
-
 type telegramTimer struct {
 	localtimer.Timer
 	bot *tgbotapi.BotAPI
@@ -166,7 +173,10 @@ func (t *telegramTimer) Tick() {
 }
 
 // 机器人监听代码
-func TelegramStart() {
+func TelegramStart(ctx context.Context) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	//其他位置设置了key,就用其他地方设置的替换
 	util.DefaultCallFunc.Do(util.CallTelegramMsg+"BotKey", &config.Cfg_.Telegram.BotToken)
 
@@ -182,15 +192,15 @@ func TelegramStart() {
 	}
 
 	globalBot = bot
-	bot.Debug = true
+	bot.Debug = util.DEBUG
 	vars.Info("Authorized on account: %s", bot.Self.UserName)
 
 	u := tgbotapi.NewUpdate(0)
 	u.Timeout = 60
 	updates := bot.GetUpdatesChan(u)
 	closeCh = make(chan any)
+	stopOnce = sync.Once{}
 
-	//创建定时器,每1分钟发送一次心跳
 	t, err := localtimer.NewTimer(util.MILLISECONDS_OF_MINUTE, -1, &telegramTimer{})
 	if err != nil {
 		vars.Error("telegram timer error: %v", err)
@@ -200,16 +210,22 @@ func TelegramStart() {
 	timer.bot = bot
 	localtimer.AddTimer(timer)
 
-	//创建机器人消息监听
+	telegramWG.Add(1)
 	go func() {
-		for update := range updates {
+		defer telegramWG.Done()
+		for {
 			select {
-			case _, ok := <-closeCh:
+			case <-ctx.Done():
+				timer.Remove()
+				return
+			case <-closeCh:
+				timer.Remove()
+				return
+			case update, ok := <-updates:
 				if !ok {
-					timer.Remove() //删除定时器
+					timer.Remove()
 					return
 				}
-			default:
 				if update.Message != nil {
 					handleMessage(bot, update.Message)
 				} else if update.CallbackQuery != nil {
@@ -224,7 +240,15 @@ func TelegramStop() {
 	if config.Cfg_.Telegram == nil || config.Cfg_.Telegram.BotToken == "" {
 		return
 	}
-	close(closeCh)
+	stopOnce.Do(func() {
+		if globalBot != nil {
+			globalBot.StopReceivingUpdates()
+		}
+		if closeCh != nil {
+			close(closeCh)
+		}
+	})
+	telegramWG.Wait()
 }
 
 // ValidateWebAppData 验证Telegram WebApp数据
@@ -291,6 +315,18 @@ func validateWebAppData(botToken, data string) (map[string]any, error) {
 	// 比较哈希
 	if serverHash != hashValue {
 		return nil, errors.New("invalid hash")
+	}
+
+	for _, kv := range kvPairs {
+		if kv[0] == "auth_date" {
+			ts, err := strconv.ParseInt(kv[1], 10, 64)
+			if err != nil {
+				return nil, errors.New("invalid auth_date")
+			}
+			if time.Since(time.Unix(ts, 0)) > 5*time.Minute {
+				return nil, errors.New("auth_date expired")
+			}
+		}
 	}
 
 	// 构建结果map

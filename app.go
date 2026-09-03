@@ -3,17 +3,15 @@ package touchgocore
 import (
 	"context"
 	"fmt"
-	"os"
-	"os/signal"
 	"path"
 	"runtime"
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"touchgocore/config"
+	"touchgocore/corectx"
 	"touchgocore/db"
 	"touchgocore/gin"
 	lua "touchgocore/golua"
@@ -44,6 +42,7 @@ type App struct {
 	MySQL    *db.DbMysql
 	MongoDB  *db.DbOperate
 	TimerMgr *localtimer.TimerManager
+	CallFunc *util.CallFunction
 
 	// 上下文和取消
 	ctx    context.Context
@@ -70,12 +69,12 @@ type Service interface {
 type timerService struct{}
 
 func (s *timerService) Name() string { return "timer" }
-func (s *timerService) Start(_ context.Context) error {
-	localtimer.Run()
+func (s *timerService) Start(ctx context.Context) error {
+	localtimer.Run(ctx)
 	return nil
 }
-func (s *timerService) Stop(_ context.Context) error {
-	localtimer.TimeStop()
+func (s *timerService) Stop(ctx context.Context) error {
+	localtimer.TimeStop(ctx)
 	return nil
 }
 
@@ -83,12 +82,11 @@ func (s *timerService) Stop(_ context.Context) error {
 type websocketService struct{}
 
 func (s *websocketService) Name() string { return "websocket" }
-func (s *websocketService) Start(_ context.Context) error {
-	websocket.Run()
-	return nil
+func (s *websocketService) Start(ctx context.Context) error {
+	return websocket.Run(ctx)
 }
-func (s *websocketService) Stop(_ context.Context) error {
-	websocket.Stop()
+func (s *websocketService) Stop(ctx context.Context) error {
+	websocket.Stop(ctx)
 	return nil
 }
 
@@ -96,9 +94,8 @@ func (s *websocketService) Stop(_ context.Context) error {
 type luaService struct{}
 
 func (s *luaService) Name() string { return "lua" }
-func (s *luaService) Start(_ context.Context) error {
-	lua.Run()
-	return nil
+func (s *luaService) Start(ctx context.Context) error {
+	return lua.Run(ctx)
 }
 func (s *luaService) Stop(_ context.Context) error {
 	lua.Stop()
@@ -109,9 +106,8 @@ func (s *luaService) Stop(_ context.Context) error {
 type rpcService struct{}
 
 func (s *rpcService) Name() string { return "rpc" }
-func (s *rpcService) Start(_ context.Context) error {
-	rpc.Run()
-	return nil
+func (s *rpcService) Start(ctx context.Context) error {
+	return rpc.Run(ctx)
 }
 func (s *rpcService) Stop(_ context.Context) error {
 	rpc.Stop()
@@ -122,8 +118,8 @@ func (s *rpcService) Stop(_ context.Context) error {
 type telegramService struct{}
 
 func (s *telegramService) Name() string { return "telegram" }
-func (s *telegramService) Start(_ context.Context) error {
-	telegram.TelegramStart()
+func (s *telegramService) Start(ctx context.Context) error {
+	telegram.TelegramStart(ctx)
 	return nil
 }
 func (s *telegramService) Stop(_ context.Context) error {
@@ -135,11 +131,11 @@ func (s *telegramService) Stop(_ context.Context) error {
 type mapService struct{}
 
 func (s *mapService) Name() string { return "map" }
-func (s *mapService) Start(_ context.Context) error {
-	mapmanager.RunMap()
-	return nil
+func (s *mapService) Start(ctx context.Context) error {
+	return mapmanager.RunMap(ctx)
 }
-func (s *mapService) Stop(_ context.Context) error {
+func (s *mapService) Stop(ctx context.Context) error {
+	mapmanager.StopMap(ctx)
 	return nil
 }
 
@@ -147,12 +143,11 @@ func (s *mapService) Stop(_ context.Context) error {
 type ginService struct{}
 
 func (s *ginService) Name() string { return "gin" }
-func (s *ginService) Start(_ context.Context) error {
-	gin.Run()
-	return nil
+func (s *ginService) Start(ctx context.Context) error {
+	return gin.Run(ctx)
 }
-func (s *ginService) Stop(_ context.Context) error {
-	return nil
+func (s *ginService) Stop(ctx context.Context) error {
+	return gin.Stop(ctx)
 }
 
 // ==================== App 方法 ====================
@@ -163,6 +158,7 @@ func NewApp(serverName string) (*App, error) {
 		ServerName: serverName,
 	}
 	app.ctx, app.cancel = context.WithCancel(context.Background())
+	app.CallFunc = util.DefaultCallFunc
 
 	// 加载配置
 	if err := app.loadConfig(); err != nil {
@@ -184,6 +180,10 @@ func NewApp(serverName string) (*App, error) {
 	// 注册服务（按依赖顺序）
 	app.registerServices()
 
+	app.ctx = corectx.WithAppView(app.ctx, &corectx.AppView{
+		ServerName: app.ServerName,
+		Cfg:        app.Cfg,
+	})
 	globalApp = app
 	return app, nil
 }
@@ -196,6 +196,9 @@ func (app *App) loadConfig() error {
 	}
 	config.ServerName_ = app.ServerName
 	app.Cfg = config.Cfg_
+	if err := app.Cfg.Validate(); err != nil {
+		return fmt.Errorf("配置校验失败: %w", err)
+	}
 
 	//读取INI
 	if p, err := ini.Load(config.GetDefaultFie()); err == nil {
@@ -291,8 +294,8 @@ func (s *metricsService) Start(_ context.Context) error {
 	StartMetrics(config.Cfg_.Metrics)
 	return nil
 }
-func (s *metricsService) Stop(_ context.Context) error {
-	ShutdownMetrics(context.Background())
+func (s *metricsService) Stop(ctx context.Context) error {
+	ShutdownMetrics(ctx)
 	return nil
 }
 
@@ -306,10 +309,15 @@ func (app *App) Start() error {
 	}
 
 	// 按顺序启动服务
+	startedCount := 0
 	for _, svc := range app.services {
 		if err := svc.Start(app.ctx); err != nil {
+			for i := startedCount - 1; i >= 0; i-- {
+				_ = app.services[i].Stop(app.ctx)
+			}
 			return fmt.Errorf("启动服务[%s]失败: %w", svc.Name(), err)
 		}
+		startedCount++
 		vars.Info("服务[%s]启动成功", svc.Name())
 	}
 
@@ -327,6 +335,7 @@ func (app *App) Shutdown(timeout time.Duration) error {
 	defer app.mu.Unlock()
 
 	if !app.started {
+		app.closeDatabase()
 		return nil
 	}
 
@@ -357,7 +366,8 @@ func (app *App) Shutdown(timeout time.Duration) error {
 	// 执行业务层关闭回调
 	util.DefaultCallFunc.Do(util.CallStop)
 
-	// 关闭日志系统（最后关闭）
+	app.closeDatabase()
+
 	vars.Shutdown()
 
 	app.started = false
@@ -369,41 +379,47 @@ func (app *App) Shutdown(timeout time.Duration) error {
 	return nil
 }
 
-// RunWithApp 使用App容器运行（替代全局Run函数）
-// 提供更可控的生命周期管理和依赖注入能力
-func RunWithApp(serverName string) {
-	app, err := NewApp(serverName)
-	if err != nil {
-		fmt.Printf("初始化失败: %v\n", err)
-		<-time.After(time.Millisecond * 100)
-		os.Exit(1)
+func (app *App) closeDatabase() {
+	if app.MongoDB != nil {
+		app.MongoDB.DBClose()
+		app.MongoDB = nil
 	}
-
-	if err := app.Start(); err != nil {
-		vars.Error("启动失败: %v", err)
-		_ = app.Shutdown(10 * time.Second)
-		<-time.After(time.Millisecond * 100)
-		os.Exit(1)
+	if app.MySQL != nil {
+		if err := app.MySQL.Close(); err != nil {
+			vars.Error("关闭MySQL失败: %v", err)
+		}
+		app.MySQL = nil
 	}
-
-	// 信号处理
-	chSig := make(chan os.Signal, 1)
-	signal.Notify(chSig, syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
-	sig := <-chSig
-	vars.Info("Signal: %v", sig)
-
-	// 优雅关闭（30秒超时）
-	if err := app.Shutdown(30 * time.Second); err != nil {
-		vars.Error("关闭出错: %v", err)
+	if app.Redis != nil {
+		app.Redis.Close()
+		app.Redis = nil
 	}
-
-	vars.Info("关闭完成,退出服务器")
 }
 
-// GetApp 获取当前App实例（全局单例，向后兼容）
-// 注意：这仅用于过渡期，新代码应通过依赖注入获取App实例
+// GetApp 获取当前App实例（全局单例，向后兼容）。
+//
+// Deprecated: 新代码应通过 NewApp 返回值或 corectx.AppViewFrom(ctx) 获取依赖。
 var globalApp *App
 
 func GetApp() *App {
 	return globalApp
+}
+
+func (app *App) Context() context.Context {
+	return app.ctx
+}
+
+// GetRpcClient 从 RPC 注册表取客户端（全局 fallback）
+func (app *App) GetRpcClient(name string) *rpc.RpcClient {
+	return rpc.GetRpcClient(name)
+}
+
+// GetRpcServer 从 RPC 注册表取服务端（全局 fallback）
+func (app *App) GetRpcServer(name string) *rpc.RpcServer {
+	return rpc.GetRpcServer(name)
+}
+
+// GetWSClient 按 UID 取 WebSocket 客户端
+func (app *App) GetWSClient(uid int64) *websocket.Client {
+	return websocket.GetClient(uid)
 }

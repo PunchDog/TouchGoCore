@@ -36,7 +36,8 @@
     "web": {
         "说明": "这是一个web框架使用的配置",
         "httpport": 1000,
-        "static": "文件夹路径"
+        "static": "文件夹路径",
+        "allow_origins": ["https://example.com"]
     },
     "ws": {
         "说明:": "这里是websocket配置,作为服务器监听配置,多个端口用|分割",
@@ -53,12 +54,13 @@
             "https://example.com"
         ],
         "check_origin": true,
-        "skip_origin_for_intranet": true,
+        "skip_origin_for_intranet": false,
+        "trusted_proxies": ["127.0.0.1"],
         "worker_pool_size": 0,
         "shard_by_key": false,
         "auth_token_header": "X-Auth-Token",
-        "auth_token_query": "token",
-        "auth_intranet_skip": true
+        "auth_token_query": "",
+        "auth_intranet_skip": false
     },
     "rpc_port": {
         "rpc_port说明": "rpc_port是监听端口,如果不填,则不开rpc服务",

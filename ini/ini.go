@@ -2,7 +2,6 @@ package ini
 
 import (
 	"fmt"
-	"os"
 
 	ini "gopkg.in/ini.v1"
 )
@@ -147,7 +146,7 @@ func (this *IniParser) GetAll(section string) map[string]string {
 // 读取配置
 func Load(path string) (p *IniParser, err error) {
 	ini_parser := &IniParser{}
-	if err1 := ini_parser.Load(path); err != nil {
+	if err1 := ini_parser.Load(path); err1 != nil {
 		p = nil
 		err = &IniParserError{fmt.Sprintf("try load config file[%s] error[%s]\n", path, err1.Error())}
 		return
@@ -157,11 +156,10 @@ func Load(path string) (p *IniParser, err error) {
 	return
 }
 
-func LoadConfigByNoSectionName(tpath string) map[string]map[string]string {
+func LoadConfigByNoSectionName(tpath string) (map[string]map[string]string, error) {
 	cfg, err := ini.Load(tpath)
 	if err != nil {
-		fmt.Println("Failed to load configuration file: %v", err)
-		os.Exit(-1)
+		return nil, fmt.Errorf("failed to load configuration file: %w", err)
 	}
 	ret := make(map[string]map[string]string)
 	sectionNamelist := cfg.SectionStrings()
@@ -171,5 +169,5 @@ func LoadConfigByNoSectionName(tpath string) map[string]map[string]string {
 			ret[sectionName] = mp.KeysHash()
 		}
 	}
-	return ret
+	return ret, nil
 }

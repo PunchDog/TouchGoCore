@@ -46,35 +46,29 @@ func initUpgrader() {
 		ReadBufferSize:  UPGRADER_READ_BUFFER_SIZE,
 		WriteBufferSize: UPGRADER_WRITE_BUFFER_SIZE,
 		CheckOrigin: func(r *http.Request) bool {
-			// 获取客户端IP
-			clientIP := getClientIP(r)
+			clientIP := getDirectIP(r)
 
-			// 如果配置了内网跳过 Origin 检查，且客户端IP为内网IP，则直接允许
 			if skipOriginForIntranet && util.IsIntranetIP(clientIP) {
 				return true
 			}
 
-			// 如果不检查 Origin，直接允许
 			if !checkOrigin {
+				vars.Warning("WebSocket CheckOrigin 未启用，允许任意 Origin")
 				return true
 			}
 
-			// 获取 Origin 头
 			origin := r.Header.Get("Origin")
 			if origin == "" {
-				// 没有 Origin 头，检查 Host
 				host := r.Host
 				return isAllowedOrigin(host, host)
 			}
 
-			// 解析 Origin
 			originHost := strings.TrimPrefix(origin, "http://")
 			originHost = strings.TrimPrefix(originHost, "https://")
 			if idx := strings.Index(originHost, "/"); idx != -1 {
 				originHost = originHost[:idx]
 			}
 
-			// 检查是否在白名单中
 			return isAllowedOrigin(origin, originHost)
 		},
 	}
@@ -82,12 +76,11 @@ func initUpgrader() {
 
 // isAllowedOrigin 检查 Origin 是否允许
 func isAllowedOrigin(origin, host string) bool {
-	// 白名单为空时，允许所有
 	if len(allowedOrigins) == 0 {
-		return true
+		vars.Warning("WebSocket Origin 白名单为空，拒绝: %s", origin)
+		return false
 	}
 
-	// 检查是否在白名单中
 	for _, allowed := range allowedOrigins {
 		if allowed == "*" {
 			return true
@@ -95,7 +88,6 @@ func isAllowedOrigin(origin, host string) bool {
 		if allowed == origin || allowed == host {
 			return true
 		}
-		// 支持通配符 *.example.com
 		if strings.HasPrefix(allowed, "*.") {
 			suffix := strings.TrimPrefix(allowed, "*.")
 			if strings.HasSuffix(host, suffix) {
@@ -108,27 +100,42 @@ func isAllowedOrigin(origin, host string) bool {
 	return false
 }
 
-func getClientIP(r *http.Request) string {
-	// 优先从X-Forwarded-For解析第一个IP
-	xff := strings.TrimSpace(r.Header.Get("X-Forwarded-For"))
-	if xff != "" {
-		ips := strings.Split(xff, ",")
-		if len(ips) > 0 {
-			return strings.TrimSpace(ips[0])
-		}
-	}
-	// 次选X-Real-IP
-	realIP := r.Header.Get("X-Real-IP")
-	if realIP != "" {
-		return realIP
-	}
-	// 最后从TCP连接获取（可能为代理IP）
+func getDirectIP(r *http.Request) string {
 	ip, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
-		vars.Error("获取客户端IP失败: %v", err)
-		ip = "127.0.0.1"
+		return r.RemoteAddr
 	}
 	return ip
+}
+
+func isTrustedProxy(r *http.Request) bool {
+	if config.Cfg_ == nil || config.Cfg_.Ws == nil || len(config.Cfg_.Ws.TrustedProxies) == 0 {
+		return false
+	}
+	ip := getDirectIP(r)
+	for _, p := range config.Cfg_.Ws.TrustedProxies {
+		if p == ip || p == "*" {
+			return true
+		}
+	}
+	return false
+}
+
+func getClientIP(r *http.Request) string {
+	if isTrustedProxy(r) {
+		xff := strings.TrimSpace(r.Header.Get("X-Forwarded-For"))
+		if xff != "" {
+			ips := strings.Split(xff, ",")
+			if len(ips) > 0 {
+				return strings.TrimSpace(ips[0])
+			}
+		}
+		realIP := r.Header.Get("X-Real-IP")
+		if realIP != "" {
+			return realIP
+		}
+	}
+	return getDirectIP(r)
 }
 
 // extractAuthToken 从请求中提取认证令牌
@@ -148,13 +155,10 @@ func extractAuthToken(c *gin.Context) string {
 		return token
 	}
 
-	// 从 URL Query 参数读取
-	queryName := wsCfg.AuthTokenQuery
-	if queryName == "" {
-		queryName = "token"
-	}
-	if token := c.Query(queryName); token != "" {
-		return token
+	if wsCfg.AuthTokenQuery != "" {
+		if token := c.Query(wsCfg.AuthTokenQuery); token != "" {
+			return token
+		}
 	}
 
 	return ""
@@ -183,10 +187,10 @@ func ListenAndServe(port int, className string) error {
 		// ========== 连接认证 ==========
 		if authFn := GetAuthFunc(); authFn != nil {
 			clientIP := getClientIP(c.Request)
+			directIP := getDirectIP(c.Request)
 
-			// 内网连接跳过认证
-			if config.Cfg_.Ws.AuthIntranetSkip && util.IsIntranetIP(clientIP) {
-				// 内网IP跳过
+			if config.Cfg_.Ws.AuthIntranetSkip && util.IsIntranetIP(directIP) {
+				// 仅以直连 IP 判断内网，避免伪造 XFF 绕过认证
 			} else {
 				// 从配置的 Header 或 Query 参数中提取 Token
 				token := extractAuthToken(c)
@@ -231,22 +235,35 @@ func ListenAndServe(port int, className string) error {
 		}
 	})
 
-	//websocket实现ipv6
+	ln, err := net.Listen("tcp", "[::]:"+strconv.Itoa(port))
+	if err != nil {
+		return err
+	}
+
 	server := &http.Server{
-		Addr:    "[::]:" + strconv.Itoa(port),
+		Addr:    ln.Addr().String(),
 		Handler: r,
 	}
 
-	go func() { //异步启动
+	go func() {
 		defer func() {
 			if err := recover(); err != nil {
 				vars.Error("WebSocket服务器发生panic错误: %v", err)
 			}
 		}()
-		server.ListenAndServe()
+		tlsCfg := config.Cfg_.Ws.TLS
+		var err error
+		if tlsCfg != nil && tlsCfg.Enable {
+			vars.Info("WebSocket TLS 已启用，监听 wss://%s", ln.Addr().String())
+			err = server.ServeTLS(ln, tlsCfg.CertFile, tlsCfg.KeyFile)
+		} else {
+			err = server.Serve(ln)
+		}
+		if err != nil && err != http.ErrServerClosed {
+			vars.Error("WebSocket ListenAndServe 错误: %v", err)
+		}
 	}()
 	serverList = append(serverList, server)
-	//将服务器名字注册到redis中
 	return nil
 }
 
@@ -256,4 +273,3 @@ func ListenAndServe(port int, className string) error {
 func IsIntranetIP(ip string) bool {
 	return util.IsIntranetIP(ip)
 }
-

@@ -45,53 +45,51 @@ func HttpPost(uri string, data string) ([]byte, error) {
 // 发送POST请求
 // url:请求地址，data:POST请求提交的数据,contentType:请求体格式，如：application/json
 // content:请求放回的内容
-func HttpPostByContentType(url string, data interface{}, contentType string) (content string) {
+func HttpPostByContentType(url string, data interface{}, contentType string) (content string, err error) {
 	jsonStr, err := json.Marshal(data)
 	if err != nil {
-		fmt.Println(err)
+		return "", err
 	}
-	fmt.Println(string(jsonStr))
 	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonStr))
+	if err != nil {
+		return "", err
+	}
 	req.Header.Add("content-type", contentType)
 	req.Header.Add("content-type", "charset=UTF-8")
-
-	if err != nil {
-		panic(err)
-	}
 	defer req.Body.Close()
 
 	client := &http.Client{Timeout: 15 * time.Second}
-	resp, error := client.Do(req)
-	if error != nil {
-		panic(error)
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
 	}
 	defer resp.Body.Close()
 
-	result, _ := ioutil.ReadAll(resp.Body)
-	content = string(result)
-	return
+	result, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	return string(result), nil
 }
 
 func PostJSONAuth(url string, data interface{}, user string, password string) ([]byte, error) {
 	jsonStr, err := json.Marshal(data)
 	if err != nil {
-		fmt.Println(err)
+		return nil, err
 	}
-	fmt.Println(string(jsonStr))
 	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonStr))
+	if err != nil {
+		return nil, err
+	}
 	req.Header.Add("content-type", "application/json")
 	req.Header.Add("content-type", "charset=UTF-8")
 	req.SetBasicAuth(user, password)
-
-	if err != nil {
-		panic(err)
-	}
 	defer req.Body.Close()
 
 	client := &http.Client{Timeout: 15 * time.Second}
-	resp, error := client.Do(req)
-	if error != nil {
-		panic(error)
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
 	}
 	defer resp.Body.Close()
 	return ioutil.ReadAll(resp.Body)

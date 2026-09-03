@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"touchgocore/config"
+	"touchgocore/corectx"
 	"touchgocore/syncmap"
 	"touchgocore/vars"
 
@@ -15,14 +16,29 @@ const (
 	MAX_CHANNEL_SIZE = 100000 // 减少通道容量以降低内存占用
 )
 
-func Run() {
-	if config.Cfg_.RpcPort == nil {
+var rpcRunCtx = context.Background()
+
+func Run(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	rpcRunCtx = ctx
+	root := corectx.CfgFrom(ctx)
+	if root == nil {
 		vars.Info("RPC配置为空，跳过RPC服务启动")
-		return
+		return nil
+	}
+	rpcCfg := root.RpcPort
+	if rpcCfg == nil && root.Rpc != nil {
+		rpcCfg = root.Rpc
+	}
+	if rpcCfg == nil {
+		vars.Info("RPC配置为空，跳过RPC服务启动")
+		return nil
 	}
 	rpcClient_ = syncmap.NewMap[string, *RpcClient]()
 	service_ = syncmap.NewMap[string, *RpcServer]()
-	cfg := config.Cfg_.RpcPort
+	cfg := rpcCfg
 	serverCount := len(cfg.Server)
 	clientCount := len(cfg.Client)
 	vars.Info("开始启动RPC服务: 服务器%d个, 客户端%d个", serverCount, clientCount)
@@ -30,14 +46,19 @@ func Run() {
 	// 初始化服务发现（默认使用静态配置）
 	InitDiscovery(NewStaticDiscovery(cfg.Server, cfg.Client))
 
-	// 启动服务器监听（通过服务发现解析端点）
+	var lastErr error
+	started := 0
 	for _, v := range cfg.Server {
 		if v.Name == "" || v.Port <= 0 {
 			vars.Error("RPC服务器配置无效: Name=%s, Addr=%s, Port=%d", v.Name, v.Addr, v.Port)
 			continue
 		}
 		useTLS := resolveTLSConfig(v.UseTLS)
-		StartGrpcServer(v.Name, v.Port, useTLS)
+		if err := StartGrpcServer(v.Name, v.Port, useTLS); err != nil {
+			lastErr = err
+			continue
+		}
+		started++
 	}
 
 	// 启动客户端连接（通过服务发现解析端点）
@@ -52,12 +73,21 @@ func Run() {
 		}
 	}
 	vars.Info("RPC服务启动完成: 服务器%d个, 客户端%d个 (成功连接%d个)", serverCount, clientCount, clientSuccess)
+	if serverCount > 0 && started == 0 && lastErr != nil {
+		return lastErr
+	}
+	return nil
 }
 
 // resolveTLSConfig 统一解析TLS配置
 func resolveTLSConfig(defaultTLS bool) bool {
-	if config.Cfg_.Rpc != nil && config.Cfg_.Rpc.TLS != nil && config.Cfg_.Rpc.TLS.Enable {
-		if config.Cfg_.Rpc.TLS.SkipForIntranet {
+	rpc := config.Cfg_.Rpc
+	if rpc == nil {
+		rpc = config.Cfg_.RpcPort
+	}
+	if rpc != nil && rpc.TLS != nil && rpc.TLS.Enable {
+		if rpc.TLS.SkipForIntranet {
+			vars.Warning("rpc.tls.skip_for_intranet=true：内网将按各端 use_tls 决定是否明文，生产环境请关闭")
 			return defaultTLS
 		}
 		return true
@@ -95,6 +125,7 @@ func Stop() {
 	// 关闭所有RPC客户端连接
 	clientCount := 0
 	rpcClient_.Range(func(key string, v1 *RpcClient) bool {
+		v1.Remove()
 		if connVal := v1.conn.Load(); connVal != nil {
 			if conn, ok := connVal.(*grpc.ClientConn); ok && conn != nil {
 				conn.Close()

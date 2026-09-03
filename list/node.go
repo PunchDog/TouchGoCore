@@ -121,13 +121,21 @@ func (n *Node) InsertBefore(data interface{}) (newNode INode) {
 	return
 }
 
-// 删除当前节点
+// Remove 删除当前节点并归还对象池
 func (n *Node) Remove() {
+	n.remove(true)
+}
+
+// detach 从链表摘下但不归还对象池，供 Add 复用同一节点
+func (n *Node) detach() {
+	n.remove(false)
+}
+
+func (n *Node) remove(release bool) {
 	if n == nil {
 		return
 	}
 
-	// 原子地获取 list 引用，防止并发修改
 	list := n.list
 	if list == nil {
 		return
@@ -136,19 +144,16 @@ func (n *Node) Remove() {
 	list.mu.Lock()
 	defer list.mu.Unlock()
 
-	// 再次检查 list 是否还是同一个（防止在获取锁之前被修改）
 	if n.list != list {
 		return
 	}
 
-	// 如果是链表遍历期间，需要删除的节点先缓存下来，等遍历结束后再删除
-	if list.rangeCount.Load() > 0 {
+	if release && list.rangeCount.Load() > 0 {
 		list.rangeDelList = append(list.rangeDelList, n)
 		return
 	}
 
-	// 直接删除节点
-	list.removeNodeLocked(n)
+	list.removeNodeLocked(n, release)
 }
 
 // 添加一个节点，如果nodeType为nil，则用默认的ListNode创建

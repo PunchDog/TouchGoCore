@@ -59,8 +59,8 @@ func (l *List) Add(node INode) (bret bool) {
 		bret = false
 		return
 	}
-	//删除老的链接
-	node.GetNode().Remove()
+	// 从旧链表摘下但不回池，避免 Add 复用节点时被 sync.Pool 改写
+	node.GetNode().detach()
 
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -127,7 +127,7 @@ func (l *List) Range(f func(INode) bool) {
 			defer l.mu.Unlock()
 			for _, node := range l.rangeDelList {
 				if n := node.GetNode(); n != nil {
-					l.removeNodeLocked(n)
+					l.removeNodeLocked(n, true)
 				}
 			}
 			l.rangeDelList = nil // 清空引用，防止内存泄漏
@@ -159,7 +159,7 @@ func (l *List) Clear() {
 	node := l.head
 	for node != nil {
 		next := node.GetNode().next
-		l.removeNodeLocked(node.GetNode())
+		l.removeNodeLocked(node.GetNode(), true)
 		node = next
 	}
 	// 确保状态一致
@@ -170,13 +170,13 @@ func (l *List) Clear() {
 	l.nodeMap = make(map[int64]INode) // 重建 map，清理所有引用
 }
 
-// removeNodeLocked 从链表中删除节点，调用者必须已持有 mu 锁
-func (l *List) removeNodeLocked(node *Node) {
-	if node.list != l {
-		return // 不属于此链表
+// removeNodeLocked 从链表中删除节点，调用者必须已持有 mu 锁。
+// release 为 true 时才归还对象池；Add 复用节点时必须传 false。
+func (l *List) removeNodeLocked(node *Node, release bool) {
+	if node == nil || node.list != l {
+		return
 	}
 
-	// 删除节点
 	if node.pre == nil {
 		l.head = node.next
 	} else {
@@ -188,17 +188,18 @@ func (l *List) removeNodeLocked(node *Node) {
 		node.next.GetNode().pre = node.pre
 	}
 	l.len--
-	delete(l.nodeMap, node.id) // 从 map 索引中删除
+	delete(l.nodeMap, node.id)
 
-	// 清理节点引用并归还到池中
 	node.list = nil
 	node.pre = nil
 	node.next = nil
 	node.id = 0
+
+	if !release {
+		return
+	}
+
 	node.data = nil
 	node.nodeType = nil
-
-	// 将节点归还到对象池，只有默认 ListNode 类型才放入池
-	// 自定义类型不应放入池中，因为类型不确定
 	releaseNode(node)
 }

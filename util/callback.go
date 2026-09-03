@@ -1,6 +1,7 @@
 ﻿package util
 
 import (
+	"context"
 	"fmt"
 	"reflect"
 	"sync"
@@ -13,7 +14,9 @@ import (
 func (c *CallFunction) Register(key any, fn any) {
 	var funcs []any
 	if l, has := c.fn.Load(key); has {
-		funcs = l.([]any)
+		old := l.([]any)
+		funcs = make([]any, len(old), len(old)+1)
+		copy(funcs, old)
 	}
 	funcs = append(funcs, fn)
 	c.fn.Store(key, funcs)
@@ -217,5 +220,63 @@ func (c *CallFunction) DoWithRet(key any, values ...any) ([]reflect.Value, bool)
 		return results, true
 	}
 
+	return nil, false
+}
+
+func injectContext(ctx context.Context, fn interface{}, values []any) []any {
+	if ctx == nil {
+		return values
+	}
+	ft := reflect.TypeOf(fn)
+	if ft == nil || ft.Kind() != reflect.Func || ft.NumIn() == 0 {
+		return values
+	}
+	if ft.In(0) == reflect.TypeOf((*context.Context)(nil)).Elem() {
+		out := make([]any, 0, len(values)+1)
+		out = append(out, ctx)
+		out = append(out, values...)
+		return out
+	}
+	return values
+}
+
+// DoWithRetCtx 在 ctx 取消时立即返回；若回调首参为 context.Context 则自动注入。
+func (c *CallFunction) DoWithRetCtx(ctx context.Context, key any, values ...any) ([]reflect.Value, bool) {
+	if ctx != nil {
+		select {
+		case <-ctx.Done():
+			return nil, false
+		default:
+		}
+	}
+
+	defer func() {
+		if err := recover(); err != nil {
+			vars.Error("调用回调函数失败: %v", err)
+		}
+	}()
+
+	var results []reflect.Value
+	if l, has := c.fn.Load(key); has {
+		funcs := l.([]any)
+		for _, fn := range funcs {
+			if ctx != nil {
+				select {
+				case <-ctx.Done():
+					return results, len(results) > 0
+				default:
+				}
+			}
+			args, err := callFunctionArgs(fn, injectContext(ctx, fn, values)...)
+			if err != nil {
+				vars.Debug("参数转换失败: %v", err)
+				continue
+			}
+			method := reflect.ValueOf(fn)
+			ret := method.Call(args)
+			results = append(results, ret...)
+		}
+		return results, true
+	}
 	return nil, false
 }

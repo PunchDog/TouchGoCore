@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path"
+	"strings"
 
 	"touchgocore/ini"
 )
@@ -37,14 +38,37 @@ func init() {
 		Other:    nil,
 		Telegram: nil,
 	}
+	resolveConfigPaths()
+}
 
-	if PathExists(_defaultFile) == false {
-		_basePath = path.Join(path.Dir(os.Args[0]), "../../")
+// resolveConfigPaths 解析配置根目录。
+// 优先环境变量 CONFIG_PATH，其次可执行文件旁、上级目录、当前工作目录中的 conf/config.ini。
+func resolveConfigPaths() {
+	if p := strings.TrimSpace(os.Getenv("CONFIG_PATH")); p != "" {
+		_basePath = p
 		_defaultFile = path.Join(_basePath, "conf/config.ini")
+		return
+	}
+
+	execDir := path.Dir(os.Args[0])
+	candidates := []string{
+		path.Join(execDir, "../"),
+		path.Join(execDir, "../../"),
+		".",
+	}
+	for _, base := range candidates {
+		f := path.Join(base, "conf/config.ini")
+		if PathExists(f) {
+			_basePath = base
+			_defaultFile = f
+			return
+		}
 	}
 }
 
-// Load 加载配置文件（兼容旧接口，内部调用LoadWithError）
+// Load 加载配置文件（兼容旧接口，内部调用LoadWithError）。
+//
+// Deprecated: 请使用 LoadWithError，由调用方决定错误处理，避免进程直接 panic。
 func (this *Cfg) Load(cfgname string) {
 	if err := this.LoadWithError(cfgname); err != nil {
 		panic(err)
@@ -54,20 +78,19 @@ func (this *Cfg) Load(cfgname string) {
 // LoadWithError 加载配置文件（返回error而非panic）
 // 推荐使用此方法替代Load，便于上层决定错误处理策略
 func (this *Cfg) LoadWithError(cfgname string) error {
-	var path1 string
-	if p, err := ini.Load(_defaultFile); err == nil {
-		path1 = path.Join(_basePath, "/conf/", p.GetString(cfgname, "ini", ""))
+	p, err := ini.Load(_defaultFile)
+	if err != nil {
+		return fmt.Errorf("读取ini失败 [%s]: %w", _defaultFile, err)
 	}
-
-	if path1 == "" {
-		return fmt.Errorf("配置文件路径为空, 服务器名: %s", cfgname)
+	path1 := path.Join(_basePath, "/conf/", p.GetString(cfgname, "ini", ""))
+	if path1 == "" || strings.HasSuffix(path1, "/conf/") {
+		return fmt.Errorf("配置文件路径为空, 服务器名: %s, ini: %s", cfgname, _defaultFile)
 	}
 
 	file, err := os.ReadFile(path1)
 	if err != nil {
 		return fmt.Errorf("读取启动配置出错: %w", err)
 	}
-	fmt.Println(string(file))
 
 	if err := json.Unmarshal(file, this); err != nil {
 		return fmt.Errorf("解析配置出错[%s]: %w", path1, err)

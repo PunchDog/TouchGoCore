@@ -1,8 +1,12 @@
 {
     "redis": {
         "redis_host": "127.0.0.1:6379",
-        "redis_password": "123456",
+        "redis_password": "",
         "redis_db": 0
+    },
+    "web": {
+        "httpport": 1000,
+        "allow_origins": ["http://127.0.0.1:3000"]
     },
     "ws": {
         "port": [
@@ -10,8 +14,18 @@
                 "port": 8000,
                 "callbackclassname": "GateMsg"
             }
-        ]
+        ],
+        "url": "ws",
+        "inurl": "inws",
+        "allowed_origins": ["http://127.0.0.1:3000", "http://localhost:3000"],
+        "check_origin": true,
+        "skip_origin_for_intranet": false,
+        "trusted_proxies": [],
+        "worker_pool_size": 0,
+        "shard_by_key": false,
+        "auth_token_header": "X-Auth-Token",
+        "auth_token_query": "",
+        "auth_intranet_skip": false
     },
-    "http": "off",
     "log_level": "debug"
 }

@@ -1,6 +1,7 @@
 package localtimer
 
 import (
+	"context"
 	"errors"
 	"reflect"
 	"sync"
@@ -308,6 +309,7 @@ type TimerManager struct {
 	maxTimerUID atomic.Int64  // 最大定时器ID
 	isClosed    atomic.Bool   // 是否关闭
 	stats       TimerStats    // 性能统计
+	wheelWG     sync.WaitGroup
 }
 
 // TimerStats 保存性能统计信息
@@ -372,8 +374,11 @@ func (m *TimerManager) AddTimer(timer TimerInterface) error {
 		case <-time.After(time.Millisecond * 100):
 			// 超时后尝试直接执行定时器
 			go func() {
+				if m.isClosed.Load() {
+					return
+				}
 				timer.Tick()
-				if timer.HasNext() {
+				if timer.HasNext() && !m.isClosed.Load() {
 					_ = m.AddTimer(timer)
 				}
 			}()
@@ -392,10 +397,10 @@ func (m *TimerManager) Close() {
 	// 发送关闭信号
 	close(m.closeChan)
 
-	// 停止所有时间轮
+	m.wheelWG.Wait()
+
 	for _, wheel := range m.wheels {
 		wheel.isRunning.Store(false)
-		close(wheel.addTimerChan)
 	}
 }
 
@@ -419,6 +424,8 @@ var (
 	timerChannel        chan TimerInterface
 	managerInitOnce     sync.Once
 	closech             chan any
+	tickWG              sync.WaitGroup
+	timerRunCtx         = context.Background()
 )
 
 // NewTimerManager 创建新的定时器管理器
@@ -452,7 +459,11 @@ func NewTimerManager() *TimerManager {
 		mgr.wheels[i] = wheel
 
 		// 启动时间轮协程
-		go mgr.runWheel(wheel, TimerType(i))
+		mgr.wheelWG.Add(1)
+		go func(w *TimerWheel, t TimerType) {
+			defer mgr.wheelWG.Done()
+			mgr.runWheel(w, t)
+		}(wheel, TimerType(i))
 	}
 
 	timerManagerMap.Store(mgr, true)
@@ -536,8 +547,11 @@ func (m *TimerManager) processWheelTick(wheel *TimerWheel, wheelType TimerType) 
 				// 通道已满，异步执行：当前持有 wheelLock，
 				// 同步调用 Tick（内部可能再次 AddTimer 加锁）会导致死锁
 				go func() {
+					if m.isClosed.Load() {
+						return
+					}
 					timer.Tick()
-					if timer.HasNext() {
+					if timer.HasNext() && !m.isClosed.Load() {
 						if err := m.AddTimer(timer); err != nil {
 							vars.Error("重新调度定时器失败: %v", err)
 						}
@@ -593,22 +607,42 @@ func (m *TimerManager) cleanupWheel(wheel *TimerWheel) {
 	m.stats.TimersRemoved.Add(removedCount)
 }
 
-// Run 启动定时器系统
-func Run() {
+// Run 启动定时器系统。ctx 取消时 TimeTick 退出。
+func Run(ctx context.Context) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	timerRunCtx = ctx
 	vars.Info("启动计时器系统")
 	timerManagerMap = syncmap.NewMap[*TimerManager, bool]()
 	defaultTimerManager = NewTimerManager()
 	closech = make(chan any)
-	go TimeTick()
+	tickWG.Add(1)
+	go func() {
+		defer tickWG.Done()
+		TimeTick()
+	}()
 	vars.Info("计时器系统启动完成")
 }
 
-// TimeStop 停止定时器系统
-func TimeStop() {
+// TimeStop 停止定时器系统。ctx 可用于限制等待时间。
+func TimeStop(ctx context.Context) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	vars.Info("正在停止计时器系统...")
-	close(closech)
+	if closech != nil {
+		select {
+		case <-closech:
+		default:
+			close(closech)
+		}
+	}
 
 	// 关闭所有定时器管理器
+	if timerManagerMap == nil {
+		return
+	}
 	timerManagerMap.Range(func(mgr *TimerManager, value bool) bool {
 		vars.Info("关闭定时器管理器，当前定时器数量: %d", mgr.GetTimerCount())
 		mgr.Close()
@@ -617,7 +651,17 @@ func TimeStop() {
 	})
 	timerManagerMap.Clear()
 
-	// 关闭定时器通道
+	done := make(chan struct{})
+	go func() {
+		tickWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		vars.Error("等待定时器协程退出超时: %v", ctx.Err())
+	}
+
 	if timerChannel != nil {
 		close(timerChannel)
 		timerChannel = nil
@@ -673,6 +717,8 @@ func TimeTick() {
 				}
 			}()
 		case <-closech:
+			return
+		case <-timerRunCtx.Done():
 			return
 		}
 	}

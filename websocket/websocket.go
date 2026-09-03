@@ -1,11 +1,12 @@
 package websocket
 
 import (
+	"context"
 	"reflect"
 	"sync"
 	"sync/atomic"
 	"time"
-	"touchgocore/config"
+	"touchgocore/corectx"
 	"touchgocore/syncmap"
 	"touchgocore/util"
 	"touchgocore/vars"
@@ -42,22 +43,27 @@ const (
 // remoteAddr: 客户端IP地址
 type AuthFunc func(token string, remoteAddr string) bool
 
-var wsAuthFunc AuthFunc = nil
+var (
+	authMu     sync.RWMutex
+	wsAuthFunc AuthFunc
+)
 
-// SetAuthFunc 注册WebSocket连接认证函数
-// 业务层应在启动前调用此函数注册自定义认证逻辑
 func SetAuthFunc(fn AuthFunc) {
+	authMu.Lock()
 	wsAuthFunc = fn
+	authMu.Unlock()
 }
 
-// GetAuthFunc 获取当前注册的认证函数
 func GetAuthFunc() AuthFunc {
+	authMu.RLock()
+	defer authMu.RUnlock()
 	return wsAuthFunc
 }
 
 var (
 	closeCh              chan bool          = nil
 	msgQueue             chan *msgQueueType = nil
+	wsRunCtx             context.Context    = context.Background()
 	clientpool           *sync.Pool         = nil
 	clientcall           *syncmap.Map[string, *sync.Pool]
 	writeBufferSize      int                  = DEFAULT_WRITE_BUFFER_SIZE
@@ -72,6 +78,8 @@ var (
 	workerPoolWaitGroup  sync.WaitGroup               // Worker 等待组
 	workerPoolStats      []*workerStats               // Worker 统计信息
 	workerPoolStatsMutex sync.Mutex                   // 统计信息保护锁
+	stopOnce             sync.Once
+	tickDone             chan struct{}
 )
 
 // workerStats 用于收集 Worker 的统计信息
@@ -120,22 +128,40 @@ func RegisterCall(className string, factoryFunc any) {
 	})
 }
 
-func Run() {
-	if config.Cfg_.Ws == nil {
+// GetClient 按 UID 获取已连接客户端；不存在返回 nil。
+func GetClient(uid int64) *Client {
+	if clientMap == nil {
+		return nil
+	}
+	c, ok := clientMap.Load(uid)
+	if !ok {
+		return nil
+	}
+	return c
+}
+
+func Run(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	wsRunCtx = ctx
+	cfg := corectx.CfgFrom(ctx)
+	if cfg == nil || cfg.Ws == nil {
 		vars.Info("未启动websocket")
-		return
+		return nil
 	}
 
 	clientMap = syncmap.NewMap[int64, *Client]()
 
-	// 从配置中读取背压设置
-	enableBackpressure = true // 启用背压控制
-	dropMessageOnFull = false // 通道满时是否丢弃消息
+	enableBackpressure = true
+	dropMessageOnFull = false
 
 	writeBufferSize = DEFAULT_WRITE_BUFFER_SIZE
 	readBufferSize = DEFAULT_READ_BUFFER_SIZE
 
 	closeCh = make(chan bool)
+	tickDone = make(chan struct{})
+	stopOnce = sync.Once{}
 	msgQueue = make(chan *msgQueueType, readBufferSize)
 	clientpool = &sync.Pool{
 		New: func() interface{} {
@@ -145,11 +171,10 @@ func Run() {
 		},
 	}
 
-	// 读取 Worker Pool 配置
-	workerPoolSize = config.Cfg_.Ws.WorkerPoolSize
+	workerPoolSize = cfg.Ws.WorkerPoolSize
 	if workerPoolSize > 0 {
 		workerPoolEnabled = true
-		shardByKey = config.Cfg_.Ws.ShardByKey
+		shardByKey = cfg.Ws.ShardByKey
 		if shardByKey {
 			vars.Info("WebSocket Worker Pool 启用: %d workers, 按UID分片", workerPoolSize)
 		} else {
@@ -160,57 +185,96 @@ func Run() {
 		vars.Info("WebSocket 串行处理模式")
 	}
 
-	//启动监听
-	for _, port := range config.Cfg_.Ws.Port {
+	var lastErr error
+	started := 0
+	for _, port := range cfg.Ws.Port {
 		err := ListenAndServe(port.Port, port.CallbackClassName)
 		if err != nil {
 			vars.Error("websocket服务启动端口%d监听失败:%v", port.Port, err.Error())
+			lastErr = err
 			continue
 		}
+		started++
+	}
+	if started == 0 && lastErr != nil {
+		return lastErr
 	}
 
 	go Tick()
 	vars.Info("websocket服务启动")
+	return nil
 }
 
-func Stop() {
-	if config.Cfg_.Ws == nil {
+func Stop(ctx context.Context) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	cfg := corectx.CfgFrom(ctx)
+	if cfg == nil || cfg.Ws == nil {
 		return
 	}
 
-	close(closeCh)
+	stopOnce.Do(func() {
+		if closeCh != nil {
+			close(closeCh)
+		}
+	})
+	if tickDone != nil {
+		select {
+		case <-tickDone:
+		case <-ctx.Done():
+			vars.Error("WebSocket Tick 停止超时: %v", ctx.Err())
+		}
+	}
+}
+
+func shutdownWebsocket() {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	for _, server := range serverList {
+		if err := server.Shutdown(ctx); err != nil {
+			_ = server.Close()
+		}
+	}
+	cancel()
+	serverList = nil
+	if clientMap != nil {
+		clientMap.Range(func(key int64, client *Client) bool {
+			client.Close("")
+			return true
+		})
+	}
+	if msgQueue != nil {
+		close(msgQueue)
+		msgQueue = nil
+	}
+	if workerPoolEnabled {
+		stopWorkerPool()
+	}
 }
 
 func Tick() {
+	defer func() {
+		if tickDone != nil {
+			select {
+			case <-tickDone:
+			default:
+				close(tickDone)
+			}
+		}
+	}()
 	for {
 		select {
 		case <-closeCh:
-			//关闭所有服务器
-			for _, server := range serverList {
-				server.Close()
-			}
-			//关闭所有客户端
-			clientMap.Range(func(key int64, client *Client) bool {
-				client.Close("")
-				return true
-			})
-
-			//关闭消息队列
-			close(msgQueue)
-
-			//停止 Worker Pool
-			if workerPoolEnabled {
-				stopWorkerPool()
-			}
+			shutdownWebsocket()
+			return
+		case <-wsRunCtx.Done():
+			shutdownWebsocket()
 			return
 		case read_msg := <-msgQueue:
-			// Worker Pool 模式：按UID分片分发到不同Worker
 			if workerPoolEnabled {
 				dispatchToWorker(read_msg)
 				continue
 			}
-
-			// 串行模式：直接处理
 			processMessage(read_msg)
 		}
 	}

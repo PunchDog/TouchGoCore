@@ -28,10 +28,10 @@ const (
 var globalBot *tgbotapi.BotAPI
 
 func init() {
-	util.DefaultCallFunc.Register(util.CallTelegramMsg+"StartMessage", startMessage)
+	util.DefaultCallFunc.Register(util.CallTelegramMsg+"StartMessage", SendPhotoMessage)
 }
 
-func startMessage(bot *tgbotapi.BotAPI, chatID int64, desc, bannerURL string) error {
+func SendPhotoMessage(bot *tgbotapi.BotAPI, chatID int64, desc, bannerURL string) error {
 	if bot == nil {
 		vars.Error("bot未初始化")
 		return fmt.Errorf("bot未初始化")
@@ -102,7 +102,7 @@ func SendMessage(chatID int64, desc string) error {
 func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message) {
 	// 处理/start命令
 	if message.Text == "/start" {
-		startMessage(bot, message.Chat.ID, "", "")
+		SendPhotoMessage(bot, message.Chat.ID, "", "")
 		// } else if message.Text == "/game" {
 		// 	for _, v := range config.Cfg_.Telegram.GameToShort {
 		// 		chat := tgbotapi.NewMessage(message.Chat.ID, v)

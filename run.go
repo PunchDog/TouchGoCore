@@ -54,7 +54,7 @@ func Run(serverName string) {
 // signalProcHandler 信号处理
 func signalProcHandler() {
 	chSig := make(chan os.Signal, 1)
-	signal.Notify(chSig, syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
+	signal.Notify(chSig, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT, syscall.SIGKILL)
 	sig := <-chSig
 	vars.Info("Signal: %v", sig)
 

@@ -2,14 +2,15 @@
 
 ## 运行示例网关
 
-1. 设置 `CONFIG_PATH` 指向包含 `conf/` 的目录（示例配置：`example/conf/gatewayserverbus.json`，需在 `conf/config.ini` 中指向该 json）。
+1. 用 `-c` / `--config` 指定 **conf 目录**（内含 `config.ini` 与 `gatewayserverbus.json`）。未指定时可用环境变量 `CONFIG_PATH`（指向 conf 或其上级目录）。
 2. 启动前会注册 `GatePing`/`GatePong`（协议 `1:1` / `1:2`）。未调用 `util.RegisterProtocolType` 的 `(protocol1, protocol2)` 会被拒绝解析。
 3. WebSocket Token：环境变量 `TOUCHGO_WS_TOKEN`。未设置时本地使用 `dev-token`；`TOUCHGO_ENV=production` 时未设置会拒绝认证。登录服示例通过 `?token=` 传递。
 4. 监听路径：`ws.url` / `ws.inurl`（如 `/ws` 或 `ws://host:8000/ws`），缺省 `/ws`。
 
 ```bash
-export CONFIG_PATH=/opt/touchgo
-./gatewayserver
+./gatewayserver -c /opt/touchgo/conf
+# 等价
+./gatewayserver --config /opt/touchgo/conf
 ```
 
 登录服连网关并发送 Ping：
@@ -25,7 +26,7 @@ export TOUCHGO_WS_TOKEN=dev-token
 
 - `nohup ./gatewayserver &`：进程在终端退出后仍运行，但缺少重启与统一日志。
 - `disown`：仅从当前 shell 作业表移除，不替代进程管理器。
-- **推荐 systemd**：使用 [deploy/touchgo.service](deploy/touchgo.service)。`KillSignal=SIGTERM`、`Restart=on-failure`、`Environment=CONFIG_PATH=...`。
+- **推荐 systemd**：使用 [deploy/touchgo.service](deploy/touchgo.service)。`KillSignal=SIGTERM`、`Restart=on-failure`、`ExecStart=... -c /opt/touchgo/conf`。
 
 ```bash
 sudo cp example/deploy/touchgo.service /etc/systemd/system/

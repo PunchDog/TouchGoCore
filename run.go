@@ -8,6 +8,7 @@ import (
 	"syscall"
 	"time"
 
+	"touchgocore/config"
 	"touchgocore/vars"
 )
 
@@ -28,6 +29,7 @@ func Run(serverName string) {
 	}()
 
 	flag.Parse()
+	config.ApplyFlags()
 
 	app, err := NewApp(serverName)
 	if err != nil {

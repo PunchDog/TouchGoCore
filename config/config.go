@@ -5,7 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"path"
+	"path/filepath"
 	"strings"
 
 	"touchgocore/ini"
@@ -41,32 +41,73 @@ func init() {
 		Other:    nil,
 		Telegram: nil,
 	}
+	flag.StringVar(&_configDirFlag, "c", "", "conf 目录路径（内含 config.ini 与各服 JSON），与 --config 相同")
+	flag.StringVar(&_configDirFlag, "config", "", "conf 目录路径，同 -c")
 	resolveConfigPaths()
 }
 
-// resolveConfigPaths 解析配置根目录。
-// 优先环境变量 CONFIG_PATH，其次可执行文件旁、上级目录、当前工作目录中的 conf/config.ini。
+// ApplyFlags 解析命令行并重新解析配置目录。Run / LoadWithError 会调用。
+func ApplyFlags() {
+	if !flag.Parsed() {
+		flag.Parse()
+	}
+	resolveConfigPaths()
+}
+
+// resolveConfigPaths 解析 conf 目录。
+// 优先级：-c/--config > 环境变量 CONFIG_PATH > 可执行文件旁/上级/CWD 自动查找。
 func resolveConfigPaths() {
+	if dir := strings.TrimSpace(_configDirFlag); dir != "" {
+		applyConfigDir(dir)
+		return
+	}
 	if p := strings.TrimSpace(os.Getenv("CONFIG_PATH")); p != "" {
-		_basePath = p
-		_defaultFile = path.Join(_basePath, "conf/config.ini")
+		applyConfigDir(p)
 		return
 	}
 
-	execDir := path.Dir(os.Args[0])
+	execDir := filepath.Dir(os.Args[0])
 	candidates := []string{
-		path.Join(execDir, "../"),
-		path.Join(execDir, "../../"),
+		filepath.Join(execDir, ".."),
+		filepath.Join(execDir, "..", ".."),
 		".",
 	}
 	for _, base := range candidates {
-		f := path.Join(base, "conf/config.ini")
-		if PathExists(f) {
-			_basePath = base
-			_defaultFile = f
+		conf := filepath.Join(base, "conf")
+		if PathExists(filepath.Join(conf, "config.ini")) {
+			setConfDir(conf)
 			return
 		}
 	}
+}
+
+// applyConfigDir 接受 conf 目录本身，或包含 conf/ 的基目录（兼容 CONFIG_PATH）。
+func applyConfigDir(p string) {
+	p = strings.TrimSpace(p)
+	if p == "" {
+		return
+	}
+	if abs, err := filepath.Abs(p); err == nil {
+		p = abs
+	}
+	p = filepath.Clean(p)
+
+	switch {
+	case PathExists(filepath.Join(p, "config.ini")):
+		setConfDir(p)
+	case PathExists(filepath.Join(p, "conf", "config.ini")):
+		setConfDir(filepath.Join(p, "conf"))
+	case strings.EqualFold(filepath.Base(p), "conf"):
+		setConfDir(p)
+	default:
+		setConfDir(filepath.Join(p, "conf"))
+	}
+}
+
+func setConfDir(confDir string) {
+	_confDir = confDir
+	_defaultFile = filepath.Join(confDir, "config.ini")
+	_basePath = filepath.Dir(confDir)
 }
 
 // Load 加载配置文件（兼容旧接口，内部调用LoadWithError）。
@@ -81,14 +122,16 @@ func (this *Cfg) Load(cfgname string) {
 // LoadWithError 加载配置文件（返回error而非panic）
 // 推荐使用此方法替代Load，便于上层决定错误处理策略
 func (this *Cfg) LoadWithError(cfgname string) error {
+	ApplyFlags()
 	p, err := ini.Load(_defaultFile)
 	if err != nil {
 		return fmt.Errorf("读取ini失败 [%s]: %w", _defaultFile, err)
 	}
-	path1 := path.Join(_basePath, "/conf/", p.GetString(cfgname, "ini", ""))
-	if path1 == "" || strings.HasSuffix(path1, "/conf/") {
+	iniName := strings.TrimSpace(p.GetString(cfgname, "ini", ""))
+	if iniName == "" {
 		return fmt.Errorf("配置文件路径为空, 服务器名: %s, ini: %s", cfgname, _defaultFile)
 	}
+	path1 := filepath.Join(_confDir, iniName)
 
 	file, err := os.ReadFile(path1)
 	if err != nil {
@@ -154,15 +197,22 @@ var (
 	// Cfg_ 全局配置单例。
 	//
 	// Deprecated: 新代码应从 App.Cfg 或 corectx.CfgFrom(ctx) 读取。
-	Cfg_         *Cfg = nil
-	ServerName_  string
-	_basePath    = path.Join(path.Dir(os.Args[0]), "../")
-	_defaultFile = path.Join(_basePath, "conf/config.ini")
-	_defServerId = flag.String("s", "default", "server flag") //默认服务器ID
+	Cfg_           *Cfg = nil
+	ServerName_    string
+	_configDirFlag string
+	_basePath      string
+	_confDir       string
+	_defaultFile   string
+	_defServerId   = flag.String("s", "default", "server flag") //默认服务器ID
 )
 
 func GetBasePath() string {
 	return _basePath
+}
+
+// GetConfDir 返回 conf 目录（config.ini 与各服 JSON 所在目录）。
+func GetConfDir() string {
+	return _confDir
 }
 
 func GetDefaultFie() string {

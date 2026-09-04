@@ -3,7 +3,7 @@ package touchgocore
 import (
 	"context"
 	"fmt"
-	"path"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -235,7 +235,7 @@ func (app *App) initLogger() {
 	if app.Cfg != nil && app.Cfg.LogLevel != "" {
 		logLevel = app.Cfg.LogLevel
 	}
-	vars.Run(path.Join(config.GetBasePath(), "/log"), app.ServerName, logLevel)
+	vars.Run(filepath.Join(config.GetBasePath(), "log"), app.ServerName, logLevel)
 
 	centerstr := "*         Service:[" + config.ServerName_ + "] Version:[" + util.Version + "]         *"
 	var sb strings.Builder

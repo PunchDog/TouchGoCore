@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 	"touchgocore/config"
+	"touchgocore/corectx"
 	"touchgocore/localtimer"
 	"touchgocore/util"
 	"touchgocore/vars"
@@ -30,11 +31,20 @@ const (
 )
 
 var (
-	globalBot  *tgbotapi.BotAPI
-	closeCh    chan any
-	stopOnce   sync.Once
-	telegramWG sync.WaitGroup
+	globalBot      *tgbotapi.BotAPI
+	closeCh        chan any
+	stopOnce       sync.Once
+	telegramWG     sync.WaitGroup
+	telegramRunCtx = context.Background()
 )
+
+func telegramCfg() *config.TelegramConfig {
+	cfg := corectx.CfgFrom(telegramRunCtx)
+	if cfg == nil {
+		return nil
+	}
+	return cfg.Telegram
+}
 
 func init() {
 	util.DefaultCallFunc.Register(util.CallTelegramMsg+"StartMessage", SendPhotoMessage)
@@ -47,15 +57,19 @@ func SendPhotoMessage(bot *tgbotapi.BotAPI, chatID int64, desc, bannerURL string
 	}
 
 	// 构建游戏链接
-	vars.Info("telegram start game link: %v", config.Cfg_.Telegram.GameToShort)
+	tg := telegramCfg()
+	if tg == nil {
+		return fmt.Errorf("telegram config is nil")
+	}
+	vars.Info("telegram start game link: %v", tg.GameToShort)
 
 	photo := tgbotapi.NewPhoto(
 		chatID,
-		tgbotapi.FileURL(config.Cfg_.Telegram.GameBannerUrl),
+		tgbotapi.FileURL(tg.GameBannerUrl),
 	)
 
 	if desc == "" { //开始消息
-		photo.Caption = config.Cfg_.Telegram.GameDescription
+		photo.Caption = tg.GameDescription
 		photo.ReplyMarkup = &tgbotapi.InlineKeyboardMarkup{
 			InlineKeyboard: [][]tgbotapi.InlineKeyboardButton{},
 		}
@@ -64,7 +78,7 @@ func SendPhotoMessage(bot *tgbotapi.BotAPI, chatID int64, desc, bannerURL string
 		InlineKeyboard := &pt1.InlineKeyboard
 		cnt := 0
 		idx := 0
-		for key, gameurl := range config.Cfg_.Telegram.GameToShort {
+		for key, gameurl := range tg.GameToShort {
 			if cnt%MaxButtonsPerRow == 0 {
 				*InlineKeyboard = append(*InlineKeyboard, []tgbotapi.InlineKeyboardButton{})
 				idx = len(*InlineKeyboard) - 1
@@ -140,7 +154,12 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message) {
 func handleCallback(bot *tgbotapi.BotAPI, callback *tgbotapi.CallbackQuery) {
 	if callback.GameShortName != "" {
 		// 检查游戏URL是否存在
-		gameURL, exists := config.Cfg_.Telegram.GameToShort[callback.GameShortName]
+		tg := telegramCfg()
+		if tg == nil {
+			vars.Error("telegram config is nil")
+			return
+		}
+		gameURL, exists := tg.GameToShort[callback.GameShortName]
 		if !exists || gameURL == "" {
 			vars.Error("game URL not found for short name: %s", callback.GameShortName)
 			return
@@ -177,15 +196,16 @@ func TelegramStart(ctx context.Context) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	telegramRunCtx = ctx
+	tg := telegramCfg()
 	//其他位置设置了key,就用其他地方设置的替换
-	util.DefaultCallFunc.Do(util.CallTelegramMsg+"BotKey", &config.Cfg_.Telegram.BotToken)
-
-	if config.Cfg_.Telegram == nil || config.Cfg_.Telegram.BotToken == "" {
+	util.DefaultCallFunc.Do(util.CallTelegramMsg+"BotKey", &tg.BotToken)
+	if tg == nil || tg.BotToken == "" {
 		vars.Info("不启动Telegram")
 		return
 	}
 
-	bot, err := tgbotapi.NewBotAPI(config.Cfg_.Telegram.BotToken)
+	bot, err := tgbotapi.NewBotAPI(tg.BotToken)
 	if err != nil {
 		vars.Error("telegram bot api error: %v", err)
 		return
@@ -240,7 +260,7 @@ func TelegramStop(ctx context.Context) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if config.Cfg_.Telegram == nil || config.Cfg_.Telegram.BotToken == "" {
+	if tg := telegramCfg(); tg == nil || tg.BotToken == "" {
 		return
 	}
 	stopOnce.Do(func() {
@@ -369,12 +389,13 @@ func TelegramVerify(data string) (string, string, error) {
 		}
 	}()
 
-	if config.Cfg_.Telegram == nil || config.Cfg_.Telegram.BotToken == "" {
+	tg := telegramCfg()
+	if tg == nil || tg.BotToken == "" {
 		vars.Error("telegram verify error: %s", "telegram config error")
 		return "", "", errors.New("telegram config error")
 	}
 
-	result, err := validateWebAppData(config.Cfg_.Telegram.BotToken, data)
+	result, err := validateWebAppData(tg.BotToken, data)
 	if err != nil {
 		vars.Error("telegram verify error: %v", err)
 		return "", "", err

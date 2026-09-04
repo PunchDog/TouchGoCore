@@ -263,7 +263,10 @@ func (dbo *DbOperate) DBFindAll(name string, query interface{}, resHandler func(
 	for qCursor.TryNext(ctx) {
 		if nil != resHandler {
 			var doc bson.M
-			qCursor.Decode(&doc)
+			if err = qCursor.Decode(&doc); err != nil {
+				vars.Error("[DBFindAll] Decode error: %v", err)
+				return err
+			}
 			err = resHandler(doc)
 			if nil != err {
 				vars.Error("[DBFindAll] resHandler error :%v!!!", err)
@@ -275,7 +278,6 @@ func (dbo *DbOperate) DBFindAll(name string, query interface{}, resHandler func(
 	return nil
 }
 
-//TODO
 /* name 表名,  query 条件, resHandler 回调 , sortCond 排序, projection 筛选*/
 func (dbo *DbOperate) DBFindAllEx(name string, query interface{}, resHandler func(*mongo.Cursor) error, sortCond string, projection interface{}) error {
 	if dbo.session == nil {

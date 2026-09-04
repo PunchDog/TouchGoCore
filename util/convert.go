@@ -1,7 +1,6 @@
 package util
 
 import (
-	"fmt"
 	"reflect"
 	"touchgocore/vars"
 )
@@ -34,7 +33,7 @@ func ConvertToKind(val float64, kind reflect.Kind) interface{} {
 	case reflect.Float64:
 		return val
 	default:
-		vars.Error(fmt.Sprintf("无法转换数值到类型：%s,值:%v", kind.String(), val))
+		vars.Error("无法转换数值到类型：%s,值:%v", kind.String(), val)
 		return 0
 	}
 }

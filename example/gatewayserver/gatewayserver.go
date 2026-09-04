@@ -22,6 +22,10 @@ func init() {
 func gatewayAuth(token, remoteAddr string) bool {
 	expected := os.Getenv("TOUCHGO_WS_TOKEN")
 	if expected == "" {
+		if os.Getenv("TOUCHGO_ENV") == "production" {
+			vars.Error("生产环境必须设置 TOUCHGO_WS_TOKEN")
+			return false
+		}
 		expected = "dev-token"
 		vars.Warning("TOUCHGO_WS_TOKEN 未设置，示例网关使用 dev-token（仅本地调试）")
 	}

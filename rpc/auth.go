@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"touchgocore/config"
+	"touchgocore/corectx"
 	"touchgocore/vars"
 
 	"google.golang.org/grpc"
@@ -32,14 +33,20 @@ func authMode() string {
 	return mode
 }
 
-func rpcAuthCfg() *config.RpcAuthConfig {
-	if config.Cfg_ == nil {
+func activeCfg() *config.Cfg {
+	return corectx.CfgFrom(rpcRunCtx)
+}
+
+func activeRpcCfg() *config.RpcConfig {
+	cfg := activeCfg()
+	if cfg == nil {
 		return nil
 	}
-	rpc := config.Cfg_.Rpc
-	if rpc == nil {
-		rpc = config.Cfg_.RpcPort
-	}
+	return cfg.RpcOf()
+}
+
+func rpcAuthCfg() *config.RpcAuthConfig {
+	rpc := activeRpcCfg()
 	if rpc == nil {
 		return nil
 	}
@@ -190,14 +197,8 @@ func warnInsecureRPC(name string, useTLS bool) {
 	if !useTLS {
 		vars.Warning("gRPC[%s] 未启用 TLS；生产环境应开启 tls.enable，且不要使用 skip_for_intranet", name)
 	}
-	if config.Cfg_ != nil {
-		rpc := config.Cfg_.Rpc
-		if rpc == nil {
-			rpc = config.Cfg_.RpcPort
-		}
-		if rpc != nil && rpc.TLS != nil && rpc.TLS.Enable && rpc.TLS.SkipForIntranet {
-			vars.Warning("gRPC[%s] skip_for_intranet=true，内网明文可被伪造身份；生产请设为 false", name)
-		}
+	if rpc := activeRpcCfg(); rpc != nil && rpc.TLS != nil && rpc.TLS.Enable && rpc.TLS.SkipForIntranet {
+		vars.Warning("gRPC[%s] skip_for_intranet=true，内网明文可被伪造身份；生产请设为 false", name)
 	}
 	if authMode() == "none" {
 		vars.Warning("gRPC[%s] auth.mode=none，仅校验 client-name 是否存在，可被伪造", name)

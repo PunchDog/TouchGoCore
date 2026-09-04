@@ -1,7 +1,11 @@
 package lua
 
 import (
+	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
+
 	rt "github.com/arnodel/golua/runtime"
 	"touchgocore/util"
 	"touchgocore/vars"
@@ -37,11 +41,35 @@ func error1(t *rt.Thread, c *rt.GoCont) (rt.Cont, error) {
 	return c.Next(), nil
 }
 
-// dofile Lua 内置函数：加载并执行 Lua 文件
+func confineLuaPath(filePath string) (string, error) {
+	root := "."
+	if lc := luaCfg(); lc != nil && lc.ScriptPath != "" {
+		root = filepath.Dir(lc.ScriptPath)
+	}
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return "", err
+	}
+	absFile, err := filepath.Abs(filePath)
+	if err != nil {
+		return "", err
+	}
+	rel, err := filepath.Rel(absRoot, absFile)
+	if err != nil || strings.HasPrefix(rel, "..") {
+		return "", fmt.Errorf("lua path outside script root: %s", filePath)
+	}
+	return absFile, nil
+}
+
+// dofile Lua 内置函数：加载并执行 Lua 文件（限制在脚本根目录内）
 func dofile(t *rt.Thread, c *rt.GoCont) (rt.Cont, error) {
 	filePath, err := c.StringArg(0)
 	if err != nil {
 		return nil, err
+	}
+	filePath, err = confineLuaPath(filePath)
+	if err != nil {
+		return pushErrorResult(t, c, err)
 	}
 
 	// 读取并编译文件
@@ -85,6 +113,10 @@ func getpathluafile(t *rt.Thread, c *rt.GoCont) (rt.Cont, error) {
 	path, err := c.StringArg(0)
 	if err != nil {
 		return nil, err
+	}
+	path, err = confineLuaPath(path)
+	if err != nil {
+		return pushErrorResult(t, c, err)
 	}
 
 	fileList := util.GetPathFile(path, []string{LuaFileExt})

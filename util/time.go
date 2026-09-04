@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"regexp"
 	"strconv"
+	"sync/atomic"
 	"time"
 	"touchgocore/vars"
 
@@ -18,13 +19,49 @@ const (
 	// FieldRealTime    Redis Hash 中的真实时间字段名
 	FieldRealTime = "real_time"
 	// FieldVirtualTime Redis Hash 中的虚拟时间字段名
-	FieldVirtualTime = "virtual_time"
+	FieldVirtualTime  = "virtual_time"
+	defaultVTCacheTTL = 500 * time.Millisecond
 )
 
-// virtualTimeHolder 保存 Redis 客户端的全局变量
+// virtualTimeBackend 虚拟时间存储，便于单测注入内存实现。
+type virtualTimeBackend interface {
+	HGetAll(ctx context.Context, key string) (map[string]string, error)
+	HSet(ctx context.Context, key string, fields map[string]any) error
+	Del(ctx context.Context, key string) error
+}
+
+type redisVTBackend struct {
+	c redis.Cmdable
+}
+
+func (r redisVTBackend) HGetAll(ctx context.Context, key string) (map[string]string, error) {
+	return r.c.HGetAll(ctx, key).Result()
+}
+
+func (r redisVTBackend) HSet(ctx context.Context, key string, fields map[string]any) error {
+	return r.c.HSet(ctx, key, fields).Err()
+}
+
+func (r redisVTBackend) Del(ctx context.Context, key string) error {
+	return r.c.Del(ctx, key).Err()
+}
+
+type vtCacheEntry struct {
+	data      *VirtualTimeData
+	fetchedAt time.Time
+	hasData   bool
+}
+
 var (
 	redisClient redis.Cmdable
+	vtBackend   virtualTimeBackend
+	vtCache     atomic.Pointer[vtCacheEntry]
+	vtCacheTTL  atomic.Int64
 )
+
+func init() {
+	vtCacheTTL.Store(int64(defaultVTCacheTTL))
+}
 
 // VirtualTimeData 虚拟时间数据结构
 type VirtualTimeData struct {
@@ -36,15 +73,39 @@ func virtualTimeKey() string {
 	return fmt.Sprintf("%s:%s", VirtualTimeKey, GameGroup)
 }
 
+// VirtualTimeRedisKey 返回当前进程使用的虚拟时间 Redis key（含 GameGroup）。
+func VirtualTimeRedisKey() string {
+	return virtualTimeKey()
+}
+
+func invalidateVTCache() {
+	vtCache.Store(nil)
+}
+
+func SetVirtualTimeCacheTTL(d time.Duration) {
+	if d <= 0 {
+		d = defaultVTCacheTTL
+	}
+	vtCacheTTL.Store(int64(d))
+	invalidateVTCache()
+}
+
+func useVirtualTimeBackend(b virtualTimeBackend) {
+	vtBackend = b
+	if b == nil {
+		redisClient = nil
+	}
+	invalidateVTCache()
+}
+
 // GetVirtualTimeData 获取 Redis 中存储的虚拟时间数据
 // 返回 nil 表示未找到或出错，使用真实时间
 func GetVirtualTimeData(ctx context.Context) (*VirtualTimeData, error) {
-	if redisClient == nil {
+	if vtBackend == nil {
 		return nil, errors.New("redis client not initialized")
 	}
 
-	// 使用 HGETALL 获取所有字段
-	result, err := redisClient.HGetAll(ctx, virtualTimeKey()).Result()
+	result, err := vtBackend.HGetAll(ctx, virtualTimeKey())
 	if err != nil {
 		return nil, fmt.Errorf("get virtual time from redis: %w", err)
 	}
@@ -74,70 +135,103 @@ func GetVirtualTimeData(ctx context.Context) (*VirtualTimeData, error) {
 // realTime: 当前的真实时间（Unix 纳秒）
 // virtualTime: 虚拟时间（Unix 纳秒）
 func SetVirtualTimeData(ctx context.Context, realTime, virtualTime int64) error {
-	if redisClient == nil {
+	if vtBackend == nil {
 		return errors.New("redis client not initialized")
 	}
 
-	err := redisClient.HSet(ctx, virtualTimeKey(), map[string]any{
+	fields := map[string]any{
 		FieldRealTime:    realTime,
 		FieldVirtualTime: virtualTime,
-	}).Err()
-	if err != nil {
+	}
+	if err := vtBackend.HSet(ctx, virtualTimeKey(), fields); err != nil {
 		return fmt.Errorf("set virtual time to redis: %w", err)
 	}
-
+	vtCache.Store(&vtCacheEntry{
+		data:      &VirtualTimeData{RealTime: realTime, VirtualTime: virtualTime},
+		fetchedAt: time.Now(),
+		hasData:   true,
+	})
 	return nil
 }
 
 // CalculateVirtualTime 根据 Redis 中的虚拟时间数据计算当前虚拟时间
 // 公式：虚拟时间 = 记录虚拟时间 + (当前真实时间 - 记录真实时间)
 // 如果 Redis 中没有虚拟时间配置，返回当前真实时间
-func CalculateVirtualTime(ctx context.Context) (time.Time, error) {
-	// 获取当前真实时间
-	nowReal := time.Now().UnixNano()
+func cachedVirtualTime() (*VirtualTimeData, bool) {
+	if vtBackend == nil {
+		return nil, false
+	}
+	if e := vtCache.Load(); e != nil {
+		ttl := time.Duration(vtCacheTTL.Load())
+		if time.Since(e.fetchedAt) < ttl {
+			return e.data, e.hasData
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	data, err := GetVirtualTimeData(ctx)
+	entry := &vtCacheEntry{fetchedAt: time.Now()}
+	if err != nil {
+		vtCache.Store(entry)
+		return nil, false
+	}
+	entry.data = data
+	entry.hasData = true
+	vtCache.Store(entry)
+	return data, true
+}
 
-	// 获取 Redis 中的虚拟时间数据
+func applyVirtualOffset(data *VirtualTimeData) time.Time {
+	nowReal := time.Now().UnixNano()
+	return time.Unix(0, data.VirtualTime+(nowReal-data.RealTime))
+}
+
+// CalculateVirtualTime 根据缓存/Redis 中的虚拟时间数据计算当前虚拟时间。
+// 公式：虚拟时间 = 记录虚拟时间 + (当前真实时间 - 记录真实时间)
+func CalculateVirtualTime(ctx context.Context) (time.Time, error) {
+	if data, ok := cachedVirtualTime(); ok && data != nil {
+		return applyVirtualOffset(data), nil
+	}
+	if vtBackend == nil {
+		return time.Now(), errors.New("redis client not initialized")
+	}
 	data, err := GetVirtualTimeData(ctx)
 	if err != nil {
 		return time.Now(), err
 	}
-
-	// 计算偏移量
-	offset := nowReal - data.RealTime
-
-	// 计算虚拟时间
-	virtualMs := data.VirtualTime + offset
-
-	return time.Unix(0, virtualMs), nil
+	return applyVirtualOffset(data), nil
 }
 
-// CurrentTime 返回当前时间，支持虚拟时间
-// 如果 Redis 中配置了虚拟时间，则返回虚拟时间；否则返回真实时间
+// CurrentTime 返回当前时间，支持虚拟时间。
+// Redis 未初始化或缓存未命中虚拟偏移时走真实时间，避免每个 tick 都 HGETALL。
 func CurrentTime() time.Time {
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	defer cancel()
-
-	virtualTime, err := CalculateVirtualTime(ctx)
-	if err != nil {
-		// 如果出错或返回零值，使用真实时间
+	data, ok := cachedVirtualTime()
+	if !ok || data == nil {
 		return time.Now()
 	}
-	return virtualTime
+	return applyVirtualOffset(data)
 }
 
-// ResetVirtualTime 重置虚拟时间为真实时间
+// ResetVirtualTime 重置虚拟时间为真实时间（删除当前 GameGroup 的 key）。
 func ResetVirtualTime(ctx context.Context) error {
-	if redisClient == nil {
+	if vtBackend == nil {
 		return errors.New("redis client not initialized")
 	}
-
-	return redisClient.Del(ctx, VirtualTimeKey).Err()
+	if err := vtBackend.Del(ctx, virtualTimeKey()); err != nil {
+		return err
+	}
+	invalidateVTCache()
+	return nil
 }
 
 // InitVirtualTime 初始化虚拟时间模块（应在应用启动时调用）
-// 从 App 实例获取 Redis 客户端并设置到 util 包中
 func InitVirtualTime(client redis.Cmdable) {
 	redisClient = client
+	if client == nil {
+		useVirtualTimeBackend(nil)
+		return
+	}
+	useVirtualTimeBackend(redisVTBackend{c: client})
 	vars.Info("虚拟时间模块初始化redis")
 }
 

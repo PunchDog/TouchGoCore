@@ -20,11 +20,14 @@ type Cfg struct {
 	LogLevel  string           `json:"log_level"`  //日志等级，off为不开,其次为INFO,DEBUG,WARN,ERROR
 	MapPath   string           `json:"map_path"`   //地图配置位置
 	Web       *WebConfig       `json:"web"`        //web配置
-	RpcPort   *RpcConfig       `json:"rpc_port"`   //rpc_port端口，没有则表示不开rpc服务
-	Rpc       *RpcConfig       `json:"rpc"`        // gRPC 配置
-	Telegram  *TelegramConfig  `json:"telegram"`   //telegram配置
-	Server    *ServerConfig    `json:"server"`     // 服务器全局配置
-	Metrics   *MetricsConfig   `json:"metrics"`    // Prometheus 监控配置
+	// RpcPort 历史字段，与 Rpc 二选一；Validate/Normalize 会将其归并到 Rpc。
+	//
+	// Deprecated: 请使用 json:"rpc"。
+	RpcPort  *RpcConfig      `json:"rpc_port"`
+	Rpc      *RpcConfig      `json:"rpc"`      // gRPC 配置
+	Telegram *TelegramConfig `json:"telegram"` //telegram配置
+	Server   *ServerConfig   `json:"server"`   // 服务器全局配置
+	Metrics  *MetricsConfig  `json:"metrics"`  // Prometheus 监控配置
 	//其他配置
 	Other interface{} `json:"other_data"` //其他配置,需要自行传入想要的数据模型
 }
@@ -99,6 +102,54 @@ func (this *Cfg) LoadWithError(cfgname string) error {
 	return nil
 }
 
+// Normalize 将 rpc_port 别名归并到 Rpc，供启动与校验统一读取。
+func (c *Cfg) Normalize() {
+	if c == nil {
+		return
+	}
+	if c.Rpc == nil && c.RpcPort != nil {
+		c.Rpc = c.RpcPort
+	}
+}
+
+// RpcOf 返回生效的 RPC 配置（优先 Rpc，其次 RpcPort）。
+func (c *Cfg) RpcOf() *RpcConfig {
+	if c == nil {
+		return nil
+	}
+	if c.Rpc != nil {
+		return c.Rpc
+	}
+	return c.RpcPort
+}
+
+// QueueCapacity 消息队列容量；未配置时用 defaultSize。
+func (c *Cfg) QueueCapacity(defaultSize int) int {
+	if defaultSize <= 0 {
+		defaultSize = 4096
+	}
+	if c != nil && c.Server != nil && c.Server.ReadBuffer > 0 {
+		return c.Server.ReadBuffer
+	}
+	return defaultSize
+}
+
+// WriteQueueCapacity 写队列容量。
+func (c *Cfg) WriteQueueCapacity(defaultSize int) int {
+	if defaultSize <= 0 {
+		defaultSize = 4096
+	}
+	if c != nil && c.Server != nil && c.Server.WriteBuffer > 0 {
+		return c.Server.WriteBuffer
+	}
+	return defaultSize
+}
+
+// DropOnFull 为 true 时队列满丢弃消息（背压）。
+func (c *Cfg) DropOnFull() bool {
+	return c != nil && c.Server != nil && c.Server.Backpressure
+}
+
 var (
 	// Cfg_ 全局配置单例。
 	//
@@ -115,6 +166,11 @@ func GetBasePath() string {
 }
 
 func GetDefaultFie() string {
+	return GetDefaultFile()
+}
+
+// GetDefaultFile 返回 config.ini 路径（GetDefaultFie 的正确拼写）。
+func GetDefaultFile() string {
 	return _defaultFile
 }
 

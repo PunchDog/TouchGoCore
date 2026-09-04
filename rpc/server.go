@@ -11,7 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"touchgocore/config"
+	"touchgocore/metrics"
 	"touchgocore/network/message"
 	"touchgocore/syncmap"
 	"touchgocore/util"
@@ -53,7 +53,7 @@ type RpcServer struct {
 	callFunc *util.CallFunction
 	// 回调接口
 	callbacks *ServerCallbacks
-	// 正在执行的 handler 数量（超时后仍可能未退出，需业务接 ctx）
+	// 正在执行的 handler 数量。超时只丢弃结果；handler 须自行尊重 ctx，运行时不会强杀 goroutine。
 	inFlight atomic.Int64
 }
 
@@ -238,34 +238,40 @@ func (s *RpcServer) handleChannel() {
 				}
 			}()
 
-			// 等待处理结果或超时
+			method := fmt.Sprintf("%d:%d", msg.protol1, msg.protol2)
+			metrics.RPC.IncRequests(s.name, method)
+			started := time.Now()
+
+			// 等待处理结果或超时。超时后后台 goroutine 仍可能继续跑，业务回调必须尊重 ctx。
 			select {
 			case <-ctx.Done():
 				cancel()
+				metrics.RPC.IncErrors(s.name, method, "timeout")
+				metrics.RPC.ObserveLatency(s.name, method, time.Since(started))
 				vars.Error("处理gRPC请求超时,协议号:%d:%d, 客户端:%s, in-flight=%d（回调须接受 context.Context）",
 					msg.protol1, msg.protol2, msg.clientNameKey, s.inFlight.Load())
 
 			case result := <-resultCh:
 				cancel()
+				metrics.RPC.ObserveLatency(s.name, method, time.Since(started))
 				if result.bret {
 					if len(result.res) > 0 {
 						rsp := result.res[0].Interface().(proto.Message)
 						s.SendWithRequestID(msg.clientNameKey, msg.protol1, msg.protol2, msg.requestID, rsp)
 
-						// 触发消息处理成功回调
 						s.triggerOnMessageProcessed(msg.clientNameKey, msg.protol1, msg.protol2, rsp, true)
 					} else {
+						metrics.RPC.IncErrors(s.name, method, "empty")
 						vars.Error("处理gRPC请求错误,没有返回值,协议号:%d:%d, 客户端:%s",
 							msg.protol1, msg.protol2, msg.clientNameKey)
 
-						// 触发消息处理失败回调（无返回值）
 						s.triggerOnMessageProcessed(msg.clientNameKey, msg.protol1, msg.protol2, nil, false)
 					}
 				} else {
+					metrics.RPC.IncErrors(s.name, method, "handler")
 					vars.Error("处理gRPC请求错误,协议号:%d:%d, 客户端:%s",
 						msg.protol1, msg.protol2, msg.clientNameKey)
 
-					// 触发消息处理失败回调
 					s.triggerOnMessageProcessed(msg.clientNameKey, msg.protol1, msg.protol2, nil, false)
 				}
 			}
@@ -303,6 +309,14 @@ func (s *RpcServer) Stop(ctx context.Context) {
 		}
 	}
 
+	deadline := time.Now().Add(5 * time.Second)
+	for s.inFlight.Load() > 0 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if n := s.inFlight.Load(); n > 0 {
+		vars.Warning("RPC服务器[%s] 关闭时仍有 %d 个 in-flight handler", s.name, n)
+	}
+
 	s.triggerOnServerStopped()
 
 	vars.Info("RPC服务器停止[%s]", s.name)
@@ -319,11 +333,8 @@ func StartGrpcServer(name string, port int, useTLS bool) error {
 	// 检查 TLS 配置
 	var serverOptions []grpc.ServerOption
 
-	if useTLS && config.Cfg_ != nil {
-		rpc := config.Cfg_.Rpc
-		if rpc == nil {
-			rpc = config.Cfg_.RpcPort
-		}
+	if useTLS {
+		rpc := activeRpcCfg()
 		if rpc != nil && rpc.TLS != nil {
 			cert, err := tls.LoadX509KeyPair(rpc.TLS.CertFile, rpc.TLS.KeyFile)
 			if err != nil {
@@ -372,10 +383,10 @@ func StartGrpcServer(name string, port int, useTLS bool) error {
 	service := &RpcServer{
 		name:               name,
 		service:            s,
-		readchannel:        make(chan *msginfo, MAX_CHANNEL_SIZE),
-		handlechannel:      make(chan *msginfo, MAX_CHANNEL_SIZE),
+		readchannel:        make(chan *msginfo, channelSize),
+		handlechannel:      make(chan *msginfo, channelSize),
 		done:               make(chan struct{}),
-		callFunc:           &util.CallFunction{},
+		callFunc:           util.DefaultCallFunc,
 		nametoclientstream: syncmap.NewMap[string, message.Grpc_MsgServer](),
 		callbacks:          NewServerCallbacks(),
 		handlerSem:         make(chan struct{}, 256),

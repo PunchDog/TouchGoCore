@@ -208,7 +208,7 @@ func toTime(src interface{}) time.Time {
 func ParseDbData(des, src interface{}) {
 	defer func() {
 		if r := recover(); r != nil {
-			vars.Error("ParseDbData类型转换异常", fmt.Errorf("%v", r))
+			vars.Error("ParseDbData类型转换异常: %v", r)
 		}
 	}()
 
@@ -237,11 +237,11 @@ func ParseDbData(des, src interface{}) {
 		if reflect.TypeOf(des).Elem().Kind() == reflect.Struct {
 			buf, err := json.Marshal(src)
 			if err != nil {
-				vars.Error("结构体序列化失败", err)
+				vars.Error("结构体序列化失败: %v", err)
 				return
 			}
 			if err := json.Unmarshal(buf, des); err != nil {
-				vars.Error("结构体反序列化失败", err)
+				vars.Error("结构体反序列化失败: %v", err)
 			}
 		}
 	}

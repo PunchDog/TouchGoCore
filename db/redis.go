@@ -2,11 +2,16 @@ package db
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"os"
 	"strconv"
 	"time"
 
 	"touchgocore/config"
+	"touchgocore/util"
+	"touchgocore/vars"
 
 	"github.com/redis/go-redis/v9"
 )
@@ -31,8 +36,13 @@ func NewRedis(config *config.RedisConfig) (*Redis, error) {
 	return this, this.connect()
 }
 
+func (this *Redis) poolKey() string {
+	sum := sha256.Sum256([]byte(this.config.Password))
+	return this.config.Host + "-" + strconv.Itoa(this.config.Db) + "-" + hex.EncodeToString(sum[:8])
+}
+
 func (this *Redis) connect() error {
-	str := this.config.Host + "-" + strconv.Itoa(this.config.Db) + "-" + this.config.Password
+	str := this.poolKey()
 	if this.connectOnly(str) {
 		return nil
 	}
@@ -144,6 +154,10 @@ func (this *Redis) connectOnly(dataSourceName string) bool {
 }
 
 func (this *Redis) FlushAll() {
+	if !util.DEBUG && os.Getenv("TOUCHGO_ALLOW_FLUSHALL") != "1" {
+		vars.Error("FlushAll 已拒绝：仅 debug 或 TOUCHGO_ALLOW_FLUSHALL=1 可用")
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	this.redisClient.FlushAll(ctx)
@@ -161,8 +175,7 @@ func (this *Redis) Close() {
 	}
 	this.redisClient = nil
 	if this.config != nil {
-		str := this.config.Host + "-" + strconv.Itoa(this.config.Db) + "-" + this.config.Password
-		_DbMap.Delete(str)
+		_DbMap.Delete(this.poolKey())
 	}
 }
 

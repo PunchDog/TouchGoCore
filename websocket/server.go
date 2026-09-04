@@ -1,12 +1,14 @@
-﻿package websocket
+package websocket
 
 import (
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
 	"touchgocore/config"
+	"touchgocore/corectx"
 	"touchgocore/util"
 	"touchgocore/vars"
 
@@ -34,12 +36,57 @@ var (
 // ============ 原有代码 ============
 
 // initUpgrader 初始化 WebSocket Upgrader
+func wsCfg() *config.WebsocketConfig {
+	cfg := corectx.CfgFrom(wsRunCtx)
+	if cfg == nil {
+		return nil
+	}
+	return cfg.Ws
+}
+
+func websocketPath(raw, fallback string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return fallback
+	}
+	if strings.Contains(raw, "://") {
+		u, err := url.Parse(raw)
+		if err == nil && u.Path != "" && u.Path != "/" {
+			return u.Path
+		}
+		return fallback
+	}
+	if !strings.HasPrefix(raw, "/") {
+		return "/" + raw
+	}
+	return raw
+}
+
+func websocketListenPaths(ws *config.WebsocketConfig) []string {
+	paths := []string{websocketPath("", "/ws")}
+	if ws != nil {
+		paths = []string{websocketPath(ws.URL, "/ws")}
+		if in := websocketPath(ws.InURL, ""); in != "" && in != paths[0] {
+			paths = append(paths, in)
+		}
+	}
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(paths))
+	for _, p := range paths {
+		if _, ok := seen[p]; ok {
+			continue
+		}
+		seen[p] = struct{}{}
+		out = append(out, p)
+	}
+	return out
+}
+
 func initUpgrader() {
-	// 加载配置
-	if config.Cfg_ != nil && config.Cfg_.Ws != nil {
-		allowedOrigins = config.Cfg_.Ws.AllowedOrigins
-		checkOrigin = config.Cfg_.Ws.CheckOrigin
-		skipOriginForIntranet = config.Cfg_.Ws.SkipOriginForIntranet
+	if ws := wsCfg(); ws != nil {
+		allowedOrigins = ws.AllowedOrigins
+		checkOrigin = ws.CheckOrigin
+		skipOriginForIntranet = ws.SkipOriginForIntranet
 	}
 
 	upgrader = &websocket.Upgrader{
@@ -109,11 +156,12 @@ func getDirectIP(r *http.Request) string {
 }
 
 func isTrustedProxy(r *http.Request) bool {
-	if config.Cfg_ == nil || config.Cfg_.Ws == nil || len(config.Cfg_.Ws.TrustedProxies) == 0 {
+	ws := wsCfg()
+	if ws == nil || len(ws.TrustedProxies) == 0 {
 		return false
 	}
 	ip := getDirectIP(r)
-	for _, p := range config.Cfg_.Ws.TrustedProxies {
+	for _, p := range ws.TrustedProxies {
 		if p == ip || p == "*" {
 			return true
 		}
@@ -141,7 +189,7 @@ func getClientIP(r *http.Request) string {
 // extractAuthToken 从请求中提取认证令牌
 // 优先从 HTTP Header 读取，其次从 URL Query 参数读取
 func extractAuthToken(c *gin.Context) string {
-	wsCfg := config.Cfg_.Ws
+	wsCfg := wsCfg()
 	if wsCfg == nil {
 		return ""
 	}
@@ -177,7 +225,7 @@ func ListenAndServe(port int, className string) error {
 		c.Next()
 	})
 
-	r.GET("/ws", func(c *gin.Context) {
+	handler := func(c *gin.Context) {
 		defer func() {
 			if err := recover(); err != nil {
 				vars.Error("WebSocket处理发生panic错误: %v", err)
@@ -189,7 +237,7 @@ func ListenAndServe(port int, className string) error {
 			clientIP := getClientIP(c.Request)
 			directIP := getDirectIP(c.Request)
 
-			if config.Cfg_.Ws.AuthIntranetSkip && util.IsIntranetIP(directIP) {
+			if ws := wsCfg(); ws != nil && ws.AuthIntranetSkip && util.IsIntranetIP(directIP) {
 				// 仅以直连 IP 判断内网，避免伪造 XFF 绕过认证
 			} else {
 				// 从配置的 Header 或 Query 参数中提取 Token
@@ -233,7 +281,11 @@ func ListenAndServe(port int, className string) error {
 			wsConn.Close()
 			return
 		}
-	})
+	}
+	for _, p := range websocketListenPaths(wsCfg()) {
+		r.GET(p, handler)
+		vars.Info("WebSocket 路由已注册: GET %s", p)
+	}
 
 	ln, err := net.Listen("tcp", "[::]:"+strconv.Itoa(port))
 	if err != nil {
@@ -251,7 +303,10 @@ func ListenAndServe(port int, className string) error {
 				vars.Error("WebSocket服务器发生panic错误: %v", err)
 			}
 		}()
-		tlsCfg := config.Cfg_.Ws.TLS
+		var tlsCfg *config.TLSConfig
+		if ws := wsCfg(); ws != nil {
+			tlsCfg = ws.TLS
+		}
 		var err error
 		if tlsCfg != nil && tlsCfg.Enable {
 			vars.Info("WebSocket TLS 已启用，监听 wss://%s", ln.Addr().String())

@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 	"touchgocore/corectx"
+	"touchgocore/metrics"
 	"touchgocore/syncmap"
 	"touchgocore/util"
 	"touchgocore/vars"
@@ -29,8 +30,8 @@ var (
 // ============ 原有代码 ============
 
 const (
-	DEFAULT_WRITE_BUFFER_SIZE = 10240
-	DEFAULT_READ_BUFFER_SIZE  = 102400
+	DEFAULT_WRITE_BUFFER_SIZE = 4096
+	DEFAULT_READ_BUFFER_SIZE  = 4096
 	// 背压阈值：当通道满于此比例时，记录警告日志
 	BACKPRESSURE_THRESHOLD = 0.9
 )
@@ -163,10 +164,10 @@ func Run(ctx context.Context) error {
 	}
 
 	enableBackpressure = true
-	dropMessageOnFull = false
+	dropMessageOnFull = cfg.DropOnFull()
 
-	writeBufferSize = DEFAULT_WRITE_BUFFER_SIZE
-	readBufferSize = DEFAULT_READ_BUFFER_SIZE
+	writeBufferSize = cfg.WriteQueueCapacity(DEFAULT_WRITE_BUFFER_SIZE)
+	readBufferSize = cfg.QueueCapacity(DEFAULT_READ_BUFFER_SIZE)
 
 	closeCh = make(chan bool)
 	tickDone = make(chan struct{})
@@ -296,7 +297,7 @@ func processMessage(read_msg *msgQueueType) {
 		if client.IsClose() {
 			return
 		}
-		pbmsg := util.PasreFSMessage(read_msg.data)
+		pbmsg := util.ParseFSMessage(read_msg.data)
 		if pbmsg != nil {
 			if client != nil {
 				client.UpdateStatsFromMessage(read_msg.data)
@@ -304,10 +305,12 @@ func processMessage(read_msg *msgQueueType) {
 			client.OnMessage(client, pbmsg)
 		} else {
 			UpdateErrorStats()
+			metrics.WS.IncErrors("parse")
 			vars.Error("解析消息失败，客户端: %d", read_msg.uid)
 		}
 	} else {
 		UpdateErrorStats()
+		metrics.WS.IncErrors("not_found")
 		vars.Error("客户端未找到: %d", read_msg.uid)
 	}
 }
@@ -319,7 +322,7 @@ func initWorkerPool() {
 	workerPoolStop = make(chan struct{})
 
 	for i := 0; i < workerPoolSize; i++ {
-		workerPoolQueues[i] = make(chan *msgQueueType, 102400)
+		workerPoolQueues[i] = make(chan *msgQueueType, readBufferSize)
 		workerPoolStats[i] = &workerStats{
 			WorkerID: i,
 		}
@@ -356,6 +359,11 @@ func dispatchToWorker(msg *msgQueueType) {
 	default:
 		// Worker队列满，回退到当前goroutine处理
 		workerPoolStats[workerIdx].Errors.Add(1)
+		metrics.WS.IncErrors("queue_full")
+		if dropMessageOnFull {
+			vars.Warning("Worker[%d]队列满，丢弃消息", workerIdx)
+			return
+		}
 		vars.Warning("Worker[%d]队列满，回退到同步处理", workerIdx)
 		processMessage(msg)
 	}
@@ -412,14 +420,17 @@ func UpdateConnectionStats(connected bool) {
 	if connected {
 		serverStats.totalConnections.Add(1)
 		serverStats.currentConnections.Add(1)
+		metrics.WS.IncConnection()
 	} else {
 		serverStats.currentConnections.Add(-1)
+		metrics.WS.DecConnection()
 	}
 }
 
 // UpdateMessageStats 更新消息统计
 func UpdateMessageStats() {
 	serverStats.totalMessages.Add(1)
+	metrics.WS.IncMessages("inbound")
 }
 
 // UpdateErrorStats 更新错误统计

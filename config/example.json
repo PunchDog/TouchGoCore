@@ -7,19 +7,19 @@
     },
     "mysql": {
         "说明:": "这里是mysql配置",
-        "db_host": "121.36.15.181:3306",
+        "db_host": "127.0.0.1:3306",
         "db_username": "root",
-        "db_password": "123789abcA",
-        "db_name": "neiwangpoker",
+        "db_password": "change-me",
+        "db_name": "example",
         "db_max_idle_conns": 100,
         "db_max_open_conns": 500
     },
     "mongo": {
         "说明:": "这里是mongo配置",
-        "db_host": "121.36.15.181:27017",
+        "db_host": "127.0.0.1:27017",
         "db_username": "",
         "db_password": "",
-        "db_name": "neiwangpoker",
+        "db_name": "example",
         "db_replica_set_name": "",
         "mongo_up_url": "mongodb://%s:%s@%s/%s",
         "mongo_url": "mongodb://%s/%s",
@@ -54,8 +54,8 @@
                 "callbackclassname": "GateMsg"
             }
         ],
-        "url": "ws",
-        "inurl": "inws",
+        "url": "/ws",
+        "inurl": "/ws",
         "allowed_origins": [
             "https://example.com"
         ],
@@ -111,7 +111,7 @@
     },
     "telegram": {
         "telegram说明": "Telegram 机器人配置（可选，不填 Cfg.Telegram 为 nil 则不启用）",
-        "bot_token": "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11",
+        "bot_token": "000000:CHANGE-ME",
         "game_url": "https://t.me/your_bot?start=",
         "game_banner_url": "https://example.com/banner.png",
         "game_description": "游戏简介",
@@ -141,7 +141,8 @@
     "metrics": {
         "metrics说明": "Prometheus 监控配置",
         "enabled": false,
-        "port": 9090
+        "port": 9090,
+        "token": ""
     },
     "log_level": "日志等级,off为不开,其次为INFO,DEBUG,WARN,ERROR",
     "map_path": "off"

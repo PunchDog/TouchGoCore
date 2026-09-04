@@ -2,7 +2,6 @@ package util
 
 import (
 	"encoding/binary"
-	"fmt"
 	"sync"
 	"touchgocore/network/message"
 	"touchgocore/vars"
@@ -95,10 +94,9 @@ func NewFSMessage(protocol1 int32, protocol2 int32, pb proto.Message) *message.F
 
 func NewFSMessageWithID(protocol1 int32, protocol2 int32, requestID uint64, pb proto.Message) *message.FSMessage {
 	fnname := proto.MessageName(pb)
-	RegisterProtocolType(protocol1, protocol2, pb)
 	data, err := proto.Marshal(pb)
 	if err != nil {
-		vars.Error("打包数据失败:", err)
+		vars.Error("打包数据失败: %v", err)
 		return nil
 	}
 
@@ -116,6 +114,14 @@ func NewFSMessageWithID(protocol1 int32, protocol2 int32, requestID uint64, pb p
 	}
 }
 
+// ParseFSMessage 解析协议消息。未注册的 (protocol1, protocol2) 会被拒绝。
+func ParseFSMessage(buff interface{}) proto.Message {
+	return PasreFSMessage(buff)
+}
+
+// PasreFSMessage 历史拼写，请使用 ParseFSMessage。
+//
+// Deprecated: 使用 ParseFSMessage。
 func PasreFSMessage(buff interface{}) proto.Message {
 	var pb *message.FSMessage = nil
 	switch buff.(type) {
@@ -149,7 +155,7 @@ func PasreFSMessage(buff interface{}) proto.Message {
 
 	msgType, err := protoregistry.GlobalTypes.FindMessageByName(cmdName)
 	if err != nil {
-		vars.Error(fmt.Sprintf("找不到消息类型 %s (protocol %d:%d): %v", cmdName, p1, p2, err))
+		vars.Error("找不到消息类型 %s (protocol %d:%d): %v", cmdName, p1, p2, err)
 		return nil
 	}
 	msg1, ok := msgType.New().Interface().(proto.Message)
@@ -159,7 +165,7 @@ func PasreFSMessage(buff interface{}) proto.Message {
 	}
 	err = proto.Unmarshal(pb.GetBody(), msg1)
 	if err != nil {
-		vars.Error(fmt.Sprintf("proto[%v].Unmarshal error : %v. ---> msg:%+v.", msgType, err, msg1))
+		vars.Error("proto[%v].Unmarshal error : %v. ---> msg:%+v.", msgType, err, msg1)
 		return nil
 	}
 	return msg1

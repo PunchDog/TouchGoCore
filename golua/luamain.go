@@ -8,8 +8,11 @@ import (
 	"runtime"
 	"sync"
 	"sync/atomic"
+	"time"
 	"touchgocore/config"
+	"touchgocore/corectx"
 	"touchgocore/localtimer"
+	"touchgocore/metrics"
 	"touchgocore/syncmap"
 	"touchgocore/util"
 	"touchgocore/vars"
@@ -25,17 +28,25 @@ var (
 )
 
 // getUpdateIntervalMs 从配置获取更新间隔
+func luaCfg() *config.LuaConfig {
+	cfg := corectx.CfgFrom(luaParentCtx)
+	if cfg == nil {
+		return nil
+	}
+	return cfg.LuaConfig
+}
+
 func getUpdateIntervalMs() int64 {
-	if config.Cfg_ != nil && config.Cfg_.LuaConfig != nil && config.Cfg_.LuaConfig.UpdateInterval > 0 {
-		return config.Cfg_.LuaConfig.UpdateInterval
+	if lc := luaCfg(); lc != nil && lc.UpdateInterval > 0 {
+		return lc.UpdateInterval
 	}
 	return 1000 // 默认 1 秒
 }
 
 // getGCTickCount 从配置获取 GC tick 计数
 func getGCTickCount() int64 {
-	if config.Cfg_ != nil && config.Cfg_.LuaConfig != nil && config.Cfg_.LuaConfig.GCTickCount > 0 {
-		return config.Cfg_.LuaConfig.GCTickCount
+	if lc := luaCfg(); lc != nil && lc.GCTickCount > 0 {
+		return lc.GCTickCount
 	}
 	return 1800 // 默认 30 分钟 (30 * 60)
 }
@@ -163,7 +174,8 @@ func (ls *LuaScript) Call(funcname string, list ...interface{}) ([]interface{}, 
 	return ls.CallWithContext(context.Background(), funcname, list...)
 }
 
-// CallWithContext 使用上下文调用 Lua 函数
+// CallWithContext 使用上下文调用 Lua 函数。
+// 超时只中止等待：Lua 运行时非线程安全，后台 goroutine 不会被强杀，调用方应串行使用同一实例。
 func (ls *LuaScript) CallWithContext(ctx context.Context, funcname string, list ...interface{}) ([]interface{}, error) {
 	select {
 	case <-ls.ctx.Done():
@@ -201,13 +213,19 @@ func (ls *LuaScript) CallWithContext(ctx context.Context, funcname string, list 
 		}
 	}()
 
+	metrics.Lua.IncCalls(funcname)
+	started := time.Now()
 	select {
 	case <-ctx.Done():
+		metrics.Lua.IncCalls("timeout:" + funcname)
+		metrics.Lua.ObserveCallLatency(funcname, time.Since(started))
 		return nil, fmt.Errorf("call timeout: %w", ctx.Err())
 	case result := <-resultChan:
+		metrics.Lua.ObserveCallLatency(funcname, time.Since(started))
 		ls.returnValues = []interface{}{LuaToGoValueWithContext(ctx, result)}
 		return ls.returnValues, nil
 	case err := <-errChan:
+		metrics.Lua.ObserveCallLatency(funcname, time.Since(started))
 		return nil, fmt.Errorf("Lua call failed: %w", err)
 	}
 }
@@ -338,7 +356,8 @@ func RegisterLuaClass(class ILuaClassInterface) error {
 
 // RunLua 启动 Lua 服务
 func RunLua() error {
-	if config.Cfg_.LuaConfig == nil {
+	lc := luaCfg()
+	if lc == nil {
 		vars.Info("Lua service disabled")
 		return nil
 	}
@@ -348,7 +367,7 @@ func RunLua() error {
 	luaInstancesMu.Unlock()
 
 	var err error
-	dl, err := NewLuaScript(config.Cfg_.LuaConfig.ScriptPath)
+	dl, err := NewLuaScript(lc.ScriptPath)
 	if err != nil {
 		return fmt.Errorf("create Lua script failed: %w", err)
 	}
@@ -526,7 +545,7 @@ func Run(ctx context.Context) error {
 		ctx = context.Background()
 	}
 	luaParentCtx = ctx
-	if config.Cfg_.LuaConfig == nil {
+	if luaCfg() == nil {
 		vars.Info("不启动lua服务")
 		return nil
 	}

@@ -41,9 +41,9 @@ type TLSConfig struct {
 }
 
 type WebConfig struct {
-	HTTPPort     int      `json:"httpport"`      //监听端口
-	Static       *string  `json:"static"`        //文件服
-	AllowOrigins []string `json:"allow_origins"` // CORS 允许的来源，空则不允许跨域（生产默认）
+	HTTPPort     int        `json:"httpport"`      //监听端口
+	Static       *string    `json:"static"`        //文件服
+	AllowOrigins []string   `json:"allow_origins"` // CORS 允许的来源，空则不允许跨域（生产默认）
 	TLS          *TLSConfig `json:"tls"`
 }
 
@@ -72,9 +72,9 @@ type WebsocketConfig struct {
 	WorkerPoolSize int  `json:"worker_pool_size"` // Worker 数量，0 表示串行模式（默认），>0 启用并行
 	ShardByKey     bool `json:"shard_by_key"`     // 是否按 UID 分片（保证同 UID 消息顺序性）
 	// 认证配置
-	AuthTokenHeader  string `json:"auth_token_header"`  // 认证 Token 的 HTTP 头名称（默认 "X-Auth-Token"），为空则不验证
-	AuthTokenQuery   string `json:"auth_token_query"`   // 认证 Token 的 URL 查询参数名（默认 "token"），为空则不从 query 读取
-	AuthIntranetSkip bool   `json:"auth_intranet_skip"` // 内网连接是否跳过认证
+	AuthTokenHeader  string     `json:"auth_token_header"`  // 认证 Token 的 HTTP 头名称（默认 "X-Auth-Token"），为空则不验证
+	AuthTokenQuery   string     `json:"auth_token_query"`   // 认证 Token 的 URL 查询参数名（默认 "token"），为空则不从 query 读取
+	AuthIntranetSkip bool       `json:"auth_intranet_skip"` // 内网连接是否跳过认证
 	TLS              *TLSConfig `json:"tls"`
 }
 
@@ -144,6 +144,7 @@ type ServerConfig struct {
 
 // Metrics 监控配置
 type MetricsConfig struct {
-	Enabled bool `json:"enabled"` // 是否启用 Prometheus 监控
-	Port    int  `json:"port"`    // metrics HTTP 端口（默认 9090）
+	Enabled bool   `json:"enabled"` // 是否启用 Prometheus 监控
+	Port    int    `json:"port"`    // metrics HTTP 端口（默认 9090）
+	Token   string `json:"token"`   // 非空时 /metrics 需要 Bearer 或 ?token=
 }

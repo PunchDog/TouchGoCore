@@ -4,7 +4,8 @@
 
 1. 设置 `CONFIG_PATH` 指向包含 `conf/` 的目录（示例配置：`example/conf/gatewayserverbus.json`，需在 `conf/config.ini` 中指向该 json）。
 2. 启动前会注册 `GatePing`/`GatePong`（协议 `1:1` / `1:2`）。未调用 `util.RegisterProtocolType` 的 `(protocol1, protocol2)` 会被拒绝解析。
-3. WebSocket Token：环境变量 `TOUCHGO_WS_TOKEN`，未设置时示例使用 `dev-token`。登录服示例通过 `?token=` 传递。
+3. WebSocket Token：环境变量 `TOUCHGO_WS_TOKEN`。未设置时本地使用 `dev-token`；`TOUCHGO_ENV=production` 时未设置会拒绝认证。登录服示例通过 `?token=` 传递。
+4. 监听路径：`ws.url` / `ws.inurl`（如 `/ws` 或 `ws://host:8000/ws`），缺省 `/ws`。
 
 ```bash
 export CONFIG_PATH=/opt/touchgo
@@ -47,6 +48,8 @@ sudo systemctl enable --now touchgo
 - [ ] gRPC：`tls.enable=true`，`skip_for_intranet=false`；`auth.mode` 使用 `allowlist`、`token` 或 `mtls`（不要用 `none` 对公网）
 - [ ] HTTP/WS TLS：直连时配置 `web.tls` / `ws.tls`；前置 Nginx 终结 TLS 时可保持 `enable: false`
 - [ ] bidi RPC：`Head.request_id` 用于并发响应关联；旧客户端 `request_id=0` 仍走串行兼容
+- [ ] 生产设置 `TOUCHGO_WS_TOKEN`，不要依赖 `dev-token`
+- [ ] `metrics.token` 保护 `/metrics`，或仅内网暴露
 
 ## RPC request_id
 

@@ -8,7 +8,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"touchgocore/config"
 	"touchgocore/localtimer"
 	"touchgocore/network/message"
 	"touchgocore/syncmap"
@@ -84,10 +83,8 @@ func (c *RpcClient) Tick() {
 // markDisconnected 标记连接断开，并启动重连定时器
 func (c *RpcClient) markDisconnected() {
 	c.connStatus.Store(false)
-
-	// 触发断开连接回调
+	c.failAllPending()
 	c.triggerOnDisconnected(nil)
-
 	localtimer.AddTimer(c)
 }
 
@@ -132,6 +129,10 @@ func (c *RpcClient) SendMsg(protocol1, protocol2 int32, pb proto.Message, callfu
 	var recv *message.FSMessage
 	select {
 	case recv = <-waitCh:
+		if recv == nil {
+			vars.Error("RPC客户端连接断开[%s] 协议:%d:%d request_id=%d", c.fullAddr, protocol1, protocol2, reqID)
+			return
+		}
 	case <-ctx.Done():
 		vars.Error("RPC客户端等待响应超时[%s] 协议:%d:%d request_id=%d", c.fullAddr, protocol1, protocol2, reqID)
 		return
@@ -198,8 +199,14 @@ func (c *RpcClient) recvLoop(stream message.Grpc_MsgClient) {
 }
 
 func (c *RpcClient) failAllPending() {
-	c.pending.Range(func(key, _ any) bool {
+	c.pending.Range(func(key, value any) bool {
 		c.pending.Delete(key)
+		if ch, ok := value.(chan *message.FSMessage); ok {
+			select {
+			case ch <- nil:
+			default:
+			}
+		}
 		return true
 	})
 }
@@ -255,9 +262,9 @@ func NewRpcClient(servername, addr string, port int) *RpcClient {
 	// 检查 TLS 配置
 	useTLS := false
 	skipForIntranet := false
-	if config.Cfg_ != nil && config.Cfg_.Rpc != nil && config.Cfg_.Rpc.TLS != nil {
-		useTLS = config.Cfg_.Rpc.TLS.Enable
-		skipForIntranet = config.Cfg_.Rpc.TLS.SkipForIntranet
+	if rpc := activeRpcCfg(); rpc != nil && rpc.TLS != nil {
+		useTLS = rpc.TLS.Enable
+		skipForIntranet = rpc.TLS.SkipForIntranet
 	}
 
 	// 检查是否需要跳过 TLS（内网且配置允许）

@@ -211,12 +211,13 @@ func (app *App) loadConfig() error {
 	}
 	config.ServerName_ = app.ServerName
 	app.Cfg = config.Cfg_
+	app.Cfg.Normalize()
 	if err := app.Cfg.Validate(); err != nil {
 		return fmt.Errorf("配置校验失败: %w", err)
 	}
 
 	//读取INI
-	if p, err := ini.Load(config.GetDefaultFie()); err == nil {
+	if p, err := ini.Load(config.GetDefaultFile()); err == nil {
 		util.DEBUG = p.GetString("GLOBAL", "debug", "false") == "true"
 		util.Fps, _ = strconv.Atoi(p.GetString("GLOBAL", "fps", "120"))
 		util.Version = p.GetString(app.ServerName, "Version", "1.0")
@@ -230,7 +231,11 @@ func (app *App) loadConfig() error {
 
 // initLogger 初始化日志系统
 func (app *App) initLogger() {
-	vars.Run(path.Join(config.GetBasePath(), "/log"), config.ServerName_, config.Cfg_.LogLevel)
+	logLevel := "info"
+	if app.Cfg != nil && app.Cfg.LogLevel != "" {
+		logLevel = app.Cfg.LogLevel
+	}
+	vars.Run(path.Join(config.GetBasePath(), "/log"), app.ServerName, logLevel)
 
 	centerstr := "*         Service:[" + config.ServerName_ + "] Version:[" + util.Version + "]         *"
 	var sb strings.Builder
@@ -305,8 +310,11 @@ func (app *App) registerServices() {
 type metricsService struct{}
 
 func (s *metricsService) Name() string { return "metrics" }
-func (s *metricsService) Start(_ context.Context) error {
-	StartMetrics(config.Cfg_.Metrics)
+func (s *metricsService) Start(ctx context.Context) error {
+	cfg := corectx.CfgFrom(ctx)
+	if cfg != nil {
+		StartMetrics(cfg.Metrics)
+	}
 	return nil
 }
 func (s *metricsService) Stop(ctx context.Context) error {

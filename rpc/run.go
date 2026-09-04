@@ -3,7 +3,6 @@ package rpc
 import (
 	"context"
 	"fmt"
-	"touchgocore/config"
 	"touchgocore/corectx"
 	"touchgocore/syncmap"
 	"touchgocore/vars"
@@ -12,9 +11,12 @@ import (
 )
 
 const (
-	MAX_MSG_SIZE     = 1024 * 1024 * 10
-	MAX_CHANNEL_SIZE = 100000 // 减少通道容量以降低内存占用
+	MAX_MSG_SIZE       = 1024 * 1024 * 10
+	defaultChannelSize = 4096
+	MAX_CHANNEL_SIZE   = defaultChannelSize
 )
+
+var channelSize = defaultChannelSize
 
 var rpcRunCtx = context.Background()
 
@@ -28,10 +30,9 @@ func Run(ctx context.Context) error {
 		vars.Info("RPC配置为空，跳过RPC服务启动")
 		return nil
 	}
-	rpcCfg := root.RpcPort
-	if rpcCfg == nil && root.Rpc != nil {
-		rpcCfg = root.Rpc
-	}
+	root.Normalize()
+	channelSize = root.QueueCapacity(defaultChannelSize)
+	rpcCfg := root.RpcOf()
 	if rpcCfg == nil {
 		vars.Info("RPC配置为空，跳过RPC服务启动")
 		return nil
@@ -85,10 +86,7 @@ func Run(ctx context.Context) error {
 
 // resolveTLSConfig 统一解析TLS配置
 func resolveTLSConfig(defaultTLS bool) bool {
-	rpc := config.Cfg_.Rpc
-	if rpc == nil {
-		rpc = config.Cfg_.RpcPort
-	}
+	rpc := activeRpcCfg()
 	if rpc != nil && rpc.TLS != nil && rpc.TLS.Enable {
 		if rpc.TLS.SkipForIntranet {
 			vars.Warning("rpc.tls.skip_for_intranet=true：内网将按各端 use_tls 决定是否明文，生产环境请关闭")
@@ -116,10 +114,7 @@ func Stop(ctx context.Context) {
 	if cfg == nil {
 		return
 	}
-	rpcCfg := cfg.RpcPort
-	if rpcCfg == nil {
-		rpcCfg = cfg.Rpc
-	}
+	rpcCfg := cfg.RpcOf()
 	if rpcCfg == nil {
 		return
 	}

@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"sync/atomic"
 	"time"
+	"touchgocore/metrics"
 	"touchgocore/syncmap"
 	"touchgocore/util"
 	"touchgocore/vars"
@@ -152,13 +153,29 @@ func (c *Client) readLoop() {
 	for c.Connected() {
 		if _, data, err := c.wsConnect.ReadMessage(); err == nil {
 			if c.Connected() {
-				select {
-				case msgQueue <- &msgQueueType{uid: c.UID, data: data}:
-					c.stats.messagesReceived.Add(1)
-					c.stats.bytesReceived.Add(int64(len(data)))
-					c.stats.lastActivity.Store(util.CurrentTime())
-				case <-closeCh:
-					return
+				item := &msgQueueType{uid: c.UID, data: data}
+				if dropMessageOnFull {
+					select {
+					case msgQueue <- item:
+						c.stats.messagesReceived.Add(1)
+						c.stats.bytesReceived.Add(int64(len(data)))
+						c.stats.lastActivity.Store(util.CurrentTime())
+					case <-closeCh:
+						return
+					default:
+						UpdateErrorStats()
+						metrics.WS.IncErrors("queue_full")
+						vars.Warning("WebSocket 接收队列已满，丢弃消息 uid=%d", c.UID)
+					}
+				} else {
+					select {
+					case msgQueue <- item:
+						c.stats.messagesReceived.Add(1)
+						c.stats.bytesReceived.Add(int64(len(data)))
+						c.stats.lastActivity.Store(util.CurrentTime())
+					case <-closeCh:
+						return
+					}
 				}
 			}
 		} else {
@@ -253,6 +270,7 @@ func (c *Client) SendMsg(msg ...any) {
 		if float64(chanLen) >= float64(chanCap)*BACKPRESSURE_THRESHOLD {
 			vars.Warning("WebSocket 发送通道背压过高: len=%d, cap=%d, client=%s", chanLen, chanCap, c.remoteAddr)
 			if dropMessageOnFull {
+				metrics.WS.IncErrors("write")
 				vars.Error("WebSocket 发送通道已满，丢弃消息: client=%s", c.remoteAddr)
 				return
 			}

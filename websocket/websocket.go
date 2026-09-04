@@ -30,8 +30,8 @@ var (
 // ============ 原有代码 ============
 
 const (
-	DEFAULT_WRITE_BUFFER_SIZE = 4096
-	DEFAULT_READ_BUFFER_SIZE  = 4096
+	DEFAULT_WRITE_BUFFER_SIZE = 1024 * 1024
+	DEFAULT_READ_BUFFER_SIZE  = 1024 * 1024
 	// 背压阈值：当通道满于此比例时，记录警告日志
 	BACKPRESSURE_THRESHOLD = 0.9
 )

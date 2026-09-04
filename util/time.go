@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"regexp"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"time"
 	"touchgocore/vars"
@@ -14,16 +15,19 @@ import (
 )
 
 const (
-	// VirtualTimeKey Redis 中存储虚拟时间配置的 Key
+	// VirtualTimeKey Redis 中存储虚拟时间配置的 Key（同 GameGroup 共用）
 	VirtualTimeKey = "game:virtual_time"
 	// FieldRealTime    Redis Hash 中的真实时间字段名
 	FieldRealTime = "real_time"
 	// FieldVirtualTime Redis Hash 中的虚拟时间字段名
-	FieldVirtualTime  = "virtual_time"
-	defaultVTCacheTTL = 500 * time.Millisecond
+	FieldVirtualTime = "virtual_time"
+	defaultVTPoll    = 200 * time.Millisecond
 )
 
-// virtualTimeBackend 虚拟时间存储，便于单测注入内存实现。
+// ErrVirtualTimeNotSet Redis 中未配置该组虚拟时间，各节点应走真实时间。
+var ErrVirtualTimeNotSet = errors.New("virtual time not set")
+
+// virtualTimeBackend 组内共享存储（生产为 Redis）。
 type virtualTimeBackend interface {
 	HGetAll(ctx context.Context, key string) (map[string]string, error)
 	HSet(ctx context.Context, key string, fields map[string]any) error
@@ -46,21 +50,26 @@ func (r redisVTBackend) Del(ctx context.Context, key string) error {
 	return r.c.Del(ctx, key).Err()
 }
 
-type vtCacheEntry struct {
-	data      *VirtualTimeData
-	fetchedAt time.Time
-	hasData   bool
+type redisSubscriber interface {
+	Subscribe(ctx context.Context, channels ...string) *redis.PubSub
+}
+
+type vtSnapshot struct {
+	data    *VirtualTimeData
+	hasData bool
 }
 
 var (
-	redisClient redis.Cmdable
-	vtBackend   virtualTimeBackend
-	vtCache     atomic.Pointer[vtCacheEntry]
-	vtCacheTTL  atomic.Int64
+	redisClient    redis.Cmdable
+	vtBackend      virtualTimeBackend
+	vtSnap         atomic.Pointer[vtSnapshot]
+	vtPollInterval atomic.Int64
+	vtSyncMu       sync.Mutex
+	vtSyncCancel   context.CancelFunc
 )
 
 func init() {
-	vtCacheTTL.Store(int64(defaultVTCacheTTL))
+	vtPollInterval.Store(int64(defaultVTPoll))
 }
 
 // VirtualTimeData 虚拟时间数据结构
@@ -78,28 +87,125 @@ func VirtualTimeRedisKey() string {
 	return virtualTimeKey()
 }
 
-func invalidateVTCache() {
-	vtCache.Store(nil)
+func virtualTimeNotifyChannel() string {
+	return virtualTimeKey() + ":notify"
 }
 
-func SetVirtualTimeCacheTTL(d time.Duration) {
-	if d <= 0 {
-		d = defaultVTCacheTTL
+func storeSnapshot(data *VirtualTimeData, hasData bool) {
+	vtSnap.Store(&vtSnapshot{data: data, hasData: hasData})
+}
+
+func stopVirtualTimeSync() {
+	vtSyncMu.Lock()
+	defer vtSyncMu.Unlock()
+	if vtSyncCancel != nil {
+		vtSyncCancel()
+		vtSyncCancel = nil
 	}
-	vtCacheTTL.Store(int64(d))
-	invalidateVTCache()
+}
+
+func startVirtualTimeSync(client redis.Cmdable) {
+	stopVirtualTimeSync()
+	ctx, cancel := context.WithCancel(context.Background())
+	vtSyncMu.Lock()
+	vtSyncCancel = cancel
+	vtSyncMu.Unlock()
+	go vtPollLoop(ctx)
+	if client != nil {
+		go vtSubscribeLoop(ctx, client)
+	}
 }
 
 func useVirtualTimeBackend(b virtualTimeBackend) {
+	stopVirtualTimeSync()
 	vtBackend = b
 	if b == nil {
 		redisClient = nil
+		storeSnapshot(nil, false)
+		return
 	}
-	invalidateVTCache()
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	RefreshVirtualTime(ctx)
 }
 
-// GetVirtualTimeData 获取 Redis 中存储的虚拟时间数据
-// 返回 nil 表示未找到或出错，使用真实时间
+// RefreshVirtualTime 从 Redis（组内共享节点）拉取偏移并更新本地快照。
+func RefreshVirtualTime(ctx context.Context) {
+	if vtBackend == nil {
+		storeSnapshot(nil, false)
+		return
+	}
+	data, err := GetVirtualTimeData(ctx)
+	if err != nil {
+		if errors.Is(err, ErrVirtualTimeNotSet) {
+			storeSnapshot(nil, false)
+			return
+		}
+		// Redis 瞬时失败时保留上一份快照，避免同组一部分节点跳回真实时间。
+		return
+	}
+	storeSnapshot(data, true)
+}
+
+func vtPollLoop(ctx context.Context) {
+	d := time.Duration(vtPollInterval.Load())
+	if d <= 0 {
+		d = defaultVTPoll
+	}
+	ticker := time.NewTicker(d)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			c, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+			RefreshVirtualTime(c)
+			cancel()
+		}
+	}
+}
+
+func vtSubscribeLoop(ctx context.Context, client redis.Cmdable) {
+	subber, ok := client.(redisSubscriber)
+	if !ok {
+		return
+	}
+	ps := subber.Subscribe(ctx, virtualTimeNotifyChannel())
+	defer func() { _ = ps.Close() }()
+	ch := ps.Channel()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case msg, ok := <-ch:
+			if !ok {
+				return
+			}
+			_ = msg
+			c, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+			RefreshVirtualTime(c)
+			cancel()
+		}
+	}
+}
+
+func vtPublish(ctx context.Context, action string) {
+	if redisClient == nil {
+		return
+	}
+	_ = redisClient.Publish(ctx, virtualTimeNotifyChannel(), action).Err()
+}
+
+// SetVirtualTimePollInterval 组内从 Redis 拉取偏移的间隔（CurrentTime 热路径不打 Redis）。
+func SetVirtualTimePollInterval(d time.Duration) {
+	if d <= 0 {
+		d = defaultVTPoll
+	}
+	vtPollInterval.Store(int64(d))
+}
+
+// GetVirtualTimeData 读取 Redis 中该 GameGroup 的共享虚拟时间偏移。
 func GetVirtualTimeData(ctx context.Context) (*VirtualTimeData, error) {
 	if vtBackend == nil {
 		return nil, errors.New("redis client not initialized")
@@ -112,7 +218,7 @@ func GetVirtualTimeData(ctx context.Context) (*VirtualTimeData, error) {
 
 	// 如果 Hash 不存在，返回 nil
 	if len(result) == 0 {
-		return nil, fmt.Errorf("get virtual time result from redis is 0")
+		return nil, ErrVirtualTimeNotSet
 	}
 
 	realTime, err := strconv.ParseInt(result[FieldRealTime], 10, 64)
@@ -146,73 +252,50 @@ func SetVirtualTimeData(ctx context.Context, realTime, virtualTime int64) error 
 	if err := vtBackend.HSet(ctx, virtualTimeKey(), fields); err != nil {
 		return fmt.Errorf("set virtual time to redis: %w", err)
 	}
-	vtCache.Store(&vtCacheEntry{
-		data:      &VirtualTimeData{RealTime: realTime, VirtualTime: virtualTime},
-		fetchedAt: time.Now(),
-		hasData:   true,
-	})
+	storeSnapshot(&VirtualTimeData{RealTime: realTime, VirtualTime: virtualTime}, true)
+	vtPublish(ctx, "set")
 	return nil
 }
 
 // CalculateVirtualTime 根据 Redis 中的虚拟时间数据计算当前虚拟时间
 // 公式：虚拟时间 = 记录虚拟时间 + (当前真实时间 - 记录真实时间)
 // 如果 Redis 中没有虚拟时间配置，返回当前真实时间
-func cachedVirtualTime() (*VirtualTimeData, bool) {
-	if vtBackend == nil {
-		return nil, false
-	}
-	if e := vtCache.Load(); e != nil {
-		ttl := time.Duration(vtCacheTTL.Load())
-		if time.Since(e.fetchedAt) < ttl {
-			return e.data, e.hasData
-		}
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	defer cancel()
-	data, err := GetVirtualTimeData(ctx)
-	entry := &vtCacheEntry{fetchedAt: time.Now()}
-	if err != nil {
-		vtCache.Store(entry)
-		return nil, false
-	}
-	entry.data = data
-	entry.hasData = true
-	vtCache.Store(entry)
-	return data, true
-}
-
 func applyVirtualOffset(data *VirtualTimeData) time.Time {
 	nowReal := time.Now().UnixNano()
 	return time.Unix(0, data.VirtualTime+(nowReal-data.RealTime))
 }
 
-// CalculateVirtualTime 根据缓存/Redis 中的虚拟时间数据计算当前虚拟时间。
+func snapshotOffset() *VirtualTimeData {
+	e := vtSnap.Load()
+	if e == nil || !e.hasData || e.data == nil {
+		return nil
+	}
+	return e.data
+}
+
+// CalculateVirtualTime 按 Redis 组内共享偏移计算当前虚拟时间。
 // 公式：虚拟时间 = 记录虚拟时间 + (当前真实时间 - 记录真实时间)
 func CalculateVirtualTime(ctx context.Context) (time.Time, error) {
-	if data, ok := cachedVirtualTime(); ok && data != nil {
+	RefreshVirtualTime(ctx)
+	if data := snapshotOffset(); data != nil {
 		return applyVirtualOffset(data), nil
 	}
 	if vtBackend == nil {
 		return time.Now(), errors.New("redis client not initialized")
 	}
-	data, err := GetVirtualTimeData(ctx)
-	if err != nil {
-		return time.Now(), err
-	}
-	return applyVirtualOffset(data), nil
+	return time.Now(), ErrVirtualTimeNotSet
 }
 
-// CurrentTime 返回当前时间，支持虚拟时间。
-// Redis 未初始化或缓存未命中虚拟偏移时走真实时间，避免每个 tick 都 HGETALL。
+// CurrentTime 返回当前时间。偏移以 Redis 中 GameGroup 共享数据为准，
+// 热路径只做本地换算；偏移由轮询/PubSub 从 Redis 同步。
 func CurrentTime() time.Time {
-	data, ok := cachedVirtualTime()
-	if !ok || data == nil {
-		return time.Now()
+	if data := snapshotOffset(); data != nil {
+		return applyVirtualOffset(data)
 	}
-	return applyVirtualOffset(data)
+	return time.Now()
 }
 
-// ResetVirtualTime 重置虚拟时间为真实时间（删除当前 GameGroup 的 key）。
+// ResetVirtualTime 删除组内 Redis 偏移，同组节点随后回到真实时间。
 func ResetVirtualTime(ctx context.Context) error {
 	if vtBackend == nil {
 		return errors.New("redis client not initialized")
@@ -220,19 +303,32 @@ func ResetVirtualTime(ctx context.Context) error {
 	if err := vtBackend.Del(ctx, virtualTimeKey()); err != nil {
 		return err
 	}
-	invalidateVTCache()
+	storeSnapshot(nil, false)
+	vtPublish(ctx, "reset")
 	return nil
 }
 
-// InitVirtualTime 初始化虚拟时间模块（应在应用启动时调用）
+// InitVirtualTime 绑定 Redis 共享节点，并启动组内偏移同步。
 func InitVirtualTime(client redis.Cmdable) {
 	redisClient = client
 	if client == nil {
 		useVirtualTimeBackend(nil)
 		return
 	}
-	useVirtualTimeBackend(redisVTBackend{c: client})
-	vars.Info("虚拟时间模块初始化redis")
+	vtBackend = redisVTBackend{c: client}
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	RefreshVirtualTime(ctx)
+	cancel()
+	startVirtualTimeSync(client)
+	vars.Info("虚拟时间模块使用 Redis 共享节点 key=%s", virtualTimeKey())
+}
+
+// StopVirtualTime 停止组内 Redis 同步。
+func StopVirtualTime() {
+	stopVirtualTimeSync()
+	storeSnapshot(nil, false)
+	vtBackend = nil
+	redisClient = nil
 }
 
 // 时间工具函数部分保持不变（已优化命名和错误处理）

@@ -103,17 +103,15 @@ func TestResetVirtualTimeUsesGroupKey(t *testing.T) {
 	}
 }
 
-func TestCurrentTimeUsesCacheNotBackendEveryCall(t *testing.T) {
+func TestCurrentTimeFollowsRedisGroupOffset(t *testing.T) {
 	prev := GameGroup
-	GameGroup = "cache"
+	GameGroup = "shared"
 	t.Cleanup(func() {
 		GameGroup = prev
 		useVirtualTimeBackend(nil)
-		SetVirtualTimeCacheTTL(defaultVTCacheTTL)
 	})
 	store := newMemVTStore()
 	useVirtualTimeBackend(store)
-	SetVirtualTimeCacheTTL(time.Hour)
 	now := time.Now().UnixNano()
 	if err := SetVirtualTimeData(context.Background(), now, now+2*time.Hour.Nanoseconds()); err != nil {
 		t.Fatal(err)
@@ -122,13 +120,40 @@ func TestCurrentTimeUsesCacheNotBackendEveryCall(t *testing.T) {
 	if got.Sub(time.Now()) < time.Hour {
 		t.Fatalf("expected ~2h offset, got %v", got)
 	}
-	// wipe backend; cache should still apply offset
-	store.mu.Lock()
-	store.data = map[string]map[string]string{}
-	store.mu.Unlock()
-	got2 := CurrentTime()
-	if got2.Sub(time.Now()) < time.Hour {
-		t.Fatal("cache miss after backend wipe")
+	if err := ResetVirtualTime(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	RefreshVirtualTime(context.Background())
+	delta := time.Since(CurrentTime())
+	if delta < 0 {
+		delta = -delta
+	}
+	if delta > time.Second {
+		t.Fatalf("after redis reset, expected real time, drift=%v", delta)
+	}
+}
+
+func TestGroupServersShareRedisOffset(t *testing.T) {
+	prev := GameGroup
+	GameGroup = "party"
+	t.Cleanup(func() {
+		GameGroup = prev
+		useVirtualTimeBackend(nil)
+	})
+	store := newMemVTStore()
+	useVirtualTimeBackend(store)
+	now := time.Now().UnixNano()
+	offset := 90 * time.Minute.Nanoseconds()
+	if err := SetVirtualTimeData(context.Background(), now, now+offset); err != nil {
+		t.Fatal(err)
+	}
+
+	// 模拟同组另一进程：清空本地快照后从同一 Redis key 拉取
+	storeSnapshot(nil, false)
+	RefreshVirtualTime(context.Background())
+	got := CurrentTime()
+	if got.Sub(time.Now()) < 60*time.Minute {
+		t.Fatalf("peer should see shared redis offset, got %v", got)
 	}
 }
 

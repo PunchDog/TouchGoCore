@@ -414,6 +414,7 @@ func (app *App) closeDatabase() {
 		app.MySQL = nil
 	}
 	if app.Redis != nil {
+		util.StopVirtualTime()
 		app.Redis.Close()
 		app.Redis = nil
 	}

@@ -258,7 +258,7 @@ func (dbo *DbOperate) DBFindAll(name string, query interface{}, resHandler func(
 	}
 	defer qCursor.Close(ctx)
 
-	vars.Debug("[DBFindAll] name:%s,query:%v, q:%b", name, query, qCursor)
+	vars.Debug("[DBFindAll] name:%s,query:%v, q:%v", name, query, qCursor)
 
 	for qCursor.TryNext(ctx) {
 		if nil != resHandler {

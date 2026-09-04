@@ -6,7 +6,12 @@
     },
     "web": {
         "httpport": 1000,
-        "allow_origins": ["http://127.0.0.1:3000"]
+        "allow_origins": ["http://127.0.0.1:3000"],
+        "tls": {
+            "enable": false,
+            "cert_file": "conf/server.crt",
+            "key_file": "conf/server.key"
+        }
     },
     "ws": {
         "port": [
@@ -24,8 +29,26 @@
         "worker_pool_size": 0,
         "shard_by_key": false,
         "auth_token_header": "X-Auth-Token",
-        "auth_token_query": "",
-        "auth_intranet_skip": false
+        "auth_token_query": "token",
+        "auth_intranet_skip": false,
+        "tls": {
+            "enable": false,
+            "cert_file": "conf/server.crt",
+            "key_file": "conf/server.key"
+        }
+    },
+    "rpc_port": {
+        "server": [],
+        "client": [],
+        "tls": {
+            "enable": false,
+            "skip_for_intranet": false
+        },
+        "auth": {
+            "mode": "none",
+            "allowlist": [],
+            "token": ""
+        }
     },
     "log_level": "debug"
 }

@@ -100,6 +100,9 @@ func (this *Cfg) LoadWithError(cfgname string) error {
 }
 
 var (
+	// Cfg_ 全局配置单例。
+	//
+	// Deprecated: 新代码应从 App.Cfg 或 corectx.CfgFrom(ctx) 读取。
 	Cfg_         *Cfg = nil
 	ServerName_  string
 	_basePath    = path.Join(path.Dir(os.Args[0]), "../")

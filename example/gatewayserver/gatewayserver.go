@@ -4,6 +4,8 @@ import (
 	"os"
 
 	"touchgocore"
+	"touchgocore/example/gatewayserver/gatepb"
+	"touchgocore/util"
 	"touchgocore/vars"
 	"touchgocore/websocket"
 )
@@ -31,7 +33,9 @@ func gatewayAuth(token, remoteAddr string) bool {
 }
 
 func main() {
-	// 业务 protobuf 须在启动前注册：util.RegisterProtocolType(p1, p2, &YourMsg{})
-	// 未注册的 (protocol1, protocol2) 会被拒绝解析。
+	util.RegisterProtocolTypes(
+		util.ProtocolBinding{Protocol1: gatepb.ProtocolPing1, Protocol2: gatepb.ProtocolPing2, Message: &gatepb.GatePing{}},
+		util.ProtocolBinding{Protocol1: gatepb.ProtocolPong1, Protocol2: gatepb.ProtocolPong2, Message: &gatepb.GatePong{}},
+	)
 	touchgocore.Run(Name)
 }

@@ -22,3 +22,4 @@ example/*/*/*.log
 .workbuddy/*
 vars/logs/*.log
 .trae/documents/*
+.cursor/plans/*.md

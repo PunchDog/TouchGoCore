@@ -1,0 +1,18 @@
+[Unit]
+Description=TouchGoCore example gateway
+After=network.target
+
+[Service]
+Type=simple
+Environment=CONFIG_PATH=/opt/touchgo
+Environment=TOUCHGO_WS_TOKEN=change-me
+ExecStart=/opt/touchgo/bin/gatewayserver
+WorkingDirectory=/opt/touchgo
+KillSignal=SIGTERM
+TimeoutStopSec=30
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

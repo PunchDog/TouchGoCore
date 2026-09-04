@@ -1,0 +1,11 @@
+syntax = "proto3";
+package example.gate;
+option go_package = "touchgocore/example/gatewayserver/gatepb";
+
+message GatePing {
+  string payload = 1;
+}
+
+message GatePong {
+  string payload = 1;
+}

@@ -24,6 +24,7 @@ import (
 	"touchgocore/websocket"
 
 	"touchgocore/ini"
+	"touchgocore/syncmap"
 )
 
 // ==================== 依赖注入容器 ====================
@@ -43,6 +44,12 @@ type App struct {
 	MongoDB  *db.DbOperate
 	TimerMgr *localtimer.TimerManager
 	CallFunc *util.CallFunction
+
+	// 模块注册表（优先于此读取，全局变量作为 fallback）
+	rpcServers *syncmap.Map[string, *rpc.RpcServer]
+	rpcClients *syncmap.Map[string, *rpc.RpcClient]
+	wsClients  *syncmap.Map[int64, *websocket.Client]
+	databases  *syncmap.MapAny
 
 	// 上下文和取消
 	ctx    context.Context
@@ -97,8 +104,8 @@ func (s *luaService) Name() string { return "lua" }
 func (s *luaService) Start(ctx context.Context) error {
 	return lua.Run(ctx)
 }
-func (s *luaService) Stop(_ context.Context) error {
-	lua.Stop()
+func (s *luaService) Stop(ctx context.Context) error {
+	lua.Stop(ctx)
 	return nil
 }
 
@@ -109,8 +116,8 @@ func (s *rpcService) Name() string { return "rpc" }
 func (s *rpcService) Start(ctx context.Context) error {
 	return rpc.Run(ctx)
 }
-func (s *rpcService) Stop(_ context.Context) error {
-	rpc.Stop()
+func (s *rpcService) Stop(ctx context.Context) error {
+	rpc.Stop(ctx)
 	return nil
 }
 
@@ -122,8 +129,8 @@ func (s *telegramService) Start(ctx context.Context) error {
 	telegram.TelegramStart(ctx)
 	return nil
 }
-func (s *telegramService) Stop(_ context.Context) error {
-	telegram.TelegramStop()
+func (s *telegramService) Stop(ctx context.Context) error {
+	telegram.TelegramStop(ctx)
 	return nil
 }
 
@@ -156,9 +163,17 @@ func (s *ginService) Stop(ctx context.Context) error {
 func NewApp(serverName string) (*App, error) {
 	app := &App{
 		ServerName: serverName,
+		rpcServers: syncmap.NewMap[string, *rpc.RpcServer](),
+		rpcClients: syncmap.NewMap[string, *rpc.RpcClient](),
+		wsClients:  syncmap.NewMap[int64, *websocket.Client](),
+		databases:  syncmap.NewAny(),
 	}
 	app.ctx, app.cancel = context.WithCancel(context.Background())
 	app.CallFunc = util.DefaultCallFunc
+
+	rpc.UseRegistry(app.rpcServers, app.rpcClients)
+	websocket.UseClientMap(app.wsClients)
+	db.UseRegistry(app.databases)
 
 	// 加载配置
 	if err := app.loadConfig(); err != nil {
@@ -396,7 +411,7 @@ func (app *App) closeDatabase() {
 	}
 }
 
-// GetApp 获取当前App实例（全局单例，向后兼容）。
+// GetApp 获取当前 App 实例（全局单例，向后兼容）。
 //
 // Deprecated: 新代码应通过 NewApp 返回值或 corectx.AppViewFrom(ctx) 获取依赖。
 var globalApp *App
@@ -409,17 +424,32 @@ func (app *App) Context() context.Context {
 	return app.ctx
 }
 
-// GetRpcClient 从 RPC 注册表取客户端（全局 fallback）
+// GetRpcClient 从 App registry 取客户端，未命中则 fallback 全局。
 func (app *App) GetRpcClient(name string) *rpc.RpcClient {
+	if app != nil && app.rpcClients != nil {
+		if c, ok := app.rpcClients.Load(name); ok {
+			return c
+		}
+	}
 	return rpc.GetRpcClient(name)
 }
 
-// GetRpcServer 从 RPC 注册表取服务端（全局 fallback）
+// GetRpcServer 从 App registry 取服务端，未命中则 fallback 全局。
 func (app *App) GetRpcServer(name string) *rpc.RpcServer {
+	if app != nil && app.rpcServers != nil {
+		if s, ok := app.rpcServers.Load(name); ok {
+			return s
+		}
+	}
 	return rpc.GetRpcServer(name)
 }
 
-// GetWSClient 按 UID 取 WebSocket 客户端
+// GetWSClient 按 UID 取 WebSocket 客户端，未命中则 fallback 全局。
 func (app *App) GetWSClient(uid int64) *websocket.Client {
+	if app != nil && app.wsClients != nil {
+		if c, ok := app.wsClients.Load(uid); ok {
+			return c
+		}
+	}
 	return websocket.GetClient(uid)
 }

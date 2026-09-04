@@ -25,6 +25,7 @@ func WithCfg(ctx context.Context, cfg *config.Cfg) context.Context {
 	return context.WithValue(ctx, cfgKey{}, cfg)
 }
 
+// CfgFrom 从 ctx 取出配置；未注入时 fallback 到 config.Cfg_（兼容旧代码）。
 func CfgFrom(ctx context.Context) *config.Cfg {
 	if ctx != nil {
 		if cfg, ok := ctx.Value(cfgKey{}).(*config.Cfg); ok && cfg != nil {

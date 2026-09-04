@@ -236,7 +236,10 @@ func TelegramStart(ctx context.Context) {
 	}()
 }
 
-func TelegramStop() {
+func TelegramStop(ctx context.Context) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if config.Cfg_.Telegram == nil || config.Cfg_.Telegram.BotToken == "" {
 		return
 	}
@@ -248,7 +251,16 @@ func TelegramStop() {
 			close(closeCh)
 		}
 	})
-	telegramWG.Wait()
+	done := make(chan struct{})
+	go func() {
+		telegramWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		vars.Error("等待 Telegram 协程退出超时: %v", ctx.Err())
+	}
 }
 
 // ValidateWebAppData 验证Telegram WebApp数据

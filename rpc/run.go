@@ -36,8 +36,12 @@ func Run(ctx context.Context) error {
 		vars.Info("RPC配置为空，跳过RPC服务启动")
 		return nil
 	}
-	rpcClient_ = syncmap.NewMap[string, *RpcClient]()
-	service_ = syncmap.NewMap[string, *RpcServer]()
+	if rpcClient_ == nil {
+		rpcClient_ = syncmap.NewMap[string, *RpcClient]()
+	}
+	if service_ == nil {
+		service_ = syncmap.NewMap[string, *RpcServer]()
+	}
 	cfg := rpcCfg
 	serverCount := len(cfg.Server)
 	clientCount := len(cfg.Client)
@@ -104,8 +108,19 @@ func ResolveService(ctx context.Context, serviceName string) ([]*ServiceEndpoint
 	return dm.Resolve(ctx, serviceName)
 }
 
-func Stop() {
-	if config.Cfg_.RpcPort == nil {
+func Stop(ctx context.Context) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	cfg := corectx.CfgFrom(ctx)
+	if cfg == nil {
+		return
+	}
+	rpcCfg := cfg.RpcPort
+	if rpcCfg == nil {
+		rpcCfg = cfg.Rpc
+	}
+	if rpcCfg == nil {
 		return
 	}
 
@@ -116,25 +131,39 @@ func Stop() {
 
 	// 停止所有RPC服务器
 	serverCount := 0
-	service_.Range(func(key string, v1 *RpcServer) bool {
-		v1.Stop()
-		serverCount++
-		return true
-	})
+	if service_ != nil {
+		service_.Range(func(key string, v1 *RpcServer) bool {
+			v1.Stop(ctx)
+			serverCount++
+			return true
+		})
+	}
 
 	// 关闭所有RPC客户端连接
 	clientCount := 0
-	rpcClient_.Range(func(key string, v1 *RpcClient) bool {
-		v1.Remove()
-		if connVal := v1.conn.Load(); connVal != nil {
-			if conn, ok := connVal.(*grpc.ClientConn); ok && conn != nil {
-				conn.Close()
-				clientCount++
+	if rpcClient_ != nil {
+		rpcClient_.Range(func(key string, v1 *RpcClient) bool {
+			v1.Remove()
+			if connVal := v1.conn.Load(); connVal != nil {
+				if conn, ok := connVal.(*grpc.ClientConn); ok && conn != nil {
+					conn.Close()
+					clientCount++
+				}
 			}
-		}
-		return true
-	})
+			return true
+		})
+	}
 	vars.Info("RPC服务停止: 服务器%d个, 客户端%d个", serverCount, clientCount)
+}
+
+// UseRegistry 将 RPC 服务端/客户端表绑定到调用方提供的 map（App 优先，全局 fallback）。
+func UseRegistry(servers *syncmap.Map[string, *RpcServer], clients *syncmap.Map[string, *RpcClient]) {
+	if servers != nil {
+		service_ = servers
+	}
+	if clients != nil {
+		rpcClient_ = clients
+	}
 }
 
 // ==================== 全局访问方法（供外部使用）====================

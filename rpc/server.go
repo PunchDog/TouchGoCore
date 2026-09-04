@@ -280,12 +280,15 @@ func (s *RpcServer) closeDone() {
 	})
 }
 
-func (s *RpcServer) Stop() {
+func (s *RpcServer) Stop(ctx context.Context) {
 	if !s.stopped.CompareAndSwap(false, true) {
 		return
 	}
 	s.closeDone()
 	if s.service != nil {
+		if ctx == nil {
+			ctx = context.Background()
+		}
 		done := make(chan struct{})
 		go func() {
 			s.service.GracefulStop()
@@ -293,6 +296,8 @@ func (s *RpcServer) Stop() {
 		}()
 		select {
 		case <-done:
+		case <-ctx.Done():
+			s.service.Stop()
 		case <-time.After(10 * time.Second):
 			s.service.Stop()
 		}

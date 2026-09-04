@@ -533,7 +533,15 @@ func Run(ctx context.Context) error {
 	return RunLua()
 }
 
-// Stop 关闭所有的定时器（公开接口）
-func Stop() {
+// Stop 关闭所有 Lua 实例。ctx 用于与其它服务 Stop 签名对齐。
+func Stop(ctx context.Context) {
+	if ctx != nil {
+		select {
+		case <-ctx.Done():
+			StopLua()
+			return
+		default:
+		}
+	}
 	StopLua()
 }

@@ -3,7 +3,6 @@ package util
 import (
 	"encoding/binary"
 	"fmt"
-	"reflect"
 	"sync"
 	"touchgocore/network/message"
 	"touchgocore/vars"
@@ -153,7 +152,11 @@ func PasreFSMessage(buff interface{}) proto.Message {
 		vars.Error(fmt.Sprintf("找不到消息类型 %s (protocol %d:%d): %v", cmdName, p1, p2, err))
 		return nil
 	}
-	msg1 := reflect.New(reflect.TypeOf(msgType.Zero()).Elem()).Interface().(proto.Message)
+	msg1, ok := msgType.New().Interface().(proto.Message)
+	if !ok {
+		vars.Error("消息类型 %s 未实现 proto.Message", cmdName)
+		return nil
+	}
 	err = proto.Unmarshal(pb.GetBody(), msg1)
 	if err != nil {
 		vars.Error(fmt.Sprintf("proto[%v].Unmarshal error : %v. ---> msg:%+v.", msgType, err, msg1))

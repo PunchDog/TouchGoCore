@@ -37,7 +37,13 @@
         "说明": "这是一个web框架使用的配置",
         "httpport": 1000,
         "static": "文件夹路径",
-        "allow_origins": ["https://example.com"]
+        "allow_origins": ["https://example.com"],
+        "tls": {
+            "tls说明": "直连 HTTPS；前置 Nginx 终结 TLS 时保持 enable=false",
+            "enable": false,
+            "cert_file": "conf/server.crt",
+            "key_file": "conf/server.key"
+        }
     },
     "ws": {
         "说明:": "这里是websocket配置,作为服务器监听配置,多个端口用|分割",
@@ -60,7 +66,13 @@
         "shard_by_key": false,
         "auth_token_header": "X-Auth-Token",
         "auth_token_query": "",
-        "auth_intranet_skip": false
+        "auth_intranet_skip": false,
+        "tls": {
+            "tls说明": "直连 WSS；前置反代终结 TLS 时保持 enable=false",
+            "enable": false,
+            "cert_file": "conf/server.crt",
+            "key_file": "conf/server.key"
+        }
     },
     "rpc_port": {
         "rpc_port说明": "rpc_port是监听端口,如果不填,则不开rpc服务",
@@ -88,7 +100,13 @@
             "cert_file": "conf/server.crt",
             "key_file": "conf/server.key",
             "enable": false,
-            "skip_for_intranet": true
+            "skip_for_intranet": false
+        },
+        "auth": {
+            "auth说明": "gRPC 鉴权。生产请用 allowlist/token/mtls，禁止 skip_for_intranet",
+            "mode": "none",
+            "allowlist": [],
+            "token": ""
         }
     },
     "telegram": {

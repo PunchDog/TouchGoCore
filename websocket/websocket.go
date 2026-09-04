@@ -128,6 +128,13 @@ func RegisterCall(className string, factoryFunc any) {
 	})
 }
 
+// UseClientMap 绑定 WebSocket 客户端表（App 优先，全局 fallback）。
+func UseClientMap(m *syncmap.Map[int64, *Client]) {
+	if m != nil {
+		clientMap = m
+	}
+}
+
 // GetClient 按 UID 获取已连接客户端；不存在返回 nil。
 func GetClient(uid int64) *Client {
 	if clientMap == nil {
@@ -151,7 +158,9 @@ func Run(ctx context.Context) error {
 		return nil
 	}
 
-	clientMap = syncmap.NewMap[int64, *Client]()
+	if clientMap == nil {
+		clientMap = syncmap.NewMap[int64, *Client]()
+	}
 
 	enableBackpressure = true
 	dropMessageOnFull = false

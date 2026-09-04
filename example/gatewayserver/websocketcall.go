@@ -1,13 +1,13 @@
 package main
 
 import (
+	"touchgocore/example/gatewayserver/gatepb"
 	"touchgocore/vars"
 	"touchgocore/websocket"
 
 	"google.golang.org/protobuf/proto"
 )
 
-// 这里实现消息分发机制需要的接口函数
 type GateMsg struct {
 }
 
@@ -17,7 +17,15 @@ func (this *GateMsg) OnConnect(client *websocket.Client) bool {
 }
 
 func (this *GateMsg) OnMessage(client *websocket.Client, msg proto.Message) {
-	vars.Info("GateMsg OnMessage")
+	switch m := msg.(type) {
+	case *gatepb.GatePing:
+		vars.Info("GatePing payload=%s", m.GetPayload())
+		client.SendMsg(gatepb.ProtocolPong1, gatepb.ProtocolPong2, &gatepb.GatePong{Payload: "pong:" + m.GetPayload()})
+	case *gatepb.GatePong:
+		vars.Info("GatePong payload=%s", m.GetPayload())
+	default:
+		vars.Info("GateMsg OnMessage type=%T", msg)
+	}
 }
 
 func (this *GateMsg) OnClose(client *websocket.Client) {

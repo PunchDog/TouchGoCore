@@ -99,6 +99,17 @@ func RegisterRouter(class IRouterInterface) {
 		}
 
 		routerMap[callbackmsg] = func(ctx *gin.Context) {
+			// 默认 15s，避免慢接口拖死 worker；CheckUrlNow 批量探测外网，单独放宽到 60s
+			reqTimeout := 15 * time.Second
+			if strings.Contains(strings.ToLower(ctx.Request.URL.Path), "checkurlnow") {
+				reqTimeout = 3600 * time.Second
+			}
+			ctxnew, cancel := context.WithTimeout(ctx.Request.Context(), reqTimeout)
+			defer cancel() // 必须调用，释放资源
+
+			// 将新的 ctx 写入请求
+			ctx.Request = ctx.Request.WithContext(ctxnew)
+
 			// 从缓存获取方法信息
 			entry, err := getMethodCacheEntry(rcvr, sname, mnameCopy)
 			if err != nil {

@@ -76,7 +76,8 @@ type IRouterInterface interface {
 // 支持两种函数签名：
 //   - func (this *class) MethodName(request *http.Request) any
 //   - func (this *class) MethodName(ctx *gin.Context) any  (推荐，可获取更多上下文)
-func RegisterRouter(class IRouterInterface) {
+//   - timeout map[string]int64 自定义ctx超时时间
+func RegisterRouter(class IRouterInterface, timeoutmap map[string]int64) {
 	sname, mnames := util.GetClassName(class)
 	rcvr := reflect.ValueOf(class)
 
@@ -101,9 +102,10 @@ func RegisterRouter(class IRouterInterface) {
 		routerMap[callbackmsg] = func(ctx *gin.Context) {
 			// 默认 15s，避免慢接口拖死 worker；CheckUrlNow 批量探测外网，单独放宽到 60s
 			reqTimeout := 15 * time.Second
-			if strings.Contains(strings.ToLower(ctx.Request.URL.Path), "checkurlnow") {
-				reqTimeout = 3600 * time.Second
+			if sec, h := timeoutmap[ctx.FullPath()]; h {
+				reqTimeout = time.Duration(sec) * time.Second
 			}
+
 			ctxnew, cancel := context.WithTimeout(ctx.Request.Context(), reqTimeout)
 			defer cancel() // 必须调用，释放资源
 

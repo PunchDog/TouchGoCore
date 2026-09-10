@@ -110,6 +110,13 @@ func RegisterRouter(class IRouterInterface) {
 			// 将新的 ctx 写入请求
 			ctx.Request = ctx.Request.WithContext(ctxnew)
 
+			// CheckUrlNow 长时间不写 body：中间层掐连接后浏览器读不到 ACAO，DevTools 会显示 CORS error（status 0）。
+			// CORS 中间件已写入响应头，这里立刻 Flush，让浏览器先收到允许跨域的头。
+			if strings.Contains(strings.ToLower(ctx.Request.URL.Path), "checkurlnow") {
+				if f, ok := ctx.Writer.(http.Flusher); ok {
+					f.Flush()
+				}
+			}
 			// 从缓存获取方法信息
 			entry, err := getMethodCacheEntry(rcvr, sname, mnameCopy)
 			if err != nil {

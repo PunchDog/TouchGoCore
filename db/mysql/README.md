@@ -588,3 +588,61 @@ defer client2.Close()           // 第二次 Close 是 no-op
 ### 15.3 与 dbmap 子包的关系
 
 `dbmap.Global` 是 `db/mysql`、`db/redis`、`db/mongo` 共享的全局连接注册表；`dbmap.appRegistry` 由 `dbmap.UseAppRegistry(m)` 绑定（由 `app.go` 在 `NewApp` 中调用），启用后 `dbmap.Get` 优先查 app 表再 fallback 全局。注册表逻辑全部位于 `touchgocore/db/dbmap` 子包，`db` 顶层包不再持有任何注册表状态。
+
+---
+
+## 16. 自动建表（表不存在时）
+
+`db.WithAutoMigrate(true)` 启用「表不存在时自动建表」能力。**默认关闭**，需在 `NewClient` 时显式打开。
+
+### 16.1 用法
+
+```go
+client, _ := db.NewClient(cfg,
+    db.WithAutoMigrate(true), // 开启自动建表
+)
+
+repo := db.NewRepository[Order](client)
+
+// 表不存在时自动 CREATE TABLE 并重试
+if err := repo.Create(ctx, &Order{...}); err != nil {
+    log.Fatal(err)
+}
+```
+
+### 16.2 行为
+
+| 状态 | 行为 |
+|---|---|
+| `WithAutoMigrate(false)`（默认） | 行为不变，错误按 `*Error` 原样返回 |
+| `WithAutoMigrate(true)` + 表已存在 | 查询直接执行，无额外开销（`migrated=true` 后跳过） |
+| `WithAutoMigrate(true)` + 表不存在 | 查询返回 MySQL 1146 → 自动 `AutoMigrate(T)` → 标记 `migrated=true` → **重试一次** |
+| `WithAutoMigrate(true)` + 迁移失败 | 返回 `*Error{Op:"Op.AutoMigrate", Kind:KindSyntax}`，不再重试 |
+| 事务内 | 自动建表强制关闭（DDL 会触发隐式提交） |
+
+### 16.3 检测函数
+
+```go
+if db.IsTableNotExist(err) {
+    // 调用方也可以手动触发一次 AutoMigrate
+    if err := db.NewRepository[T](client).AutoMigrate(ctx); err != nil {
+        return err
+    }
+}
+```
+
+`IsTableNotExist` 仅识别 MySQL 错误码 **1146**（Table 'x.y' doesn't exist）；与 `KindSyntax` 分类正交。
+
+### 16.4 缓存粒度
+
+- `migrated atomic.Bool` 在每个 `Repository[T]` 实例内独立
+- 同一 `*Client` 派生的多个 Repository 实例共享 `Client.AutoMigrateEnabled()` 但各自维护迁移状态
+- 跨实例不共享缓存（与 Repository 生命周期一致）
+
+### 16.5 注意事项
+
+- ⚠️ **生产环境慎用**：开启后任何对不存在表的写操作都会隐式创建表结构，可能掩盖「表被误删」等事故
+- ✅ **推荐用法**：开发/测试环境开启加速迭代；生产建议保持关闭，仍使用显式 `repo.AutoMigrate(ctx)`
+- ✅ **并发安全**：`atomic.Bool` 无锁；多个 goroutine 同时触发迁移时 `AutoMigrate` 本身幂等
+- ✅ **错误透传**：非表不存在错误（如字段不存在、约束冲突）不会被错误归类为「表不存在」，直接返回
+- ⚠️ **事务隔离**：事务内不自动建表（`NewTxRepository` 强制关闭），避免 DDL 导致隐式提交

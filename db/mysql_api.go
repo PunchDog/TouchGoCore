@@ -96,6 +96,12 @@ func WithMetricsHook(h MetricsHook) Option         { return mysqldb.WithMetricsH
 func WithConnMaxLifetime(d time.Duration) Option   { return mysqldb.WithConnMaxLifetime(d) }
 func WithDSNParam(k, v string) Option              { return mysqldb.WithDSNParam(k, v) }
 func WithCharset(charset, collation string) Option { return mysqldb.WithCharset(charset, collation) }
+func WithAutoMigrate(enable bool) Option           { return mysqldb.WithAutoMigrate(enable) }
+
+// ==================== MySQL 表存在性判定 ====================
+
+// IsTableNotExist 断言为目标表不存在（MySQL 1146）
+func IsTableNotExist(err error) bool { return mysqldb.IsTableNotExist(err) }
 
 // ==================== 默认 metrics 适配器 ====================
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/go-sql-driver/mysql"
@@ -146,5 +147,39 @@ func TestKindOf(t *testing.T) {
 func TestWrap_NilSafe(t *testing.T) {
 	if wrap("op", nil, KindUnknown) != nil {
 		t.Fatal("wrap(nil) 应返回 nil")
+	}
+}
+
+func TestIsTableNotExist(t *testing.T) {
+	if IsTableNotExist(nil) {
+		t.Fatal("IsTableNotExist(nil) 应为 false")
+	}
+	// MySQL 1146
+	merr := &mysql.MySQLError{Number: 1146, Message: "Table 'x.y' doesn't exist"}
+	if !IsTableNotExist(merr) {
+		t.Fatal("IsTableNotExist(1146) 应为 true")
+	}
+	// 通过 fmt.Errorf 包裹也应能识别
+	wrapped := fmt.Errorf("wrapped: %w", merr)
+	if !IsTableNotExist(wrapped) {
+		t.Fatal("IsTableNotExist(fmt.Errorf wrap 1146) 应为 true")
+	}
+	// 其他错误码
+	if IsTableNotExist(&mysql.MySQLError{Number: 1062}) {
+		t.Fatal("IsTableNotExist(1062) 应为 false")
+	}
+	if IsTableNotExist(errors.New("random")) {
+		t.Fatal("IsTableNotExist(随机错误) 应为 false")
+	}
+}
+
+func TestClassify_TableNotExist_StillKindSyntax(t *testing.T) {
+	// 1146 仍归类为 KindSyntax（向后兼容），但 IsTableNotExist 提供细粒度判定
+	merr := &mysql.MySQLError{Number: 1146}
+	if got := classify(merr); got != KindSyntax {
+		t.Fatalf("classify(1146)=%v want=KindSyntax", got)
+	}
+	if !IsTableNotExist(merr) {
+		t.Fatal("IsTableNotExist 应识别 1146")
 	}
 }

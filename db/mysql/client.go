@@ -44,6 +44,7 @@ type options struct {
 	extraDSNParams  map[string]string
 	charset         string
 	collation       string
+	autoMigrate     bool
 }
 
 // Option 函数式配置
@@ -85,6 +86,14 @@ func WithCharset(charset, collation string) Option {
 		o.charset = charset
 		o.collation = collation
 	}
+}
+
+// WithAutoMigrate 启用/关闭「表不存在自动建表」。
+//
+// 默认 false。开启后，Repository[T] 首次执行写/读操作时，若目标表不存在，
+// 自动调用 gorm AutoMigrate(T) 建表并重试一次；之后该 Repository 实例内不再检测。
+func WithAutoMigrate(enable bool) Option {
+	return func(o *options) { o.autoMigrate = enable }
 }
 
 func defaultOptions() options {
@@ -244,6 +253,10 @@ func (c *Client) Config() *config.MySqlDBConfig { return c.cfg }
 
 // Engine 返回内部 gorm.DB
 func (c *Client) Engine() *gorm.DB { return c.engine }
+
+// AutoMigrateEnabled 返回是否启用了「表不存在自动建表」。
+// Repository[T] 通过此判断决定是否在查询前后做迁移检测。
+func (c *Client) AutoMigrateEnabled() bool { return c.opts.autoMigrate }
 
 // WithContext 返回绑定 ctx 的会话
 func (c *Client) WithContext(ctx context.Context) *Session {

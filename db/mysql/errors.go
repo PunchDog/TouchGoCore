@@ -195,6 +195,20 @@ func IsCanceled(err error) bool { return kindOf(err) == KindCanceled }
 // IsDeadlock 断言为死锁
 func IsDeadlock(err error) bool { return kindOf(err) == KindDeadlock }
 
+// IsTableNotExist 断言为目标表不存在（MySQL 1146）。
+// 用于驱动自动建表决策；与 KindSyntax 语义不同，需要单独判定。
+func IsTableNotExist(err error) bool {
+	if err == nil {
+		return false
+	}
+	// MySQL 错误码 1146（Table 'db.table' doesn't exist）
+	var me *mysql.MySQLError
+	if errors.As(err, &me) {
+		return me.Number == 1146
+	}
+	return false
+}
+
 // kindOf 抽取错误链中的 Kind
 func kindOf(err error) Kind {
 	if err == nil {

@@ -74,7 +74,6 @@ type IRouterInterface interface {
 
 // RegisterRouter 将一个struct中所有的函数注册到gin中
 // 支持两种函数签名：
-//   - func (this *class) MethodName(request *http.Request) any
 //   - func (this *class) MethodName(ctx *gin.Context) any  (推荐，可获取更多上下文)
 //   - timeout map[string]int64 自定义ctx超时时间
 func RegisterRouter(class IRouterInterface, timeoutmap map[string]int64) {
@@ -121,11 +120,7 @@ func RegisterRouter(class IRouterInterface, timeoutmap map[string]int64) {
 
 			// 根据参数类型构造调用参数
 			var args []reflect.Value
-			if entry.argType.String() == "*gin.Context" {
-				args = []reflect.Value{reflect.ValueOf(ctx)}
-			} else {
-				args = []reflect.Value{reflect.ValueOf(ctx.Request)}
-			}
+			args = []reflect.Value{reflect.ValueOf(ctx)}
 
 			// 调用函数
 			result := entry.method.Call(args)

@@ -1,7 +1,7 @@
 package core
 
 import (
-	"touchgocore/go-swd/types/category"
+	"touchgocore/swd/types/category"
 )
 
 // AlgorithmType 算法类型

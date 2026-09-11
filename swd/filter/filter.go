@@ -3,8 +3,8 @@ package filter
 import (
 	"sort"
 
-	"touchgocore/go-swd/core"
-	"touchgocore/go-swd/types/category"
+	"touchgocore/swd/core"
+	"touchgocore/swd/types/category"
 )
 
 // filter 实现了敏感词过滤器接口

@@ -8,15 +8,15 @@ import (
 	"sync/atomic"
 	"unicode"
 
-	"touchgocore/go-swd/algorithm"
-	"touchgocore/go-swd/common"
-	"touchgocore/go-swd/config"
-	"touchgocore/go-swd/core"
-	"touchgocore/go-swd/detector/preprocessor"
-	"touchgocore/go-swd/dictionary"
-	"touchgocore/go-swd/types/category"
-	"touchgocore/go-swd/types/pinyin"
-	"touchgocore/go-swd/types/similar"
+	"touchgocore/swd/algorithm"
+	"touchgocore/swd/common"
+	"touchgocore/swd/config"
+	"touchgocore/swd/core"
+	"touchgocore/swd/detector/preprocessor"
+	"touchgocore/swd/dictionary"
+	"touchgocore/swd/types/category"
+	"touchgocore/swd/types/pinyin"
+	"touchgocore/swd/types/similar"
 )
 
 // detector 实现敏感词检测器接口

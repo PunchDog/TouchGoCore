@@ -15,9 +15,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"touchgocore/go-swd/config"
-	"touchgocore/go-swd/core"
-	"touchgocore/go-swd/types/category"
+	"touchgocore/swd/config"
+	"touchgocore/swd/core"
+	"touchgocore/swd/types/category"
 	"touchgocore/util"
 )
 

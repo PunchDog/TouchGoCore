@@ -3,10 +3,10 @@
 package swd
 
 import (
-	"touchgocore/go-swd/config"
-	"touchgocore/go-swd/core"
-	pkgswd "touchgocore/go-swd/swd"
-	"touchgocore/go-swd/types/category"
+	"touchgocore/swd/config"
+	"touchgocore/swd/core"
+	pkgswd "touchgocore/swd/swd"
+	"touchgocore/swd/types/category"
 )
 
 // 导出核心类型

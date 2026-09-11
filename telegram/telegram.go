@@ -267,6 +267,7 @@ func TelegramStop(ctx context.Context) {
 		if globalBot != nil {
 			globalBot.StopReceivingUpdates()
 		}
+		globalBot = nil
 		if closeCh != nil {
 			close(closeCh)
 		}

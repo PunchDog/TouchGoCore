@@ -42,14 +42,14 @@ func NewScriptWatcher(script *LuaScript) *ScriptWatcher {
 func NewScriptWatcherWithContext(ctx context.Context, script *LuaScript) *ScriptWatcher {
 	watcherCtx, cancel := context.WithCancel(ctx)
 	return &ScriptWatcher{
-		scriptPath:    script.initScriptPath,
-		script:        script,
-		stopChan:      make(chan struct{}),
-		dependencies:  make(map[string]time.Time),
-		callbacks:     make([]ScriptReloadCallback, 0),
+		scriptPath:   script.initScriptPath,
+		script:       script,
+		stopChan:     make(chan struct{}),
+		dependencies: make(map[string]time.Time),
+		callbacks:    make([]ScriptReloadCallback, 0),
 		callbacksOld: make([]ScriptReloadCallbackOld, 0),
-		ctx:           watcherCtx,
-		cancel:        cancel,
+		ctx:          watcherCtx,
+		cancel:       cancel,
 	}
 }
 
@@ -57,7 +57,7 @@ func NewScriptWatcherWithContext(ctx context.Context, script *LuaScript) *Script
 func (sw *ScriptWatcher) AddDependency(depPath string) {
 	sw.mu.Lock()
 	defer sw.mu.Unlock()
-	
+
 	sw.dependencies[depPath] = time.Time{}
 	if info, err := os.Stat(depPath); err == nil {
 		sw.dependencies[depPath] = info.ModTime()
@@ -199,7 +199,7 @@ func (sw *ScriptWatcher) reloadScript() {
 		sw.mu.Lock()
 		sw.script = oldScript
 		sw.mu.Unlock()
-		
+
 		oldScript.ctx = sw.ctx
 		oldScript.Init()
 
@@ -208,7 +208,7 @@ func (sw *ScriptWatcher) reloadScript() {
 		callbacks := sw.callbacks
 		callbacksOld := sw.callbacksOld
 		sw.mu.RUnlock()
-		
+
 		for _, callback := range callbacks {
 			callback(sw.ctx, oldScript, false, err)
 		}
@@ -247,7 +247,7 @@ func (sw *ScriptWatcher) reloadScript() {
 	callbacks := sw.callbacks
 	callbacksOld := sw.callbacksOld
 	sw.mu.RUnlock()
-	
+
 	for _, callback := range callbacks {
 		callback(sw.ctx, newScript, true, nil)
 	}
@@ -396,7 +396,7 @@ func (mfw *MultiFileWatcher) AddScript(script *LuaScript) {
 func (mfw *MultiFileWatcher) Start() {
 	mfw.mu.Lock()
 	defer mfw.mu.Unlock()
-	
+
 	if mfw.running {
 		return
 	}
@@ -412,7 +412,7 @@ func (mfw *MultiFileWatcher) Start() {
 func (mfw *MultiFileWatcher) Stop() {
 	mfw.mu.Lock()
 	defer mfw.mu.Unlock()
-	
+
 	if !mfw.running {
 		return
 	}
@@ -437,7 +437,7 @@ func (mfw *MultiFileWatcher) ReloadAll() error {
 func (mfw *MultiFileWatcher) ReloadAllWithContext(ctx context.Context) error {
 	mfw.mu.RLock()
 	defer mfw.mu.RUnlock()
-	
+
 	for _, watcher := range mfw.watchers {
 		if err := watcher.script.ReloadScriptWithContext(ctx); err != nil {
 			return err
@@ -450,7 +450,7 @@ func (mfw *MultiFileWatcher) ReloadAllWithContext(ctx context.Context) error {
 func (mfw *MultiFileWatcher) GetScriptByPath(path string) (*LuaScript, bool) {
 	mfw.mu.RLock()
 	defer mfw.mu.RUnlock()
-	
+
 	watcher, ok := mfw.watchers[path]
 	if !ok {
 		return nil, false

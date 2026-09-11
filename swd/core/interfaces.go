@@ -3,7 +3,7 @@ package core
 import (
 	"context"
 
-	"touchgocore/go-swd/types/category"
+	"touchgocore/swd/types/category"
 )
 
 // SensitiveWord 敏感词匹配结果

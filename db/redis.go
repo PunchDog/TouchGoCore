@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"touchgocore/config"
+	"touchgocore/db/dbmap"
 	"touchgocore/util"
 	"touchgocore/vars"
 
@@ -86,7 +87,7 @@ func (this *Redis) connectStandalone(connKey string) error {
 
 	this.redisClient = client
 	this.isCluster = false
-	_DbMap.Store(connKey, client)
+	dbmap.Global.Store(connKey, client)
 	return nil
 }
 
@@ -111,7 +112,7 @@ func (this *Redis) connectCluster(connKey string) error {
 
 	this.redisClient = client
 	this.isCluster = true
-	_DbMap.Store(connKey, client)
+	dbmap.Global.Store(connKey, client)
 	return nil
 }
 
@@ -133,7 +134,7 @@ func splitAddrs(host string) []string {
 
 // 使用已有的连接资源
 func (this *Redis) connectOnly(dataSourceName string) bool {
-	if v, ok := _DbMap.Load(dataSourceName); ok {
+	if v, ok := dbmap.Global.Load(dataSourceName); ok {
 		this.redisClient = v.(redis.Cmdable)
 		switch v.(type) {
 		case *redis.ClusterClient:
@@ -175,7 +176,7 @@ func (this *Redis) Close() {
 	}
 	this.redisClient = nil
 	if this.config != nil {
-		_DbMap.Delete(this.poolKey())
+		dbmap.Global.Delete(this.poolKey())
 	}
 }
 

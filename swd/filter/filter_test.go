@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"touchgocore/go-swd/core"
-	"touchgocore/go-swd/types/category"
+	"touchgocore/swd/core"
+	"touchgocore/swd/types/category"
 )
 
 // mockDetector 是一个用于测试的mock检测器

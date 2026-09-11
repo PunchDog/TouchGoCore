@@ -3,8 +3,8 @@ package detector
 import (
 	"testing"
 
-	"touchgocore/go-swd/core"
-	"touchgocore/go-swd/types/category"
+	"touchgocore/swd/core"
+	"touchgocore/swd/types/category"
 )
 
 func TestDetector_Detect(t *testing.T) {

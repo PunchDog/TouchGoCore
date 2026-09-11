@@ -4,8 +4,8 @@ import (
 	"reflect"
 	"testing"
 
-	"touchgocore/go-swd/core"
-	"touchgocore/go-swd/types/category"
+	"touchgocore/swd/core"
+	"touchgocore/swd/types/category"
 )
 
 // algorithmTest 定义测试用例结构

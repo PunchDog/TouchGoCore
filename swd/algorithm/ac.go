@@ -3,9 +3,9 @@ package algorithm
 import (
 	"log"
 
-	"touchgocore/go-swd/common"
-	"touchgocore/go-swd/core"
-	"touchgocore/go-swd/types/category"
+	"touchgocore/swd/common"
+	"touchgocore/swd/core"
+	"touchgocore/swd/types/category"
 )
 
 // AhoCorasickNode Aho-Corasick算法节点

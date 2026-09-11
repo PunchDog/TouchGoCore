@@ -2,8 +2,8 @@ package lua
 
 import (
 	"context"
-	"sync"
 	rt "github.com/arnodel/golua/runtime"
+	"sync"
 )
 
 // SafeLuaScript LuaScript 并发安全封装

@@ -4,7 +4,7 @@ import (
 	"strings"
 	"sync"
 
-	"touchgocore/go-swd/config"
+	"touchgocore/swd/config"
 )
 
 var (

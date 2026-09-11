@@ -1,6 +1,6 @@
 //go:build ignore
 
-package db
+package mysql
 
 import (
 	"time"
@@ -10,9 +10,10 @@ import (
 
 // User 用户模型示例
 // 使用示例:
-//   db.Create(&User{Name: "John", Email: "john@example.com"})
-//   var user User; db.First(&user, 1)
-//   db.Where("age > ?", 18).Find(&users)
+//
+//	db.Create(&User{Name: "John", Email: "john@example.com"})
+//	var user User; db.First(&user, 1)
+//	db.Where("age > ?", 18).Find(&users)
 type User struct {
 	ID        uint           `gorm:"primaryKey" json:"id"`
 	Name      string         `gorm:"size:100;not null" json:"name"`
@@ -66,13 +67,13 @@ type Product struct {
 
 // Category 分类模型示例
 type Category struct {
-	ID        uint           `gorm:"primaryKey" json:"id"`
-	Name      string         `gorm:"size:100;uniqueIndex;not null" json:"name"`
-	ParentID  *uint          `gorm:"index" json:"parent_id,omitempty"`
-	CreatedAt time.Time      `json:"created_at"`
-	UpdatedAt time.Time      `json:"updated_at"`
-	Children  []Category     `gorm:"foreignKey:ParentID" json:"children,omitempty"`
-	Products  []Product      `gorm:"foreignKey:CategoryID" json:"products,omitempty"`
+	ID        uint       `gorm:"primaryKey" json:"id"`
+	Name      string     `gorm:"size:100;uniqueIndex;not null" json:"name"`
+	ParentID  *uint      `gorm:"index" json:"parent_id,omitempty"`
+	CreatedAt time.Time  `json:"created_at"`
+	UpdatedAt time.Time  `json:"updated_at"`
+	Children  []Category `gorm:"foreignKey:ParentID" json:"children,omitempty"`
+	Products  []Product  `gorm:"foreignKey:CategoryID" json:"products,omitempty"`
 }
 
 // Log 日志模型示例
@@ -140,19 +141,19 @@ type OrderItem struct {
 
 // Article 文章模型示例
 type Article struct {
-	ID        uint           `gorm:"primaryKey" json:"id"`
-	Title     string         `gorm:"size:200;not null" json:"title"`
-	Content   string         `gorm:"type:longtext" json:"content"`
-	Summary   string         `gorm:"type:text" json:"summary,omitempty"`
-	AuthorID  uint           `gorm:"not null;index" json:"author_id"`
-	Status    string         `gorm:"size:20;default:'draft';index" json:"status"` // draft, published, archived
-	ViewCount int            `gorm:"default:0" json:"view_count"`
-	PublishedAt *time.Time   `json:"published_at,omitempty"`
-	CreatedAt time.Time      `gorm:"index" json:"created_at"`
-	UpdatedAt time.Time      `json:"updated_at"`
-	DeletedAt gorm.DeletedAt `gorm:"index" json:"-"`
-	Author    User           `gorm:"foreignKey:AuthorID" json:"author,omitempty"`
-	Tags      []Tag          `gorm:"many2many:article_tags;" json:"tags,omitempty"`
+	ID          uint           `gorm:"primaryKey" json:"id"`
+	Title       string         `gorm:"size:200;not null" json:"title"`
+	Content     string         `gorm:"type:longtext" json:"content"`
+	Summary     string         `gorm:"type:text" json:"summary,omitempty"`
+	AuthorID    uint           `gorm:"not null;index" json:"author_id"`
+	Status      string         `gorm:"size:20;default:'draft';index" json:"status"` // draft, published, archived
+	ViewCount   int            `gorm:"default:0" json:"view_count"`
+	PublishedAt *time.Time     `json:"published_at,omitempty"`
+	CreatedAt   time.Time      `gorm:"index" json:"created_at"`
+	UpdatedAt   time.Time      `json:"updated_at"`
+	DeletedAt   gorm.DeletedAt `gorm:"index" json:"-"`
+	Author      User           `gorm:"foreignKey:AuthorID" json:"author,omitempty"`
+	Tags        []Tag          `gorm:"many2many:article_tags;" json:"tags,omitempty"`
 }
 
 // Session 会话模型示例
@@ -168,71 +169,71 @@ type Session struct {
 
 // Payment 支付记录模型示例
 type Payment struct {
-	ID         uint      `gorm:"primaryKey" json:"id"`
-	OrderID    uint      `gorm:"not null;index" json:"order_id"`
-	Amount     float64   `gorm:"type:decimal(10,2);not null" json:"amount"`
-	Method     string    `gorm:"size:20;not null" json:"method"` // alipay, wechat, credit_card
-	Status     string    `gorm:"size:20;default:'pending';index" json:"status"` // pending, success, failed
-	TransactionID string `gorm:"size:100;index" json:"transaction_id,omitempty"`
-	PaidAt     *time.Time `json:"paid_at,omitempty"`
-	CreatedAt  time.Time `json:"created_at"`
-	UpdatedAt  time.Time `json:"updated_at"`
-	Order      Order     `gorm:"foreignKey:OrderID" json:"order,omitempty"`
+	ID            uint       `gorm:"primaryKey" json:"id"`
+	OrderID       uint       `gorm:"not null;index" json:"order_id"`
+	Amount        float64    `gorm:"type:decimal(10,2);not null" json:"amount"`
+	Method        string     `gorm:"size:20;not null" json:"method"`                // alipay, wechat, credit_card
+	Status        string     `gorm:"size:20;default:'pending';index" json:"status"` // pending, success, failed
+	TransactionID string     `gorm:"size:100;index" json:"transaction_id,omitempty"`
+	PaidAt        *time.Time `json:"paid_at,omitempty"`
+	CreatedAt     time.Time  `json:"created_at"`
+	UpdatedAt     time.Time  `json:"updated_at"`
+	Order         Order      `gorm:"foreignKey:OrderID" json:"order,omitempty"`
 }
 
 // Notification 通知模型示例
 type Notification struct {
-	ID        uint      `gorm:"primaryKey" json:"id"`
-	UserID    uint      `gorm:"not null;index" json:"user_id"`
-	Type      string    `gorm:"size:50;not null;index" json:"type"`
-	Title     string    `gorm:"size:200;not null" json:"title"`
-	Content   string    `gorm:"type:text" json:"content"`
-	Data      string    `gorm:"type:json" json:"data,omitempty"` // JSON 格式的额外数据
-	IsRead    bool      `gorm:"default:false;index" json:"is_read"`
+	ID        uint       `gorm:"primaryKey" json:"id"`
+	UserID    uint       `gorm:"not null;index" json:"user_id"`
+	Type      string     `gorm:"size:50;not null;index" json:"type"`
+	Title     string     `gorm:"size:200;not null" json:"title"`
+	Content   string     `gorm:"type:text" json:"content"`
+	Data      string     `gorm:"type:json" json:"data,omitempty"` // JSON 格式的额外数据
+	IsRead    bool       `gorm:"default:false;index" json:"is_read"`
 	ReadAt    *time.Time `json:"read_at,omitempty"`
-	CreatedAt time.Time `gorm:"index" json:"created_at"`
-	User      User      `gorm:"foreignKey:UserID" json:"user,omitempty"`
+	CreatedAt time.Time  `gorm:"index" json:"created_at"`
+	User      User       `gorm:"foreignKey:UserID" json:"user,omitempty"`
 }
 
 // Comment 评论模型示例
 type Comment struct {
-	ID        uint           `gorm:"primaryKey" json:"id"`
-	TargetType string       `gorm:"size:50;not null;index" json:"target_type"` // article, product
-	TargetID   uint         `gorm:"not null;index" json:"target_id"`
-	UserID     uint         `gorm:"not null;index" json:"user_id"`
-	ParentID   *uint        `gorm:"index" json:"parent_id,omitempty"`
-	Content    string       `gorm:"type:text;not null" json:"content"`
-	IP         string       `gorm:"size:50" json:"ip,omitempty"`
-	CreatedAt  time.Time    `gorm:"index" json:"created_at"`
-	UpdatedAt  time.Time    `json:"updated_at"`
+	ID         uint           `gorm:"primaryKey" json:"id"`
+	TargetType string         `gorm:"size:50;not null;index" json:"target_type"` // article, product
+	TargetID   uint           `gorm:"not null;index" json:"target_id"`
+	UserID     uint           `gorm:"not null;index" json:"user_id"`
+	ParentID   *uint          `gorm:"index" json:"parent_id,omitempty"`
+	Content    string         `gorm:"type:text;not null" json:"content"`
+	IP         string         `gorm:"size:50" json:"ip,omitempty"`
+	CreatedAt  time.Time      `gorm:"index" json:"created_at"`
+	UpdatedAt  time.Time      `json:"updated_at"`
 	DeletedAt  gorm.DeletedAt `gorm:"index" json:"-"`
-	User       User         `gorm:"foreignKey:UserID" json:"user,omitempty"`
-	Replies    []Comment    `gorm:"foreignKey:ParentID" json:"replies,omitempty"`
+	User       User           `gorm:"foreignKey:UserID" json:"user,omitempty"`
+	Replies    []Comment      `gorm:"foreignKey:ParentID" json:"replies,omitempty"`
 }
 
 // Attachment 附件模型示例
 type Attachment struct {
-	ID          uint           `gorm:"primaryKey" json:"id"`
-	FileName    string         `gorm:"size:255;not null" json:"file_name"`
-	FilePath    string         `gorm:"size:500;not null" json:"file_path"`
-	FileSize    int64          `gorm:"not null" json:"file_size"`
-	FileType    string         `gorm:"size:50;index" json:"file_type"` // image, video, document
-	MimeType    string         `gorm:"size:100" json:"mime_type"`
-	UploaderID  uint           `gorm:"not null;index" json:"uploader_id"`
-	CreatedAt   time.Time      `json:"created_at"`
-	DeletedAt   gorm.DeletedAt `gorm:"index" json:"-"`
-	Uploader    User           `gorm:"foreignKey:UploaderID" json:"uploader,omitempty"`
+	ID         uint           `gorm:"primaryKey" json:"id"`
+	FileName   string         `gorm:"size:255;not null" json:"file_name"`
+	FilePath   string         `gorm:"size:500;not null" json:"file_path"`
+	FileSize   int64          `gorm:"not null" json:"file_size"`
+	FileType   string         `gorm:"size:50;index" json:"file_type"` // image, video, document
+	MimeType   string         `gorm:"size:100" json:"mime_type"`
+	UploaderID uint           `gorm:"not null;index" json:"uploader_id"`
+	CreatedAt  time.Time      `json:"created_at"`
+	DeletedAt  gorm.DeletedAt `gorm:"index" json:"-"`
+	Uploader   User           `gorm:"foreignKey:UploaderID" json:"uploader,omitempty"`
 }
 
 // Permission 权限模型示例（RBAC）
 type Permission struct {
-	ID          uint         `gorm:"primaryKey" json:"id"`
-	Name        string       `gorm:"size:100;uniqueIndex;not null" json:"name"`
-	Code        string       `gorm:"size:100;uniqueIndex;not null" json:"code"`
-	Description string       `gorm:"type:text" json:"description,omitempty"`
-	CreatedAt   time.Time    `json:"created_at"`
-	UpdatedAt   time.Time    `json:"updated_at"`
-	Roles       []Role       `gorm:"many2many:role_permissions;" json:"roles,omitempty"`
+	ID          uint      `gorm:"primaryKey" json:"id"`
+	Name        string    `gorm:"size:100;uniqueIndex;not null" json:"name"`
+	Code        string    `gorm:"size:100;uniqueIndex;not null" json:"code"`
+	Description string    `gorm:"type:text" json:"description,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+	Roles       []Role    `gorm:"many2many:role_permissions;" json:"roles,omitempty"`
 }
 
 // Role 角色模型示例（RBAC）

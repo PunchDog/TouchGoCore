@@ -1,6 +1,6 @@
 package swd
 
-import "touchgocore/go-swd/core"
+import "touchgocore/swd/core"
 
 // WithOptions 设置所有配置选项
 func (swd *SWD) WithOptions(options *core.SWDOptions) core.SWD {

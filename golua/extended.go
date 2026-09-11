@@ -15,7 +15,7 @@ type pathCacheEntry struct {
 }
 
 var (
-	pathCache     sync.Map // map[string]*pathCacheEntry
+	pathCache    sync.Map // map[string]*pathCacheEntry
 	cacheMaxSize = 1000   // 最大缓存条目数
 )
 

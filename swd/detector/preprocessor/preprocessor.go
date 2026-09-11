@@ -5,12 +5,12 @@ import (
 	"sync"
 	"unicode"
 
-	"touchgocore/go-swd/common"
-	"touchgocore/go-swd/config"
-	"touchgocore/go-swd/core"
-	"touchgocore/go-swd/types/homophone"
-	"touchgocore/go-swd/types/pinyin"
-	"touchgocore/go-swd/types/similar"
+	"touchgocore/swd/common"
+	"touchgocore/swd/config"
+	"touchgocore/swd/core"
+	"touchgocore/swd/types/homophone"
+	"touchgocore/swd/types/pinyin"
+	"touchgocore/swd/types/similar"
 )
 
 // 预编译正则表达式（包级别，只编译一次）

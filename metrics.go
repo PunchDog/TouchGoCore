@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"net/http"
+	"net/http/pprof"
 	"strconv"
 	"strings"
 	"sync"
@@ -50,6 +51,21 @@ func StartMetricsServer(port int, token string) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
+
+	// pprof 端点（生产环境建议在反代层做 IP 白名单）
+	pprofMux := http.NewServeMux()
+	pprofMux.HandleFunc("/pprof/", pprof.Index)
+	pprofMux.HandleFunc("/pprof/cmdline", pprof.Cmdline)
+	pprofMux.HandleFunc("/pprof/profile", pprof.Profile)
+	pprofMux.HandleFunc("/pprof/symbol", pprof.Symbol)
+	pprofMux.HandleFunc("/pprof/trace", pprof.Trace)
+	pprofMux.Handle("/pprof/heap", pprof.Handler("heap"))
+	pprofMux.Handle("/pprof/goroutine", pprof.Handler("goroutine"))
+	pprofMux.Handle("/pprof/allocs", pprof.Handler("allocs"))
+	pprofMux.Handle("/pprof/block", pprof.Handler("block"))
+	pprofMux.Handle("/pprof/mutex", pprof.Handler("mutex"))
+	pprofMux.Handle("/pprof/threadcreate", pprof.Handler("threadcreate"))
+	mux.Handle("/debug/pprof/", metricsAuth(token, http.StripPrefix("/debug/pprof", pprofMux)))
 
 	server := &http.Server{
 		Addr:    "[::]:" + strconv.Itoa(port),

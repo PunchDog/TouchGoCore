@@ -4,11 +4,11 @@ import (
 	"context"
 	"fmt"
 
-	"touchgocore/go-swd/config"
-	"touchgocore/go-swd/core"
-	"touchgocore/go-swd/detector"
-	"touchgocore/go-swd/dictionary"
-	"touchgocore/go-swd/filter"
+	"touchgocore/swd/config"
+	"touchgocore/swd/core"
+	"touchgocore/swd/detector"
+	"touchgocore/swd/dictionary"
+	"touchgocore/swd/filter"
 )
 
 // DefaultFactory 默认组件工厂实现

@@ -7,7 +7,7 @@ import (
 	"sync"
 	"testing"
 
-	"touchgocore/go-swd/types/category"
+	"touchgocore/swd/types/category"
 	"github.com/stretchr/testify/assert"
 )
 

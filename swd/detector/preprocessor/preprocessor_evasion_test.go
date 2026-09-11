@@ -3,7 +3,7 @@ package preprocessor
 import (
 	"testing"
 
-	"touchgocore/go-swd/core"
+	"touchgocore/swd/core"
 	"github.com/stretchr/testify/assert"
 )
 

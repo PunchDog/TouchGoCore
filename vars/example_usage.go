@@ -96,8 +96,8 @@ func ExampleAdvancedUsage() {
 	// 1. 创建带有轮转功能的日志器
 	cfg := DefaultConfig()
 	cfg.LogName = "advanced"
-	cfg.MaxSize = 50  // 50MB
-	cfg.MaxAge = 7    // 7天
+	cfg.MaxSize = 50   // 50MB
+	cfg.MaxAge = 7     // 7天
 	cfg.MaxBackups = 5 // 保留5个备份
 	cfg.Compress = true
 
@@ -181,8 +181,8 @@ func ExampleErrorHandling() {
 func ExampleLogRotation() {
 	cfg := DefaultConfig()
 	cfg.LogName = "rotation_test"
-	cfg.MaxSize = 1    // 1MB - 小值用于测试
-	cfg.MaxAge = 1    // 1天
+	cfg.MaxSize = 1 // 1MB - 小值用于测试
+	cfg.MaxAge = 1  // 1天
 	cfg.MaxBackups = 3
 	cfg.Compress = true
 
@@ -256,15 +256,15 @@ func ExampleProductionUsage() {
 	// 生产环境配置
 	cfg := DefaultConfig()
 	cfg.LogName = "production"
-	cfg.LogLevel = LogLevelInfo      // 生产环境使用Info级别
-	cfg.MaxSize = 100               // 100MB
-	cfg.MaxAge = 30                 // 保留30天
-	cfg.MaxBackups = 20             // 保留20个备份
-	cfg.Compress = true             // 压缩旧日志
-	cfg.Stdout = false              // 生产环境通常不输出到stdout
-	cfg.Async = true                // 使用异步日志提升性能
-	cfg.AsyncBufferSize = 100000    // 大缓冲区
-	cfg.CallerSkip = 2              // 跳过调用栈
+	cfg.LogLevel = LogLevelInfo  // 生产环境使用Info级别
+	cfg.MaxSize = 100            // 100MB
+	cfg.MaxAge = 30              // 保留30天
+	cfg.MaxBackups = 20          // 保留20个备份
+	cfg.Compress = true          // 压缩旧日志
+	cfg.Stdout = false           // 生产环境通常不输出到stdout
+	cfg.Async = true             // 使用异步日志提升性能
+	cfg.AsyncBufferSize = 100000 // 大缓冲区
+	cfg.CallerSkip = 2           // 跳过调用栈
 	cfg.Fields = map[string]string{
 		"environment": "production",
 		"cluster":     "us-east-1",

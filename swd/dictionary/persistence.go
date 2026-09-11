@@ -9,7 +9,7 @@ import (
 	"strings"
 	"sync"
 
-	"touchgocore/go-swd/types/category"
+	"touchgocore/swd/types/category"
 )
 
 // Persistence 词库持久化接口

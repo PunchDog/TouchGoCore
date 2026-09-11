@@ -3,10 +3,10 @@ package swd
 import (
 	"context"
 
-	"touchgocore/go-swd/config"
-	"touchgocore/go-swd/types/category"
+	"touchgocore/swd/config"
+	"touchgocore/swd/types/category"
 
-	"touchgocore/go-swd/core"
+	"touchgocore/swd/core"
 )
 
 // ComponentFactory 定义了创建各种组件的工厂接口

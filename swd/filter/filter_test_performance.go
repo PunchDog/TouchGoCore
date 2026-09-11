@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"touchgocore/go-swd/core"
-	"touchgocore/go-swd/detector"
-	"touchgocore/go-swd/types/category"
+	"touchgocore/swd/core"
+	"touchgocore/swd/detector"
+	"touchgocore/swd/types/category"
 	"touchgocore/util"
 )
 

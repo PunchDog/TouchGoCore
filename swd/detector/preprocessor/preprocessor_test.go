@@ -3,7 +3,7 @@ package preprocessor
 import (
 	"testing"
 
-	"touchgocore/go-swd/core"
+	"touchgocore/swd/core"
 )
 
 func TestPreprocessor_Process(t *testing.T) {

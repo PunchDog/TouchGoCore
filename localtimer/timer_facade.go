@@ -2,9 +2,7 @@ package localtimer
 
 import (
 	"context"
-	"sync"
 
-	"touchgocore/syncmap"
 	"touchgocore/vars"
 )
 
@@ -15,10 +13,13 @@ func Run(ctx context.Context) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	timerRunCtx = ctx
+	timerRunCtx.Store(&ctx)
 	vars.Info("启动计时器系统")
-	timerManagerMap = syncmap.NewMap[*TimerManager, bool]()
-	defaultTimerManager = NewTimerManager()
+
+	// 只清空不重建：重建会让已持有引用的协程拿到不同实例，甚至 nil
+	timerManagerMap.Clear()
+	defaultTimerManager.Store(NewTimerManager())
+
 	closech = make(chan any)
 	tickWG.Add(1)
 	go func() {
@@ -43,13 +44,9 @@ func TimeStop(ctx context.Context) {
 	}
 
 	// 关闭所有定时器管理器
-	if timerManagerMap == nil {
-		return
-	}
 	timerManagerMap.Range(func(mgr *TimerManager, value bool) bool {
 		vars.Info("关闭定时器管理器，当前定时器数量: %d", mgr.GetTimerCount())
 		mgr.Close()
-		// timerManagerMap.Delete(key)
 		return true
 	})
 	timerManagerMap.Clear()
@@ -65,19 +62,17 @@ func TimeStop(ctx context.Context) {
 		vars.Error("等待定时器协程退出超时: %v", ctx.Err())
 	}
 
-	if timerChannel != nil {
-		close(timerChannel)
-		timerChannel = nil
-	}
+	// 释放调度通道（不 close，避免仍在运行的协程 send on closed channel）
+	resetTimerChannel()
 
-	defaultTimerManager = nil
-	managerInitOnce = sync.Once{}
+	defaultTimerManager.Store(nil)
 	vars.Info("计时器系统已停止")
 }
 
 // AddTimer 向默认管理器添加定时器
 func AddTimer(timer TimerInterface) error {
-	if defaultTimerManager == nil {
+	mgr := defaultTimerManager.Load()
+	if mgr == nil {
 		return ErrTimerSystemNotReady
 	}
 
@@ -85,7 +80,7 @@ func AddTimer(timer TimerInterface) error {
 		return ErrTimerNilParent
 	}
 
-	return defaultTimerManager.AddTimer(timer)
+	return mgr.AddTimer(timer)
 }
 
 // TimeTick 处理定时器滴答
@@ -96,32 +91,31 @@ func TimeTick() {
 		}
 	}()
 
+	ch := currentTimerChannel()
+	if ch == nil {
+		return
+	}
+
+	var ctxDone <-chan struct{}
+	if ctx := timerRunCtx.Load(); ctx != nil {
+		ctxDone = (*ctx).Done()
+	}
+
 	for {
 		select {
-		case timer, ok := <-timerChannel:
+		case task, ok := <-ch:
 			if !ok {
 				// 通道已关闭
 				return
 			}
-
 			// recover 放在循环内：避免用户 Tick 内 panic 杀死消费协程，导致所有定时器失效
-			func() {
-				defer func() {
-					if err := recover(); err != nil {
-						vars.Error("定时器滴答处理发生panic错误: %v", err)
-					}
-				}()
+			if mgr := defaultTimerManager.Load(); mgr != nil {
+				mgr.executeTimer(task)
+			}
 
-				timer.Tick()
-				if timer.HasNext() {
-					if err := AddTimer(timer); err != nil {
-						vars.Error("重新调度定时器失败: %v", err)
-					}
-				}
-			}()
 		case <-closech:
 			return
-		case <-timerRunCtx.Done():
+		case <-ctxDone:
 			return
 		}
 	}
@@ -129,19 +123,20 @@ func TimeTick() {
 
 // GetDefaultManager 返回默认定时器管理器
 func GetDefaultManager() *TimerManager {
-	return defaultTimerManager
+	return defaultTimerManager.Load()
 }
 
 // IsSystemRunning 检查定时器系统是否正在运行
 func IsSystemRunning() bool {
-	return defaultTimerManager != nil && !defaultTimerManager.isClosed.Load()
+	mgr := defaultTimerManager.Load()
+	return mgr != nil && !mgr.isClosed.Load()
 }
 
 // GetSystemStats 返回定时器系统统计信息
 func GetSystemStats() (totalTimers int64, stats TimerStats) {
-	if defaultTimerManager != nil {
-		totalTimers = defaultTimerManager.GetTimerCount()
-		stats = defaultTimerManager.GetStats()
+	if mgr := defaultTimerManager.Load(); mgr != nil {
+		totalTimers = mgr.GetTimerCount()
+		stats = mgr.GetStats()
 	}
 	return
 }

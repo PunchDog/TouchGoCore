@@ -12,14 +12,36 @@ import (
 	"touchgocore/vars"
 )
 
+// timerTask 是调度通道中传递的定时器项。
+//
+// gen 记录入队瞬间的定时器代次；出队时若代次已变，说明该定时器已被移除或被
+// 对象池复用给另一个业务，这条在途的旧调度项必须丢弃，否则会对同一个实例
+// 重复调度、甚至操作已被别人复用的对象（即「幽灵定时器 / 串号」问题）。
+type timerTask struct {
+	timer TimerInterface
+	gen   uint64
+}
+
+// isValid 判断该调度项是否仍然有效
+func (t timerTask) isValid() bool {
+	if t.timer == nil {
+		return false
+	}
+	parent := t.timer.GetParent()
+	if parent == nil {
+		return false
+	}
+	return parent.IsActive() && parent.gen.Load() == t.gen
+}
+
 // TimerWheel 表示时间轮结构
 type TimerWheel struct {
-	wheelConfig  int64               // 时间轮精度（毫秒）
-	tickWheel    *list.List          // 定时器链表
-	wheelLock    sync.RWMutex        // 时间轮锁（读写优化）
-	addTimerChan chan TimerInterface // 定时器添加通道
-	isRunning    atomic.Bool         // 是否运行
-	timerCount   atomic.Int64        // 定时器计数（用于监控）
+	wheelConfig  int64          // 时间轮精度（毫秒）
+	tickWheel    *list.List     // 定时器链表
+	wheelLock    sync.RWMutex   // 时间轮锁（读写优化）
+	addTimerChan chan timerTask // 定时器添加通道
+	isRunning    atomic.Bool    // 是否运行
+	timerCount   atomic.Int64   // 定时器计数（用于监控）
 }
 
 // TimerManager 管理所有时间轮
@@ -60,16 +82,14 @@ func (m *TimerManager) AddTimer(timer TimerInterface) error {
 	}
 
 	// 没有分配时，分配唯一ID
-	if parent.uid == 0 {
-		parent.uid = m.maxTimerUID.Add(1)
+	if parent.uid.Load() == 0 {
+		parent.uid.CompareAndSwap(0, m.maxTimerUID.Add(1))
 	}
-	parent.mgr = m
+	parent.mgr.Store(m)
 
-	// 清理现有定时器
+	// 清理现有定时器：内部会推进代次，使在途的旧调度项失效，避免重复调度
 	timer.RemoveFromManager(false)
-	// 重新进入调度，恢复活跃状态：
-	// RemoveFromManager 内部会 CAS 将 isActive 置为 false，
-	// 若不恢复，handleTimerAdd 会因 !IsActive() 直接丢弃定时器，导致 Tick 永远不被调用
+	// RemoveFromManager 会把 isActive 置为 false，这里恢复活跃状态重新进入调度
 	parent.isActive.Store(true)
 
 	// 选择合适的时间轮
@@ -87,32 +107,62 @@ func (m *TimerManager) AddTimer(timer TimerInterface) error {
 		vars.Warning("定时器通道背压过高: 类型=%s, len=%d, cap=%d", wheelType.String(), chanLen, chanCap)
 	}
 
+	// 代次必须在 RemoveFromManager 之后读取，保证与入队后的定时器一致
+	task := timerTask{timer: timer, gen: parent.gen.Load()}
+
 	select {
-	case wheel.addTimerChan <- timer:
+	case wheel.addTimerChan <- task:
 		m.stats.timersAdded.Add(1)
 		wheel.timerCount.Add(1)
 		return nil
 	default:
 		// 通道满时，尝试阻塞发送（带超时）
 		select {
-		case wheel.addTimerChan <- timer:
+		case wheel.addTimerChan <- task:
 			m.stats.timersAdded.Add(1)
 			wheel.timerCount.Add(1)
 			return nil
 		case <-time.After(time.Millisecond * 100):
-			// 超时后尝试直接执行定时器
-			go func() {
-				if m.isClosed.Load() {
-					return
-				}
-				timer.Tick()
-				if timer.HasNext() && !m.isClosed.Load() {
-					_ = m.AddTimer(timer)
-				}
-			}()
+			// 超时后异步执行：绝不能在持有 wheelLock 的情况下执行业务回调
+			go m.executeTimer(task)
 			vars.Warning("定时器通道已满，异步执行定时器")
 			return nil
 		}
+	}
+}
+
+// executeTimer 执行定时器并在需要时重新调度。
+//
+// 调用前提：不得持有任何 wheelLock。
+// Tick 内部允许调用 Remove / AddTimer（业务最常见的写法），
+// 因此本函数必须在完全无锁的上下文中运行，否则会自锁死锁。
+func (m *TimerManager) executeTimer(task timerTask) {
+	if !task.isValid() {
+		return // 已被移除或被复用的过期调度项，直接丢弃
+	}
+
+	func() {
+		defer func() {
+			if err := recover(); err != nil {
+				vars.Error("定时器执行发生panic: %v", err)
+			}
+		}()
+		task.timer.Tick()
+	}()
+	m.stats.timersExecuted.Add(1)
+
+	// Tick 内部可能已经移除/复用该定时器，或系统已关闭，重新校验后再续期
+	if m.isClosed.Load() || !task.isValid() {
+		return
+	}
+	if !task.timer.HasNext() {
+		return
+	}
+	if !task.isValid() {
+		return
+	}
+	if err := m.AddTimer(task.timer); err != nil {
+		vars.Error("重新调度定时器失败: %v", err)
 	}
 }
 
@@ -153,20 +203,46 @@ func (m *TimerManager) GetTimerCount() int64 {
 
 // 全局状态（定时器系统单例相关）
 var (
-	timerManagerMap     *syncmap.Map[*TimerManager, bool] // map[*TimerManager]bool
-	defaultTimerManager *TimerManager
-	timerChannel        chan TimerInterface
-	managerInitOnce     sync.Once
+	timerManagerMap     = syncmap.NewMap[*TimerManager, bool]() // map[*TimerManager]bool
+	defaultTimerManager atomic.Pointer[TimerManager]
+	timerChannel        chan timerTask
+	timerChannelMu      sync.Mutex
+	timerChannelReady   bool
 	closech             chan any
 	tickWG              sync.WaitGroup
-	timerRunCtx         = context.Background()
+	timerRunCtx         atomic.Pointer[context.Context]
 )
+
+// ensureTimerChannel 确保调度通道已创建（可被 Stop 后重建）
+func ensureTimerChannel() {
+	timerChannelMu.Lock()
+	defer timerChannelMu.Unlock()
+	if !timerChannelReady || timerChannel == nil {
+		timerChannel = make(chan timerTask, MaxTimerChannelNum)
+		timerChannelReady = true
+	}
+}
+
+// resetTimerChannel 释放调度通道。
+// 刻意不 close：未被管理器纳管（或停止后仍在运行）的时间轮可能仍在发送，
+// close 会直接触发 "send on closed channel" 的致命 panic。
+func resetTimerChannel() {
+	timerChannelMu.Lock()
+	defer timerChannelMu.Unlock()
+	timerChannel = nil
+	timerChannelReady = false
+}
+
+// currentTimerChannel 返回当前调度通道快照（无通道时为 nil）
+func currentTimerChannel() chan timerTask {
+	timerChannelMu.Lock()
+	defer timerChannelMu.Unlock()
+	return timerChannel
+}
 
 // NewTimerManager 创建新的定时器管理器
 func NewTimerManager() *TimerManager {
-	managerInitOnce.Do(func() {
-		timerChannel = make(chan TimerInterface, MaxTimerChannelNum)
-	})
+	ensureTimerChannel()
 
 	// 时间轮配置：毫秒/秒/分钟/10分钟/小时
 	wheelConfigs := []int64{
@@ -187,7 +263,7 @@ func NewTimerManager() *TimerManager {
 		wheel := &TimerWheel{
 			wheelConfig:  config,
 			tickWheel:    list.NewList(),
-			addTimerChan: make(chan TimerInterface, MaxAddTimerChannelNum),
+			addTimerChan: make(chan timerTask, MaxAddTimerChannelNum),
 		}
 		wheel.isRunning.Store(true)
 		mgr.wheels[i] = wheel
@@ -226,12 +302,12 @@ func (m *TimerManager) runWheel(wheel *TimerWheel, wheelType TimerType) {
 				m.cleanupWheel(wheel)
 				vars.Info("时间轮停止: %s", wheelType.String())
 
-			case timer, ok := <-wheel.addTimerChan:
+			case task, ok := <-wheel.addTimerChan:
 				if !ok {
 					// 通道已关闭
 					return
 				}
-				m.handleTimerAdd(wheel, timer)
+				m.handleTimerAdd(wheel, task)
 
 			case <-ticker.C:
 				m.processWheelTick(wheel, wheelType)
@@ -241,17 +317,27 @@ func (m *TimerManager) runWheel(wheel *TimerWheel, wheelType TimerType) {
 }
 
 // handleTimerAdd 处理定时器添加到时间轮
-func (m *TimerManager) handleTimerAdd(wheel *TimerWheel, timer TimerInterface) {
-	wheel.wheelLock.Lock()
-	defer wheel.wheelLock.Unlock()
+func (m *TimerManager) handleTimerAdd(wheel *TimerWheel, task timerTask) {
+	if !task.isValid() {
+		return // 过期调度项：定时器已被移除或复用，丢弃
+	}
 
-	parent := timer.GetParent()
-	if parent == nil || !parent.IsActive() {
+	node, ok := task.timer.(list.INode)
+	if !ok {
+		vars.Error("定时器未实现 list.INode，无法加入时间轮")
 		return
 	}
 
-	parent.wheel = wheel
-	wheel.tickWheel.Add(timer.(list.INode))
+	wheel.wheelLock.Lock()
+	defer wheel.wheelLock.Unlock()
+
+	// 加锁后再次校验：并发 Remove 可能刚好发生在这之前
+	if !task.isValid() {
+		return
+	}
+
+	task.timer.GetParent().wheel.Store(wheel)
+	wheel.tickWheel.Add(node)
 }
 
 // processWheelTick 处理时间轮滴答事件
@@ -260,55 +346,57 @@ func (m *TimerManager) processWheelTick(wheel *TimerWheel, wheelType TimerType) 
 	defer wheel.wheelLock.Unlock()
 
 	currentTime := util.CurrentMS()
+	ch := currentTimerChannel()
 
 	wheel.tickWheel.Range(func(node list.INode) bool {
-		timer := node.(TimerInterface)
+		timer, ok := node.(TimerInterface)
+		if !ok {
+			return true
+		}
 		parent := timer.GetParent()
-
 		if parent == nil || !parent.IsActive() {
 			return true
 		}
+		// 已被迁移或摘除的节点不再处理
+		if parent.wheel.Load() != wheel {
+			return true
+		}
 
-		if parent.nextTime <= currentTime {
+		if parent.nextTime.Load() <= currentTime {
 			// 时间到达，执行并移除
 			node.GetNode().Remove()
+			parent.wheel.Store(nil)
 			wheel.timerCount.Add(-1)
-			m.stats.timersExecuted.Add(1)
 
+			task := timerTask{timer: timer, gen: parent.gen.Load()}
 			select {
-			case timerChannel <- timer:
+			case ch <- task:
 			default:
-				// 通道已满，异步执行：当前持有 wheelLock，
-				// 同步调用 Tick（内部可能再次 AddTimer 加锁）会导致死锁
-				go func() {
-					if m.isClosed.Load() {
-						return
-					}
-					timer.Tick()
-					if timer.HasNext() && !m.isClosed.Load() {
-						if err := m.AddTimer(timer); err != nil {
-							vars.Error("重新调度定时器失败: %v", err)
-						}
-					}
-				}()
+				// 通道已满（或已停止）：异步执行。
+				// 当前持有 wheelLock，同步调用 Tick（内部可能再次 AddTimer 加锁）会死锁。
+				go m.executeTimer(task)
 			}
 		} else {
 			// 检查是否需要迁移到更精确的时间轮
-			remaining := parent.nextTime - currentTime - TimerMigrationOffset
+			remaining := parent.nextTime.Load() - currentTime - TimerMigrationOffset
 			newType := parent.calculateType(remaining)
 
 			if newType != wheelType && int(newType) < len(m.wheels) {
 				node.GetNode().Remove()
+				parent.wheel.Store(nil)
 				wheel.timerCount.Add(-1)
-				parent.wheel = nil
 				m.stats.wheelMigrations.Add(1)
 
+				task := timerTask{timer: timer, gen: parent.gen.Load()}
 				select {
-				case m.wheels[newType].addTimerChan <- timer:
+				case m.wheels[newType].addTimerChan <- task:
+					// 迁移成功，handleTimerAdd 会重新设置 wheel
 				default:
-					// 如果目标时间轮通道已满，保持在当前时间轮
+					// 目标时间轮通道已满，保持在当前时间轮。
+					// list 会撤销本次的待删除标记，确保回加的节点不会被延迟删除误删。
 					wheel.tickWheel.Add(node)
 					wheel.timerCount.Add(1)
+					parent.wheel.Store(wheel)
 				}
 			}
 		}
@@ -317,19 +405,27 @@ func (m *TimerManager) processWheelTick(wheel *TimerWheel, wheelType TimerType) 
 }
 
 // cleanupWheel 清理时间轮
+//
+// 关键：业务回调（Tick）必须在完全释放 wheelLock 之后执行。
+// Tick 内部调用 Remove / AddTimer 会再次申请同一把 wheelLock，
+// 若持锁执行会立即自锁，导致 TimeStop 永久挂起（进程停不下来）。
 func (m *TimerManager) cleanupWheel(wheel *TimerWheel) {
-	wheel.wheelLock.Lock()
-	defer wheel.wheelLock.Unlock()
+	// 阶段一：持锁摘链，收集已过期的定时器
+	var expired []timerTask
 
+	wheel.wheelLock.Lock()
 	currentTime := util.CurrentMS()
 
-	// 执行所有已过期的定时器
 	wheel.tickWheel.Range(func(node list.INode) bool {
-		timer := node.(TimerInterface)
+		timer, ok := node.(TimerInterface)
+		if !ok {
+			return true
+		}
 		parent := timer.GetParent()
-		if parent != nil && parent.nextTime <= currentTime {
-			timer.Tick()
-			m.stats.timersExecuted.Add(1)
+		if parent != nil && parent.IsActive() && parent.nextTime.Load() <= currentTime {
+			node.GetNode().Remove()
+			parent.wheel.Store(nil)
+			expired = append(expired, timerTask{timer: timer, gen: parent.gen.Load()})
 		}
 		return true
 	})
@@ -339,4 +435,10 @@ func (m *TimerManager) cleanupWheel(wheel *TimerWheel) {
 	wheel.tickWheel.Clear()
 	wheel.timerCount.Store(0)
 	m.stats.timersRemoved.Add(removedCount)
+	wheel.wheelLock.Unlock()
+
+	// 阶段二：无锁执行（此时 Tick 内 Remove/AddTimer 都不会再触碰 wheelLock）
+	for _, task := range expired {
+		m.executeTimer(task)
+	}
 }

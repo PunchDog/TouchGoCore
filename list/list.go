@@ -79,6 +79,8 @@ func (l *List) Add(node INode) (bret bool) {
 	obj.list = l
 	obj.pre = nil
 	obj.next = nil
+	// 节点重新入链：撤销遍历期间挂起的删除请求
+	obj.delPending = false
 
 	//添加新的链接
 	if l.head == nil {
@@ -126,7 +128,13 @@ func (l *List) Range(f func(INode) bool) {
 			l.mu.Lock()
 			defer l.mu.Unlock()
 			for _, node := range l.rangeDelList {
-				if n := node.GetNode(); n != nil {
+				n := node.GetNode()
+				if n == nil {
+					continue
+				}
+				// 只清理「仍然处于待删除状态」的节点：
+				// 遍历期间被重新 Add 回链表的节点其 delPending 已被撤销，必须保留
+				if n.delPending {
 					l.removeNodeLocked(n, true)
 				}
 			}
@@ -194,6 +202,7 @@ func (l *List) removeNodeLocked(node *Node, release bool) {
 	node.pre = nil
 	node.next = nil
 	node.id = 0
+	node.delPending = false
 
 	if !release {
 		return

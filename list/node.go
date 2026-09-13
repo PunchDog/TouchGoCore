@@ -24,6 +24,14 @@ type Node struct {
 	data     interface{} //数据
 	list     *List       //所属链表
 	nodeType INode       //节点类型
+
+	// 内嵌节点保护：只有由节点池分配（acquireNode）的节点才允许归还节点池。
+	// 否则像 `type X struct{ Node }` 这类内嵌节点会被当成独立节点复用，
+	// 造成宿主对象内存被踩踏。
+	fromPool bool
+	// 遍历（Range）期间被请求删除、尚未真正摘除。
+	// 若之后又被 Add 回链表，该标记会被清除，避免延迟删除把「回加的节点」误删。
+	delPending bool
 }
 
 // 获取节点
@@ -149,6 +157,9 @@ func (n *Node) remove(release bool) {
 	}
 
 	if release && list.rangeCount.Load() > 0 {
+		// 标记待删除；若遍历期间该节点又被 Add 回本链表，Add 会清掉此标记，
+		// 遍历结束后就不会把它误删。
+		n.delPending = true
 		list.rangeDelList = append(list.rangeDelList, n)
 		return
 	}

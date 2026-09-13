@@ -11,7 +11,7 @@ func TestTimer_Init_Basic(t *testing.T) {
 	if err := tr.Init(100, 3, nil); err != nil {
 		t.Fatalf("Init 失败: %v", err)
 	}
-	if tr.interval != 100 || tr.count != 3 {
+	if tr.interval.Load() != 100 || tr.count.Load() != 3 {
 		t.Fatalf("Init 后字段未设置: %+v", tr)
 	}
 	if !tr.isActive.Load() {
@@ -31,8 +31,8 @@ func TestTimer_Init_Infinite(t *testing.T) {
 	if err := tr.Init(100, InfiniteCount, nil); err != nil {
 		t.Fatal(err)
 	}
-	if tr.count != CountCorrectionValue {
-		t.Fatalf("InfiniteCount 应转 CountCorrectionValue，实际: %d", tr.count)
+	if tr.count.Load() != CountCorrectionValue {
+		t.Fatalf("InfiniteCount 应转 CountCorrectionValue，实际: %d", tr.count.Load())
 	}
 }
 
@@ -144,8 +144,8 @@ func TestNewTimer_NilClass(t *testing.T) {
 }
 
 func TestNewTimer_InvalidInterval(t *testing.T) {
-	// 传入一个有非 nil parent 的实例避免被对象池覆盖
-	tmr := &Timer{uid: 0, interval: 0, count: 0}
+	// 状态字段均为原子类型，零值即无效状态
+	tmr := &Timer{}
 	tmr.isActive.Store(false)
 	// 直接测校验路径
 	if _, err := NewTimer(0, 1, nil); err != ErrTimerInvalidInterval && err != ErrTimerInvalidType {

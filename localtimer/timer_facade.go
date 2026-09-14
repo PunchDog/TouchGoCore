@@ -9,38 +9,57 @@ import (
 // ==================== 定时器系统全局门面 ====================
 
 // Run 启动定时器系统。ctx 取消时 TimeTick 退出。
+//
+// Run 与 TimeStop 不可并发调用。重复 Run 会先完整收尾上一轮生命周期
+// （关闭旧 runtime、等旧 TimeTick 退出、Close 全部旧管理器），
+// 否则旧管理器的时间轮协程与 ticker 会永久泄漏。
 func Run(ctx context.Context) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	timerRunCtx.Store(&ctx)
 	vars.Info("启动计时器系统")
 
-	// 只清空不重建：重建会让已持有引用的协程拿到不同实例，甚至 nil
+	rt := &timerRuntime{closech: make(chan struct{}), ctx: ctx}
+
+	// 先接管上一轮生命周期。等待可能阻塞在业务 Tick 里的旧 TimeTick 退出，
+	// 否则新旧两个消费协程会同时抢同一个调度通道。
+	if old := timerRT.Swap(rt); old != nil {
+		vars.Warning("定时器系统重复启动，先收尾上一轮生命周期")
+		old.shutdown()
+		old.tickWG.Wait()
+	}
+
+	// 关闭上一轮全部管理器后重建。只 Clear 不 Close 会泄漏 5 个时间轮协程 + 5 个 ticker。
+	timerManagerMap.Range(func(mgr *TimerManager, _ bool) bool {
+		mgr.Close()
+		return true
+	})
 	timerManagerMap.Clear()
+	// NewTimerManager 内部会 ensureTimerChannel，必须先于 timeTick 协程启动
 	defaultTimerManager.Store(NewTimerManager())
 
-	closech = make(chan any)
-	tickWG.Add(1)
+	rt.tickWG.Add(1)
 	go func() {
-		defer tickWG.Done()
-		TimeTick()
+		defer rt.tickWG.Done()
+		// rt 以参数传入而非协程内读全局，消除「旧协程读到新 runtime」的窗口
+		timeTick(rt)
 	}()
 	vars.Info("计时器系统启动完成")
 }
 
 // TimeStop 停止定时器系统。ctx 可用于限制等待时间。
+//
+// 幂等且并发安全：timerRT.Swap(nil) 保证只有一方拿到 runtime，
+// 重复或并发调用都不会二次 close 通道（那会触发 fatal 的 close of closed channel）。
 func TimeStop(ctx context.Context) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	vars.Info("正在停止计时器系统...")
-	if closech != nil {
-		select {
-		case <-closech:
-		default:
-			close(closech)
-		}
+
+	rt := timerRT.Swap(nil)
+	if rt != nil {
+		rt.shutdown()
 	}
 
 	// 关闭所有定时器管理器
@@ -50,22 +69,23 @@ func TimeStop(ctx context.Context) {
 		return true
 	})
 	timerManagerMap.Clear()
+	defaultTimerManager.Store(nil)
 
-	done := make(chan struct{})
-	go func() {
-		tickWG.Wait()
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-ctx.Done():
-		vars.Error("等待定时器协程退出超时: %v", ctx.Err())
+	if rt != nil {
+		done := make(chan struct{})
+		go func() {
+			rt.tickWG.Wait()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-ctx.Done():
+			vars.Error("等待定时器协程退出超时: %v", ctx.Err())
+		}
 	}
 
 	// 释放调度通道（不 close，避免仍在运行的协程 send on closed channel）
 	resetTimerChannel()
-
-	defaultTimerManager.Store(nil)
 	vars.Info("计时器系统已停止")
 }
 
@@ -83,8 +103,11 @@ func AddTimer(timer TimerInterface) error {
 	return mgr.AddTimer(timer)
 }
 
-// TimeTick 处理定时器滴答
-func TimeTick() {
+// timeTick 消费调度通道并执行到期定时器。
+//
+// rt 由调用方传入，不在协程内读全局：否则重复 Run 之后，
+// 上一轮的 TimeTick 会读到新一轮的 closech，永远等不到自己的退出信号。
+func timeTick(rt *timerRuntime) {
 	defer func() {
 		if err := recover(); err != nil {
 			vars.Error("定时器滴答处理发生panic错误: %v", err)
@@ -96,10 +119,7 @@ func TimeTick() {
 		return
 	}
 
-	var ctxDone <-chan struct{}
-	if ctx := timerRunCtx.Load(); ctx != nil {
-		ctxDone = (*ctx).Done()
-	}
+	ctxDone := rt.ctx.Done()
 
 	for {
 		select {
@@ -108,16 +128,26 @@ func TimeTick() {
 				// 通道已关闭
 				return
 			}
-			// recover 放在循环内：避免用户 Tick 内 panic 杀死消费协程，导致所有定时器失效
-			if mgr := defaultTimerManager.Load(); mgr != nil {
-				mgr.executeTimer(task)
+			// 按归属管理器执行：timerChannel 是全局共享的，
+			// 一律交给默认管理器会把非默认管理器的定时器改嫁过去。
+			// 业务 Tick 的 panic 由 executeTimer 内部逐次 recover，
+			// 不会杀死本消费协程导致所有定时器失效。
+			if task.mgr != nil {
+				task.mgr.executeTimer(task)
 			}
 
-		case <-closech:
+		case <-rt.closech:
 			return
 		case <-ctxDone:
 			return
 		}
+	}
+}
+
+// TimeTick 处理定时器滴答（导出入口，绑定当前生命周期）
+func TimeTick() {
+	if rt := timerRT.Load(); rt != nil {
+		timeTick(rt)
 	}
 }
 

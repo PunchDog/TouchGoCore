@@ -97,3 +97,55 @@ func TestMap_Range_Stop(t *testing.T) {
 		t.Fatalf("Range 应在 3 次后停止，实际: %d", count)
 	}
 }
+
+func TestMap_LoadOrStore_InsertReturnsValue(t *testing.T) {
+	m := NewMap[string, *int]()
+	v := new(int)
+	*v = 42
+
+	actual, loaded := m.LoadOrStore("a", v)
+	if loaded {
+		t.Fatal("首次插入 loaded 应为 false")
+	}
+	if actual != v {
+		t.Fatalf("首次插入应返回传入的值，而非零值，实际: %v", actual)
+	}
+	if m.Length() != 1 {
+		t.Fatalf("Length 应为 1，实际: %d", m.Length())
+	}
+}
+
+func TestMap_LoadOrStore_ExistingWins(t *testing.T) {
+	m := NewMap[string, int]()
+	m.Store("a", 1)
+
+	actual, loaded := m.LoadOrStore("a", 99)
+	if !loaded {
+		t.Fatal("已存在的 key，loaded 应为 true")
+	}
+	if actual != 1 {
+		t.Fatalf("应返回已存在的值 1，实际: %d", actual)
+	}
+	if v, _ := m.Load("a"); v != 1 {
+		t.Fatalf("原值不应被覆盖，实际: %d", v)
+	}
+	if m.Length() != 1 {
+		t.Fatalf("Length 应为 1，实际: %d", m.Length())
+	}
+}
+
+// golua/luatable.go 的 SubTable 依赖「首次插入后直接类型断言」，
+// MapAny 内嵌 Map[any,any]，这里覆盖它的同一条路径。
+func TestMapAny_LoadOrStore_TypeAssertable(t *testing.T) {
+	type sub struct{ n int }
+	m := NewAny()
+
+	data, _ := m.LoadOrStore("k", &sub{n: 7})
+	got, ok := data.(*sub)
+	if !ok {
+		t.Fatalf("首次插入后应可直接断言，实际拿到: %#v", data)
+	}
+	if got.n != 7 {
+		t.Fatalf("值不符，实际: %d", got.n)
+	}
+}

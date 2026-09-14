@@ -105,8 +105,10 @@ func (p *TimerPool) Get(cls TimerInterface) TimerInterface {
 			return reflect.New(tp).Interface().(TimerInterface)
 		},
 	}
-	p.pool.Store(tpname, newPool)
-	return newPool.Get().(TimerInterface)
+	// LoadOrStore 而非 Store：并发首次调用时只会保留一个池。
+	// 各自 Store 会后写覆盖前写，被覆盖那个池里已归还的对象就此孤儿。
+	pool, _ := p.pool.LoadOrStore(tpname, newPool)
+	return pool.Get().(TimerInterface)
 }
 
 // Put 将定时器返回到池中
@@ -135,8 +137,7 @@ type Timer struct {
 	count    atomic.Int64 // 剩余执行次数
 
 	// 管理组件
-	mgr   atomic.Pointer[TimerManager] // 父管理器
-	wheel atomic.Pointer[TimerWheel]   // 父时间轮
+	wheel atomic.Pointer[TimerWheel] // 父时间轮
 	self  atomic.Pointer[TimerInterface]
 
 	// 状态标志
@@ -198,8 +199,14 @@ func (t *Timer) RemoveFromManager(cleanPool bool) {
 	// 只在摘链这一小段持锁，绝不在持锁状态下调用业务回调（Put 同理）
 	if wheel := t.wheel.Load(); wheel != nil {
 		wheel.wheelLock.Lock()
+		// 持锁后复核归属：processWheelTick 可能已在它的临界区里摘链、扣减计数
+		// 并把 wheel 置 nil，此时再减一次就会把计数打成负数。
+		stillOurs := t.wheel.Load() == wheel
 		t.Node.Remove()
 		wheel.wheelLock.Unlock()
+		if stillOurs {
+			wheel.timerCount.Add(-1)
+		}
 	} else {
 		t.Node.Remove()
 	}
@@ -301,6 +308,12 @@ func (t *Timer) GetRemainingCount() int64 {
 // NewTimer 创建新的定时器实例
 func NewTimer(interval, count int64, cls TimerInterface) (TimerInterface, error) {
 	if cls == nil {
+		return nil, ErrTimerInvalidType
+	}
+
+	// timerPool.Get 内部用 reflect.TypeOf(cls).Elem() 取元素类型，
+	// 传入非指针会直接 panic。用值接收者自行实现 TimerInterface 即可触发。
+	if reflect.TypeOf(cls).Kind() != reflect.Pointer {
 		return nil, ErrTimerInvalidType
 	}
 

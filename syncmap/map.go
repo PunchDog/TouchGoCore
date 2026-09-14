@@ -77,7 +77,8 @@ func (m *Map[K, V]) ClearAll(fn func(k K, v V) bool) {
 }
 
 // LoadOrStore returns the existing value for key if present.
-// Otherwise, it stores the given value and returns the value as loaded.
+// Otherwise, it stores and returns the given value.
+// The loaded result reports whether the value was loaded from the map.
 // This operation is atomic.
 func (m *Map[K, V]) LoadOrStore(key K, value V) (actual V, loaded bool) {
 	m.mu.Lock()
@@ -86,12 +87,12 @@ func (m *Map[K, V]) LoadOrStore(key K, value V) (actual V, loaded bool) {
 		m.mp = make(map[K]V)
 	}
 
-	actual, loaded = m.mp[key]
-	if !loaded {
-		m.mp[key] = value
-		m.num.Add(1)
+	if actual, loaded = m.mp[key]; loaded {
+		return actual, true
 	}
-	return
+	m.mp[key] = value
+	m.num.Add(1)
+	return value, false
 }
 
 // Load returns the value associated with the key and a boolean indicating

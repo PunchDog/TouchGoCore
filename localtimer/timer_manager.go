@@ -17,9 +17,13 @@ import (
 // gen 记录入队瞬间的定时器代次；出队时若代次已变，说明该定时器已被移除或被
 // 对象池复用给另一个业务，这条在途的旧调度项必须丢弃，否则会对同一个实例
 // 重复调度、甚至操作已被别人复用的对象（即「幽灵定时器 / 串号」问题）。
+//
+// mgr 记录归属管理器。timerChannel 是全局共享的，若不带上归属，消费端只能
+// 一律交给默认管理器执行并续期，非默认管理器的定时器首次触发后就被改嫁了。
 type timerTask struct {
 	timer TimerInterface
 	gen   uint64
+	mgr   *TimerManager
 }
 
 // isValid 判断该调度项是否仍然有效
@@ -52,6 +56,9 @@ type TimerManager struct {
 	isClosed    atomic.Bool        // 是否关闭
 	stats       timerStatsCounters // 内部原子计数
 	wheelWG     sync.WaitGroup
+
+	// 上次背压告警时间（毫秒）。背压时每个时间轮每秒最多告警一条，避免刷爆日志。
+	lastBackpressureWarn atomic.Int64
 }
 
 // TimerStats 保存性能统计信息（快照值，非实时引用）
@@ -59,6 +66,7 @@ type TimerStats struct {
 	TimersAdded     int64 // 已添加定时器数量
 	TimersRemoved   int64 // 已移除定时器数量
 	TimersExecuted  int64 // 已执行定时器数量
+	TimersDropped   int64 // 因背压被丢弃的调度次数
 	WheelMigrations int64 // 时间轮迁移次数
 }
 
@@ -67,7 +75,25 @@ type timerStatsCounters struct {
 	timersAdded     atomic.Int64
 	timersRemoved   atomic.Int64
 	timersExecuted  atomic.Int64
+	timersDropped   atomic.Int64
 	wheelMigrations atomic.Int64
+}
+
+// notifyBackpressure 背压限频告警：每个管理器每秒最多一条。
+//
+// 必须在释放 wheelLock 之后调用——vars 的异步日志在缓冲写满时会阻塞最长 5 秒
+// （见 vars/async_channel.go 的阻塞模式分支），持锁调用会把整个时间轮拖死。
+func (m *TimerManager) notifyBackpressure(wheelType TimerType, dropped int64) {
+	now := util.CurrentMS()
+	last := m.lastBackpressureWarn.Load()
+	if now-last < 1000 {
+		return
+	}
+	if !m.lastBackpressureWarn.CompareAndSwap(last, now) {
+		return
+	}
+	vars.Warning("定时器背压: 轮=%s, 本次丢弃=%d, 累计丢弃=%d",
+		wheelType.String(), dropped, m.stats.timersDropped.Load())
 }
 
 // AddTimer 向管理器添加定时器
@@ -85,7 +111,6 @@ func (m *TimerManager) AddTimer(timer TimerInterface) error {
 	if parent.uid.Load() == 0 {
 		parent.uid.CompareAndSwap(0, m.maxTimerUID.Add(1))
 	}
-	parent.mgr.Store(m)
 
 	// 清理现有定时器：内部会推进代次，使在途的旧调度项失效，避免重复调度
 	timer.RemoveFromManager(false)
@@ -102,32 +127,24 @@ func (m *TimerManager) AddTimer(timer TimerInterface) error {
 	chanLen := int64(len(wheel.addTimerChan))
 	chanCap := int64(cap(wheel.addTimerChan))
 
-	// 检查通道是否接近满
-	if float64(chanLen) >= float64(chanCap)*0.9 {
-		vars.Warning("定时器通道背压过高: 类型=%s, len=%d, cap=%d", wheelType.String(), chanLen, chanCap)
-	}
-
 	// 代次必须在 RemoveFromManager 之后读取，保证与入队后的定时器一致
-	task := timerTask{timer: timer, gen: parent.gen.Load()}
+	task := timerTask{timer: timer, gen: parent.gen.Load(), mgr: m}
 
 	select {
 	case wheel.addTimerChan <- task:
 		m.stats.timersAdded.Add(1)
-		wheel.timerCount.Add(1)
+		if float64(chanLen) >= float64(chanCap)*0.9 {
+			m.notifyBackpressure(wheelType, 0)
+		}
 		return nil
 	default:
-		// 通道满时，尝试阻塞发送（带超时）
-		select {
-		case wheel.addTimerChan <- task:
-			m.stats.timersAdded.Add(1)
-			wheel.timerCount.Add(1)
-			return nil
-		case <-time.After(time.Millisecond * 100):
-			// 超时后异步执行：绝不能在持有 wheelLock 的情况下执行业务回调
-			go m.executeTimer(task)
-			vars.Warning("定时器通道已满，异步执行定时器")
-			return nil
-		}
+		// 通道满：丢弃本次调度。
+		// 绝不阻塞、绝不新开协程——原先的「阻塞 100ms 后 go executeTimer」
+		// 会与 executeTimer 内部的续期 AddTimer 构成递归 fork，
+		// 下游 Tick 一旦变慢就会指数级堆积协程直至 OOM。
+		m.stats.timersDropped.Add(1)
+		m.notifyBackpressure(wheelType, 1)
+		return ErrTimerChannelFull
 	}
 }
 
@@ -188,6 +205,7 @@ func (m *TimerManager) GetStats() TimerStats {
 		TimersAdded:     m.stats.timersAdded.Load(),
 		TimersRemoved:   m.stats.timersRemoved.Load(),
 		TimersExecuted:  m.stats.timersExecuted.Load(),
+		TimersDropped:   m.stats.timersDropped.Load(),
 		WheelMigrations: m.stats.wheelMigrations.Load(),
 	}
 }
@@ -201,16 +219,36 @@ func (m *TimerManager) GetTimerCount() int64 {
 	return total
 }
 
+// timerRuntime 是一次 Run → TimeStop 生命周期的全部可变状态。
+//
+// 整体用 atomic.Pointer 替换，而不是把 closech / tickWG / ctx 摊成三个裸全局：
+// Run 写、TimeStop 读并关闭、TimeTick 在 select 里读，逐字段访问必然竞态，
+// 且 TimeStop 对 closech「先查后关」不是原子的，两个并发调用会双重 close
+// 直接触发 fatal 的 "close of closed channel"。Swap 保证只有一方拿到非 nil
+// 实例，closeOnce 再做一层幂等兜底。
+type timerRuntime struct {
+	closech   chan struct{}
+	closeOnce sync.Once
+	tickWG    sync.WaitGroup
+	ctx       context.Context
+}
+
+// shutdown 关闭本轮生命周期，幂等且并发安全
+func (rt *timerRuntime) shutdown() {
+	rt.closeOnce.Do(func() { close(rt.closech) })
+}
+
 // 全局状态（定时器系统单例相关）
 var (
 	timerManagerMap     = syncmap.NewMap[*TimerManager, bool]() // map[*TimerManager]bool
 	defaultTimerManager atomic.Pointer[TimerManager]
-	timerChannel        chan timerTask
-	timerChannelMu      sync.Mutex
-	timerChannelReady   bool
-	closech             chan any
-	tickWG              sync.WaitGroup
-	timerRunCtx         atomic.Pointer[context.Context]
+	timerRT             atomic.Pointer[timerRuntime]
+
+	// timerChannel 刻意保持全局、跨生命周期共享：
+	// NewTimerManager 可以在未 Run 的情况下独立调用，此时也得有地方派发。
+	timerChannel      chan timerTask
+	timerChannelMu    sync.Mutex
+	timerChannelReady bool
 )
 
 // ensureTimerChannel 确保调度通道已创建（可被 Stop 后重建）
@@ -338,70 +376,88 @@ func (m *TimerManager) handleTimerAdd(wheel *TimerWheel, task timerTask) {
 
 	task.timer.GetParent().wheel.Store(wheel)
 	wheel.tickWheel.Add(node)
+	// 计数只在「节点真正入链」处自增，与 processWheelTick / cleanupWheel 的
+	// 自减严格配对。放在 AddTimer 里统计的是入队次数，迁移到达不经过那里，
+	// 会让计数每次迁移净减一。
+	wheel.timerCount.Add(1)
 }
 
 // processWheelTick 处理时间轮滴答事件
+//
+// 背压原则：通道满就把定时器留在当前轮等下一个 tick 重试，绝不新开协程。
+// 原先的「go executeTimer」在毫秒轮上是 1ms 一次的无限 fork 源，
+// 消费端只有单个 TimeTick 协程且同步执行业务 Tick，下游一慢就会堆积到 OOM。
 func (m *TimerManager) processWheelTick(wheel *TimerWheel, wheelType TimerType) {
-	wheel.wheelLock.Lock()
-	defer wheel.wheelLock.Unlock()
-
 	currentTime := util.CurrentMS()
 	ch := currentTimerChannel()
+	var dropped int64
 
+	wheel.wheelLock.Lock()
 	wheel.tickWheel.Range(func(node list.INode) bool {
 		timer, ok := node.(TimerInterface)
 		if !ok {
 			return true
 		}
 		parent := timer.GetParent()
-		if parent == nil || !parent.IsActive() {
+		if parent == nil {
 			return true
 		}
-		// 已被迁移或摘除的节点不再处理
+		// 已被迁移到别的轮：归目标轮处理
 		if parent.wheel.Load() != wheel {
+			return true
+		}
+		if !parent.IsActive() {
+			// 业务已移除，但 RemoveFromManager 与 handleTimerAdd 竞态：
+			// 节点在 wheel 引用写入前就被判为「无轮」而漏摘，随后又被入链。
+			// 它既不会被调度也不会被回收，计数还永远多 1 —— 顺手清掉。
+			node.GetNode().Remove()
+			parent.wheel.Store(nil)
+			wheel.timerCount.Add(-1)
 			return true
 		}
 
 		if parent.nextTime.Load() <= currentTime {
-			// 时间到达，执行并移除
-			node.GetNode().Remove()
-			parent.wheel.Store(nil)
-			wheel.timerCount.Add(-1)
-
-			task := timerTask{timer: timer, gen: parent.gen.Load()}
+			// 时间到达：只有派发成功才摘链，失败则留在轮里下个 tick 重试
+			task := timerTask{timer: timer, gen: parent.gen.Load(), mgr: m}
 			select {
 			case ch <- task:
-			default:
-				// 通道已满（或已停止）：异步执行。
-				// 当前持有 wheelLock，同步调用 Tick（内部可能再次 AddTimer 加锁）会死锁。
-				go m.executeTimer(task)
-			}
-		} else {
-			// 检查是否需要迁移到更精确的时间轮
-			remaining := parent.nextTime.Load() - currentTime - TimerMigrationOffset
-			newType := parent.calculateType(remaining)
-
-			if newType != wheelType && int(newType) < len(m.wheels) {
 				node.GetNode().Remove()
 				parent.wheel.Store(nil)
 				wheel.timerCount.Add(-1)
-				m.stats.wheelMigrations.Add(1)
-
-				task := timerTask{timer: timer, gen: parent.gen.Load()}
-				select {
-				case m.wheels[newType].addTimerChan <- task:
-					// 迁移成功，handleTimerAdd 会重新设置 wheel
-				default:
-					// 目标时间轮通道已满，保持在当前时间轮。
-					// list 会撤销本次的待删除标记，确保回加的节点不会被延迟删除误删。
-					wheel.tickWheel.Add(node)
-					wheel.timerCount.Add(1)
-					parent.wheel.Store(wheel)
-				}
+			default:
+				dropped++
 			}
+			return true
+		}
+
+		// 检查是否需要迁移到更精确的时间轮
+		remaining := parent.nextTime.Load() - currentTime - TimerMigrationOffset
+		newType := parent.calculateType(remaining)
+		if newType == wheelType || int(newType) >= len(m.wheels) {
+			return true
+		}
+
+		task := timerTask{timer: timer, gen: parent.gen.Load(), mgr: m}
+		select {
+		case m.wheels[newType].addTimerChan <- task:
+			// 迁移成功，handleTimerAdd 会重新设置 wheel 并自增目标轮计数
+			node.GetNode().Remove()
+			parent.wheel.Store(nil)
+			wheel.timerCount.Add(-1)
+			m.stats.wheelMigrations.Add(1)
+		default:
+			// 目标时间轮通道已满，保持在当前时间轮等下一个 tick
+			dropped++
 		}
 		return true
 	})
+	wheel.wheelLock.Unlock()
+
+	// 告警必须在解锁之后：vars 异步日志缓冲满时会阻塞最长 5 秒
+	if dropped > 0 {
+		m.stats.timersDropped.Add(dropped)
+		m.notifyBackpressure(wheelType, dropped)
+	}
 }
 
 // cleanupWheel 清理时间轮
@@ -422,10 +478,15 @@ func (m *TimerManager) cleanupWheel(wheel *TimerWheel) {
 			return true
 		}
 		parent := timer.GetParent()
-		if parent != nil && parent.IsActive() && parent.nextTime.Load() <= currentTime {
+		if parent == nil {
+			return true
+		}
+		// 无论是否到期都要断开 wheel 引用：本函数随后会 Clear 整个轮并把计数归零，
+		// 残留引用会让业务侧后续的 Remove 误判节点仍在轮里，把计数减成负数。
+		parent.wheel.Store(nil)
+		if parent.IsActive() && parent.nextTime.Load() <= currentTime {
 			node.GetNode().Remove()
-			parent.wheel.Store(nil)
-			expired = append(expired, timerTask{timer: timer, gen: parent.gen.Load()})
+			expired = append(expired, timerTask{timer: timer, gen: parent.gen.Load(), mgr: m})
 		}
 		return true
 	})

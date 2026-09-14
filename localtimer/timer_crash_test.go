@@ -390,3 +390,283 @@ func tailLines(s string, n int) string {
 	}
 	return strings.Join(lines, "\n")
 }
+
+// ============================================================================
+// 场景 9（背压）：调度通道打满时不得 fork 协程，且定时器「留轮重试」而非永久丢弃。
+//
+//	修复前：通道满 → 每个到期定时器 go executeTimer → 与续期 AddTimer 递归 fork，
+//	毫秒轮 1ms 一次即可 OOM。修复后：发送失败就留在当前轮，下个 tick 重试，零新增协程。
+//
+//	用 NewTimerManager 独立驱动（不 Run、无消费协程），全局通道天然保持满，
+//	隔离出纯背压路径。
+// ============================================================================
+
+func TestRegression_BackpressureNoGoroutineExplosion(t *testing.T) {
+	m := NewTimerManager()
+	defer m.Close()
+
+	wheel := m.wheels[TimerTypeHour] // 小时轮 1h 才 tick 一次，不会自我干扰
+	ch := currentTimerChannel()
+
+	// 灌满全局调度通道，制造持续背压
+fill:
+	for i := int64(0); i < MaxTimerChannelNum; i++ {
+		select {
+		case ch <- timerTask{}:
+		default:
+			break fill
+		}
+	}
+
+	base := runtime.NumGoroutine()
+
+	plant := func() {
+		tm, err := NewTimer(1000, InfiniteCount, &plainTimer{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		p := tm.GetParent()
+		p.nextTime.Store(util.CurrentMS() - 1) // 已过期，必然走派发分支
+		m.handleTimerAdd(wheel, timerTask{timer: tm, gen: p.gen.Load(), mgr: m})
+	}
+
+	for i := 0; i < 200; i++ {
+		plant()
+		m.processWheelTick(wheel, TimerTypeHour)
+	}
+
+	if g := runtime.NumGoroutine(); g-base > 5 {
+		t.Fatalf("✘ 背压期间协程数暴涨: base=%d now=%d", base, g)
+	}
+	if d := m.GetStats().TimersDropped; d < 200 {
+		t.Fatalf("✘ 丢弃计数不足: %d（期望 >=200）", d)
+	}
+	if l := wheel.tickWheel.Length(); l != 200 {
+		t.Fatalf("✘ 定时器应全部留在轮里等待重试: 链表长度=%d（期望 200）", l)
+	}
+	if c := wheel.timerCount.Load(); c != 200 {
+		t.Fatalf("✘ 计数与链表不一致: count=%d len=%d", c, wheel.tickWheel.Length())
+	}
+
+	// 腾出一个空位，验证「留轮重试」而非永久丢弃
+	<-ch
+	m.processWheelTick(wheel, TimerTypeHour)
+	if l := wheel.tickWheel.Length(); l != 199 {
+		t.Fatalf("✘ 通道腾空后应有一个定时器恢复派发: 链表长度=%d（期望 199）", l)
+	}
+
+	// 清理：排空灌入的占位任务，避免污染后续测试的全局通道
+drain:
+	for {
+		select {
+		case <-ch:
+		default:
+			break drain
+		}
+	}
+	t.Logf("✔ 背压期间零协程增长，累计丢弃 %d 次，通道腾空后恢复派发", m.GetStats().TimersDropped)
+}
+
+// ============================================================================
+// 场景 10（并发）：N 个协程并发 TimeStop 不得触发 "close of closed channel"。
+//
+//	修复前：TimeStop 对裸全局 closech 先查后关，非原子，两个并发调用会双重 close。
+//	修复后：timerRT.Swap(nil) 只有一方拿到 runtime，closeOnce 再兜一层幂等。
+// ============================================================================
+
+func scenarioConcurrentTimeStop() {
+	Run(context.Background())
+	var wg sync.WaitGroup
+	for i := 0; i < 32; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			TimeStop(context.Background())
+		}()
+	}
+	wg.Wait()
+}
+
+func TestRegression_ConcurrentTimeStopNoPanic(t *testing.T) {
+	if isChild() {
+		scenarioConcurrentTimeStop()
+		return
+	}
+	out, timedOut := runCrashChild(t, "TestRegression_ConcurrentTimeStopNoPanic", 25*time.Second)
+	if strings.Contains(out, "close of closed channel") {
+		t.Fatalf("✘ 并发 TimeStop 触发双重 close:\n%s", tailLines(out, 20))
+	}
+	if strings.Contains(out, "panic:") {
+		t.Fatalf("✘ 并发 TimeStop panic:\n%s", tailLines(out, 20))
+	}
+	if timedOut {
+		t.Fatalf("✘ 并发 TimeStop 挂死:\n%s", tailLines(out, 12))
+	}
+	t.Log("✔ 32 个协程并发 TimeStop 无 panic、无双重 close")
+}
+
+// ============================================================================
+// 场景 11（生命周期）：连续多次 Run 不得泄漏管理器 / 时间轮协程。
+//
+//	修复前：Run 只 Clear 管理器 map 不 Close，每多一次 Run 就泄漏 5 个时间轮协程
+//	+ 5 个 ticker。修复后：Run 先 Close 上一轮全部管理器并等待旧 TimeTick 退出。
+// ============================================================================
+
+func TestRegression_RepeatedRunNoManagerLeak(t *testing.T) {
+	Run(context.Background())
+	TimeStop(context.Background())
+	time.Sleep(100 * time.Millisecond)
+	runtime.GC()
+	base := runtime.NumGoroutine()
+
+	for i := 0; i < 3; i++ {
+		Run(context.Background())
+	}
+
+	// 确定性断言：任意时刻管理器 map 里最多一个存活管理器
+	if l := timerManagerMap.Length(); l != 1 {
+		t.Fatalf("✘ 重复 Run 后管理器泄漏: map 长度=%d（期望 1）", l)
+	}
+	if g := runtime.NumGoroutine(); g-base > 12 {
+		t.Logf("⚠ 协程数增长偏多: base=%d now=%d（软提示）", base, g)
+	}
+
+	TimeStop(context.Background())
+	time.Sleep(300 * time.Millisecond)
+	runtime.GC()
+	if g := runtime.NumGoroutine(); g > base+3 {
+		t.Fatalf("✘ TimeStop 后协程未回落: base=%d now=%d", base, g)
+	}
+	t.Logf("✔ 连续 3 次 Run 无管理器泄漏，TimeStop 后协程回落至 %d", runtime.NumGoroutine())
+}
+
+// ============================================================================
+// 场景 12（跨管理器）：非默认管理器的定时器触发后续期必须回到原管理器。
+//
+//	修复前：timerChannel 全局共享，消费端恒用默认管理器执行并续期，
+//	非默认管理器的定时器首次触发后即被改嫁。修复后：timerTask 携带 mgr 归属。
+// ============================================================================
+
+func TestManagerIsolation_NoHijack(t *testing.T) {
+	Run(context.Background())
+	defer TimeStop(context.Background())
+
+	custom := NewTimerManager()
+	defer custom.Close()
+
+	// 注意：timerPool.Get 返回的是池里新建的实例，不是传入的 cls，
+	// 所以必须断言返回的 tm 本身，而非外部那个 &plainTimer{}。
+	tm, err := NewTimer(5, InfiniteCount, &plainTimer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := custom.AddTimer(tm); err != nil {
+		t.Fatal(err)
+	}
+	pt := tm.(*plainTimer)
+
+	time.Sleep(300 * time.Millisecond)
+
+	if n := pt.n.Load(); n == 0 {
+		t.Fatal("✘ 非默认管理器的定时器未被执行")
+	}
+	customStats := custom.GetStats()
+	defaultStats := GetDefaultManager().GetStats()
+	if customStats.TimersAdded < 2 {
+		t.Fatalf("✘ 非默认管理器续期计数异常: TimersAdded=%d（期望 >=2）", customStats.TimersAdded)
+	}
+	if defaultStats.TimersAdded != 0 {
+		t.Fatalf("✘ 定时器被改嫁到默认管理器: 默认 TimersAdded=%d（期望 0）", defaultStats.TimersAdded)
+	}
+	t.Logf("✔ 非默认管理器定时器持续在原管理器续期: custom.Added=%d default.Added=%d",
+		customStats.TimersAdded, defaultStats.TimersAdded)
+}
+
+// ============================================================================
+// 场景 13（计数一致性）：大量派发 / 迁移 / 移除后，timerCount 与链表长度必须一致且归零。
+//
+//	修复前：AddTimer 入队时 +1、迁移到达不 +1、触发/迁移各 -1 → 每次迁移净 -1，长期变负；
+//	Remove 摘链不 -1 → 泄漏。修复后：计数只在「节点真正进出链表」处增减，严格配对。
+// ============================================================================
+
+func TestTimerCount_MatchesListAfterChurn(t *testing.T) {
+	Run(context.Background())
+	defer TimeStop(context.Background())
+
+	m := GetDefaultManager()
+	var timers []TimerInterface
+	for i := 0; i < 40; i++ {
+		// 间隔跨越时间轮边界，强制触发派发 + 迁移
+		tm, err := NewTimer(int64(50+i*100), InfiniteCount, &plainTimer{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := AddTimer(tm); err != nil {
+			t.Fatal(err)
+		}
+		timers = append(timers, tm)
+	}
+
+	// 让派发 / 迁移充分发生，期间采样断言计数不为负
+	for i := 0; i < 5; i++ {
+		time.Sleep(100 * time.Millisecond)
+		if c := m.GetTimerCount(); c < 0 {
+			t.Fatalf("✘ 计数为负: %d", c)
+		}
+	}
+
+	for _, tm := range timers {
+		tm.Remove()
+	}
+
+	// 轮询等待全部摘除；若残留（极窄的续期竞态窗口），补一轮 Remove 再等
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		var sumCount, sumLen int64
+		for _, w := range m.wheels {
+			sumCount += w.timerCount.Load()
+			sumLen += int64(w.tickWheel.Length())
+		}
+		if sumCount == 0 && sumLen == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("✘ 全部移除后计数/链表未归零: count=%d len=%d", sumCount, sumLen)
+		}
+		for _, tm := range timers {
+			tm.Remove()
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Logf("✔ 大量派发/迁移/移除后计数与链表一致且归零")
+}
+
+// ============================================================================
+// 基准：processWheelTick 的 Range 快照分配。
+//
+//	list.Range 改为 sync.Pool 复用快照 buffer 后，每 tick 不应再为链表长度
+//	线性分配短命切片。用 -benchmem 对比 allocs/op。
+// ============================================================================
+
+func BenchmarkProcessWheelTick(b *testing.B) {
+	m := NewTimerManager()
+	defer m.Close()
+
+	wheel := m.wheels[TimerTypeHour]
+	for i := 0; i < 1000; i++ {
+		tm, err := NewTimer(3600*1000, InfiniteCount, &plainTimer{})
+		if err != nil {
+			b.Fatal(err)
+		}
+		p := tm.GetParent()
+		// 剩余时间需 >= 1h，calculateType 才判为小时轮，既不派发也不迁移，
+		// 这样基准只测量 Range 快照分配本身。
+		p.nextTime.Store(util.CurrentMS() + 3600*1000 + 60*1000)
+		m.handleTimerAdd(wheel, timerTask{timer: tm, gen: p.gen.Load(), mgr: m})
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		m.processWheelTick(wheel, TimerTypeHour)
+	}
+}

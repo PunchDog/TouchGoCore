@@ -228,7 +228,10 @@ func TelegramStart(ctx context.Context) {
 	}
 	timer := t.(*telegramTimer)
 	timer.bot = bot
-	localtimer.AddTimer(timer)
+	// 不中断 bot 启动（收消息主循环仍可工作），但定时器丢失必须留痕
+	if err := localtimer.AddTimer(timer); err != nil {
+		vars.Error("telegram 维护定时器注册失败: %v", err)
+	}
 
 	telegramWG.Add(1)
 	go func() {

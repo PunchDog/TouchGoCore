@@ -239,7 +239,10 @@ func NewLuaScriptWithContext(ctx context.Context, initluapath string) (*LuaScrip
 	p.timer = tmr.(*luaTimer)
 	p.timer.luaScript = p
 	p.timer.ctx = p.ctx
-	localtimer.AddTimer(p.timer)
+	// 没有 update 定时器，这个脚本实例永远不会被驱动，不能当成创建成功返回
+	if err := localtimer.AddTimer(p.timer); err != nil {
+		return nil, fmt.Errorf("register lua timer failed: %w", err)
+	}
 
 	// 加入管理列表
 	instanceID := nextInstanceID.Add(1)

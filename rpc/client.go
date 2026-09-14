@@ -85,7 +85,10 @@ func (c *RpcClient) markDisconnected() {
 	c.connStatus.Store(false)
 	c.failAllPending()
 	c.triggerOnDisconnected(nil)
-	localtimer.AddTimer(c)
+	// 丢掉这个定时器意味着该客户端永远不会再自动重连，必须留下痕迹
+	if err := localtimer.AddTimer(c); err != nil {
+		vars.Error("RPC客户端重连定时器注册失败[%s]: %v", c.fullAddr, err)
+	}
 }
 
 func (c *RpcClient) SendMsg(protocol1, protocol2 int32, pb proto.Message, callfunc func(pb1 proto.Message)) {
@@ -297,7 +300,9 @@ func NewRpcClient(servername, addr string, port int) *RpcClient {
 		vars.Error("RPC客户端初始连接失败[%s]: %v", client.fullAddr, err)
 		client.conn.Store(nil)
 		client.connStatus.Store(false)
-		localtimer.AddTimer(client)
+		if err := localtimer.AddTimer(client); err != nil {
+			vars.Error("RPC客户端重连定时器注册失败[%s]: %v", client.fullAddr, err)
+		}
 	}
 
 	rpcClient_.Store(servername, client)

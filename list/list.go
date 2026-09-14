@@ -118,6 +118,16 @@ func (l *List) Get(id int64) INode {
 	return l.nodeMap[id]
 }
 
+// rangeBufPool 复用 Range 的快照切片。
+// 毫秒时间轮每秒 Range 1000 次，每次 make 新快照会产生大量短命垃圾。
+// sync.Pool 在 GC 周期间会被清理，不会长期占住峰值容量。
+var rangeBufPool = sync.Pool{
+	New: func() any {
+		s := make([]INode, 0, 64)
+		return &s
+	},
+}
+
 // 遍历（优化：使用快照遍历，避免遍历期间持锁导致死锁和竞态条件）
 func (l *List) Range(f func(INode) bool) {
 	// 标记遍历进行中（原子计数，支持嵌套/并发遍历）
@@ -144,7 +154,8 @@ func (l *List) Range(f func(INode) bool) {
 
 	// 获取快照：在锁内复制节点列表，锁外遍历
 	l.mu.RLock()
-	snapshot := make([]INode, 0, l.len)
+	p := rangeBufPool.Get().(*[]INode)
+	snapshot := (*p)[:0]
 	for node := l.head; node != nil; node = node.GetNode().next {
 		snapshot = append(snapshot, node)
 	}
@@ -156,6 +167,12 @@ func (l *List) Range(f func(INode) bool) {
 			break
 		}
 	}
+
+	// 归还前清空引用，否则池里的切片会长期持有已删除的节点。
+	// 回调 panic 时跳过归还，buffer 由 GC 回收，不会累积。
+	clear(snapshot)
+	*p = snapshot
+	rangeBufPool.Put(p)
 }
 
 // 清空

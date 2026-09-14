@@ -104,6 +104,7 @@ func hasFormatVerbs(s string) bool {
 // assembleLine 统一格式化日志消息：
 //   - 首参含 %s 等格式化占位符时，按 fmt.Sprintf 处理；
 //   - 首参不含占位符时，将所有参数按顺序直接拼接（以空格分隔），避免多余参数被丢弃。
+//
 // 参数签名采用 []any 而非 ...any，避开 go vet 对 (string, ...any) 形式的 printf 静态分析。
 func assembleLine(msg string, args []any) string {
 	if len(args) == 0 {
@@ -145,9 +146,15 @@ func consoleLevelPrefix(level slog.Level) string {
 	}
 }
 
-// printToConsole 优先将日志同步输出到命令行（立即可见，便于实时观察）。
-// 不受日志级别限制；级别过滤仅作用于后续的 log 文件写入。
+// printToConsole 将日志同步输出到命令行。
+// Debug 受日志级别约束（高并发下每条请求打 Debug 会把 fmt.Printf 锁打满）；
+// Info/Warn/Error 仍始终打到命令行，便于实时观察。
 func printToConsole(level slog.Level, msg string) {
+	if level <= slog.LevelDebug {
+		if ch := GetChannelLogger(); ch != nil && !ch.ShouldWriteFile(level) {
+			return
+		}
+	}
 	ts := time.Now().Format("15:04:05")
 	fmt.Printf("%s %s %s\n", ts, consoleLevelPrefix(level), msg)
 }

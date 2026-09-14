@@ -259,8 +259,8 @@ func Run(ctx context.Context) error {
 
 // ginLogger 将 gin 的访问日志桥接到项目的 vars 日志系统。
 // 取代 gin.Default() 自带的 Logger()（直接写 stdout，高并发下因共享锁被串行化）。
-// 访问日志量大，统一走 vars.Debug：仅当日志级别开启 debug 或更详细时输出，
-// 并自动继承 vars 的 off 模式（完全静默）与文件滚动策略，融入统一日志体系。
+// 访问日志量大，2xx 成功请求不再逐条输出（1 万并发时 fmt 锁会把延迟打穿）；
+// 仅记录 4xx/5xx 或 gin 私有错误，走 vars.Debug。
 func ginLogger() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		start := time.Now()
@@ -275,6 +275,9 @@ func ginLogger() gin.HandlerFunc {
 		clientIP := c.ClientIP()
 		method := c.Request.Method
 		errMsg := c.Errors.ByType(gin.ErrorTypePrivate).String()
+		if status < 400 && errMsg == "" {
+			return
+		}
 
 		// 先自行 Sprintf，避免把用户可控的路径/错误信息当作格式串传给 vars，
 		// 也避免二次格式化。vars.Debug 在 0 个变参时直接原样输出，安全。

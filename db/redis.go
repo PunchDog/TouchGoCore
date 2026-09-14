@@ -28,7 +28,7 @@ func redisPoolSize(n int) int {
 	if n > 0 {
 		return n
 	}
-	return 256
+	return 512
 }
 
 func redisMinIdle(poolSize int) int {

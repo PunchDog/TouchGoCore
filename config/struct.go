@@ -31,7 +31,7 @@ type RedisConfig struct {
 	Host     string `json:"redis_host"`      //连接地址
 	Password string `json:"redis_password"`  //用户密码
 	Db       int    `json:"redis_db"`        //库编号
-	PoolSize int    `json:"redis_pool_size"` // 连接池大小；<=0 时用默认 256
+	PoolSize int    `json:"redis_pool_size"` // 连接池大小；<=0 时用默认 512
 }
 
 // TLSConfig 通用服务端 TLS（Gin / WebSocket 直连场景；前置反代可保持 enable=false）

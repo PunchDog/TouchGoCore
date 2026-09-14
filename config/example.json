@@ -3,7 +3,8 @@
         "说明:": "这里是redis配置(必填)",
         "redis_host": "127.0.0.1:6379",
         "redis_password": "",
-        "redis_db": 0
+        "redis_db": 0,
+        "redis_pool_size": 256
     },
     "mysql": {
         "说明:": "这里是mysql配置",

@@ -21,6 +21,22 @@ type RedisConfigModel struct {
 	Host     string
 	Db       int
 	Password string
+	PoolSize int
+}
+
+func redisPoolSize(n int) int {
+	if n > 0 {
+		return n
+	}
+	return 256
+}
+
+func redisMinIdle(poolSize int) int {
+	idle := 32
+	if idle > poolSize {
+		return poolSize
+	}
+	return idle
 }
 
 type Redis struct {
@@ -32,7 +48,7 @@ type Redis struct {
 // NewRedis 创建Redis连接（支持单机和集群模式）
 func NewRedis(config *config.RedisConfig) (*Redis, error) {
 	this := new(Redis)
-	configModel := &RedisConfigModel{config.Host, config.Db, config.Password}
+	configModel := &RedisConfigModel{config.Host, config.Db, config.Password, config.PoolSize}
 	this.config = configModel
 	return this, this.connect()
 }
@@ -67,6 +83,7 @@ func isClusterMode(host string) bool {
 
 // connectStandalone 单机模式连接
 func (this *Redis) connectStandalone(connKey string) error {
+	poolSize := redisPoolSize(this.config.PoolSize)
 	client := redis.NewClient(&redis.Options{
 		Addr:         this.config.Host,
 		Password:     this.config.Password,
@@ -74,8 +91,8 @@ func (this *Redis) connectStandalone(connKey string) error {
 		DialTimeout:  5 * time.Second,
 		ReadTimeout:  3 * time.Second,
 		WriteTimeout: 3 * time.Second,
-		PoolSize:     10,
-		MinIdleConns: 5,
+		PoolSize:     poolSize,
+		MinIdleConns: redisMinIdle(poolSize),
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -93,14 +110,15 @@ func (this *Redis) connectStandalone(connKey string) error {
 
 // connectCluster 集群模式连接
 func (this *Redis) connectCluster(connKey string) error {
+	poolSize := redisPoolSize(this.config.PoolSize)
 	client := redis.NewClusterClient(&redis.ClusterOptions{
 		Addrs:        splitAddrs(this.config.Host),
 		Password:     this.config.Password,
 		DialTimeout:  5 * time.Second,
 		ReadTimeout:  3 * time.Second,
 		WriteTimeout: 3 * time.Second,
-		PoolSize:     10,
-		MinIdleConns: 5,
+		PoolSize:     poolSize,
+		MinIdleConns: redisMinIdle(poolSize),
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

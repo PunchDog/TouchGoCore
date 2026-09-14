@@ -166,7 +166,10 @@ func Run(ctx context.Context) error {
 		vars.Error("web服务未开启")
 		return nil
 	}
-	ginServer := gin.Default()
+	ginServer := gin.New()
+	// 用自定义 logger 桥接（见 ginLogger），取代 gin.Default() 自带的 Logger()：
+	// 后者直接写 stdout，高并发下因共享锁被串行化，且脱离项目统一日志体系。
+	ginServer.Use(ginLogger())
 
 	ginServer.Use(gin.CustomRecovery(func(c *gin.Context, recovered interface{}) {
 		vars.Error("HTTP请求处理panic: %v, 路径: %s", recovered, c.Request.URL.Path)
@@ -252,6 +255,39 @@ func Run(ctx context.Context) error {
 		vars.Info("web服务启动成功,端口:%d", cfg.Web.HTTPPort)
 	}
 	return nil
+}
+
+// ginLogger 将 gin 的访问日志桥接到项目的 vars 日志系统。
+// 取代 gin.Default() 自带的 Logger()（直接写 stdout，高并发下因共享锁被串行化）。
+// 访问日志量大，统一走 vars.Debug：仅当日志级别开启 debug 或更详细时输出，
+// 并自动继承 vars 的 off 模式（完全静默）与文件滚动策略，融入统一日志体系。
+func ginLogger() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		start := time.Now()
+		path := c.Request.URL.Path
+		raw := c.Request.URL.RawQuery
+		c.Next()
+
+		if raw != "" {
+			path = path + "?" + raw
+		}
+		status := c.Writer.Status()
+		clientIP := c.ClientIP()
+		method := c.Request.Method
+		errMsg := c.Errors.ByType(gin.ErrorTypePrivate).String()
+
+		// 先自行 Sprintf，避免把用户可控的路径/错误信息当作格式串传给 vars，
+		// 也避免二次格式化。vars.Debug 在 0 个变参时直接原样输出，安全。
+		var line string
+		if errMsg != "" {
+			line = fmt.Sprintf("[GIN] %3d | %13v | %15s | %-7s %s | %s",
+				status, time.Since(start), clientIP, method, path, errMsg)
+		} else {
+			line = fmt.Sprintf("[GIN] %3d | %13v | %15s | %-7s %s",
+				status, time.Since(start), clientIP, method, path)
+		}
+		vars.Debug(line)
+	}
 }
 
 func Stop(ctx context.Context) error {

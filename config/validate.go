@@ -61,6 +61,30 @@ func (c *Cfg) Validate() error {
 		}
 	}
 
+	if c.ModelAPI != nil && !strings.EqualFold(strings.TrimSpace(c.ModelAPI.Enable), "off") {
+		if len(c.ModelAPI.Providers) == 0 {
+			return fmt.Errorf("model_api 已启用但 providers 为空")
+		}
+		for name, p := range c.ModelAPI.Providers {
+			if p == nil {
+				return fmt.Errorf("model_api.providers[%s] 配置为空", name)
+			}
+			if strings.TrimSpace(p.BaseURL) == "" {
+				return fmt.Errorf("model_api.providers[%s] base_url 为空", name)
+			}
+			if strings.TrimSpace(p.APIKey) == "" {
+				return fmt.Errorf("model_api.providers[%s] api_key 为空", name)
+			}
+		}
+		if def := strings.TrimSpace(c.ModelAPI.Default); def != "" {
+			if _, ok := c.ModelAPI.Providers[def]; !ok {
+				return fmt.Errorf("model_api.default=%s 不存在于 providers", def)
+			}
+		} else if len(c.ModelAPI.Providers) > 1 {
+			return fmt.Errorf("model_api 存在多个提供方时必须指定 default")
+		}
+	}
+
 	rpc := c.RpcOf()
 	if rpc != nil {
 		for i, s := range rpc.Server {

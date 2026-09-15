@@ -3,6 +3,7 @@ package touchgocore
 import (
 	"context"
 
+	"touchgocore/ai"
 	"touchgocore/corectx"
 	"touchgocore/gin"
 	lua "touchgocore/golua"
@@ -113,5 +114,17 @@ func (s *metricsService) Start(ctx context.Context) error {
 }
 func (s *metricsService) Stop(ctx context.Context) error {
 	ShutdownMetrics(ctx)
+	return nil
+}
+
+// modelAPIService 模型API服务适配器
+type modelAPIService struct{}
+
+func (s *modelAPIService) Name() string { return "modelapi" }
+func (s *modelAPIService) Start(ctx context.Context) error {
+	return ai.Run(ctx)
+}
+func (s *modelAPIService) Stop(ctx context.Context) error {
+	ai.Stop(ctx)
 	return nil
 }

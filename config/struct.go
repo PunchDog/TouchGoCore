@@ -149,3 +149,19 @@ type MetricsConfig struct {
 	Port    int    `json:"port"`    // metrics HTTP 端口（默认 9090）
 	Token   string `json:"token"`   // 非空时 /metrics 需要 Bearer 或 ?token=
 }
+
+// ModelProviderConfig 单个模型提供方配置（OpenAI 兼容接口）
+type ModelProviderConfig struct {
+	BaseURL    string `json:"base_url"`    // API 地址，如 https://api.openai.com/v1
+	APIKey     string `json:"api_key"`     // API 密钥
+	Model      string `json:"model"`       // 默认模型名
+	Timeout    int    `json:"timeout"`     // 请求超时（秒），默认 60
+	MaxRetries int    `json:"max_retries"` // 429/5xx 重试次数，默认 2
+}
+
+// ModelAPIConfig 模型API接入配置（支持多提供方）
+type ModelAPIConfig struct {
+	Enable    string                          `json:"enable"`    // 是否启用 "on" 或 "off"
+	Default   string                          `json:"default"`   // 默认提供方名（多个提供方时必填）
+	Providers map[string]*ModelProviderConfig `json:"providers"` // 命名的提供方
+}

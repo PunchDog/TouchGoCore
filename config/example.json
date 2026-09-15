@@ -145,6 +145,26 @@
         "port": 9090,
         "token": ""
     },
+    "model_api": {
+        "model_api说明": "模型API接入配置（OpenAI 兼容接口，可选，不填则不启用；支持多个提供方，enable=off 也可关闭）",
+        "enable": "on",
+        "default说明": "默认提供方名，多个提供方时必填",
+        "default": "openai",
+        "providers": {
+            "openai": {
+                "base_url": "https://api.openai.com/v1",
+                "api_key": "sk-CHANGE-ME",
+                "model": "gpt-4o-mini",
+                "timeout": 60,
+                "max_retries": 2
+            },
+            "deepseek": {
+                "base_url": "https://api.deepseek.com/v1",
+                "api_key": "sk-CHANGE-ME",
+                "model": "deepseek-chat"
+            }
+        }
+    },
     "log_level": "日志等级,off为不开,其次为INFO,DEBUG,WARN,ERROR",
     "map_path": "off"
 }

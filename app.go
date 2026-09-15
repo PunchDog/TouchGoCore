@@ -213,6 +213,7 @@ func (app *App) registerServices() {
 		&telegramService{},
 		&mapService{},
 		&ginService{},
+		&modelAPIService{},
 	}
 }
 

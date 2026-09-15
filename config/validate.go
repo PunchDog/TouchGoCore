@@ -65,6 +65,11 @@ func (c *Cfg) Validate() error {
 		if len(c.ModelAPI.Providers) == 0 {
 			return fmt.Errorf("model_api 已启用但 providers 为空")
 		}
+		if !c.ModelAPI.StrategyValid() {
+			return fmt.Errorf("model_api.strategy=%s 非法（可选 %s / %s）",
+				c.ModelAPI.Strategy, ModelStrategyDefault, ModelStrategyCheapest)
+		}
+		pricedModels := 0
 		for name, p := range c.ModelAPI.Providers {
 			if p == nil {
 				return fmt.Errorf("model_api.providers[%s] 配置为空", name)
@@ -75,6 +80,34 @@ func (c *Cfg) Validate() error {
 			if strings.TrimSpace(p.APIKey) == "" {
 				return fmt.Errorf("model_api.providers[%s] api_key 为空", name)
 			}
+			seen := make(map[string]struct{}, len(p.Models))
+			for i, m := range p.Models {
+				if m == nil {
+					return fmt.Errorf("model_api.providers[%s].models[%d] 配置为空", name, i)
+				}
+				mn := strings.TrimSpace(m.Name)
+				if mn == "" {
+					return fmt.Errorf("model_api.providers[%s].models[%d].name 为空", name, i)
+				}
+				if m.InputPrice < 0 || m.OutputPrice < 0 {
+					return fmt.Errorf("model_api.providers[%s].models[%s] 价格不能为负", name, mn)
+				}
+				if _, dup := seen[mn]; dup {
+					return fmt.Errorf("model_api.providers[%s] 模型名重复: %s", name, mn)
+				}
+				seen[mn] = struct{}{}
+				if m.InputPrice > 0 || m.OutputPrice > 0 {
+					pricedModels++
+				}
+			}
+			if p.DefaultModel() == "" {
+				return fmt.Errorf("model_api.providers[%s] 的 model 与 models 不能同时为空", name)
+			}
+			if raw := strings.TrimSpace(p.Model); raw != "" && len(p.Models) > 0 {
+				if _, ok := seen[raw]; !ok {
+					return fmt.Errorf("model_api.providers[%s].model=%s 不存在于 models 列表", name, raw)
+				}
+			}
 		}
 		if def := strings.TrimSpace(c.ModelAPI.Default); def != "" {
 			if _, ok := c.ModelAPI.Providers[def]; !ok {
@@ -82,6 +115,10 @@ func (c *Cfg) Validate() error {
 			}
 		} else if len(c.ModelAPI.Providers) > 1 {
 			return fmt.Errorf("model_api 存在多个提供方时必须指定 default")
+		}
+		if c.ModelAPI.StrategyOf() == ModelStrategyCheapest && pricedModels == 0 {
+			return fmt.Errorf("model_api.strategy=%s 但没有任何模型配置了价格（input_price/output_price）",
+				ModelStrategyCheapest)
 		}
 	}
 

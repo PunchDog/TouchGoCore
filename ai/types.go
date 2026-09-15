@@ -48,9 +48,20 @@ type Tool struct {
 	Function FunctionDef `json:"function"`
 }
 
+// ModelInfo 模型元信息（用于"最省消费"策略比价与能力判断）
+type ModelInfo struct {
+	Name          string  // 模型名
+	InputPrice    float64 // 输入价格（美元/百万 token），0 表示未配置
+	OutputPrice   float64 // 输出价格（美元/百万 token），0 表示未配置
+	SupportsTools bool    // 是否支持 Function Calling
+}
+
+// Priced 是否配置了价格（未配置价格的模型不参与"最省消费"比价）
+func (m ModelInfo) Priced() bool { return m.InputPrice > 0 || m.OutputPrice > 0 }
+
 // ChatRequest 对话补全请求
 type ChatRequest struct {
-	Model       string    `json:"model,omitempty"` // 为空时使用配置中的默认模型
+	Model       string    `json:"model,omitempty"` // 为空时由策略或提供方默认模型决定
 	Messages    []Message `json:"messages"`
 	Temperature float64   `json:"temperature,omitempty"`
 	MaxTokens   int       `json:"max_tokens,omitempty"`

@@ -242,6 +242,91 @@ func TestNewClientValidation(t *testing.T) {
 	}
 }
 
+func TestNewClientModelsAndDefault(t *testing.T) {
+	c, err := NewClient("p", &config.ModelProviderConfig{
+		BaseURL: "http://127.0.0.1:1/v1",
+		APIKey:  "k",
+		Models: []*config.ModelInfoConfig{
+			{Name: "m1", InputPrice: 1, OutputPrice: 2, SupportsTools: true},
+			nil,
+			{Name: "  "},
+			{Name: " m2 "},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	if got := c.DefaultModel(); got != "m1" {
+		t.Errorf("DefaultModel = %q, want m1（model 为空时取 models 首个）", got)
+	}
+	models := c.Models()
+	if len(models) != 2 || models[0].Name != "m1" || models[1].Name != "m2" {
+		t.Fatalf("Models = %+v, want m1/m2（跳过空条目、去空白）", models)
+	}
+	if !models[0].SupportsTools || models[0].InputPrice != 1 || models[0].OutputPrice != 2 {
+		t.Errorf("模型元信息解析有误: %+v", models[0])
+	}
+	for _, name := range []string{"m1", "m2"} {
+		if !c.HasModel(name) {
+			t.Errorf("HasModel(%q) = false, want true", name)
+		}
+	}
+	if c.HasModel("") || c.HasModel("nope") {
+		t.Error("HasModel 对空名或未配置模型应返回 false")
+	}
+	// Models 返回副本，外部修改不影响内部状态
+	models[0].Name = "hacked"
+	if !c.HasModel("m1") {
+		t.Error("Models 应返回副本")
+	}
+
+	// 旧配置（只有 model，没有 models）行为保持兼容
+	legacy, err := NewClient("legacy", &config.ModelProviderConfig{
+		BaseURL: "http://127.0.0.1:1/v1", APIKey: "k", Model: "old-model",
+	})
+	if err != nil {
+		t.Fatalf("NewClient legacy: %v", err)
+	}
+	if legacy.DefaultModel() != "old-model" || !legacy.HasModel("old-model") || len(legacy.Models()) != 0 {
+		t.Error("仅配置 model 的旧配置行为应保持兼容")
+	}
+}
+
+func TestChatWithoutModelReturnsError(t *testing.T) {
+	c, err := NewClient("p", &config.ModelProviderConfig{BaseURL: "http://127.0.0.1:1/v1", APIKey: "k"})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	if _, err := c.Chat(context.Background(), &ChatRequest{Messages: []Message{{Role: RoleUser, Content: "hi"}}}); err == nil {
+		t.Error("提供方未配置默认模型且请求未指定 model 时应报错")
+	}
+}
+
+func TestChatDoesNotMutateRequest(t *testing.T) {
+	var got string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req ChatRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		got = req.Model
+		_ = json.NewEncoder(w).Encode(ChatResponse{
+			Choices: []Choice{{Message: Message{Role: RoleAssistant, Content: "ok"}}},
+		})
+	}))
+	defer srv.Close()
+
+	c := testClient(t, srv.URL) // 默认模型 test-model
+	req := &ChatRequest{Messages: []Message{{Role: RoleUser, Content: "hi"}}}
+	if _, err := c.Chat(context.Background(), req); err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if got != "test-model" {
+		t.Errorf("请求携带模型 = %q, want test-model（缺省模型需补全）", got)
+	}
+	if req.Model != "" {
+		t.Errorf("入参 req.Model 被改写为 %q，应保持为空", req.Model)
+	}
+}
+
 // echoServer 返回固定回复的模拟服务端
 func echoServer(t *testing.T, content string) *httptest.Server {
 	t.Helper()

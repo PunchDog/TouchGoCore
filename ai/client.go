@@ -28,7 +28,8 @@ type Client struct {
 	cfg         *config.ModelProviderConfig
 	baseURL     string
 	apiKey      string
-	model       string
+	model       string      // 默认模型名
+	models      []ModelInfo // 该提供方已配置的模型列表（参与策略比价）
 	timeout     time.Duration
 	maxRetry    int
 	backoffBase time.Duration // 退避基数，默认 500ms（测试可调小）
@@ -37,6 +38,33 @@ type Client struct {
 
 // Name 返回提供方名
 func (c *Client) Name() string { return c.name }
+
+// DefaultModel 返回提供方的默认模型名
+func (c *Client) DefaultModel() string { return c.model }
+
+// Models 返回提供方已配置的模型列表（副本，避免调用方改动内部状态）
+func (c *Client) Models() []ModelInfo {
+	out := make([]ModelInfo, len(c.models))
+	copy(out, c.models)
+	return out
+}
+
+// HasModel 是否拥有该模型（含默认模型，兼容只配置 model 的旧配置）
+func (c *Client) HasModel(name string) bool {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return false
+	}
+	if name == c.model {
+		return true
+	}
+	for _, m := range c.models {
+		if m.Name == name {
+			return true
+		}
+	}
+	return false
+}
 
 // NewClient 创建客户端。name 为提供方名（用于查找与日志）。
 func NewClient(name string, cfg *config.ModelProviderConfig) (*Client, error) {
@@ -55,27 +83,45 @@ func NewClient(name string, cfg *config.ModelProviderConfig) (*Client, error) {
 	if retries < 0 {
 		retries = defaultMaxRetries
 	}
+	models := make([]ModelInfo, 0, len(cfg.Models))
+	for _, m := range cfg.Models {
+		if m == nil || strings.TrimSpace(m.Name) == "" {
+			continue
+		}
+		models = append(models, ModelInfo{
+			Name:          strings.TrimSpace(m.Name),
+			InputPrice:    m.InputPrice,
+			OutputPrice:   m.OutputPrice,
+			SupportsTools: m.SupportsTools,
+		})
+	}
 	return &Client{
 		name:      name,
 		cfg:       cfg,
 		baseURL:   base,
 		apiKey:    strings.TrimSpace(cfg.APIKey),
-		model:     cfg.Model,
+		model:     cfg.DefaultModel(),
+		models:    models,
 		timeout:   timeout,
 		maxRetry:  retries,
 		http:      &http.Client{}, // 默认 Transport，连接池复用
 	}, nil
 }
 
-// Chat 同步调用 chat/completions，429/5xx 自动重试
+// Chat 同步调用 chat/completions，429/5xx 自动重试。
+// 不修改入参 req：需要补全模型名时先浅拷贝再发送，避免并发复用同一请求时相互污染。
 func (c *Client) Chat(ctx context.Context, req *ChatRequest) (*ChatResponse, error) {
 	if req == nil {
 		return nil, fmt.Errorf("请求为 nil")
 	}
-	if req.Model == "" {
-		req.Model = c.model
+	out := *req // 浅拷贝，messages/tools 切片只读共享
+	if out.Model == "" {
+		out.Model = c.model
 	}
-	body, err := json.Marshal(req)
+	if out.Model == "" {
+		return nil, fmt.Errorf("模型提供方[%s] 未配置默认模型，且请求未指定 model", c.name)
+	}
+	body, err := json.Marshal(&out)
 	if err != nil {
 		return nil, fmt.Errorf("序列化请求失败: %w", err)
 	}

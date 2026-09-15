@@ -146,22 +146,48 @@
         "token": ""
     },
     "model_api": {
-        "model_api说明": "模型API接入配置（OpenAI 兼容接口，可选，不填则不启用；支持多个提供方，enable=off 也可关闭）",
+        "model_api说明": "模型API接入配置（OpenAI 兼容接口，可选，不填则不启用；支持多个提供方，每个提供方可配置多个模型，enable=off 也可关闭）",
         "enable": "on",
         "default说明": "默认提供方名，多个提供方时必填",
         "default": "openai",
+        "strategy说明": "模型选择策略：default=使用默认提供方的默认模型；cheapest=按请求预估消费自动选择最省钱的模型",
+        "strategy": "cheapest",
         "providers": {
             "openai": {
                 "base_url": "https://api.openai.com/v1",
                 "api_key": "sk-CHANGE-ME",
+                "model说明": "默认模型名；models 非空时须为其一，为空时取 models 第一项",
                 "model": "gpt-4o-mini",
                 "timeout": 60,
-                "max_retries": 2
+                "max_retries": 2,
+                "models说明": "该提供方的模型列表（价格单位：美元/百万 token；supports_tools=是否支持函数调用）",
+                "models": [
+                    {
+                        "name": "gpt-4o-mini",
+                        "input_price": 0.15,
+                        "output_price": 0.6,
+                        "supports_tools": true
+                    },
+                    {
+                        "name": "gpt-4o",
+                        "input_price": 2.5,
+                        "output_price": 10,
+                        "supports_tools": true
+                    }
+                ]
             },
             "deepseek": {
                 "base_url": "https://api.deepseek.com/v1",
                 "api_key": "sk-CHANGE-ME",
-                "model": "deepseek-chat"
+                "model": "deepseek-chat",
+                "models": [
+                    {
+                        "name": "deepseek-chat",
+                        "input_price": 0.27,
+                        "output_price": 1.1,
+                        "supports_tools": true
+                    }
+                ]
             }
         }
     },

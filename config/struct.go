@@ -1,5 +1,7 @@
 package config
 
+import "strings"
+
 /*
 数据库配置结构体
 */
@@ -150,18 +152,70 @@ type MetricsConfig struct {
 	Token   string `json:"token"`   // 非空时 /metrics 需要 Bearer 或 ?token=
 }
 
-// ModelProviderConfig 单个模型提供方配置（OpenAI 兼容接口）
-type ModelProviderConfig struct {
-	BaseURL    string `json:"base_url"`    // API 地址，如 https://api.openai.com/v1
-	APIKey     string `json:"api_key"`     // API 密钥
-	Model      string `json:"model"`       // 默认模型名
-	Timeout    int    `json:"timeout"`     // 请求超时（秒），默认 60
-	MaxRetries int    `json:"max_retries"` // 429/5xx 重试次数，默认 2
+// 模型选择策略取值
+const (
+	// ModelStrategyDefault 使用默认提供方 + 其默认模型
+	ModelStrategyDefault = "default"
+	// ModelStrategyCheapest 自动选择预估消费最低的模型
+	ModelStrategyCheapest = "cheapest"
+)
+
+// ModelInfoConfig 单个模型条目（名称 + 价格 + 能力），用于策略比价
+type ModelInfoConfig struct {
+	Name          string  `json:"name"`           // 模型名
+	InputPrice    float64 `json:"input_price"`    // 输入价格（美元/百万 token），0 表示未配置
+	OutputPrice   float64 `json:"output_price"`   // 输出价格（美元/百万 token），0 表示未配置
+	SupportsTools bool    `json:"supports_tools"` // 是否支持 Function Calling
 }
 
-// ModelAPIConfig 模型API接入配置（支持多提供方）
+// ModelProviderConfig 单个模型提供方配置（OpenAI 兼容接口）
+type ModelProviderConfig struct {
+	BaseURL    string             `json:"base_url"`    // API 地址，如 https://api.openai.com/v1
+	APIKey     string             `json:"api_key"`     // API 密钥
+	Model      string             `json:"model"`       // 默认模型名；models 非空时须为其一，为空时取 models 首个
+	Models     []*ModelInfoConfig `json:"models"`      // 可选：该提供方的模型列表（多模型 + 价格 + 能力）
+	Timeout    int                `json:"timeout"`     // 请求超时（秒），默认 60
+	MaxRetries int                `json:"max_retries"` // 429/5xx 重试次数，默认 2
+}
+
+// DefaultModel 返回生效的默认模型名：优先 model，其次 models 中首个有效条目。
+func (p *ModelProviderConfig) DefaultModel() string {
+	if p == nil {
+		return ""
+	}
+	if s := strings.TrimSpace(p.Model); s != "" {
+		return s
+	}
+	for _, m := range p.Models {
+		if m != nil && strings.TrimSpace(m.Name) != "" {
+			return strings.TrimSpace(m.Name)
+		}
+	}
+	return ""
+}
+
+// ModelAPIConfig 模型API接入配置（支持多提供方、多模型与选择策略）
 type ModelAPIConfig struct {
 	Enable    string                          `json:"enable"`    // 是否启用 "on" 或 "off"
 	Default   string                          `json:"default"`   // 默认提供方名（多个提供方时必填）
+	Strategy  string                          `json:"strategy"`  // 模型选择策略："default"（默认）/ "cheapest"
 	Providers map[string]*ModelProviderConfig `json:"providers"` // 命名的提供方
+}
+
+// StrategyOf 返回生效的模型选择策略；未配置时按 default 处理，未知取值由 Validate 拦截。
+func (c *ModelAPIConfig) StrategyOf() string {
+	if c == nil || strings.TrimSpace(c.Strategy) == "" {
+		return ModelStrategyDefault
+	}
+	return strings.ToLower(strings.TrimSpace(c.Strategy))
+}
+
+// StrategyValid 策略取值是否合法（空 / default / cheapest）。
+func (c *ModelAPIConfig) StrategyValid() bool {
+	switch c.StrategyOf() {
+	case ModelStrategyDefault, ModelStrategyCheapest:
+		return true
+	default:
+		return false
+	}
 }

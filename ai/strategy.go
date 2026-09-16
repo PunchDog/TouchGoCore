@@ -34,9 +34,10 @@ func ParseStrategy(s string) Strategy {
 type Selection struct {
 	Provider   string  // 提供方名
 	Model      string  // 模型名
-	EstCost    float64 // 预估成本（美元）
-	PriceKnown bool    // 所选模型是否配置了价格
+	EstCost    float64 // 预估成本（美元）；无价格模型为 0
+	NoPrice    bool    // 无价格标签：本地与在线均无价格（视为免费，如同层免费模型优先选中）
 	Fallback   bool    // 是否因无可用候选而回退到默认提供方默认模型
+	Overloaded bool    // 所有候选均达到调用压力阈值时的降级标记（仍选了排序最优者）
 }
 
 // String 便于日志与调试
@@ -44,14 +45,17 @@ func (s *Selection) String() string {
 	if s == nil {
 		return "<nil>"
 	}
-	return fmt.Sprintf("provider=%s model=%s est_cost=%.6fUSD price_known=%t fallback=%t",
-		s.Provider, s.Model, s.EstCost, s.PriceKnown, s.Fallback)
+	return fmt.Sprintf("provider=%s model=%s est_cost=%.6fUSD no_price=%t fallback=%t overloaded=%t",
+		s.Provider, s.Model, s.EstCost, s.NoPrice, s.Fallback, s.Overloaded)
 }
 
-// candidate 参与比价的候选（提供方 + 模型元信息）
+// candidate 参与比价的候选（提供方 + 模型元信息 + 解析后的价格）
 type candidate struct {
-	provider string
-	info     ModelInfo
+	provider   string
+	info       ModelInfo
+	priced     bool    // 价格是否可知（本地配置或在线获取）
+	cost       float64 // 预估成本（美元）；priced=false 时无意义
+	overloaded bool    // 是否已达到调用压力阈值（并发或 RPM 任一超限）
 }
 
 // EstimatePromptTokens 估算输入 token 数：消息内容、工具调用与工具定义的总字节数 / 2。
@@ -91,39 +95,18 @@ func EstimateCost(m ModelInfo, req *ChatRequest) float64 {
 // hasTools 请求是否带工具定义
 func hasTools(req *ChatRequest) bool { return req != nil && len(req.Tools) > 0 }
 
-// pickCheapest 在候选中确定性地选出预估成本最低者。
-// candidates 已按提供方名排序、同提供方内按配置顺序排列；仅当成本严格更小时才替换，
-// 从而成本相同时结果可复现。无候选时返回 nil。
-func pickCheapest(req *ChatRequest, cands []candidate) *Selection {
-	var best *candidate
-	bestCost := 0.0
-	for i := range cands {
-		c := &cands[i]
-		cost := EstimateCost(c.info, req)
-		if best == nil || cost < bestCost {
-			best, bestCost = c, cost
-		}
-	}
-	if best == nil {
-		return nil
-	}
-	return &Selection{
-		Provider:   best.provider,
-		Model:      best.info.Name,
-		EstCost:    bestCost,
-		PriceKnown: true,
-	}
-}
-
-// selectCheapest 在所有提供方的模型中选择预估成本最低者（调用方需持有读锁）。
+// selectCheapest 分层筛选最省消费的模型（调用方需持有读锁）。
 //
-// 两级筛选：
-//  1. 先只保留配置了价格的模型（未配置价格无法比价）；
-//  2. 请求带 tools 时，优先收敛到支持 Function Calling 的子集（该子集非空时才收敛）。
-//
-// 无可用候选时回退到默认提供方默认模型（告警 + Fallback 标记），
-// 避免策略配置不全导致整体不可用，退化为旧行为。
-func selectCheapest(clients map[string]*Client, defaultName string, req *ChatRequest) *Selection {
+// 流程：
+//  1. 收集候选：价格解析按"本地配置价格 → 在线价格源 → 无价格标签"三级进行，
+//     并按模型/提供方级限额判断调用压力（并发在途数、RPM 滑动窗口任一超限即超载）；
+//  2. 请求带 tools 时优先收敛到支持 Function Calling 的子集（该子集非空才收敛）；
+//  3. 全序排序：priority 升序分层；同层内无价格模型优先（视为免费，成本 0），
+//     其余按预估成本升序（稳定排序保证确定性）；
+//  4. 压力溢出：依序取第一个未达到压力阈值的候选；最优模型达到阈值时自动溢出到下一个；
+//  5. 全部候选均超限时软降级：仍选排序最优者并告警（Overloaded 标记），保证业务不阻断；
+//  6. 无任何候选时回退默认提供方默认模型（Fallback 标记）。
+func selectCheapest(clients map[string]*Client, defaultName string, req *ChatRequest, src *PriceSource, tracker *PressureTracker) *Selection {
 	names := make([]string, 0, len(clients))
 	for n := range clients {
 		names = append(names, n)
@@ -133,16 +116,26 @@ func selectCheapest(clients map[string]*Client, defaultName string, req *ChatReq
 	cands := make([]candidate, 0, len(names))
 	for _, n := range names {
 		for _, m := range clients[n].Models() {
-			if !m.Priced() {
-				continue
+			c := candidate{provider: n, info: m}
+			if m.Priced() {
+				c.priced = true
+				c.cost = EstimateCost(m, req)
+			} else if q, ok := src.Lookup(n, m.Name); ok {
+				// 本地未配置价格，使用在线价格
+				c.priced = true
+				c.cost = EstimateCost(ModelInfo{InputPrice: q.Input, OutputPrice: q.Output}, req)
 			}
-			cands = append(cands, candidate{provider: n, info: m})
+			if mc, rpm := clients[n].LimitsFor(m.Name); tracker.Overloaded(n, m.Name, mc, rpm) {
+				c.overloaded = true
+			}
+			cands = append(cands, c)
 		}
 	}
 	if len(cands) == 0 {
-		vars.Warning("model_api 策略[%s]无已配置价格的模型，回退到默认提供方[%s]", StrategyCheapest, defaultName)
-		return fallbackSelection(clients, defaultName, req)
+		vars.Warning("model_api 策略[%s]无可用模型候选，回退到默认提供方[%s]", StrategyCheapest, defaultName)
+		return fallbackSelection(clients, defaultName, req, src)
 	}
+
 	if hasTools(req) {
 		toolCands := make([]candidate, 0, len(cands))
 		for _, c := range cands {
@@ -154,31 +147,81 @@ func selectCheapest(clients map[string]*Client, defaultName string, req *ChatReq
 			cands = toolCands
 		}
 	}
-	if sel := pickCheapest(req, cands); sel != nil {
-		return sel
+
+	// 全序排序：优先级升序；同层内无价格优先，其余按预估成本升序（稳定排序保证确定性）
+	sort.SliceStable(cands, func(i, j int) bool {
+		if cands[i].info.Priority != cands[j].info.Priority {
+			return cands[i].info.Priority < cands[j].info.Priority
+		}
+		pi, pj := candidateRank(cands[i]), candidateRank(cands[j])
+		if pi != pj {
+			return pi < pj
+		}
+		return cands[i].cost < cands[j].cost
+	})
+
+	// 压力溢出：依序取第一个未超限的候选（最优达到阈值时自动看下一个）
+	for i := range cands {
+		if cands[i].overloaded {
+			continue
+		}
+		return selectionOf(&cands[i])
 	}
-	return fallbackSelection(clients, defaultName, req)
+	// 全部超限：软降级仍选最优并告警
+	vars.Warning("model_api 所有候选模型均达到调用压力阈值，降级选用最优模型[%s/%s]",
+		cands[0].provider, cands[0].info.Name)
+	return selectionOf(&cands[0], true)
+}
+
+// candidateRank 同层内排序权重：无价格模型（免费）为 0，有价格模型为 1
+func candidateRank(c candidate) int {
+	if c.priced {
+		return 1
+	}
+	return 0
+}
+
+// selectionOf 由候选构造选择结果；degrade 表示全超限降级（最优本身超限）
+func selectionOf(c *candidate, degrade ...bool) *Selection {
+	sel := &Selection{Provider: c.provider, Model: c.info.Name, EstCost: c.cost}
+	if !c.priced {
+		sel.NoPrice = true
+		sel.EstCost = 0
+	}
+	if len(degrade) > 0 && degrade[0] {
+		sel.Overloaded = true
+	}
+	return sel
 }
 
 // fallbackSelection 回退到默认提供方的默认模型
-func fallbackSelection(clients map[string]*Client, defaultName string, req *ChatRequest) *Selection {
+func fallbackSelection(clients map[string]*Client, defaultName string, req *ChatRequest, src *PriceSource) *Selection {
 	c := clients[defaultName]
 	if c == nil {
 		return nil
 	}
 	sel := &Selection{Provider: c.Name(), Model: c.DefaultModel(), Fallback: true}
-	for _, m := range c.Models() {
-		if m.Name == sel.Model && m.Priced() {
-			sel.EstCost = EstimateCost(m, req)
-			sel.PriceKnown = true
-			break
-		}
-	}
+	resolvePrice(c, sel.Model, req, src, sel)
 	return sel
 }
 
+// resolvePrice 按三级解析填充选择结果的价格信息：本地配置价格 → 在线价格源 → 无价格标签。
+func resolvePrice(c *Client, model string, req *ChatRequest, src *PriceSource, sel *Selection) {
+	for _, m := range c.Models() {
+		if m.Name == model && m.Priced() {
+			sel.EstCost = EstimateCost(m, req)
+			return
+		}
+	}
+	if q, ok := src.Lookup(c.Name(), model); ok {
+		sel.EstCost = EstimateCost(ModelInfo{InputPrice: q.Input, OutputPrice: q.Output}, req)
+		return
+	}
+	sel.NoPrice = true
+}
+
 // resolveSelection 解析"非策略路径"最终使用的提供方与模型（含价格信息，仅供预览）
-func resolveSelection(c *Client, req *ChatRequest) *Selection {
+func resolveSelection(c *Client, req *ChatRequest, src *PriceSource) *Selection {
 	m := ""
 	if req != nil {
 		m = strings.TrimSpace(req.Model)
@@ -187,12 +230,6 @@ func resolveSelection(c *Client, req *ChatRequest) *Selection {
 		m = c.DefaultModel()
 	}
 	sel := &Selection{Provider: c.Name(), Model: m}
-	for _, mi := range c.Models() {
-		if mi.Name == m && mi.Priced() {
-			sel.EstCost = EstimateCost(mi, req)
-			sel.PriceKnown = true
-			break
-		}
-	}
+	resolvePrice(c, m, req, src, sel)
 	return sel
 }

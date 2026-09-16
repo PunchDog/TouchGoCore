@@ -107,11 +107,10 @@ func TestValidateModelAPIErrors(t *testing.T) {
 			m.Providers["a"].Model = ""
 			m.Providers["a"].Models = nil
 		}},
-		{"cheapest 但无价格", func(m *ModelAPIConfig) {
-			m.Strategy = "cheapest"
-			m.Providers["a"].Model = "m1"
-			m.Providers["a"].Models = []*ModelInfoConfig{{Name: "m1"}}
-		}},
+		{"提供方并发为负", func(m *ModelAPIConfig) { m.Providers["a"].MaxConcurrency = -1 }},
+		{"提供方 RPM 为负", func(m *ModelAPIConfig) { m.Providers["a"].RPMLimit = -1 }},
+		{"模型并发为负", func(m *ModelAPIConfig) { m.Providers["a"].Models[0].MaxConcurrency = -1 }},
+		{"模型 RPM 为负", func(m *ModelAPIConfig) { m.Providers["a"].Models[0].RPMLimit = -1 }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -119,6 +118,61 @@ func TestValidateModelAPIErrors(t *testing.T) {
 				t.Error("期望校验失败，但通过了")
 			}
 		})
+	}
+}
+
+func TestValidatePriceSource(t *testing.T) {
+	// cheapest + 无本地价格 + 在线价格源：应通过校验（原"cheapest 必须有本地价格"已放宽）
+	ok := &Cfg{ModelAPI: &ModelAPIConfig{
+		Enable:      "on",
+		Strategy:    ModelStrategyCheapest,
+		PriceSource: &PriceSourceConfig{Provider: PriceSourceLiteLLM, CacheTTL: 3600, Timeout: 5},
+		Providers: map[string]*ModelProviderConfig{
+			"a": {BaseURL: "https://x/v1", APIKey: "k", Models: []*ModelInfoConfig{{Name: "m1"}}},
+		},
+	}}
+	if err := ok.Validate(); err != nil {
+		t.Fatalf("cheapest + 在线价格源（无本地价格）应通过校验: %v", err)
+	}
+
+	bad := []struct {
+		name string
+		ps   *PriceSourceConfig
+	}{
+		{"provider 非法", &PriceSourceConfig{Provider: "rss"}},
+		{"cache_ttl 为负", &PriceSourceConfig{Provider: PriceSourceLiteLLM, CacheTTL: -1}},
+		{"timeout 为负", &PriceSourceConfig{Provider: PriceSourceOpenRouter, Timeout: -5}},
+	}
+	for _, tc := range bad {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &Cfg{ModelAPI: &ModelAPIConfig{
+				Enable:      "on",
+				Strategy:    ModelStrategyCheapest,
+				PriceSource: tc.ps,
+				Providers: map[string]*ModelProviderConfig{
+					"a": {BaseURL: "https://x/v1", APIKey: "k", Models: []*ModelInfoConfig{{Name: "m1"}}},
+				},
+			}}
+			if err := c.Validate(); err == nil {
+				t.Error("期望校验失败，但通过了")
+			}
+		})
+	}
+
+	// provider=off 合法（关闭在线价格）
+	off := &Cfg{ModelAPI: &ModelAPIConfig{
+		Enable:      "on",
+		Strategy:    ModelStrategyCheapest,
+		PriceSource: &PriceSourceConfig{Provider: PriceSourceOff},
+		Providers: map[string]*ModelProviderConfig{
+			"a": {BaseURL: "https://x/v1", APIKey: "k", Models: []*ModelInfoConfig{{Name: "m1"}}},
+		},
+	}}
+	if err := off.Validate(); err != nil {
+		t.Fatalf("provider=off 应通过校验: %v", err)
+	}
+	if got := off.ModelAPI.PriceSource.EffectiveProvider(); got != "" {
+		t.Errorf("EffectiveProvider(off) = %q, want 空串", got)
 	}
 }
 

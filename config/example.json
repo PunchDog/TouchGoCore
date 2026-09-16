@@ -150,8 +150,14 @@
         "enable": "on",
         "default说明": "默认提供方名，多个提供方时必填",
         "default": "openai",
-        "strategy说明": "模型选择策略：default=使用默认提供方的默认模型；cheapest=按请求预估消费自动选择最省钱的模型",
+        "strategy说明": "模型选择策略：default=使用默认提供方的默认模型；cheapest=按请求预估消费自动选择最省钱的模型（先按 priority 分层，层内无价格模型优先、其余选最省）",
         "strategy": "cheapest",
+        "price_source说明": "在线价格源（可选；模型未配置本地价格时自动查询；不配置此段则不获取在线价格）：provider=litellm/openrouter/off(关闭)；url 可覆盖默认地址；cache_ttl=价格缓存秒数(默认86400)；timeout=拉取超时秒数(默认10)",
+        "price_source": {
+            "provider": "litellm",
+            "cache_ttl": 86400,
+            "timeout": 10
+        },
         "providers": {
             "openai": {
                 "base_url": "https://api.openai.com/v1",
@@ -160,18 +166,26 @@
                 "model": "gpt-4o-mini",
                 "timeout": 60,
                 "max_retries": 2,
-                "models说明": "该提供方的模型列表（价格单位：美元/百万 token；supports_tools=是否支持函数调用）",
+                "max_concurrency说明": "提供方级默认最大并发在途请求数（cheapest 自动选型时达到即溢出到下一个模型），0=不限；模型级优先",
+                "max_concurrency": 20,
+                "rpm_limit说明": "提供方级默认每分钟最大请求数，0=不限；模型级优先",
+                "rpm_limit": 300,
+                "models说明": "该提供方的模型列表（价格单位：美元/百万 token，留 0 可由在线价格源补齐；priority=数字越小越优先；max_concurrency/rpm_limit=模型级压力阈值；supports_tools=是否支持函数调用）",
                 "models": [
                     {
                         "name": "gpt-4o-mini",
                         "input_price": 0.15,
                         "output_price": 0.6,
+                        "priority": 1,
                         "supports_tools": true
                     },
                     {
                         "name": "gpt-4o",
                         "input_price": 2.5,
                         "output_price": 10,
+                        "priority": 2,
+                        "max_concurrency": 5,
+                        "rpm_limit": 60,
                         "supports_tools": true
                     }
                 ]
@@ -185,6 +199,7 @@
                         "name": "deepseek-chat",
                         "input_price": 0.27,
                         "output_price": 1.1,
+                        "priority": 1,
                         "supports_tools": true
                     }
                 ]

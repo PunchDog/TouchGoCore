@@ -162,20 +162,56 @@ const (
 
 // ModelInfoConfig 单个模型条目（名称 + 价格 + 能力），用于策略比价
 type ModelInfoConfig struct {
-	Name          string  `json:"name"`           // 模型名
-	InputPrice    float64 `json:"input_price"`    // 输入价格（美元/百万 token），0 表示未配置
-	OutputPrice   float64 `json:"output_price"`   // 输出价格（美元/百万 token），0 表示未配置
-	SupportsTools bool    `json:"supports_tools"` // 是否支持 Function Calling
+	Name           string  `json:"name"`            // 模型名
+	InputPrice     float64 `json:"input_price"`     // 输入价格（美元/百万 token），0 表示未配置（可由在线价格源补齐）
+	OutputPrice    float64 `json:"output_price"`    // 输出价格（美元/百万 token），0 表示未配置（可由在线价格源补齐）
+	Priority       int     `json:"priority"`        // 优先级，数字越小越优先；0 为最高层（未配置时全部同层）
+	MaxConcurrency int     `json:"max_concurrency"` // 最大并发在途请求数，0=不限（未配置时回退提供方级）
+	RPMLimit       int     `json:"rpm_limit"`       // 每分钟最大请求数，0=不限（未配置时回退提供方级）
+	SupportsTools  bool    `json:"supports_tools"`  // 是否支持 Function Calling
+}
+
+// 在线价格源取值
+const (
+	// PriceSourceLiteLLM 社区价格库（LiteLLM model_prices JSON）
+	PriceSourceLiteLLM = "litellm"
+	// PriceSourceOpenRouter OpenRouter /api/v1/models 的 pricing 字段
+	PriceSourceOpenRouter = "openrouter"
+	// PriceSourceOff 关闭在线价格获取（仅使用本地配置价格）
+	PriceSourceOff = "off"
+)
+
+// PriceSourceConfig 在线价格源配置（模型未配置本地价格时自动查询）
+type PriceSourceConfig struct {
+	Provider string `json:"provider"`  // "litellm" / "openrouter" / "off"（关闭）；未配置本段时不获取在线价格
+	URL      string `json:"url"`       // 可选，覆盖默认地址（自建镜像或测试）
+	CacheTTL int    `json:"cache_ttl"` // 价格缓存时间（秒），默认 86400（24 小时）
+	Timeout  int    `json:"timeout"`   // 拉取超时（秒），默认 10
+}
+
+// EffectiveProvider 返回生效的价格源名；未配置或取值非法/off 时返回空串（关闭）。
+func (p *PriceSourceConfig) EffectiveProvider() string {
+	if p == nil {
+		return ""
+	}
+	switch s := strings.ToLower(strings.TrimSpace(p.Provider)); s {
+	case PriceSourceLiteLLM, PriceSourceOpenRouter:
+		return s
+	default:
+		return ""
+	}
 }
 
 // ModelProviderConfig 单个模型提供方配置（OpenAI 兼容接口）
 type ModelProviderConfig struct {
-	BaseURL    string             `json:"base_url"`    // API 地址，如 https://api.openai.com/v1
-	APIKey     string             `json:"api_key"`     // API 密钥
-	Model      string             `json:"model"`       // 默认模型名；models 非空时须为其一，为空时取 models 首个
-	Models     []*ModelInfoConfig `json:"models"`      // 可选：该提供方的模型列表（多模型 + 价格 + 能力）
-	Timeout    int                `json:"timeout"`     // 请求超时（秒），默认 60
-	MaxRetries int                `json:"max_retries"` // 429/5xx 重试次数，默认 2
+	BaseURL        string             `json:"base_url"`        // API 地址，如 https://api.openai.com/v1
+	APIKey         string             `json:"api_key"`         // API 密钥
+	Model          string             `json:"model"`           // 默认模型名；models 非空时须为其一，为空时取 models 首个
+	Models         []*ModelInfoConfig `json:"models"`          // 可选：该提供方的模型列表（多模型 + 价格 + 能力）
+	Timeout        int                `json:"timeout"`         // 请求超时（秒），默认 60
+	MaxRetries     int                `json:"max_retries"`     // 429/5xx 重试次数，默认 2
+	MaxConcurrency int                `json:"max_concurrency"` // 提供方级默认最大并发在途请求数，0=不限（模型未配置时回退到此值）
+	RPMLimit       int                `json:"rpm_limit"`       // 提供方级默认每分钟最大请求数，0=不限（模型未配置时回退到此值）
 }
 
 // DefaultModel 返回生效的默认模型名：优先 model，其次 models 中首个有效条目。
@@ -196,10 +232,11 @@ func (p *ModelProviderConfig) DefaultModel() string {
 
 // ModelAPIConfig 模型API接入配置（支持多提供方、多模型与选择策略）
 type ModelAPIConfig struct {
-	Enable    string                          `json:"enable"`    // 是否启用 "on" 或 "off"
-	Default   string                          `json:"default"`   // 默认提供方名（多个提供方时必填）
-	Strategy  string                          `json:"strategy"`  // 模型选择策略："default"（默认）/ "cheapest"
-	Providers map[string]*ModelProviderConfig `json:"providers"` // 命名的提供方
+	Enable      string                          `json:"enable"`       // 是否启用 "on" 或 "off"
+	Default     string                          `json:"default"`      // 默认提供方名（多个提供方时必填）
+	Strategy    string                          `json:"strategy"`     // 模型选择策略："default"（默认）/ "cheapest"
+	Providers   map[string]*ModelProviderConfig `json:"providers"`    // 命名的提供方
+	PriceSource *PriceSourceConfig              `json:"price_source"` // 可选：在线价格源（未配置时不获取在线价格）
 }
 
 // StrategyOf 返回生效的模型选择策略；未配置时按 default 处理，未知取值由 Validate 拦截。

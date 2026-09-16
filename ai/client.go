@@ -24,16 +24,18 @@ const (
 
 // Client OpenAI 兼容模型 API 客户端
 type Client struct {
-	name        string // 提供方名
-	cfg         *config.ModelProviderConfig
-	baseURL     string
-	apiKey      string
-	model       string      // 默认模型名
-	models      []ModelInfo // 该提供方已配置的模型列表（参与策略比价）
-	timeout     time.Duration
-	maxRetry    int
-	backoffBase time.Duration // 退避基数，默认 500ms（测试可调小）
-	http        *http.Client
+	name           string // 提供方名
+	cfg            *config.ModelProviderConfig
+	baseURL        string
+	apiKey         string
+	model          string      // 默认模型名
+	models         []ModelInfo // 该提供方已配置的模型列表（参与策略比价）
+	maxConcurrency int         // 提供方级默认最大并发（模型未配置时回退）
+	rpmLimit       int         // 提供方级默认 RPM（模型未配置时回退）
+	timeout        time.Duration
+	maxRetry       int
+	backoffBase    time.Duration // 退避基数，默认 500ms（测试可调小）
+	http           *http.Client
 }
 
 // Name 返回提供方名
@@ -89,23 +91,45 @@ func NewClient(name string, cfg *config.ModelProviderConfig) (*Client, error) {
 			continue
 		}
 		models = append(models, ModelInfo{
-			Name:          strings.TrimSpace(m.Name),
-			InputPrice:    m.InputPrice,
-			OutputPrice:   m.OutputPrice,
-			SupportsTools: m.SupportsTools,
+			Name:           strings.TrimSpace(m.Name),
+			InputPrice:     m.InputPrice,
+			OutputPrice:    m.OutputPrice,
+			Priority:       m.Priority,
+			MaxConcurrency: m.MaxConcurrency,
+			RPMLimit:       m.RPMLimit,
+			SupportsTools:  m.SupportsTools,
 		})
 	}
 	return &Client{
-		name:      name,
-		cfg:       cfg,
-		baseURL:   base,
-		apiKey:    strings.TrimSpace(cfg.APIKey),
-		model:     cfg.DefaultModel(),
-		models:    models,
-		timeout:   timeout,
-		maxRetry:  retries,
-		http:      &http.Client{}, // 默认 Transport，连接池复用
+		name:           name,
+		cfg:            cfg,
+		baseURL:        base,
+		apiKey:         strings.TrimSpace(cfg.APIKey),
+		model:          cfg.DefaultModel(),
+		models:         models,
+		maxConcurrency: cfg.MaxConcurrency,
+		rpmLimit:       cfg.RPMLimit,
+		timeout:        timeout,
+		maxRetry:       retries,
+		http:           &http.Client{}, // 默认 Transport，连接池复用
 	}, nil
+}
+
+// LimitsFor 返回模型生效的调用压力限额：模型级优先，未配置时回退提供方级；均 <=0 表示不限。
+func (c *Client) LimitsFor(model string) (maxConcurrency, rpmLimit int) {
+	mc, rpm := c.maxConcurrency, c.rpmLimit
+	for _, m := range c.models {
+		if m.Name == model {
+			if m.MaxConcurrency > 0 {
+				mc = m.MaxConcurrency
+			}
+			if m.RPMLimit > 0 {
+				rpm = m.RPMLimit
+			}
+			break
+		}
+	}
+	return mc, rpm
 }
 
 // Chat 同步调用 chat/completions，429/5xx 自动重试。

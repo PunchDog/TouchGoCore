@@ -50,10 +50,13 @@ type Tool struct {
 
 // ModelInfo 模型元信息（用于"最省消费"策略比价与能力判断）
 type ModelInfo struct {
-	Name          string  // 模型名
-	InputPrice    float64 // 输入价格（美元/百万 token），0 表示未配置
-	OutputPrice   float64 // 输出价格（美元/百万 token），0 表示未配置
-	SupportsTools bool    // 是否支持 Function Calling
+	Name           string  // 模型名
+	InputPrice     float64 // 输入价格（美元/百万 token），0 表示未配置（可由在线价格源补齐）
+	OutputPrice    float64 // 输出价格（美元/百万 token），0 表示未配置（可由在线价格源补齐）
+	Priority       int     // 优先级，数字越小越优先；0 为最高层
+	MaxConcurrency int     // 模型级最大并发在途请求数，0=未配置（回退提供方级）
+	RPMLimit       int     // 模型级每分钟最大请求数，0=未配置（回退提供方级）
+	SupportsTools  bool    // 是否支持 Function Calling
 }
 
 // Priced 是否配置了价格（未配置价格的模型不参与"最省消费"比价）

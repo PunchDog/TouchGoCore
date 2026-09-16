@@ -69,7 +69,20 @@ func (c *Cfg) Validate() error {
 			return fmt.Errorf("model_api.strategy=%s 非法（可选 %s / %s）",
 				c.ModelAPI.Strategy, ModelStrategyDefault, ModelStrategyCheapest)
 		}
-		pricedModels := 0
+		if ps := c.ModelAPI.PriceSource; ps != nil {
+			switch s := strings.ToLower(strings.TrimSpace(ps.Provider)); s {
+			case "", PriceSourceLiteLLM, PriceSourceOpenRouter, PriceSourceOff:
+			default:
+				return fmt.Errorf("model_api.price_source.provider=%s 非法（可选 %s / %s / %s）",
+					ps.Provider, PriceSourceLiteLLM, PriceSourceOpenRouter, PriceSourceOff)
+			}
+			if ps.CacheTTL < 0 {
+				return fmt.Errorf("model_api.price_source.cache_ttl 不能为负")
+			}
+			if ps.Timeout < 0 {
+				return fmt.Errorf("model_api.price_source.timeout 不能为负")
+			}
+		}
 		for name, p := range c.ModelAPI.Providers {
 			if p == nil {
 				return fmt.Errorf("model_api.providers[%s] 配置为空", name)
@@ -79,6 +92,12 @@ func (c *Cfg) Validate() error {
 			}
 			if strings.TrimSpace(p.APIKey) == "" {
 				return fmt.Errorf("model_api.providers[%s] api_key 为空", name)
+			}
+			if p.MaxConcurrency < 0 {
+				return fmt.Errorf("model_api.providers[%s].max_concurrency 不能为负", name)
+			}
+			if p.RPMLimit < 0 {
+				return fmt.Errorf("model_api.providers[%s].rpm_limit 不能为负", name)
 			}
 			seen := make(map[string]struct{}, len(p.Models))
 			for i, m := range p.Models {
@@ -92,13 +111,16 @@ func (c *Cfg) Validate() error {
 				if m.InputPrice < 0 || m.OutputPrice < 0 {
 					return fmt.Errorf("model_api.providers[%s].models[%s] 价格不能为负", name, mn)
 				}
+				if m.MaxConcurrency < 0 {
+					return fmt.Errorf("model_api.providers[%s].models[%s].max_concurrency 不能为负", name, mn)
+				}
+				if m.RPMLimit < 0 {
+					return fmt.Errorf("model_api.providers[%s].models[%s].rpm_limit 不能为负", name, mn)
+				}
 				if _, dup := seen[mn]; dup {
 					return fmt.Errorf("model_api.providers[%s] 模型名重复: %s", name, mn)
 				}
 				seen[mn] = struct{}{}
-				if m.InputPrice > 0 || m.OutputPrice > 0 {
-					pricedModels++
-				}
 			}
 			if p.DefaultModel() == "" {
 				return fmt.Errorf("model_api.providers[%s] 的 model 与 models 不能同时为空", name)
@@ -115,10 +137,6 @@ func (c *Cfg) Validate() error {
 			}
 		} else if len(c.ModelAPI.Providers) > 1 {
 			return fmt.Errorf("model_api 存在多个提供方时必须指定 default")
-		}
-		if c.ModelAPI.StrategyOf() == ModelStrategyCheapest && pricedModels == 0 {
-			return fmt.Errorf("model_api.strategy=%s 但没有任何模型配置了价格（input_price/output_price）",
-				ModelStrategyCheapest)
 		}
 	}
 

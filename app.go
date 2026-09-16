@@ -180,7 +180,7 @@ func (app *App) initDatabase() error {
 	// MySQL（可选）
 	if app.Cfg.MySql != nil {
 		vars.Info("开启MySqlDB功能")
-		mysql, err := db.NewClient(app.Cfg.MySql, db.WithMetricsHook(db.NewMetricsAdapter()))
+		mysql, err := db.NewMySql(app.Cfg.MySql, db.WithMetricsHook(db.NewMetricsAdapter()))
 		if err != nil {
 			return fmt.Errorf("加载MySql配置出错: %w", err)
 		}

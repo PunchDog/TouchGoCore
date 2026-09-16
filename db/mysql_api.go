@@ -52,7 +52,7 @@ const (
 // ==================== MySQL 构造函数 ====================
 
 // NewClient 创建 MySQL 客户端
-func NewClient(cfg *config.MySqlDBConfig, opts ...Option) (*Client, error) {
+func NewMySql(cfg *config.MySqlDBConfig, opts ...Option) (*Client, error) {
 	return mysqldb.NewClient(cfg, opts...)
 }
 
@@ -92,11 +92,11 @@ func IsDeadlock(err error) bool  { return mysqldb.IsDeadlock(err) }
 // ==================== MySQL Option 工厂 ====================
 
 func WithSlowQueryThreshold(d time.Duration) Option { return mysqldb.WithSlowQueryThreshold(d) }
-func WithMetricsHook(h MetricsHook) Option         { return mysqldb.WithMetricsHook(h) }
-func WithConnMaxLifetime(d time.Duration) Option   { return mysqldb.WithConnMaxLifetime(d) }
-func WithDSNParam(k, v string) Option              { return mysqldb.WithDSNParam(k, v) }
-func WithCharset(charset, collation string) Option { return mysqldb.WithCharset(charset, collation) }
-func WithAutoMigrate(enable bool) Option           { return mysqldb.WithAutoMigrate(enable) }
+func WithMetricsHook(h MetricsHook) Option          { return mysqldb.WithMetricsHook(h) }
+func WithConnMaxLifetime(d time.Duration) Option    { return mysqldb.WithConnMaxLifetime(d) }
+func WithDSNParam(k, v string) Option               { return mysqldb.WithDSNParam(k, v) }
+func WithCharset(charset, collation string) Option  { return mysqldb.WithCharset(charset, collation) }
+func WithAutoMigrate(enable bool) Option            { return mysqldb.WithAutoMigrate(enable) }
 
 // ==================== MySQL 表存在性判定 ====================
 

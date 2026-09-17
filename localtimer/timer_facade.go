@@ -2,11 +2,48 @@ package localtimer
 
 import (
 	"context"
+	"sync/atomic"
 
 	"touchgocore/vars"
 )
 
 // ==================== 定时器系统全局门面 ====================
+
+// defaultExecutorWorkers 是新建管理器默认采用的执行池 worker 数。
+//
+// 语义与 websocket 的 worker_pool_size 一致：<=0 表示禁用执行池。
+// 初值为 DefaultConcurrentWorkers，保证业务只要让 MultiThread() 返回 true 就能生效；
+// 执行池本身仍是懒创建的（没有 MultiThread 定时器时零新增协程）。
+var defaultExecutorWorkers atomic.Int32
+
+func init() {
+	defaultExecutorWorkers.Store(int32(DefaultConcurrentWorkers))
+}
+
+// SetDefaultExecutorWorkers 设置此后新建的 TimerManager 的执行池 worker 数。
+//
+// n <= 0 表示禁用执行池（MultiThread 定时器退回内联串行执行）；
+// n 超过 MaxConcurrentWorkers 会被收敛到上限，避免误配把协程数打爆。
+// 只影响后续创建的管理器（含 Run 重建的默认管理器），运行中的管理器维持原配置不变。
+func SetDefaultExecutorWorkers(n int) {
+	if n < 0 {
+		n = 0
+	}
+	if n > MaxConcurrentWorkers {
+		n = MaxConcurrentWorkers
+	}
+	defaultExecutorWorkers.Store(int32(n))
+}
+
+// GetDefaultExecutorWorkers 返回新建管理器的默认执行池 worker 数。
+func GetDefaultExecutorWorkers() int {
+	return int(defaultExecutorWorkers.Load())
+}
+
+// currentDefaultExecutorWorkers 供 NewTimerManager 读取当前默认 worker 配置。
+func currentDefaultExecutorWorkers() int {
+	return int(defaultExecutorWorkers.Load())
+}
 
 // Run 启动定时器系统。ctx 取消时 TimeTick 退出。
 //
@@ -35,7 +72,9 @@ func Run(ctx context.Context) {
 		return true
 	})
 	timerManagerMap.Clear()
-	// NewTimerManager 内部会 ensureTimerChannel，必须先于 timeTick 协程启动
+	// NewTimerManager 内部会 ensureTimerChannel，必须先于 timeTick 协程启动。
+	// 默认管理器的执行池 worker 数取自 SetDefaultExecutorWorkers 的门面配置，
+	// 池仍是懒创建的：没有 MultiThread 定时器就不会新增任何 worker 协程。
 	defaultTimerManager.Store(NewTimerManager())
 
 	rt.tickWG.Add(1)
@@ -140,7 +179,7 @@ func timeTick(rt *timerRuntime) {
 			// 业务 Tick 的 panic 由 executeTimer 内部逐次 recover，
 			// 不会杀死本消费协程导致所有定时器失效。
 			if task.mgr != nil {
-				go task.mgr.executeTimer(task)
+				task.mgr.executeTimer(task)
 			}
 
 		case <-rt.closech:

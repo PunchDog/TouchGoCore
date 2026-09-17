@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"touchgocore/list"
 	"touchgocore/syncmap"
@@ -29,6 +30,12 @@ const (
 	CountCorrectionValue  int64 = -999999
 	TimerMigrationOffset  int64 = 5 // 提前检测迁移的时间偏移(毫秒)
 	DefaultWheelCount     int   = 5 // 默认时间轮数量
+
+	// MultiThread 定时器执行池参数
+	DefaultConcurrentWorkers   int = 4    // 默认 worker 数：保证业务「MultiThread 返回 true 即可生效」，<=0 表示禁用执行池
+	MaxConcurrentWorkers       int = 1024 // worker 数上限，防止误配把进程协程数打爆
+	MaxExecutorQueueNum        int = 4096 // 执行池队列容量（有界，投递失败由调用方降级为内联执行）
+	DefaultExecutorDrainTimeout    = 5 * time.Second // 关闭时排空在途任务的有界等待，超时仅告警
 )
 
 // TimerType 表示定时器精度级别
@@ -78,6 +85,14 @@ type TimerInterface interface {
 	RemoveFromManager(cleanPool bool)
 	// IsActive 检查定时器是否活跃
 	IsActive() bool
+	// MultiThread 返回该定时器的 Tick 是否允许在独立 worker 协程中并发执行。
+	//
+	// 默认返回 false：完全走原有的「TimeTick 消费协程内联串行执行」逻辑，
+	// 行为、时序与协程数都与改造前一致；返回 true 才交由有界执行池并发执行。
+	//
+	// 内嵌 Timer 的业务无需实现：基类已提供默认实现（读实例标记，默认 false），
+	// 可在 NewTimer 成功之后调用 SetMultiThread(true) 置位，也可自行覆写本方法。
+	MultiThread() bool
 }
 
 // TimerPool 为定时器提供类型安全的对象池管理
@@ -143,6 +158,10 @@ type Timer struct {
 	// 状态标志
 	isActive atomic.Bool   // 是否活跃
 	gen      atomic.Uint64 // 代次：每次失效/复用后自增，用于丢弃在途的过期调度项
+
+	// 多线程执行相关（均由基类提供默认语义，业务通常只需 SetMultiThread）
+	multiThread atomic.Bool // 是否允许在独立 worker 协程中执行 Tick（默认 false）
+	running     atomic.Bool // 同实例重叠保护：上一轮 Tick 未结束时为 true
 }
 
 // Init 初始化定时器
@@ -159,6 +178,11 @@ func (t *Timer) Init(interval, count int64, self TimerInterface) error {
 	if self != nil {
 		t.self.Store(&self)
 	}
+	// 多线程标记与运行标志复位：Init 是「逻辑新定时器」的起点（对象池复用同样会走到这里）。
+	// 不复位会让上一轮业务的并行配置串到新业务，或让残留的在途任务把新定时器首轮误判为
+	// 「上一轮未结束」。业务需在 NewTimer 成功之后再调用 SetMultiThread(true)。
+	t.multiThread.Store(false)
+	t.running.Store(false)
 	t.isActive.Store(true)
 
 	return nil
@@ -240,6 +264,26 @@ func (t *Timer) HasNext() bool {
 	return true
 }
 
+// advanceNextTime 推进下次执行时间而不消耗剩余执行次数。
+//
+// 供「本轮因重叠被跳过」的场景使用：跳过不是一次真正的执行，
+// 若走 HasNext 扣次数，有限次数的定时器会被空转吃光。
+func (t *Timer) advanceNextTime() {
+	t.nextTime.Store(util.CurrentMS() + t.interval.Load())
+}
+
+// tryBeginRun 尝试进入执行：成功表示当前没有其它协程正在执行本实例的 Tick。
+//
+// 只有 MultiThread 定时器才需要它——串行路径由单个消费协程内联执行，天然不会重叠。
+func (t *Timer) tryBeginRun() bool {
+	return t.running.CompareAndSwap(false, true)
+}
+
+// endRun 与 tryBeginRun 配对，释放执行标记。
+func (t *Timer) endRun() {
+	t.running.Store(false)
+}
+
 // GetUID 返回唯一标识符
 func (t *Timer) GetUID() int64 {
 	return t.uid.Load()
@@ -258,6 +302,22 @@ func (t *Timer) GetType() TimerType {
 // IsActive 检查定时器是否活跃
 func (t *Timer) IsActive() bool {
 	return t.isActive.Load()
+}
+
+// MultiThread 返回该实例是否启用多线程执行（基类默认实现，初始为 false）。
+//
+// 业务也可以直接覆写本方法返回 true —— 覆写优先级高于 SetMultiThread 的实例标记。
+func (t *Timer) MultiThread() bool {
+	return t.multiThread.Load()
+}
+
+// SetMultiThread 设置该实例是否交由执行池并发执行。
+//
+// 调用时机：必须在 NewTimer 成功之后。NewTimer 会复用对象池实例并复位本标记，
+// 提前设置会被复位；管理器层还需存在可用的执行池（worker 数 > 0）才会真正并行，
+// 否则该定时器退回原有的内联串行路径，不丢任务、不新增协程。
+func (t *Timer) SetMultiThread(enable bool) {
+	t.multiThread.Store(enable)
 }
 
 // calculateType 根据间隔计算定时器类型
@@ -335,6 +395,8 @@ func NewTimer(interval, count int64, cls TimerInterface) (TimerInterface, error)
 
 	// 对象池复用：实例可以是旧的，但「身份」必须是新的。
 	// 重置 UID 让管理器重新分配，并推进代次使该实例残留的旧调度项全部失效。
+	// 注意：多线程标记 / 运行标志已在 Init 中复位，业务若要并行执行，
+	// 请在 NewTimer 返回之后再调用 SetMultiThread(true)。
 	parent.uid.Store(0)
 	parent.nextGen()
 

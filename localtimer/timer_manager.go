@@ -63,9 +63,8 @@ type TimerManager struct {
 	// 多线程执行池。懒创建：只有真的出现 MultiThread()==true 的定时器时才建 worker，
 	// 未使用该能力时不新增任何协程（既有测试对 goroutine 数有断言）。
 	// executorWorkers <= 0 表示禁用执行池，此时 MultiThread 定时器退回内联串行。
-	executorMu      sync.Mutex
-	executor        *timerExecutor
-	executorWorkers int
+	executorMu sync.Mutex
+	executor   *timerExecutor
 
 	// 上次「执行池不可用 / 队列满」告警时间（毫秒），限频同上。
 	lastExecutorWarn atomic.Int64
@@ -128,8 +127,7 @@ func (m *TimerManager) notifyExecutorBackpressure(e *timerExecutor) {
 	}
 
 	if e == nil {
-		vars.Warning("定时器执行池未启用(workers=%d)，MultiThread 定时器退回内联串行执行, 累计退回=%d",
-			m.executorWorkers, m.stats.timersInlineFallback.Load())
+		vars.Warning("定时器执行池未启用，MultiThread 定时器退回内联串行执行, 累计退回=%d", m.stats.timersInlineFallback.Load())
 		return
 	}
 	vars.Warning("定时器执行池背压: 队列已满(%d/%d)，本次退回内联执行, 累计退回=%d",
@@ -142,24 +140,19 @@ func (m *TimerManager) notifyExecutorBackpressure(e *timerExecutor) {
 // 零新增协程。创建前后都要检查 isClosed：否则 Close 之后到达的任务会重建一个
 // 永远不会被销毁的池，泄漏 worker 协程。
 func (m *TimerManager) executorOrCreate() *timerExecutor {
-	if m.executorWorkers <= 0 {
-		return nil
-	}
-
 	m.executorMu.Lock()
 	defer m.executorMu.Unlock()
 
 	if m.isClosed.Load() {
 		return nil
 	}
-	if m.executor == nil || m.executorWorkers != currentDefaultExecutorWorkers() {
+	if m.executor == nil {
 		if m.executor != nil {
 			m.executor.Stop(5 * time.Second)
 		}
-		m.executorWorkers = currentDefaultExecutorWorkers()
-		m.executor = newTimerExecutor(m, m.executorWorkers, MaxExecutorQueueNum)
+		m.executor = newTimerExecutor(m, MaxExecutorQueueNum)
 		if m.executor != nil {
-			vars.Info("定时器执行池已启用: workers=%d, queue=%d", m.executorWorkers, MaxExecutorQueueNum)
+			vars.Info("定时器执行池已启用: queue=%d", MaxExecutorQueueNum)
 		}
 	}
 	return m.executor
@@ -430,22 +423,6 @@ func currentTimerChannel() chan timerTask {
 // TimerManagerOption 用于定制 TimerManager 的行为（目前仅执行池 worker 数）。
 type TimerManagerOption func(*TimerManager)
 
-// WithExecutorWorkers 设置该管理器的执行池 worker 数。
-//
-// n <= 0 表示禁用执行池：MultiThread 定时器会退回内联串行执行（不丢任务），
-// 适合需要严格控制协程数的场景。超过 MaxConcurrentWorkers 会被收敛到上限。
-func WithExecutorWorkers(n int) TimerManagerOption {
-	return func(m *TimerManager) {
-		if n < 0 {
-			n = 0
-		}
-		if n > MaxConcurrentWorkers {
-			n = MaxConcurrentWorkers
-		}
-		m.executorWorkers = n
-	}
-}
-
 // NewTimerManager 创建新的定时器管理器
 func NewTimerManager() *TimerManager {
 	return NewTimerManagerWithOptions()
@@ -468,9 +445,8 @@ func NewTimerManagerWithOptions(opts ...TimerManagerOption) *TimerManager {
 	}
 
 	mgr := &TimerManager{
-		closeChan:       make(chan struct{}),
-		wheels:          make([]*TimerWheel, len(wheelConfigs)),
-		executorWorkers: currentDefaultExecutorWorkers(),
+		closeChan: make(chan struct{}),
+		wheels:    make([]*TimerWheel, len(wheelConfigs)),
 	}
 
 	for _, opt := range opts {

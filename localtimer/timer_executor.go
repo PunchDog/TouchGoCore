@@ -19,19 +19,20 @@ import (
 // worker 内只做 runTick + reschedule，绝不会把任务再投回池，
 // 从结构上根除「池内递归投递」。
 type timerExecutor struct {
-	mgr      *TimerManager // 归属管理器：runTick/reschedule 与日志都要用它
-	tasks    chan timerTask
-	stopCh   chan struct{}
-	wg       sync.WaitGroup
-	stopOnce sync.Once
-	workers  int
+	mgr          *TimerManager // 归属管理器：runTick/reschedule 与日志都要用它
+	tasks        chan timerTask
+	stopCh       chan struct{}
+	stopChWorker chan struct{}
+	wg           sync.WaitGroup
+	stopOnce     sync.Once
+	workers      int
 }
 
 // newTimerExecutor 创建执行池并启动固定数量的 worker。
 //
 // workers <= 0 时返回 nil，调用方据此走内联降级路径。
-func newTimerExecutor(mgr *TimerManager, workers, queueSize int) *timerExecutor {
-	if mgr == nil || workers <= 0 {
+func newTimerExecutor(mgr *TimerManager, queueSize int) *timerExecutor {
+	if mgr == nil {
 		return nil
 	}
 	if queueSize <= 0 {
@@ -42,13 +43,32 @@ func newTimerExecutor(mgr *TimerManager, workers, queueSize int) *timerExecutor 
 		mgr:     mgr,
 		tasks:   make(chan timerTask, queueSize),
 		stopCh:  make(chan struct{}),
-		workers: workers,
-	}
-	for i := 0; i < workers; i++ {
-		e.wg.Add(1)
-		go e.worker()
+		workers: 0,
 	}
 	return e
+}
+
+func (e *timerExecutor) addworker() {
+	if e.stopChWorker == nil {
+		e.stopChWorker = make(chan struct{})
+	}
+	cur := e.workers
+	if e.workers == 0 {
+		e.workers = DefaultConcurrentWorkers //最小大小
+	} else {
+		e.workers = e.workers * 2
+	}
+
+	if e.workers > MaxConcurrentWorkers {
+		e.workers = MaxConcurrentWorkers
+	}
+
+	if cur != e.workers {
+		for i := cur; i < e.workers; i++ {
+			e.wg.Add(1)
+			go e.worker()
+		}
+	}
 }
 
 // worker 执行池的工作协程：出队即执行，收到停止信号后退出。
@@ -58,8 +78,14 @@ func (e *timerExecutor) worker() {
 		select {
 		case <-e.stopCh:
 			return
+		case <-e.stopChWorker:
+			e.stopChWorker = nil
+			return
 		case task := <-e.tasks:
 			e.run(task)
+			if len(e.tasks) == 0 { //清除多余的线程
+				close(e.stopChWorker)
+			}
 		}
 	}
 }
@@ -88,6 +114,9 @@ func (e *timerExecutor) Submit(task timerTask) bool {
 
 	select {
 	case e.tasks <- task:
+		if len(e.tasks) >= e.workers*2 { //扩容
+			e.addworker()
+		}
 		return true
 	case <-e.stopCh:
 		return false

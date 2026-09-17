@@ -152,7 +152,11 @@ func (m *TimerManager) executorOrCreate() *timerExecutor {
 	if m.isClosed.Load() {
 		return nil
 	}
-	if m.executor == nil {
+	if m.executor == nil || m.executorWorkers != currentDefaultExecutorWorkers() {
+		if m.executor != nil {
+			m.executor.Stop(5 * time.Second)
+		}
+		m.executorWorkers = currentDefaultExecutorWorkers()
 		m.executor = newTimerExecutor(m, m.executorWorkers, MaxExecutorQueueNum)
 		if m.executor != nil {
 			vars.Info("定时器执行池已启用: workers=%d, queue=%d", m.executorWorkers, MaxExecutorQueueNum)

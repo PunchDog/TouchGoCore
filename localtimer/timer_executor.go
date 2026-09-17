@@ -114,7 +114,7 @@ func (e *timerExecutor) Submit(task timerTask) bool {
 
 	select {
 	case e.tasks <- task:
-		if len(e.tasks) >= e.workers*2 { //扩容
+		if len(e.tasks) >= e.workers*2 && e.workers < MaxConcurrentWorkers { //扩容
 			e.addworker()
 		}
 		return true

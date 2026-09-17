@@ -19,13 +19,14 @@ import (
 // worker 内只做 runTick + reschedule，绝不会把任务再投回池，
 // 从结构上根除「池内递归投递」。
 type timerExecutor struct {
-	mgr          *TimerManager // 归属管理器：runTick/reschedule 与日志都要用它
-	tasks        chan timerTask
-	stopCh       chan struct{}
-	stopChWorker chan struct{}
-	wg           sync.WaitGroup
-	stopOnce     sync.Once
-	workers      int
+	mgr      *TimerManager // 归属管理器：runTick/reschedule 与日志都要用它
+	tasks    chan timerTask
+	stopCh   chan struct{}
+	workerCh []chan struct{}
+	wg       sync.WaitGroup
+	stopOnce sync.Once
+	workers  int32
+	lock     sync.Mutex
 }
 
 // newTimerExecutor 创建执行池并启动固定数量的 worker。
@@ -45,47 +46,95 @@ func newTimerExecutor(mgr *TimerManager, queueSize int) *timerExecutor {
 		stopCh:  make(chan struct{}),
 		workers: 0,
 	}
+
+	go e.operate_worker()
 	return e
 }
 
+func (e *timerExecutor) operate_worker() {
+	for {
+		select {
+		case <-e.stopCh:
+			return
+		case <-time.After(time.Second * 30):
+			e.decworker()
+		default:
+			e.addworker()
+		}
+	}
+}
+
+func (e *timerExecutor) decworker() {
+	e.lock.Lock()
+	defer e.lock.Unlock()
+
+	if e.workers <= 0 {
+		return
+	}
+
+	//缩水
+	cap := int(e.workers) / 2
+	if l := len(e.tasks); l == 0 || l < cap {
+		for i := 0; i < cap; i++ {
+			e.workers--
+			close(e.workerCh[i])
+		}
+		e.workerCh = e.workerCh[cap+1:]
+
+		if e.workers <= 0 {
+			vars.Info("当前时间线程清空,剩余任务数：%d", len(e.tasks))
+		}
+	}
+}
+
 func (e *timerExecutor) addworker() {
-	if e.stopChWorker == nil {
-		e.stopChWorker = make(chan struct{})
-	}
-	cur := e.workers
-	if e.workers == 0 {
-		e.workers = DefaultConcurrentWorkers //最小大小
-	} else {
-		e.workers = e.workers * 2
-	}
+	e.lock.Lock()
+	defer e.lock.Unlock()
 
-	if e.workers > MaxConcurrentWorkers {
-		e.workers = MaxConcurrentWorkers
-	}
+	if e.workers == 0 || (len(e.tasks) >= int(e.workers)*2 && e.workers < MaxConcurrentWorkers) { //扩容
+		cur := e.workers
+		if e.workers == 0 {
+			e.workers = DefaultConcurrentWorkers //最小大小
+		} else {
+			e.workers = e.workers * 2
+		}
 
-	if cur != e.workers {
-		for i := cur; i < e.workers; i++ {
-			e.wg.Add(1)
-			go e.worker()
+		if e.workers > MaxConcurrentWorkers {
+			e.workers = MaxConcurrentWorkers
+		}
+
+		if cur != e.workers {
+			for i := cur; i < e.workers; i++ {
+				e.wg.Add(1)
+				stch := make(chan struct{})
+				e.workerCh = append(e.workerCh, stch)
+				go e.worker(stch)
+			}
 		}
 	}
 }
 
 // worker 执行池的工作协程：出队即执行，收到停止信号后退出。
-func (e *timerExecutor) worker() {
+func (e *timerExecutor) worker(stch chan struct{}) {
 	defer e.wg.Done()
 	for {
 		select {
 		case <-e.stopCh:
 			return
-		case <-e.stopChWorker:
-			e.stopChWorker = nil
+		case <-stch:
 			return
 		case task := <-e.tasks:
 			e.run(task)
-			if len(e.tasks) == 0 { //清除多余的线程
-				close(e.stopChWorker)
-			}
+			// e.lock.Lock()
+			// if l := len(e.tasks); l == 0 || l < int(e.workers)/2 { //清除多余的线程
+			// 	e.workers--
+			// 	if e.workers <= 0 {
+			// 		vars.Info("当前时间线程清空,剩余任务数：%d", len(e.tasks))
+			// 	}
+			// 	e.lock.Unlock()
+			// 	return
+			// }
+			// e.lock.Unlock()
 		}
 	}
 }
@@ -114,9 +163,6 @@ func (e *timerExecutor) Submit(task timerTask) bool {
 
 	select {
 	case e.tasks <- task:
-		if len(e.tasks) >= e.workers*2 && e.workers < MaxConcurrentWorkers { //扩容
-			e.addworker()
-		}
 		return true
 	case <-e.stopCh:
 		return false
@@ -168,7 +214,7 @@ func (e *timerExecutor) Cap() int {
 }
 
 // Workers 返回 worker 数量。
-func (e *timerExecutor) Workers() int {
+func (e *timerExecutor) Workers() int32 {
 	if e == nil {
 		return 0
 	}

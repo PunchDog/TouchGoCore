@@ -147,9 +147,6 @@ func (m *TimerManager) executorOrCreate() *timerExecutor {
 		return nil
 	}
 	if m.executor == nil {
-		if m.executor != nil {
-			m.executor.Stop(5 * time.Second)
-		}
 		m.executor = newTimerExecutor(m, MaxExecutorQueueNum)
 		if m.executor != nil {
 			vars.Info("定时器执行池已启用: queue=%d", MaxExecutorQueueNum)

@@ -32,10 +32,10 @@ const (
 	DefaultWheelCount     int   = 5 // 默认时间轮数量
 
 	// MultiThread 定时器执行池参数
-	DefaultConcurrentWorkers   int = 4    // 默认 worker 数：保证业务「MultiThread 返回 true 即可生效」，<=0 表示禁用执行池
-	MaxConcurrentWorkers       int = 1024 // worker 数上限，防止误配把进程协程数打爆
-	MaxExecutorQueueNum        int = 4096 // 执行池队列容量（有界，投递失败由调用方降级为内联执行）
-	DefaultExecutorDrainTimeout    = 5 * time.Second // 关闭时排空在途任务的有界等待，超时仅告警
+	DefaultConcurrentWorkers    int32 = 4               // 默认 worker 数：保证业务「MultiThread 返回 true 即可生效」，<=0 表示禁用执行池
+	MaxConcurrentWorkers        int32 = 1024            // worker 数上限，防止误配把进程协程数打爆
+	MaxExecutorQueueNum         int   = 4096            // 执行池队列容量（有界，投递失败由调用方降级为内联执行）
+	DefaultExecutorDrainTimeout       = 5 * time.Second // 关闭时排空在途任务的有界等待，超时仅告警
 )
 
 // TimerType 表示定时器精度级别

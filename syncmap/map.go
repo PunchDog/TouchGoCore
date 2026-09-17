@@ -125,9 +125,11 @@ func (m *Map[K, V]) List(sortFunc func(d1, d2 V) bool) []V {
 	}
 	m.mu.RUnlock()
 
-	sort.Slice(pairs, func(i, j int) bool {
-		return sortFunc(pairs[i], pairs[j])
-	})
+	if sortFunc != nil {
+		sort.Slice(pairs, func(i, j int) bool {
+			return sortFunc(pairs[i], pairs[j])
+		})
+	}
 	return pairs
 }
 

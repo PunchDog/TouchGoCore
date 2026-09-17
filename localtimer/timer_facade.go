@@ -90,17 +90,24 @@ func TimeStop(ctx context.Context) {
 }
 
 // AddTimer 向默认管理器添加定时器
-func AddTimer(timer TimerInterface) error {
+func AddTimer(timer ...TimerInterface) error {
 	mgr := defaultTimerManager.Load()
 	if mgr == nil {
 		return ErrTimerSystemNotReady
 	}
 
-	if timer == nil || timer.GetParent() == nil {
-		return ErrTimerNilParent
+	var err error
+	for _, v := range timer {
+		if v == nil || v.GetParent() == nil {
+			return ErrTimerNilParent
+		}
+		err = mgr.AddTimer(v)
+		if err != nil {
+			return err
+		}
 	}
 
-	return mgr.AddTimer(timer)
+	return err
 }
 
 // timeTick 消费调度通道并执行到期定时器。
@@ -133,7 +140,7 @@ func timeTick(rt *timerRuntime) {
 			// 业务 Tick 的 panic 由 executeTimer 内部逐次 recover，
 			// 不会杀死本消费协程导致所有定时器失效。
 			if task.mgr != nil {
-				task.mgr.executeTimer(task)
+				go task.mgr.executeTimer(task)
 			}
 
 		case <-rt.closech:

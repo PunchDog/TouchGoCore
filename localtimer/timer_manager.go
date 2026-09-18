@@ -124,7 +124,11 @@ func (m *TimerManager) AddTimer(timer TimerInterface) error {
 	// inactive（先 Remove 再 AddTimer 复活）时它会提前返回，此时在途的旧调度项
 	// 仍持有同一个 gen，会被 isValid 误判为有效，导致同一实例被重复调度。
 	// 因此这里无条件再推进一次，保证「每次 AddTimer 产生的调度项 gen 全局唯一」。
-	parent.gen.Add(1)
+	// 直接取 Add 的返回值作为本代次：原子加法返回的新值天然全局唯一。若这里丢弃
+	// 返回值、入队前再 Load，两个并发 AddTimer 会读到同一个更大的 gen，各自入队
+	// 一份相同 gen 的 task，isValid 全部放行 → 同一节点被二次入链、计数多加，
+	// 后续配对减完就出现 -1。这正是一次性修复引用计数出现 -1 的主因。
+	newGen := parent.gen.Add(1)
 	// RemoveFromManager 会把 isActive 置为 false，这里恢复活跃状态重新进入调度
 	parent.isActive.Store(true)
 
@@ -138,8 +142,8 @@ func (m *TimerManager) AddTimer(timer TimerInterface) error {
 	chanLen := int64(len(wheel.addTimerChan))
 	chanCap := int64(cap(wheel.addTimerChan))
 
-	// 代次必须在 RemoveFromManager 之后读取，保证与入队后的定时器一致
-	task := timerTask{timer: timer, gen: parent.gen.Load(), mgr: m}
+	// 使用上面 Add 返回的唯一代次入队，杜绝并发 AddTimer 的重复 gen
+	task := timerTask{timer: timer, gen: newGen, mgr: m}
 
 	select {
 	case wheel.addTimerChan <- task:

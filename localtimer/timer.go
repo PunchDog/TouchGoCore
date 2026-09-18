@@ -231,8 +231,21 @@ func (t *Timer) HasNext() bool {
 	}
 
 	if t.count.Load() != CountCorrectionValue {
-		if t.count.Add(-1) <= 0 {
-			return false
+		// CAS 扣减：count 已 <= 0 时直接判负返回，绝不再扣。
+		// 原先无条件 Add(-1) 在 count==0 时会把 -1 存回去，GetRemainingCount
+		// 从此返回 -1；这里保证 count 永不为负，且 count==1 扣到 0 后返回 false
+		// 的原语义不变。
+		for {
+			c := t.count.Load()
+			if c <= 0 {
+				return false
+			}
+			if t.count.CompareAndSwap(c, c-1) {
+				if c-1 <= 0 {
+					return false // 最后一次执行，扣到 0 并结束
+				}
+				break
+			}
 		}
 	}
 

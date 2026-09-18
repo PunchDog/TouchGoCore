@@ -102,24 +102,72 @@ func (m *TimerManager) notifyBackpressure(wheelType TimerType, dropped int64) {
 		wheelType.String(), dropped, m.stats.timersDropped.Load())
 }
 
-// AddTimer 向管理器添加定时器
+// AddTimer 向管理器添加定时器（业务首次注册与「先 Pause 再 AddTimer」复活都走这里；
+// 已 Remove 作废的实例会被拒绝并返回 ErrTimerReleased）
 func (m *TimerManager) AddTimer(timer TimerInterface) error {
-	if m.isClosed.Load() {
-		return ErrTimerManagerClosed
+	if timer == nil {
+		return ErrTimerNilParent
 	}
-
 	parent := timer.GetParent()
 	if parent == nil {
 		return ErrTimerNilParent
 	}
+
+	// 定时器私有锁：把「清理旧调度 → 推进代次 → 恢复活跃 → 入队」整体与
+	// handleTimerAdd 的「校验 → 入链」串行化。若不加锁，handleTimerAdd 校验
+	// 通过后、入链执行前，本函数可完整跑完一轮并让新 task 先入链，对方随后
+	// 拿着过期校验结果把同一节点二次入链，旧轮 timerCount 永久多 1（幻影 +1）。
+	// 加锁顺序恒为 mu → wheelLock（handleTimerAdd 同序），不存在逆序死锁。
+	parent.mu.Lock()
+	defer parent.mu.Unlock()
+	return m.addTimerLocked(timer, parent, 0)
+}
+
+// addTimerLocked 入队一个调度项，调用方必须已持有 parent.mu。
+//
+// renewGen == 0 表示业务注册/复活；非 0 表示到期续期，此时必须携带被派发那条
+// 调度项的代次：代次纹丝未动才继续调度，否则返回 ErrTimerCanceled。少了这道
+// 校验，与 Pause/Remove 竞态的续期会把「刚被业务停掉」的定时器重新置为活跃并
+// 入链（rpc 重连成功后仍在不停重连）。只比代次不比 IsActive：上一次入队失败时
+// 是我们自己把活跃标记回滚成 false 的，要求活跃会让重试永远作废，而业务停表对
+// 一个活跃定时器必定推进代次，代次比对足以拦下复活。
+func (m *TimerManager) addTimerLocked(timer TimerInterface, parent *Timer, renewGen uint64) error {
+	if m.isClosed.Load() {
+		return ErrTimerManagerClosed
+	}
+
+	if renewGen != 0 {
+		if parent.gen.Load() != renewGen {
+			return ErrTimerCanceled
+		}
+		// 代次没动却已进入作废流程：只能是移除时定时器本就不活跃（未推进代次）
+		// 的边角场景。续期方是本协程自己，返回取消即可，不算业务复活失败。
+		if parent.abandoned() {
+			return ErrTimerCanceled
+		}
+	} else if parent.abandoned() {
+		// 该实例已永久归还对象池（或正排队等待 endTick 归还），契约上旧主人已放弃
+		// 它，池随时可能把它发给下一个 NewTimer。实例自身分不清「刚归还的我」和
+		// 「已易主的我」，因此一律拒绝复活，宁可让业务显式新建。
+		timerPool.reviveRefused.Add(1)
+		return ErrTimerReleased
+	}
+
+	// 先选轮再改状态：类型非法时保持定时器原样返回，不必回滚活跃标记。
+	wheelType := parent.GetType()
+	if int(wheelType) >= len(m.wheels) {
+		return ErrTimerInvalidType
+	}
+	wheel := m.wheels[wheelType]
 
 	// 没有分配时，分配唯一ID
 	if parent.uid.Load() == 0 {
 		parent.uid.CompareAndSwap(0, m.maxTimerUID.Add(1))
 	}
 
-	// 清理现有定时器：内部会推进代次，使在途的旧调度项失效，避免重复调度
-	timer.RemoveFromManager(false)
+	// 清理现有定时器：内部会推进代次，使在途的旧调度项失效，避免重复调度。
+	// 此处已持有 parent.mu，直接调用无锁版本，避免重复加锁死锁。
+	parent.removeFromManagerLocked(false)
 	// RemoveFromManager 只在「原本是活跃」时才推进代次；定时器被业务临时置为
 	// inactive（先 Remove 再 AddTimer 复活）时它会提前返回，此时在途的旧调度项
 	// 仍持有同一个 gen，会被 isValid 误判为有效，导致同一实例被重复调度。
@@ -132,13 +180,6 @@ func (m *TimerManager) AddTimer(timer TimerInterface) error {
 	// RemoveFromManager 会把 isActive 置为 false，这里恢复活跃状态重新进入调度
 	parent.isActive.Store(true)
 
-	// 选择合适的时间轮
-	wheelType := parent.GetType()
-	if int(wheelType) >= len(m.wheels) {
-		return ErrTimerInvalidType
-	}
-
-	wheel := m.wheels[wheelType]
 	chanLen := int64(len(wheel.addTimerChan))
 	chanCap := int64(cap(wheel.addTimerChan))
 
@@ -153,10 +194,13 @@ func (m *TimerManager) AddTimer(timer TimerInterface) error {
 		}
 		return nil
 	default:
-		// 通道满：丢弃本次调度。
+		// 通道满：丢弃本次调度。入队失败即意味着节点不在任何轮里，
+		// 必须把 isActive 撤回去：留着 true 就是「幻影活跃」——IsActive()
+		// 谎报在调度，而 processWheelTick 的失活清理分支也永远不会回收它。
 		// 绝不阻塞、绝不新开协程——原先的「阻塞 100ms 后 go executeTimer」
 		// 会与 executeTimer 内部的续期 AddTimer 构成递归 fork，
 		// 下游 Tick 一旦变慢就会指数级堆积协程直至 OOM。
+		parent.isActive.Store(false)
 		m.stats.timersDropped.Add(1)
 		m.notifyBackpressure(wheelType, 1)
 		return ErrTimerChannelFull
@@ -166,12 +210,19 @@ func (m *TimerManager) AddTimer(timer TimerInterface) error {
 // executeTimer 执行定时器并在需要时重新调度。
 //
 // 调用前提：不得持有任何 wheelLock。
-// Tick 内部允许调用 Remove / AddTimer（业务最常见的写法），
+// Tick 内部允许调用 Remove / Pause / AddTimer（业务最常见的写法），
 // 因此本函数必须在完全无锁的上下文中运行，否则会自锁死锁。
 func (m *TimerManager) executeTimer(task timerTask) {
 	if !task.isValid() {
 		return // 已被移除或被复用的过期调度项，直接丢弃
 	}
+	parent := task.timer.GetParent()
+
+	// 在飞标记：Tick 执行期间禁止把实例归还对象池，否则新主人会和这个回调同时
+	// 写同一块内存。endTick 必须是本函数最后一个动作——它返回后实例随时已易主，
+	// 再读一次 task.timer 就是踩别人的对象。
+	parent.beginTick()
+	defer parent.endTick()
 
 	func() {
 		defer func() {
@@ -188,15 +239,38 @@ func (m *TimerManager) executeTimer(task timerTask) {
 		return
 	}
 	if !task.timer.HasNext() {
+		// HasNext 为 false 有两种成因，必须用活跃标记区分：
+		//   1) 有限次数自然耗尽——定时器仍是活跃的，本条就是它的最后一次执行，
+		//      就此作废并归还对象池，否则实例永久滞留在无人管理的状态；
+		//   2) 业务在 Tick 里自己 Pause()/Remove() 了——收尾已由那两次调用做完，
+		//      这里再动手会把「只是暂停」的定时器送进池，把所有权交出去。
+		if parent.IsActive() {
+			m.retireAfterExhaustion(parent)
+		}
 		return
 	}
 	if !task.isValid() {
 		return
 	}
-	if err := m.addTimerWithRetry(task.timer); err != nil {
+	if err := m.addTimerWithRetry(task.timer, task.gen); err != nil {
+		if errors.Is(err, ErrTimerCanceled) {
+			return // 续期窗口内业务已 Pause/Remove 或已自行重新注册：本次作废，不算失败
+		}
 		m.stats.timersRescheduleFailed.Add(1)
-		vars.Error("重新调度定时器失败(已重试): %v", err)
+		vars.Error("重新调度定时器失败(已重试): uid=%d, %v", task.timer.GetUID(), err)
 	}
+}
+
+// retireAfterExhaustion 作废执行完最后一拍的定时器并归还对象池。
+//
+// 此刻 inTick 仍为 1，归还请求会被挂起、由 executeTimer 尾部的 endTick 落地，
+// 因此本函数返回时实例还没有交给池，调用链上后续的状态读取都是安全的。
+func (m *TimerManager) retireAfterExhaustion(parent *Timer) {
+	parent.mu.Lock()
+	parent.removeFromManagerLocked(true)
+	parent.mu.Unlock()
+	// 不在这里补 Put：结论必为 releaseDeferred（inTick 仍为 1），
+	// 由 executeTimer 尾部的 endTick 独占落地，避免两头争同一次归还。
 }
 
 // addTimerWithRetry 有界重试重新入队。
@@ -205,19 +279,33 @@ func (m *TimerManager) executeTimer(task timerTask) {
 // 不复投就会永久消失，业务侧表现为该定时器的 Tick 再也不触发。
 // 重试次数刻意很小且不 sleep —— 续期跑在 timeTick 消费协程的关键路径上，
 // 任何额外等待都会放大整条链路的延迟。
-func (m *TimerManager) addTimerWithRetry(timer TimerInterface) error {
+func (m *TimerManager) addTimerWithRetry(timer TimerInterface, expectGen uint64) error {
 	const maxRetry = 3
+	parent := timer.GetParent()
+	if parent == nil {
+		return ErrTimerNilParent
+	}
+
 	var err error
 	for i := 0; i < maxRetry; i++ {
-		if err = m.AddTimer(timer); err == nil {
-			return nil
-		}
-		if !errors.Is(err, ErrTimerChannelFull) {
+		err = m.addTimerWithLock(timer, parent, expectGen)
+		if err == nil || !errors.Is(err, ErrTimerChannelFull) {
 			return err
 		}
+		// 上一次尝试已烧掉一个代次却没入队，重试的期望值改为「当前代次」：
+		// 语义从「还是我这条被派发的调度项」放宽为「期间无人再改动该定时器」。
+		expectGen = parent.gen.Load()
 		runtime.Gosched()
 	}
 	return err
+}
+
+// addTimerWithLock 取定时器私有锁后入队（续期路径不走 AddTimer 公共入口，
+// 以便把期望代次一路传进临界区）。
+func (m *TimerManager) addTimerWithLock(timer TimerInterface, parent *Timer, expectGen uint64) error {
+	parent.mu.Lock()
+	defer parent.mu.Unlock()
+	return m.addTimerLocked(timer, parent, expectGen)
 }
 
 // Close 优雅地关闭定时器管理器
@@ -405,6 +493,16 @@ func (m *TimerManager) handleTimerAdd(wheel *TimerWheel, task timerTask) {
 		return
 	}
 
+	parent := task.timer.GetParent()
+	// 先取定时器私有锁、再取时间轮锁（与 AddTimer 加锁顺序一致）：
+	// 把「校验 + 入链 + 计数」与 AddTimer 的「摘链 + 推进代次 + 入队」串行化。
+	// gen 唯一 ≠ 只有一份 task 会入链——不加锁时，本校验通过后、入链执行前，
+	// 并发 AddTimer 可让更新的 task 先入链，本函数再把同一节点二次入链，
+	// list.Add 的 detach+relink 使节点物理迁移到新链表，旧轮 timerCount 永远
+	// 多 1（count 与 len 漂移：幻影 +1 / -1）。
+	parent.mu.Lock()
+	defer parent.mu.Unlock()
+
 	wheel.wheelLock.Lock()
 	defer wheel.wheelLock.Unlock()
 
@@ -413,7 +511,20 @@ func (m *TimerManager) handleTimerAdd(wheel *TimerWheel, task timerTask) {
 		return
 	}
 
-	task.timer.GetParent().wheel.Store(wheel)
+	// 已进入作废流程的实例绝不入链：在途调度项可能晚于 Put 才被本轮消化，
+	// 此刻 isActive/gen 都可能已被下一个主人重新用起，光靠 isValid 分不出来。
+	// 持锁路径禁止打日志（vars 异步缓冲满时最长阻塞 5 秒，会拖死整个时间轮）。
+	if parent.abandoned() {
+		return
+	}
+
+	// 节点已在某个时间轮中则丢弃本次入链：能走到这里且 wheel 非空，说明节点
+	// 已带着当前代次正确在链（或已易主到别的轮），再次入链只会让计数多加。
+	if parent.wheel.Load() != nil {
+		return
+	}
+
+	parent.wheel.Store(wheel)
 	wheel.tickWheel.Add(node)
 	// 计数只在「节点真正入链」处自增，与 processWheelTick / cleanupWheel 的
 	// 自减严格配对。放在 AddTimer 里统计的是入队次数，迁移到达不经过那里，

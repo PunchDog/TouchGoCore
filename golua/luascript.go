@@ -110,14 +110,43 @@ func (ls *LuaScript) Close() {
 		ls.cancel()
 	}
 
+	// 停表与 runtime 是否已置 nil 无关：Init 中途失败时 runtime 已是 nil，
+	// 漏停就会留下一个仍指向本脚本、还在被时间轮驱动的定时器。
+	if ls.timer != nil {
+		// Remove 即彻底作废并归还对象池；随后必须置 nil，否则重复 Close 会把
+		// 一个可能已易主的实例再归还一次。
+		ls.timer.Remove()
+		ls.timer = nil
+	}
+
 	if ls.runtime != nil {
-		if ls.timer != nil {
-			ls.timer.Remove()
-		}
 		ls.runtime = nil
 		ls.thread = nil
 		ls.env = nil
 	}
+}
+
+// startTimer 创建并注册脚本 update 定时器。
+//
+// 必须在主脚本执行完之后调用：Lua 运行时非线程安全，update 一旦跑起来就会和
+// 仍在进行的注册/执行流程并发读写同一个 runtime。
+func (ls *LuaScript) startTimer() error {
+	// initcallback 里完成实例归属与上下文绑定：实例来自对象池，可能带着上一个
+	// 脚本实例的全部状态，每个字段都要重新赋值（tick 残留会错后 GC 节拍）。
+	_, err := localtimer.NewTimer[*luaTimer](UpdateIntervalMs, -1, func(t *luaTimer) {
+		ls.timer = t
+		t.luaScript = ls
+		t.ctx = ls.ctx
+		t.tick.Store(0)
+	})
+	if err != nil {
+		return fmt.Errorf("create timer failed: %w", err)
+	}
+	// 没有 update 定时器，这个脚本实例永远不会被驱动，不能当成创建成功返回
+	if err := localtimer.AddTimer(ls.timer); err != nil {
+		return fmt.Errorf("register lua timer failed: %w", err)
+	}
+	return nil
 }
 
 // Call 调用 Lua 函数
@@ -231,18 +260,9 @@ func NewLuaScriptWithContext(ctx context.Context, initluapath string) (*LuaScrip
 		return nil, fmt.Errorf("execute Lua script failed: %w", err)
 	}
 
-	// 创建定时器（initcallback 内完成实例归属与上下文绑定）
-	_, err = localtimer.NewTimer[*luaTimer](UpdateIntervalMs, -1, func(t *luaTimer) {
-		p.timer = t
-		t.luaScript = p
-		t.ctx = p.ctx
-	})
-	if err != nil {
-		return nil, fmt.Errorf("create timer failed: %w", err)
-	}
-	// 没有 update 定时器，这个脚本实例永远不会被驱动，不能当成创建成功返回
-	if err := localtimer.AddTimer(p.timer); err != nil {
-		return nil, fmt.Errorf("register lua timer failed: %w", err)
+	// 创建 update 定时器（必须在主脚本执行完之后）
+	if err := p.startTimer(); err != nil {
+		return nil, err
 	}
 
 	// 加入管理列表

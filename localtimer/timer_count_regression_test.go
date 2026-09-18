@@ -2,6 +2,7 @@ package localtimer
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"sync"
 	"sync/atomic"
@@ -123,19 +124,22 @@ func TestRegression_HasNext_ConcurrentDecrement_NeverNegative(t *testing.T) {
 }
 
 // ----------------------------------------------------------------------------
-// 测试 B（并发压力，针对修复 1）：AddTimer / Remove 并发竞态下
+// 测试 B（并发压力，针对修复 1）：AddTimer / Pause 并发竞态下
 // GetTimerCount 恒 >= 0 且最终收敛为 0，无 panic、无死锁。
 // ----------------------------------------------------------------------------
 
 // TestRegression_ConcurrentAddRemoveChurn_TimerCountNeverNegative
 //
-// 模拟「TimeTick 续期协程 + 业务协程先 Remove 再 AddTimer 复活」的竞态：
+// 模拟「TimeTick 续期协程 + 业务协程先 Pause 再 AddTimer 复活」的竞态：
 // 每轮创建一个毫秒级无限次数定时器，两个 goroutine 分别对同一实例持续
-// AddTimer 与 Remove+AddTimer，持续一段时间后移除，断言：
+// AddTimer 与 Pause+AddTimer，持续一段时间后停表并作废，断言：
 //   - 压测全程 GetTimerCount() >= 0（由看门狗协程持续采样）；
 //   - 每轮结束后计数收敛归零；
 //   - 无 panic（goroutine panic 会直接令测试失败）、无死锁（外层 -timeout 保护，
 //     且每轮清理带 deadline 轮询）。
+//
+// 说明：这里必须用 Pause 而不是 Remove —— Remove 即彻底作废回池，后续 AddTimer
+// 一律被拒，压测会退化成「什么都不发生」，覆盖不到入队/摘链的竞态窗口。
 //
 // 说明：gen 重复入链需要毫秒级时间窗对齐，直接断言「复现 -1」在修复后不可行；
 // 本用例采用「长时间高频压测下计数恒非负且收敛为 0」的验证口径。
@@ -153,7 +157,7 @@ func TestRegression_ConcurrentAddRemoveChurn_TimerCountNeverNegative(t *testing.
 		minCount  atomic.Int64
 		negative  atomic.Bool
 		stopWatch = make(chan struct{})
-	 watchDone = make(chan struct{})
+		watchDone = make(chan struct{})
 	)
 	minCount.Store(math.MaxInt64)
 	go func() {
@@ -205,7 +209,7 @@ func TestRegression_ConcurrentAddRemoveChurn_TimerCountNeverNegative(t *testing.
 				}
 			}
 		}()
-		// 协程 2：模拟业务重启路径的 Remove + AddTimer 复活
+		// 协程 2：模拟业务重启路径的 Pause + AddTimer 复活
 		go func() {
 			defer wg.Done()
 			for {
@@ -213,7 +217,7 @@ func TestRegression_ConcurrentAddRemoveChurn_TimerCountNeverNegative(t *testing.
 				case <-stop:
 					return
 				default:
-					tm.Remove()
+					tm.Pause()
 					_ = AddTimer(tm)
 				}
 			}
@@ -223,17 +227,27 @@ func TestRegression_ConcurrentAddRemoveChurn_TimerCountNeverNegative(t *testing.
 		close(stop)
 		wg.Wait()
 
-		// 移除并轮询等待计数收敛归零（带 deadline，防死锁式挂起）
+		// 停表并轮询等待计数收敛归零（带 deadline，防死锁式挂起）。
+		// 循环里只能 Pause：Remove 一次即把实例交还对象池，再 Remove 就是
+		// 对可能已易主的实例做悬垂操作。
 		deadline := time.Now().Add(cleanupMax)
 		for {
-			tm.Remove()
+			tm.Pause()
 			if m.GetTimerCount() == 0 {
+				tm.Remove() // 正式作废，实例回池供下一轮复用
 				break
 			}
 			if time.Now().After(deadline) {
 				close(stopWatch)
 				<-watchDone
-				t.Fatalf("✘ 第 %d 轮结束后定时器计数未归零: %d", r+1, m.GetTimerCount())
+				// 诊断：逐轮 dump 计数与链表长度，定位是「多减」还是「少加」
+				var detail string
+				for wi, w := range m.wheels {
+					detail += fmt.Sprintf("wheel[%d]=%s count=%d len=%d; ",
+						wi, TimerType(wi), w.timerCount.Load(), w.tickWheel.Length())
+				}
+				t.Fatalf("✘ 第 %d 轮结束后定时器计数未归零: %d | stats=%+v | %s",
+					r+1, m.GetTimerCount(), m.GetStats(), detail)
 			}
 			time.Sleep(10 * time.Millisecond)
 		}
@@ -248,6 +262,6 @@ func TestRegression_ConcurrentAddRemoveChurn_TimerCountNeverNegative(t *testing.
 	if c := m.GetTimerCount(); c != 0 {
 		t.Fatalf("✘ 测试结束后计数未归零: %d", c)
 	}
-	t.Logf("✔ %d 轮高频 AddTimer/Remove 竞态压测：计数全程最小值 %d（>=0），最终归零",
+	t.Logf("✔ %d 轮高频 AddTimer/Pause 竞态压测：计数全程最小值 %d（>=0），最终归零",
 		rounds, minCount.Load())
 }

@@ -236,6 +236,8 @@ func TelegramStart(ctx context.Context) {
 	telegramWG.Add(1)
 	go func() {
 		defer telegramWG.Done()
+		// Remove = 彻底作废并归还对象池。下面三条退出分支互斥且移除后立即 return，
+		// 协程此后不再触碰 timer，实例确实永久弃用，因此不需要改用 Pause。
 		for {
 			select {
 			case <-ctx.Done():

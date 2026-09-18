@@ -74,7 +74,9 @@ func (c *RpcClient) Tick() {
 	c.connStatus.Store(true)
 	// 重置流状态
 	c.streamValid.Store(false)
-	c.Remove()
+	// 只停调度、不回对象池：本客户端指针会长期留在注册表里，断线后 markDisconnected
+	// 还要拿同一个内嵌 Timer 重新 AddTimer 复活，用 Remove 会把实例交还池再被人取走。
+	c.Pause()
 
 	// 触发连接成功回调
 	c.triggerOnConnected()

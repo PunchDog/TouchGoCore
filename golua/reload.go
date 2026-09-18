@@ -201,7 +201,13 @@ func (sw *ScriptWatcher) reloadScript() {
 		sw.mu.Unlock()
 
 		oldScript.ctx = sw.ctx
-		oldScript.Init()
+		// Close 已把旧脚本的 update 定时器作废归还，不重建就再没人驱动它；
+		// Init 失败时不能起表——那时 runtime 可能是 nil，update 会直接踩空。
+		if err := oldScript.Init(); err != nil {
+			vars.Error("回退恢复旧脚本时重新初始化失败: %v", err)
+		} else if err := oldScript.startTimer(); err != nil {
+			vars.Error("回退恢复旧脚本时定时器重建失败: %v", err)
+		}
 
 		// 触发回调
 		sw.mu.RLock()
@@ -351,6 +357,12 @@ func (ls *LuaScript) ReloadScriptWithContext(ctx context.Context) error {
 
 	// 恢复注册的对象
 	restoreRegisteredObjects(ls, objectsCopy)
+
+	// 重建 update 定时器：Close 已把它彻底作废归还，不重新起表的话本实例重载后
+	// 就再也没有人驱动 update()
+	if err := ls.startTimer(); err != nil {
+		return err
+	}
 
 	vars.Info("Lua script reloaded successfully")
 	return nil

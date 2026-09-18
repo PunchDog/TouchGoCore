@@ -138,13 +138,15 @@ func Stop(ctx context.Context) {
 	clientCount := 0
 	if rpcClient_ != nil {
 		rpcClient_.Range(func(key string, v1 *RpcClient) bool {
-			v1.Remove()
 			if connVal := v1.conn.Load(); connVal != nil {
 				if conn, ok := connVal.(*grpc.ClientConn); ok && conn != nil {
 					conn.Close()
 					clientCount++
 				}
 			}
+
+			// 退出程序，从注册表中移除
+			v1.Remove()
 			return true
 		})
 	}

@@ -4,7 +4,9 @@ import (
 	"context"
 	"sync/atomic"
 	"testing"
-)// ============================================================================
+)
+
+// ============================================================================
 // 续期（reschedule）路径的回归验证。
 //
 // 这些能力与「多线程执行池」无关，在执行池被移除后仍需保持有效：
@@ -46,9 +48,9 @@ func (g *genProbeTimer) Tick() { g.ticked.Add(1) }
 
 // TestAddTimer_AlwaysAdvancesGen 验证每次 AddTimer 都推进代次，包括「复活」路径。
 //
-// RemoveFromManager 只在「原本是活跃」时才推进代次；业务先 Remove 把定时器置为
-// inactive、再 AddTimer 复活时它会提前返回。若此时不额外推进一次代次，在途的旧
-// 调度项会与新调度项共享同一个 gen，被 isValid 误判为有效，导致同一实例重复调度。
+// 摘链那一段只在「原本是活跃」时才推进代次；业务先 Pause 把定时器置为 inactive、
+// 再 AddTimer 复活时它不会推进。若此时不额外推进一次代次，在途的旧调度项会与
+// 新调度项共享同一个 gen，被 isValid 误判为有效，导致同一实例重复调度。
 func TestAddTimer_AlwaysAdvancesGen(t *testing.T) {
 	m := NewTimerManager()
 	defer m.Close()
@@ -68,10 +70,10 @@ func TestAddTimer_AlwaysAdvancesGen(t *testing.T) {
 		t.Fatalf("活跃态 AddTimer 未推进代次: %d -> %d", before, after)
 	}
 
-	// 复活路径：先 Remove 置为 inactive，再 AddTimer
-	tm.RemoveFromManager(false)
+	// 复活路径：先 Pause 置为 inactive，再 AddTimer
+	tm.Pause()
 	if p.IsActive() {
-		t.Fatal("RemoveFromManager 后应为 inactive")
+		t.Fatal("Pause 后应为 inactive")
 	}
 
 	before = p.gen.Load()

@@ -99,6 +99,12 @@ func TestTimer_RemoveFromManager_NoWheel(t *testing.T) {
 	if tr.IsActive() {
 		t.Fatal("RemoveFromManager 后 IsActive 应为 false")
 	}
+	// 无 self、无池凭证：彻底作废同样不应 panic，也不会被塞进对象池
+	puts := GetTimerPoolStats().Puts
+	tr.RemoveFromManager(true)
+	if GetTimerPoolStats().Puts != puts {
+		t.Fatal("✘ 无池凭证的裸 Timer 不得归还对象池")
+	}
 }
 
 func TestTimer_CalculateType(t *testing.T) {
@@ -124,11 +130,11 @@ func TestTimer_CalculateType(t *testing.T) {
 func TestTimerType_String(t *testing.T) {
 	cases := map[TimerType]string{
 		TimerTypeMillisecond: "millisecond",
-		TimerTypeSecond:     "second",
-		TimerTypeMinute:     "minute",
-		TimerTypeTenMinute:  "ten-minute",
-		TimerTypeHour:       "hour",
-		TimerType(99):       "unknown",
+		TimerTypeSecond:      "second",
+		TimerTypeMinute:      "minute",
+		TimerTypeTenMinute:   "ten-minute",
+		TimerTypeHour:        "hour",
+		TimerType(99):        "unknown",
 	}
 	for typ, want := range cases {
 		if got := typ.String(); got != want {

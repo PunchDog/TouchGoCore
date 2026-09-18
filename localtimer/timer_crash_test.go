@@ -81,7 +81,9 @@ type selfRemoveTimer struct {
 
 func (s *selfRemoveTimer) Tick() {
 	s.ticked.Add(1)
-	s.Remove() // 业务最常见的写法：跑完把自己摘掉
+	// 业务最常见的写法：跑完把自己摘掉。同时覆盖「回调在飞时收到作废请求」
+	// 这条路径 —— 归还必须延迟到 endTick，不能把正在执行回调的对象交给新主人。
+	s.Remove()
 }
 
 func scenarioCloseNoDeadlock() {
@@ -209,7 +211,7 @@ func TestRegression_PoolReuseKeepsUniqueUID(t *testing.T) {
 	}
 	uidA := a.GetUID()
 
-	a.Remove() // 归还对象池
+	a.Remove() // 彻底作废并归还对象池，b 很可能正好认领到这个实例
 
 	b, err := NewTimer[*plainTimer](1000, -1, nil)
 	if err != nil {
@@ -315,9 +317,11 @@ func TestRegression_RestartAfterTimeStop(t *testing.T) {
 // ============================================================================
 // 场景 8（数据竞争，需 go test -race）：
 //
-//	telegram/rpc 等调用方会在「另一个 goroutine」里调用 timer.Remove()，
+//	telegram/rpc 等调用方会在「另一个 goroutine」里调用 timer.Pause()/Remove()，
 //	而调度协程同时在 Tick → HasNext → AddTimer 上读写同一 Timer。
 //	Timer 的状态字段已全部原子化，本用例在 -race 下不应报竞争。
+//	这里用 Pause 而非 Remove：后者会把实例交还对象池，此后的 AddTimer 一律被拒，
+//	覆盖不到「业务停表」与「调度续期」并发的真实窗口。
 // ============================================================================
 
 type raceTimer struct {
@@ -345,7 +349,7 @@ func TestRace_RemoveFromOtherGoroutine(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < 200; j++ {
-				tm.Remove()      // 业务侧并发移除
+				tm.Pause()       // 业务侧并发停表
 				time.Sleep(0)    // 放大竞态窗口
 				_ = tm.HasNext() // 与调度协程争抢 count
 				if err := AddTimer(tm); err == nil {
@@ -355,6 +359,7 @@ func TestRace_RemoveFromOtherGoroutine(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+	tm.Remove() // 全部协程退出后才正式作废归还，避免对已归池实例做悬垂操作
 }
 
 // extractDeadlockStack 抽取 dump 中「卡在锁上」的关键栈帧，避免日志刷屏
@@ -619,7 +624,9 @@ func TestTimerCount_MatchesListAfterChurn(t *testing.T) {
 		tm.Remove()
 	}
 
-	// 轮询等待全部摘除；若残留（极窄的续期竞态窗口），补一轮 Remove 再等
+	// 轮询等待全部摘除。失活残留由 processWheelTick 的清理分支负责摘链，
+	// 这里绝不补第二轮 Remove：实例一旦归还对象池就随时可能被别人认领，
+	// 陈旧主人的任何再操作都是在撕别人的调度状态。
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		var sumCount, sumLen int64
@@ -632,9 +639,6 @@ func TestTimerCount_MatchesListAfterChurn(t *testing.T) {
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("✘ 全部移除后计数/链表未归零: count=%d len=%d", sumCount, sumLen)
-		}
-		for _, tm := range timers {
-			tm.Remove()
 		}
 		time.Sleep(50 * time.Millisecond)
 	}

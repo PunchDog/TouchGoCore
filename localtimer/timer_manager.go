@@ -2,6 +2,8 @@ package localtimer
 
 import (
 	"context"
+	"errors"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -59,15 +61,6 @@ type TimerManager struct {
 
 	// 上次背压告警时间（毫秒）。背压时每个时间轮每秒最多告警一条，避免刷爆日志。
 	lastBackpressureWarn atomic.Int64
-
-	// 多线程执行池。懒创建：只有真的出现 MultiThread()==true 的定时器时才建 worker，
-	// 未使用该能力时不新增任何协程（既有测试对 goroutine 数有断言）。
-	// executorWorkers <= 0 表示禁用执行池，此时 MultiThread 定时器退回内联串行。
-	executorMu sync.Mutex
-	executor   *timerExecutor
-
-	// 上次「执行池不可用 / 队列满」告警时间（毫秒），限频同上。
-	lastExecutorWarn atomic.Int64
 }
 
 // TimerStats 保存性能统计信息（快照值，非实时引用）
@@ -78,21 +71,18 @@ type TimerStats struct {
 	TimersDropped   int64 // 因背压被丢弃的调度次数
 	WheelMigrations int64 // 时间轮迁移次数
 
-	TimersSkipped        int64 // MultiThread 定时器因上一轮 Tick 未结束而被跳过的轮次（不消耗执行次数）
-	TimersAsync          int64 // 成功投递到执行池并发执行的次数
-	TimersInlineFallback int64 // 执行池未启用/已停止/队列满，退回内联执行的次数
+	TimersRescheduleFailed int64 // 续期重试后仍失败、定时器可能丢失的次数（>0 说明需要告警）
 }
 
 // timerStatsCounters 管理器内部的原子计数器
 type timerStatsCounters struct {
-	timersAdded          atomic.Int64
-	timersRemoved        atomic.Int64
-	timersExecuted       atomic.Int64
-	timersDropped        atomic.Int64
-	wheelMigrations      atomic.Int64
-	timersSkipped        atomic.Int64
-	timersAsync          atomic.Int64
-	timersInlineFallback atomic.Int64
+	timersAdded     atomic.Int64
+	timersRemoved   atomic.Int64
+	timersExecuted  atomic.Int64
+	timersDropped   atomic.Int64
+	wheelMigrations atomic.Int64
+
+	timersRescheduleFailed atomic.Int64
 }
 
 // notifyBackpressure 背压限频告警：每个管理器每秒最多一条。
@@ -110,49 +100,6 @@ func (m *TimerManager) notifyBackpressure(wheelType TimerType, dropped int64) {
 	}
 	vars.Warning("定时器背压: 轮=%s, 本次丢弃=%d, 累计丢弃=%d",
 		wheelType.String(), dropped, m.stats.timersDropped.Load())
-}
-
-// notifyExecutorBackpressure 多线程执行池降级告警：每个管理器每秒最多一条。
-//
-// 与 notifyBackpressure 同理，必须在释放 wheelLock 之后调用。
-// e 为 nil 表示执行池未启用（配置性禁用，非故障）。
-func (m *TimerManager) notifyExecutorBackpressure(e *timerExecutor) {
-	now := util.CurrentMS()
-	last := m.lastExecutorWarn.Load()
-	if now-last < 1000 {
-		return
-	}
-	if !m.lastExecutorWarn.CompareAndSwap(last, now) {
-		return
-	}
-
-	if e == nil {
-		vars.Warning("定时器执行池未启用，MultiThread 定时器退回内联串行执行, 累计退回=%d", m.stats.timersInlineFallback.Load())
-		return
-	}
-	vars.Warning("定时器执行池背压: 队列已满(%d/%d)，本次退回内联执行, 累计退回=%d",
-		e.Len(), e.Cap(), m.stats.timersInlineFallback.Load())
-}
-
-// executorOrCreate 懒创建并返回执行池。
-//
-// 只有真的出现 MultiThread()==true 的定时器才会创建 worker，未使用该能力时
-// 零新增协程。创建前后都要检查 isClosed：否则 Close 之后到达的任务会重建一个
-// 永远不会被销毁的池，泄漏 worker 协程。
-func (m *TimerManager) executorOrCreate() *timerExecutor {
-	m.executorMu.Lock()
-	defer m.executorMu.Unlock()
-
-	if m.isClosed.Load() {
-		return nil
-	}
-	if m.executor == nil {
-		m.executor = newTimerExecutor(m, MaxExecutorQueueNum)
-		if m.executor != nil {
-			vars.Info("定时器执行池已启用: queue=%d", MaxExecutorQueueNum)
-		}
-	}
-	return m.executor
 }
 
 // AddTimer 向管理器添加定时器
@@ -173,6 +120,11 @@ func (m *TimerManager) AddTimer(timer TimerInterface) error {
 
 	// 清理现有定时器：内部会推进代次，使在途的旧调度项失效，避免重复调度
 	timer.RemoveFromManager(false)
+	// RemoveFromManager 只在「原本是活跃」时才推进代次；定时器被业务临时置为
+	// inactive（先 Remove 再 AddTimer 复活）时它会提前返回，此时在途的旧调度项
+	// 仍持有同一个 gen，会被 isValid 误判为有效，导致同一实例被重复调度。
+	// 因此这里无条件再推进一次，保证「每次 AddTimer 产生的调度项 gen 全局唯一」。
+	parent.gen.Add(1)
 	// RemoveFromManager 会把 isActive 置为 false，这里恢复活跃状态重新进入调度
 	parent.isActive.Store(true)
 
@@ -207,55 +159,14 @@ func (m *TimerManager) AddTimer(timer TimerInterface) error {
 	}
 }
 
-// executeTimer 执行定时器并在需要时重新调度（分流入口）。
+// executeTimer 执行定时器并在需要时重新调度。
 //
 // 调用前提：不得持有任何 wheelLock。
 // Tick 内部允许调用 Remove / AddTimer（业务最常见的写法），
 // 因此本函数必须在完全无锁的上下文中运行，否则会自锁死锁。
-//
-// 分流规则见 TimerInterface.MultiThread：
-//   - false（默认）：完全保持原有的内联串行路径，行为与协程数与改造前一致；
-//   - true：投递到有界执行池并发执行；池未启用 / 已停止 / 队列满时退回内联执行，
-//     既不丢任务、也绝不无界新建协程（这正是原注释禁止裸 `go executeTimer` 的原因）。
 func (m *TimerManager) executeTimer(task timerTask) {
 	if !task.isValid() {
 		return // 已被移除或被复用的过期调度项，直接丢弃
-	}
-
-	if task.timer.MultiThread() {
-		e := m.executorOrCreate()
-		if e != nil && e.Submit(task) {
-			m.stats.timersAsync.Add(1)
-			return // 由 worker 协程执行 runTick，续期也在 worker 内完成
-		}
-		// 执行池不可用（未启用/已停止）或队列已满：退回当前协程内联执行，绝不丢任务
-		m.stats.timersInlineFallback.Add(1)
-		m.notifyExecutorBackpressure(e)
-	}
-
-	m.runTick(task)
-}
-
-// runTick 执行业务回调并在需要时续期。
-//
-// 调用前提：不得持有任何 wheelLock；Tick 内的 panic 会被逐次 recover，
-// 不会杀死调用方协程（内联时是 TimeTick 消费协程，并行时是 worker 协程）。
-func (m *TimerManager) runTick(task timerTask) {
-	timer := task.timer
-	parent := timer.GetParent()
-	if parent == nil {
-		return
-	}
-
-	// 重叠保护只对 MultiThread 定时器生效：
-	// 串行路径由单个消费协程内联执行，天然不会重叠；
-	// 并行路径下若上一轮 Tick 还没跑完又到期，则跳过本轮，
-	// 只推进下次执行时间、不消耗剩余执行次数，避免业务状态被并发 Tick 破坏。
-	multithread := timer.MultiThread()
-	if multithread && !parent.tryBeginRun() {
-		m.stats.timersSkipped.Add(1)
-		m.reschedule(task, true)
-		return
 	}
 
 	func() {
@@ -264,47 +175,58 @@ func (m *TimerManager) runTick(task timerTask) {
 				vars.Error("定时器执行发生panic: %v", err)
 			}
 		}()
-		timer.Tick()
+		task.timer.Tick()
 	}()
-	// Tick 返回（或 panic 被吞掉）后立即释放运行标记，不占用后续续期窗口
-	if multithread {
-		parent.endRun()
-	}
 	m.stats.timersExecuted.Add(1)
 
-	m.reschedule(task, false)
-}
-
-// reschedule 把定时器重新放回时间轮。
-//
-// 派发成功时节点已从时间轮摘链，因此无论本轮是否真正执行都必须回轮，
-// 否则定时器会永久丢失。skipped=true 表示本轮因重叠被跳过：
-// 只推进 nextTime，不消耗执行次数（跳过不是一次真正的执行）。
-func (m *TimerManager) reschedule(task timerTask, skipped bool) {
 	// Tick 内部可能已经移除/复用该定时器，或系统已关闭，重新校验后再续期
 	if m.isClosed.Load() || !task.isValid() {
 		return
 	}
 
-	timer := task.timer
-	if skipped {
-		parent := timer.GetParent()
-		if parent == nil {
-			return
-		}
-		parent.advanceNextTime()
-	} else {
-		if !timer.HasNext() {
-			return
-		}
-		if !task.isValid() {
-			return
+	// 业务可通过 NextIntervaler 重算下一次间隔（墙钟对齐型每次间隔都不同），
+	// 统一在续期前应用，业务就不必在 Tick 里自行 Init + AddTimer 重排。
+	// 必须早于 HasNext：后者用 interval 重算 nextTime。
+	// 返回 <=0 表示不覆盖，沿用当前 interval。
+	if ni, ok := task.timer.(NextIntervaler); ok {
+		if iv := ni.NextInterval(); iv > 0 {
+			if parent := task.timer.GetParent(); parent != nil {
+				parent.SetInterval(iv)
+			}
 		}
 	}
 
-	if err := m.AddTimer(timer); err != nil {
-		vars.Error("重新调度定时器失败: %v", err)
+	if !task.timer.HasNext() {
+		return
 	}
+	if !task.isValid() {
+		return
+	}
+	if err := m.addTimerWithRetry(task.timer); err != nil {
+		m.stats.timersRescheduleFailed.Add(1)
+		vars.Error("重新调度定时器失败(已重试): %v", err)
+	}
+}
+
+// addTimerWithRetry 有界重试重新入队。
+//
+// 这是「不丢任务」的最后一道关卡：AddTimer 失败时节点已经离开时间轮，
+// 不复投就会永久消失，业务侧表现为该定时器的 Tick 再也不触发。
+// 重试次数刻意很小且不 sleep —— 续期跑在 timeTick 消费协程的关键路径上，
+// 任何额外等待都会放大整条链路的延迟。
+func (m *TimerManager) addTimerWithRetry(timer TimerInterface) error {
+	const maxRetry = 3
+	var err error
+	for i := 0; i < maxRetry; i++ {
+		if err = m.AddTimer(timer); err == nil {
+			return nil
+		}
+		if !errors.Is(err, ErrTimerChannelFull) {
+			return err
+		}
+		runtime.Gosched()
+	}
+	return err
 }
 
 // Close 优雅地关闭定时器管理器
@@ -321,31 +243,18 @@ func (m *TimerManager) Close() {
 	for _, wheel := range m.wheels {
 		wheel.isRunning.Store(false)
 	}
-
-	// 执行池必须在 wheelWG.Wait() 之后停止：cleanupWheel 阶段二仍会调用
-	// executeTimer，此时 MultiThread 定时器可能还要投池。这里先在同一把锁下
-	// 摘走池句柄（并阻止后续再创建），再于锁外做有界排空。
-	m.executorMu.Lock()
-	e := m.executor
-	m.executor = nil
-	m.executorMu.Unlock()
-
-	if e != nil {
-		e.Stop(DefaultExecutorDrainTimeout)
-	}
 }
 
 // GetStats 返回性能统计信息
 func (m *TimerManager) GetStats() TimerStats {
 	return TimerStats{
-		TimersAdded:          m.stats.timersAdded.Load(),
-		TimersRemoved:        m.stats.timersRemoved.Load(),
-		TimersExecuted:       m.stats.timersExecuted.Load(),
-		TimersDropped:        m.stats.timersDropped.Load(),
-		WheelMigrations:      m.stats.wheelMigrations.Load(),
-		TimersSkipped:        m.stats.timersSkipped.Load(),
-		TimersAsync:          m.stats.timersAsync.Load(),
-		TimersInlineFallback: m.stats.timersInlineFallback.Load(),
+		TimersAdded:     m.stats.timersAdded.Load(),
+		TimersRemoved:   m.stats.timersRemoved.Load(),
+		TimersExecuted:  m.stats.timersExecuted.Load(),
+		TimersDropped:   m.stats.timersDropped.Load(),
+		WheelMigrations: m.stats.wheelMigrations.Load(),
+
+		TimersRescheduleFailed: m.stats.timersRescheduleFailed.Load(),
 	}
 }
 
@@ -417,19 +326,8 @@ func currentTimerChannel() chan timerTask {
 	return timerChannel
 }
 
-// TimerManagerOption 用于定制 TimerManager 的行为（目前仅执行池 worker 数）。
-type TimerManagerOption func(*TimerManager)
-
 // NewTimerManager 创建新的定时器管理器
 func NewTimerManager() *TimerManager {
-	return NewTimerManagerWithOptions()
-}
-
-// NewTimerManagerWithOptions 创建定时器管理器并应用选项。
-//
-// 默认 worker 数取门面配置（SetDefaultExecutorWorkers，初始为 DefaultConcurrentWorkers），
-// 执行池仍然是懒创建的：没有 MultiThread 定时器就不会新增任何协程。
-func NewTimerManagerWithOptions(opts ...TimerManagerOption) *TimerManager {
 	ensureTimerChannel()
 
 	// 时间轮配置：毫秒/秒/分钟/10分钟/小时
@@ -444,12 +342,6 @@ func NewTimerManagerWithOptions(opts ...TimerManagerOption) *TimerManager {
 	mgr := &TimerManager{
 		closeChan: make(chan struct{}),
 		wheels:    make([]*TimerWheel, len(wheelConfigs)),
-	}
-
-	for _, opt := range opts {
-		if opt != nil {
-			opt(mgr)
-		}
 	}
 
 	// 初始化时间轮

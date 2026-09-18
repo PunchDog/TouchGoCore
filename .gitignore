@@ -25,3 +25,4 @@ vars/logs/*.log
 .cursor/plans/*.md
 .codebuddy/plans/*.md
 *.txt
+.workbuddy-ai/*

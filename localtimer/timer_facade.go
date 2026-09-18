@@ -7,8 +7,6 @@ import (
 )
 
 // ==================== 定时器系统全局门面 ====================
-func init() {
-}
 
 // Run 启动定时器系统。ctx 取消时 TimeTick 退出。
 //
@@ -37,9 +35,7 @@ func Run(ctx context.Context) {
 		return true
 	})
 	timerManagerMap.Clear()
-	// NewTimerManager 内部会 ensureTimerChannel，必须先于 timeTick 协程启动。
-	// 默认管理器的执行池 worker 数取自 SetDefaultExecutorWorkers 的门面配置，
-	// 池仍是懒创建的：没有 MultiThread 定时器就不会新增任何 worker 协程。
+	// NewTimerManager 内部会 ensureTimerChannel，必须先于 timeTick 协程启动
 	defaultTimerManager.Store(NewTimerManager())
 
 	rt.tickWG.Add(1)
@@ -93,7 +89,7 @@ func TimeStop(ctx context.Context) {
 	vars.Info("计时器系统已停止")
 }
 
-// AddTimer 向默认管理器添加定时器
+// AddTimer 向默认管理器添加定时器（支持一次传入多个）
 func AddTimer(timer ...TimerInterface) error {
 	mgr := defaultTimerManager.Load()
 	if mgr == nil {

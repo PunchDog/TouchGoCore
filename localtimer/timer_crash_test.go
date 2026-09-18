@@ -97,7 +97,7 @@ func scenarioCloseNoDeadlock() {
 	Run(context.Background())
 
 	m := GetDefaultManager()
-	tm, err := NewTimer(10, 1, &selfRemoveTimer{})
+	tm, err := NewTimer[*selfRemoveTimer](10, 1, nil)
 	if err != nil {
 		return
 	}
@@ -108,7 +108,7 @@ func scenarioCloseNoDeadlock() {
 	p.nextTime.Store(util.CurrentMS() - 1)
 	wheel := m.wheels[TimerTypeHour]
 	p.wheel.Store(wheel)
-	wheel.tickWheel.Add(tm.(list.INode))
+	wheel.tickWheel.Add(tm)
 
 	time.Sleep(50 * time.Millisecond)
 	TimeStop(context.Background())
@@ -200,7 +200,7 @@ func TestRegression_PoolReuseKeepsUniqueUID(t *testing.T) {
 	Run(context.Background())
 	defer TimeStop(context.Background())
 
-	a, err := NewTimer(1000, -1, &plainTimer{})
+	a, err := NewTimer[*plainTimer](1000, -1, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -211,7 +211,7 @@ func TestRegression_PoolReuseKeepsUniqueUID(t *testing.T) {
 
 	a.Remove() // 归还对象池
 
-	b, err := NewTimer(1000, -1, &plainTimer{})
+	b, err := NewTimer[*plainTimer](1000, -1, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -239,7 +239,7 @@ func TestRegression_RemovedTimerNotRescheduled(t *testing.T) {
 	Run(context.Background())
 	defer TimeStop(context.Background())
 
-	tm, err := NewTimer(5, -1, &plainTimer{})
+	tm, err := NewTimer[*plainTimer](5, -1, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -248,7 +248,7 @@ func TestRegression_RemovedTimerNotRescheduled(t *testing.T) {
 	}
 
 	time.Sleep(100 * time.Millisecond)
-	before := tm.(*plainTimer).n.Load()
+	before := tm.n.Load()
 	if before == 0 {
 		t.Fatal("定时器未被执行，调度链路异常")
 	}
@@ -256,7 +256,7 @@ func TestRegression_RemovedTimerNotRescheduled(t *testing.T) {
 	tm.Remove()
 	time.Sleep(300 * time.Millisecond)
 
-	if after := tm.(*plainTimer).n.Load(); after != before {
+	if after := tm.n.Load(); after != before {
 		t.Fatalf("✘ 已移除的定时器仍在执行: 移除前=%d 移除后=%d", before, after)
 	}
 	t.Logf("✔ 移除后不再执行（移除前执行 %d 次）", before)
@@ -270,7 +270,7 @@ func TestRegression_PeriodicTimerKeepsTicking(t *testing.T) {
 	Run(context.Background())
 	defer TimeStop(context.Background())
 
-	tm, err := NewTimer(10, InfiniteCount, &plainTimer{})
+	tm, err := NewTimer[*plainTimer](10, InfiniteCount, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -279,7 +279,7 @@ func TestRegression_PeriodicTimerKeepsTicking(t *testing.T) {
 	}
 
 	time.Sleep(300 * time.Millisecond)
-	if n := tm.(*plainTimer).n.Load(); n < 3 {
+	if n := tm.n.Load(); n < 3 {
 		t.Fatalf("✘ 周期定时器执行次数过少: %d（期望 >=3）", n)
 	} else {
 		t.Logf("✔ 周期定时器正常执行 %d 次", n)
@@ -297,7 +297,7 @@ func TestRegression_RestartAfterTimeStop(t *testing.T) {
 	Run(context.Background())
 	defer TimeStop(context.Background())
 
-	tm, err := NewTimer(5, -1, &plainTimer{})
+	tm, err := NewTimer[*plainTimer](5, -1, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -306,7 +306,7 @@ func TestRegression_RestartAfterTimeStop(t *testing.T) {
 	}
 	time.Sleep(300 * time.Millisecond)
 
-	if n := tm.(*plainTimer).n.Load(); n == 0 {
+	if n := tm.n.Load(); n == 0 {
 		t.Fatal("✘ 二次 Run 后定时器不再执行")
 	}
 	t.Log("✔ 停止后重启，定时器恢复正常")
@@ -331,7 +331,7 @@ func TestRace_RemoveFromOtherGoroutine(t *testing.T) {
 	Run(context.Background())
 	defer TimeStop(context.Background())
 
-	tm, err := NewTimer(1, -1, &raceTimer{})
+	tm, err := NewTimer[*raceTimer](1, -1, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -421,7 +421,7 @@ fill:
 	base := runtime.NumGoroutine()
 
 	plant := func() {
-		tm, err := NewTimer(1000, InfiniteCount, &plainTimer{})
+		tm, err := NewTimer[*plainTimer](1000, InfiniteCount, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -554,16 +554,16 @@ func TestManagerIsolation_NoHijack(t *testing.T) {
 	custom := NewTimerManager()
 	defer custom.Close()
 
-	// 注意：timerPool.Get 返回的是池里新建的实例，不是传入的 cls，
-	// 所以必须断言返回的 tm 本身，而非外部那个 &plainTimer{}。
-	tm, err := NewTimer(5, InfiniteCount, &plainTimer{})
+	// 注意：NewTimer 返回的是对象池里的实例，不是外部构造的那个，
+	// 所以必须用返回的 tm 本身，而非外部新建的 &plainTimer{}。
+	tm, err := NewTimer[*plainTimer](5, InfiniteCount, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := custom.AddTimer(tm); err != nil {
 		t.Fatal(err)
 	}
-	pt := tm.(*plainTimer)
+	pt := tm
 
 	time.Sleep(300 * time.Millisecond)
 
@@ -597,7 +597,7 @@ func TestTimerCount_MatchesListAfterChurn(t *testing.T) {
 	var timers []TimerInterface
 	for i := 0; i < 40; i++ {
 		// 间隔跨越时间轮边界，强制触发派发 + 迁移
-		tm, err := NewTimer(int64(50+i*100), InfiniteCount, &plainTimer{})
+		tm, err := NewTimer[*plainTimer](int64(50+i*100), InfiniteCount, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -654,7 +654,7 @@ func BenchmarkProcessWheelTick(b *testing.B) {
 
 	wheel := m.wheels[TimerTypeHour]
 	for i := 0; i < 1000; i++ {
-		tm, err := NewTimer(3600*1000, InfiniteCount, &plainTimer{})
+		tm, err := NewTimer[*plainTimer](3600*1000, InfiniteCount, nil)
 		if err != nil {
 			b.Fatal(err)
 		}

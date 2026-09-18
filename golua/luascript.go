@@ -231,14 +231,15 @@ func NewLuaScriptWithContext(ctx context.Context, initluapath string) (*LuaScrip
 		return nil, fmt.Errorf("execute Lua script failed: %w", err)
 	}
 
-	// 创建定时器
-	tmr, err := localtimer.NewTimer(UpdateIntervalMs, -1, &luaTimer{})
+	// 创建定时器（initcallback 内完成实例归属与上下文绑定）
+	_, err = localtimer.NewTimer[*luaTimer](UpdateIntervalMs, -1, func(t *luaTimer) {
+		p.timer = t
+		t.luaScript = p
+		t.ctx = p.ctx
+	})
 	if err != nil {
 		return nil, fmt.Errorf("create timer failed: %w", err)
 	}
-	p.timer = tmr.(*luaTimer)
-	p.timer.luaScript = p
-	p.timer.ctx = p.ctx
 	// 没有 update 定时器，这个脚本实例永远不会被驱动，不能当成创建成功返回
 	if err := localtimer.AddTimer(p.timer); err != nil {
 		return nil, fmt.Errorf("register lua timer failed: %w", err)

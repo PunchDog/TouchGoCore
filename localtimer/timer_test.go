@@ -138,17 +138,15 @@ func TestTimerType_String(t *testing.T) {
 }
 
 func TestNewTimer_NilClass(t *testing.T) {
-	if _, err := NewTimer(100, 1, nil); err != ErrTimerInvalidType {
+	// T 为接口类型时 zero 是 nil interface，reflect.TypeOf 取不到类型 → ErrTimerInvalidType
+	if _, err := NewTimer[TimerInterface](100, 1, nil); err != ErrTimerInvalidType {
 		t.Fatalf("期望 ErrTimerInvalidType，实际: %v", err)
 	}
 }
 
 func TestNewTimer_InvalidInterval(t *testing.T) {
-	// 状态字段均为原子类型，零值即无效状态
-	tmr := &Timer{}
-	tmr.isActive.Store(false)
-	// 直接测校验路径
-	if _, err := NewTimer(0, 1, nil); err != ErrTimerInvalidInterval && err != ErrTimerInvalidType {
+	// T 为接口类型时直接命中 ErrTimerInvalidType；该用例同时接受 interval 错误
+	if _, err := NewTimer[TimerInterface](0, 1, nil); err != ErrTimerInvalidInterval && err != ErrTimerInvalidType {
 		t.Fatalf("期望 interval 错误，实际: %v", err)
 	}
 }

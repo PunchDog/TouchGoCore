@@ -183,19 +183,6 @@ func (m *TimerManager) executeTimer(task timerTask) {
 	if m.isClosed.Load() || !task.isValid() {
 		return
 	}
-
-	// 业务可通过 NextIntervaler 重算下一次间隔（墙钟对齐型每次间隔都不同），
-	// 统一在续期前应用，业务就不必在 Tick 里自行 Init + AddTimer 重排。
-	// 必须早于 HasNext：后者用 interval 重算 nextTime。
-	// 返回 <=0 表示不覆盖，沿用当前 interval。
-	if ni, ok := task.timer.(NextIntervaler); ok {
-		if iv := ni.NextInterval(); iv > 0 {
-			if parent := task.timer.GetParent(); parent != nil {
-				parent.SetInterval(iv)
-			}
-		}
-	}
-
 	if !task.timer.HasNext() {
 		return
 	}

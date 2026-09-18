@@ -221,13 +221,13 @@ func TelegramStart(ctx context.Context) {
 	closeCh = make(chan any)
 	stopOnce = sync.Once{}
 
-	t, err := localtimer.NewTimer(util.MILLISECONDS_OF_MINUTE, -1, &telegramTimer{})
+	timer, err := localtimer.NewTimer[*telegramTimer](util.MILLISECONDS_OF_MINUTE, -1, func(t *telegramTimer) {
+		t.bot = bot
+	})
 	if err != nil {
 		vars.Error("telegram timer error: %v", err)
 		return
 	}
-	timer := t.(*telegramTimer)
-	timer.bot = bot
 	// 不中断 bot 启动（收消息主循环仍可工作），但定时器丢失必须留痕
 	if err := localtimer.AddTimer(timer); err != nil {
 		vars.Error("telegram 维护定时器注册失败: %v", err)

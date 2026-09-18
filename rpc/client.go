@@ -276,20 +276,20 @@ func NewRpcClient(servername, addr string, port int) *RpcClient {
 		vars.Info("RPC客户端[%s]检测到内网地址[%s]，跳过TLS", servername, addr)
 	}
 
-	// 创建一个带计时器的客户端指针
-	c, err := localtimer.NewTimer(1000, -1, &RpcClient{})
+	// 创建一个带计时器的客户端指针（initcallback 内完成连接参数初始化）
+	client, err := localtimer.NewTimer[*RpcClient](1000, -1, func(c *RpcClient) {
+		c.addr = addr
+		c.port = port
+		c.fullAddr = addr + ":" + strconv.Itoa(port)
+		c.serverName = servername
+		c.useTLS = useTLS
+		c.timeout = 30 * time.Second       // 默认超时 30 秒
+		c.callbacks = NewClientCallbacks() // 初始化回调接口
+	})
 	if err != nil {
 		vars.Error("创建RPC客户端失败[%s:%d]: %v", addr, port, err)
 		return nil
 	}
-	client := c.(*RpcClient)
-	client.addr = addr
-	client.port = port
-	client.fullAddr = addr + ":" + strconv.Itoa(port)
-	client.serverName = servername
-	client.useTLS = useTLS
-	client.timeout = 30 * time.Second       // 默认超时 30 秒
-	client.callbacks = NewClientCallbacks() // 初始化回调接口
 
 	conn, err := newClient(client.fullAddr, useTLS)
 	if err == nil {

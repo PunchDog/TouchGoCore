@@ -80,24 +80,6 @@ type TimerInterface interface {
 	IsActive() bool
 }
 
-// NextIntervaler 是定时器的可选扩展接口：由业务在「续期之前」重算下一次触发
-// 的间隔（毫秒）。
-//
-// 为什么需要它：像「每天 09:30 / 每周一 / 月末」这类墙钟对齐型定时，
-// 每次触发后的间隔都不一样；若没有这个接口，业务只能在自己的 Tick 里
-// 自行 Init + AddTimer 重排一次。而续期路径末尾也会 AddTimer 重排一次，
-// 两次 AddTimer 都会推进 gen，后者会把前者刚投递的调度项判为过期丢弃，
-// 形成「双写重排」造成的调度项互相作废。
-//
-// 返回 <=0 表示「本轮不覆盖」，沿用当前 interval，业务无需区分自己是否
-// 处于墙钟对齐模式。
-//
-// 刻意不做成 TimerInterface 的必选方法：那会强制所有实现方（telegram、
-// golua、rpc 等）跟着改签名，纯属破坏性变更。
-type NextIntervaler interface {
-	NextInterval() int64
-}
-
 // TimerPool 为定时器提供类型安全的对象池管理
 type TimerPool struct {
 	once sync.Once
@@ -332,38 +314,54 @@ func (t *Timer) GetRemainingCount() int64 {
 	}
 }
 
-// NewTimer 创建新的定时器实例
-func NewTimer(interval, count int64, cls TimerInterface) (TimerInterface, error) {
-	if cls == nil {
-		return nil, ErrTimerInvalidType
-	}
-
-	// timerPool.Get 内部用 reflect.TypeOf(cls).Elem() 取元素类型，
-	// 传入非指针会直接 panic。用值接收者自行实现 TimerInterface 即可触发。
-	if reflect.TypeOf(cls).Kind() != reflect.Pointer {
-		return nil, ErrTimerInvalidType
+// NewTimer 创建新的定时器实例，实例来自对象池（T 必须是指针类型，如 *MyTimer）。
+// 返回 T 供调用方直接断言回具体类型使用。
+// initcallback 在 Init 完成后、返回前调用，入参为池中实例（含复用实例），
+// 用于初始化业务字段；池复用时每次 NewTimer 都会重新执行，天然覆盖旧状态。
+// 说明：返回值用 T 而非 *T —— *T（T 为类型参数）不实现 TimerInterface，
+// 写 *T 会直接编译报错（pointer to type parameter / impossible type assertion）；
+// 而 T 本身受约束可实现接口，断言经 any 中转即可。
+func NewTimer[T TimerInterface](interval, count int64, initcallback func(t T)) (T, error) {
+	var zero T
+	tp := reflect.TypeOf(zero)
+	// T 必须是指针类型：对象池内部依赖 reflect.TypeOf(cls).Elem() 取元素类型，
+	// 值类型会 panic，必须提前拦截。
+	if tp == nil || tp.Kind() != reflect.Pointer {
+		return zero, ErrTimerInvalidType
 	}
 
 	if interval <= 0 {
-		return nil, ErrTimerInvalidInterval
+		return zero, ErrTimerInvalidInterval
 	}
 
-	timer := timerPool.Get(cls)
+	// 构造真实原型实例：不能用 zero（类型化 nil 指针）直接入池 ——
+	// GetClassName 内部 reflect.Indirect 对 nil 指针取 Elem 会 panic。
+	prototype, ok := reflect.New(tp.Elem()).Interface().(T)
+	if !ok {
+		return zero, ErrTimerInvalidType
+	}
+
+	timer := timerPool.Get(prototype)
 	parent := timer.GetParent()
 	if parent == nil {
 		timerPool.Put(timer)
-		return nil, ErrTimerNilParent
-	}
-
-	if err := parent.Init(interval, count, timer); err != nil {
-		timerPool.Put(timer)
-		return nil, err
+		return zero, ErrTimerNilParent
 	}
 
 	// 对象池复用：实例可以是旧的，但「身份」必须是新的。
-	// 重置 UID 让管理器重新分配，并推进代次使该实例残留的旧调度项全部失效。
+	// 必须在 Init 重新激活之前完成：重置 UID 让管理器重新分配（AddTimer 见 0 补发），
+	// 推进代次使该实例残留的旧调度项全部失效。若放在 Init 之后，复用实例在
+	// isActive=true 的窗口内会被旧代次的在途调度项命中，导致过期回调被误执行。
 	parent.uid.Store(0)
 	parent.nextGen()
 
-	return timer, nil
+	if err := parent.Init(interval, count, timer); err != nil {
+		timerPool.Put(timer)
+		return zero, err
+	}
+
+	if initcallback != nil {
+		initcallback(any(timer).(T))
+	}
+	return any(timer).(T), nil
 }

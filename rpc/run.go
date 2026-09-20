@@ -6,8 +6,6 @@ import (
 	"touchgocore/corectx"
 	"touchgocore/syncmap"
 	"touchgocore/vars"
-
-	"google.golang.org/grpc"
 )
 
 const (
@@ -138,11 +136,11 @@ func Stop(ctx context.Context) {
 	clientCount := 0
 	if rpcClient_ != nil {
 		rpcClient_.Range(func(key string, v1 *RpcClient) bool {
-			if connVal := v1.conn.Load(); connVal != nil {
-				if conn, ok := connVal.(*grpc.ClientConn); ok && conn != nil {
-					conn.Close()
-					clientCount++
-				}
+			// 先取消流 context 放掉 recvLoop，再关连接
+			v1.invalidateStream(nil)
+			if conn := v1.conn.Swap(nil); conn != nil {
+				_ = conn.Close()
+				clientCount++
 			}
 
 			// 退出程序，从注册表中移除

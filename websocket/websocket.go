@@ -253,10 +253,8 @@ func shutdownWebsocket() {
 			return true
 		})
 	}
-	if msgQueue != nil {
-		close(msgQueue)
-		msgQueue = nil
-	}
+	// msgQueue 不做 close：Tick 靠 closeCh/ctx 退出，读协程仍在往里投递，
+	// 关闭会让 send on closed channel 直接 panic。
 	if workerPoolEnabled {
 		stopWorkerPool()
 	}

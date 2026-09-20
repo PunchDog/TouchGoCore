@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
+	"sync"
 	"sync/atomic"
 	"time"
 	"touchgocore/metrics"
@@ -56,6 +57,13 @@ type Client struct {
 	iCallName  string
 	// 原子关闭标志，防止竞态条件
 	closed atomic.Bool
+	// closeOnce/recycleOnce：关闭动作与回收动作各只执行一次
+	closeOnce   sync.Once
+	recycleOnce sync.Once
+	// liveLoops：readLoop/handleLoop 常驻协程计数，归零后才允许回池
+	liveLoops atomic.Int32
+	// counted：是否已计入服务器连接统计，决定回池时是否做 -1
+	counted atomic.Bool
 
 	// ============ 改进：添加统计字段 ============
 	stats struct {
@@ -69,6 +77,21 @@ type Client struct {
 	}
 }
 
+// initChannels 建立连接期资源。msgChan 在实例生命周期内永不 close，
+// 关闭只靠 closeCh 通知，避免「发送方仍在写入 → send on closed channel」。
+func (c *Client) initChannels() {
+	c.closeCh = make(chan bool, 1)
+	c.msgChan = make(chan []byte, writeQueueCap())
+}
+
+// writeQueueCap 发送队列容量（条数）
+func writeQueueCap() int {
+	if writeBufferSize > 0 {
+		return writeBufferSize
+	}
+	return DEFAULT_WRITE_BUFFER_SIZE
+}
+
 // 新增带重试机制的WebSocket连接方法
 func (c *Client) connectionDial(url string) error {
 	const maxRetries = 3
@@ -80,8 +103,6 @@ func (c *Client) connectionDial(url string) error {
 			c.wsConnect = wsConn
 			wsConn.SetReadLimit(1 << 20)
 			c.remoteAddr = url
-			c.closeCh = make(chan bool, 1)
-			c.msgChan = make(chan []byte, DEFAULT_WRITE_BUFFER_SIZE)
 
 			// ============ 改进：初始化统计 ============
 			c.stats.connectTime = util.CurrentTime()
@@ -104,6 +125,7 @@ func (c *Client) handleLoop() {
 			vars.Error("客户端handleLoop发生panic错误: %v, 客户端地址: %s", err, c.remoteAddr)
 		}
 		c.Close("")
+		c.finishLoop()
 		runtime.Goexit()
 	}()
 
@@ -112,6 +134,9 @@ func (c *Client) handleLoop() {
 
 	for c.Connected() {
 		select {
+		case <-c.closeCh:
+			// 关闭通知：立即退出，交由最后一个退出的协程完成回收
+			return
 		case msg, ok := <-c.msgChan:
 			if !ok {
 				return
@@ -147,6 +172,7 @@ func (c *Client) readLoop() {
 			vars.Error("客户端readLoop发生panic错误: %v, 客户端地址: %s", err, c.remoteAddr)
 		}
 		c.Close("")
+		c.finishLoop()
 		runtime.Goexit()
 	}()
 
@@ -160,7 +186,7 @@ func (c *Client) readLoop() {
 						c.stats.messagesReceived.Add(1)
 						c.stats.bytesReceived.Add(int64(len(data)))
 						c.stats.lastActivity.Store(util.CurrentTime())
-					case <-closeCh:
+					case <-c.closeCh:
 						return
 					default:
 						UpdateErrorStats()
@@ -173,7 +199,7 @@ func (c *Client) readLoop() {
 						c.stats.messagesReceived.Add(1)
 						c.stats.bytesReceived.Add(int64(len(data)))
 						c.stats.lastActivity.Store(util.CurrentTime())
-					case <-closeCh:
+					case <-c.closeCh:
 						return
 					}
 				}
@@ -206,32 +232,62 @@ func (c *Client) Connected() bool {
 	return !c.IsClose()
 }
 
+// Close 关闭连接。只负责「通知关闭」，绝不释放仍被协程使用的资源：
+// msgChan 永不 close，字段清空与回池延后到 readLoop/handleLoop 全部退出之后。
 func (c *Client) Close(reason string) {
 	// 使用原子操作确保只关闭一次
-	if c.closed.CompareAndSwap(false, true) {
+	if !c.closed.CompareAndSwap(false, true) {
+		return
+	}
+
+	c.closeOnce.Do(func() {
 		// 先从映射中移除，防止新消息到达
-		clientMap.Delete(c.UID)
+		if clientMap != nil && c.UID != 0 {
+			clientMap.Delete(c.UID)
+		}
 
 		// 调用 OnClose 回调
-		c.OnClose(c)
+		if c.ICall != nil {
+			c.OnClose(c)
+		}
 
-		// 关闭通道和连接
-		close(c.closeCh)
+		// 关闭通知通道并断开底层连接；msgChan 保持开放，写入方靠 closed 判断丢弃
+		if c.closeCh != nil {
+			close(c.closeCh)
+		}
 		if c.wsConnect != nil {
 			c.wsConnect.Close()
 		}
-		close(c.msgChan)
 
-		// 清理客户端资源
-		addr := c.remoteAddr
+		vars.Info("%s 连接关闭，原因：%s", c.remoteAddr, reason)
+	})
+
+	// 无常驻协程在跑（连接建立失败等场景）时立即回收
+	if c.liveLoops.Load() == 0 {
+		c.recycle()
+	}
+}
+
+// finishLoop 常驻协程退出时调用，最后一个退出的协程负责回收
+func (c *Client) finishLoop() {
+	if c.liveLoops.Add(-1) <= 0 {
+		c.recycle()
+	}
+}
+
+// recycle 清空在用字段并归还对象池，仅在全部协程退出后执行一次
+func (c *Client) recycle() {
+	c.recycleOnce.Do(func() {
+		// 清理客户端资源，切断对连接的引用。
+		// closeCh/msgChan 保持原样：可能仍有业务协程刚通过 Connected() 检查，
+		// 置 nil 会与之形成数据竞争；下一次 NewClient 会整体重建这两条通道。
 		c.wsConnect = nil
 		c.remoteAddr = ""
 		c.UID = 0
 
 		// 归还 ICall 到对象池
 		if clientpool != nil && c.ICall != nil {
-			icallpool, ok := clientcall.Load(c.iCallName)
-			if ok {
+			if icallpool, ok := clientcall.Load(c.iCallName); ok {
 				// 使用指针避免复制sync.Pool
 				icallpool.Put(c.ICall)
 			} else {
@@ -245,11 +301,11 @@ func (c *Client) Close(reason string) {
 			clientpool.Put(c)
 		}
 
-		vars.Info("%s 连接关闭，原因：%s", addr, reason)
-
-		// ============ 改进：更新服务器统计 ============
-		UpdateConnectionStats(false)
-	}
+		// 与 NewClient 的 +1 配对，未计入统计的失败连接不做 -1
+		if c.counted.CompareAndSwap(true, false) {
+			UpdateConnectionStats(false)
+		}
+	})
 }
 
 // 发送消息
@@ -333,47 +389,41 @@ func NewClient(connType interface{}, remoteAddr string, className string) (*Clie
 	atomic.AddInt64(&maxUID, 1)
 
 	var client *Client = nil
-	var err error = nil
 	if clientpool != nil {
 		client = clientpool.Get().(*Client)
 		if client == nil {
 			return nil, errors.New("内存池获取失败")
 		}
-		// 重置原子关闭标志
-		client.closed.Store(false)
 	} else {
 		client = &Client{}
-		// 原子标志自动初始化为 false
 	}
+	// 复用的实例必须重置一次性标志与协程计数，否则上一次的关闭/回收状态会污染本次连接
+	client.closed.Store(false)
+	client.counted.Store(false)
+	client.closeOnce = sync.Once{}
+	client.recycleOnce = sync.Once{}
+	client.liveLoops.Store(0)
+	client.iCallName = className
 
 	client.UID = atomic.LoadInt64(&maxUID)
 	client.remoteAddr = remoteAddr
-	client.closeCh = make(chan bool, 1)
-	client.msgChan = make(chan []byte, DEFAULT_WRITE_BUFFER_SIZE)
-	client.iCallName = className
+	client.initChannels()
 
 	// ============ 改进：初始化统计 ============
 	client.stats.connectTime = util.CurrentTime()
 	client.stats.lastActivity.Store(util.CurrentTime())
 
-	defer func() {
-		if err != nil {
-			if client != nil && clientpool != nil {
-				client.ICall = nil
-				clientpool.Put(client)
-			}
-		}
-	}()
-
 	switch v := connType.(type) {
 	case string: // 客户端主动连接模式
 		if err := client.connectionDial(v); err != nil {
+			client.Close("拨号失败")
 			return nil, err
 		}
 	case *websocket.Conn: // 服务端接收连接模式
 		client.wsConnect = v
 		v.SetReadLimit(1 << 20)
 	default:
+		client.Close("无效的连接类型参数")
 		return nil, errors.New("无效的连接类型参数")
 	}
 
@@ -385,11 +435,13 @@ func NewClient(connType interface{}, remoteAddr string, className string) (*Clie
 			icall := icallpool.Get()
 			if icall == nil {
 				vars.Error("内存池获取失败: %s", className)
+				client.Close("内存池获取失败")
 				return nil, errors.New("内存池获取失败")
 			}
 			client.ICall = icall.(ICall)
 		} else {
 			vars.Error("未找到类名对应的ICall接口实现: %s", className)
+			client.Close("未找到类名对应的ICall接口实现")
 			return nil, errors.New("未找到类名对应的ICall接口实现")
 		}
 	} else {
@@ -402,6 +454,10 @@ func NewClient(connType interface{}, remoteAddr string, className string) (*Clie
 		return nil, errors.New("连接回调验证失败")
 	}
 
+	// 先声明「有两个常驻协程要跑」，再发布到 clientMap，
+	// 保证任何能看到该客户端的协程都不会提前把它回池。
+	client.liveLoops.Store(2)
+	client.counted.Store(true)
 	clientMap.Store(client.UID, client)
 	// vars.Info("%s 连接建立成功", client.remoteAddr)
 	go client.readLoop()

@@ -61,7 +61,7 @@ func TestFilterWithCategoriesAfterOptimization(t *testing.T) {
 	// 创建过滤器
 	f := NewFilter(d)
 
-	// 测试数据
+	// 测试数据：掩码按敏感词字符数逐个替换
 	testCases := []struct {
 		name           string
 		text           string
@@ -71,17 +71,17 @@ func TestFilterWithCategoriesAfterOptimization(t *testing.T) {
 		name:           "只过滤赌博",
 		text:           "这是一个赌钱和制毒的例子",
 		categories:     []category.Category{category.Gambling},
-		expectedResult: "这是一个****和制毒的例子",
+		expectedResult: "这是一个**和制毒的例子",
 	}, {
 		name:           "只过滤毒品",
 		text:           "这是一个赌钱和制毒的例子",
 		categories:     []category.Category{category.Drugs},
-		expectedResult: "这是一个赌钱和****的例子",
+		expectedResult: "这是一个赌钱和**的例子",
 	}, {
 		name:           "过滤赌博和毒品",
 		text:           "这是一个赌钱和制毒的例子",
 		categories:     []category.Category{category.Gambling, category.Drugs},
-		expectedResult: "这是一个****和****的例子",
+		expectedResult: "这是一个**和**的例子",
 	}}
 
 	// 执行测试

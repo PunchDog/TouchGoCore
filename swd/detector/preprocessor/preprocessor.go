@@ -39,13 +39,9 @@ const (
 	defaultCacheSize = 1000 // 默认缓存大小
 )
 
-// NewPreprocessor 创建新的预处理器实例
+// NewPreprocessor 创建新的预处理器实例，使用全局映射配置
 func NewPreprocessor(options *core.SWDOptions) *Preprocessor {
-	return &Preprocessor{
-		options:      options,
-		config:       config.NewMappingConfig(),
-		processCache: common.NewLRUCache[string, []string](defaultCacheSize),
-	}
+	return NewPreprocessorWithConfig(options, config.GetGlobalMapping())
 }
 
 // NewPreprocessorWithConfig 使用自定义配置创建预处理器

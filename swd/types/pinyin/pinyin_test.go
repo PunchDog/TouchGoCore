@@ -20,7 +20,8 @@ func TestGetCharsFromPinyin(t *testing.T) {
 		{
 			name:   "test piao pinyin",
 			pinyin: "piao",
-			expect: []string{"票", "飘", "飘", "瓢", "嫖"},
+			// 数据表里 飘 重复出现，解析时已按序去重
+			expect: []string{"票", "飘", "瓢", "嫖"},
 		},
 		{
 			name:   "test non-existent pinyin",

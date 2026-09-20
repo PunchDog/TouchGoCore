@@ -55,43 +55,31 @@ func (f *filter) Replace(text string, replacement rune) string {
 	return string(runes)
 }
 
-// removeOverlappingMatches 去重并保留最长的匹配结果
+// removeOverlappingMatches 去重重叠匹配：同一位置保留最长的匹配
 // 优化：使用区间扫描替代 O(n²) 双重循环，复杂度降为 O(n log n)
 func (f *filter) removeOverlappingMatches(matches []core.SensitiveWord) []core.SensitiveWord {
 	if len(matches) <= 1 {
 		return matches
 	}
 
-	// 按照长度排序，长的在前；长度相同的按起始位置排序，小的在前
+	// 先按起点升序，起点相同时按长度降序，保证左起最先、同位最长优先
 	sort.Slice(matches, func(i, j int) bool {
-		lenI := matches[i].EndPos - matches[i].StartPos
-		lenJ := matches[j].EndPos - matches[j].StartPos
-		if lenI != lenJ {
-			return lenI > lenJ
+		if matches[i].StartPos != matches[j].StartPos {
+			return matches[i].StartPos < matches[j].StartPos
 		}
-		return matches[i].StartPos < matches[j].StartPos
+		return matches[i].EndPos > matches[j].EndPos
 	})
 
-	// 使用区间树方式检测重叠：按已选中区间检查
-	// 由于已选区间按添加顺序排列，可以利用有序性优化
+	// 已选区间天然按起点递增且互不重叠，因此只需与最后一个区间比较
 	uniqueMatches := make([]core.SensitiveWord, 0, len(matches))
 	for _, match := range matches {
-		overlap := false
-		for _, existing := range uniqueMatches {
-			// 如果当前匹配完全在已存在的匹配范围内，则跳过
-			if match.StartPos >= existing.StartPos && match.EndPos <= existing.EndPos {
-				overlap = true
-				break
-			}
-			// 如果当前匹配与已存在的匹配有部分重叠（长的优先），跳过
-			if !(match.EndPos <= existing.StartPos || match.StartPos >= existing.EndPos) {
-				overlap = true
-				break
-			}
+		if match.EndPos <= match.StartPos {
+			continue
 		}
-		if !overlap {
-			uniqueMatches = append(uniqueMatches, match)
+		if len(uniqueMatches) > 0 && match.StartPos < uniqueMatches[len(uniqueMatches)-1].EndPos {
+			continue
 		}
+		uniqueMatches = append(uniqueMatches, match)
 	}
 
 	return uniqueMatches

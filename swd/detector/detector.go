@@ -15,8 +15,6 @@ import (
 	"touchgocore/swd/detector/preprocessor"
 	"touchgocore/swd/dictionary"
 	"touchgocore/swd/types/category"
-	"touchgocore/swd/types/pinyin"
-	"touchgocore/swd/types/similar"
 )
 
 // detector 实现敏感词检测器接口
@@ -46,7 +44,7 @@ type detector struct {
 
 // NewDetector 创建一个新的检测器实例
 func NewDetector(options *core.SWDOptions) (core.Detector, error) {
-	return NewDetectorWithConfig(options, config.NewMappingConfig())
+	return NewDetectorWithConfig(options, config.GetGlobalMapping())
 }
 
 // NewDetectorWithConfig 使用自定义配置创建检测器
@@ -58,17 +56,15 @@ func NewDetectorWithConfig(options *core.SWDOptions, cfg *config.MappingConfig) 
 		return nil, fmt.Errorf("加载默认词典失败: %w", err)
 	}
 
-	// 加载映射文件
+	// 加载映射表（内嵌数据表，随二进制发布）
 	mappingLoader := dictionary.NewMappingLoader("")
 	if err := mappingLoader.LoadFromFiles(); err != nil {
-		// 映射文件加载失败不影响主功能，只记录错误
+		// 映射表加载失败不影响主功能，退回调用方给出的配置
 		log.Printf("加载映射文件失败: %v", err)
 	} else {
-		// 使用加载的映射配置
 		cfg = mappingLoader.GetConfig()
-		// 设置到拼音包和形近字包的全局配置
-		pinyin.SetMappingConfig(cfg)
-		similar.SetMappingConfig(cfg)
+		// 拼音、同音字、形近字走包级查询，需要与检测器共用同一份映射表
+		config.SetGlobalMapping(cfg)
 	}
 
 	// 获取词典内容

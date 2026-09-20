@@ -2,6 +2,8 @@ package config
 
 import (
 	"sync"
+
+	"touchgocore/swd/config/mappingdata"
 )
 
 // MappingConfig 映射配置，存储所有字符映射表
@@ -27,7 +29,7 @@ type MappingConfig struct {
 	similarShape map[rune][]rune
 }
 
-// NewMappingConfig 创建新的映射配置
+// NewMappingConfig 创建空的映射配置
 func NewMappingConfig() *MappingConfig {
 	return &MappingConfig{
 		fullWidthToHalf: make(map[rune]rune),
@@ -37,6 +39,51 @@ func NewMappingConfig() *MappingConfig {
 		homophone:       make(map[rune][]rune),
 		similarShape:    make(map[rune][]rune),
 	}
+}
+
+// NewDefaultMappingConfig 使用内嵌数据表创建映射配置
+func NewDefaultMappingConfig() *MappingConfig {
+	cfg := NewMappingConfig()
+	cfg.UseTables(mappingdata.Default())
+	return cfg
+}
+
+// UseTables 用解析好的映射表覆盖全部内容
+func (c *MappingConfig) UseTables(tables *mappingdata.Tables) {
+	reverse := make(map[rune]rune, len(tables.FullWidthToHalf))
+	for full, half := range tables.FullWidthToHalf {
+		reverse[half] = full
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.fullWidthToHalf = cloneRuneMap(tables.FullWidthToHalf)
+	c.halfToFullWidth = reverse
+	c.numberStyle = cloneRuneMap(tables.NumberStyle)
+	c.homophone = cloneRuneSliceMap(tables.Homophone)
+	c.similarShape = cloneRuneSliceMap(tables.SimilarShape)
+
+	c.pinyin = make(map[string][]string, len(tables.Pinyin))
+	for key, chars := range tables.Pinyin {
+		c.pinyin[key] = append([]string(nil), chars...)
+	}
+}
+
+func cloneRuneMap(src map[rune]rune) map[rune]rune {
+	dst := make(map[rune]rune, len(src))
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
+}
+
+func cloneRuneSliceMap(src map[rune][]rune) map[rune][]rune {
+	dst := make(map[rune][]rune, len(src))
+	for k, v := range src {
+		dst[k] = append([]rune(nil), v...)
+	}
+	return dst
 }
 
 // GetFullWidthToHalf 获取全角转半角映射
@@ -124,19 +171,31 @@ func (c *MappingConfig) SetSimilarShape(mapping map[rune][]rune) {
 }
 
 var (
-	globalMapping     *MappingConfig
-	globalMappingOnce sync.Once
+	globalMu      sync.RWMutex
+	globalMapping *MappingConfig
 )
 
-// GetGlobalMapping 获取全局映射配置实例（单例模式）
+// GetGlobalMapping 获取全局映射配置实例。
+// 首次访问时用内嵌数据表懒加载出默认配置，因此未显式 Set 也能拿到可用映射。
 func GetGlobalMapping() *MappingConfig {
-	globalMappingOnce.Do(func() {
-		globalMapping = NewMappingConfig()
-	})
+	globalMu.RLock()
+	cfg := globalMapping
+	globalMu.RUnlock()
+	if cfg != nil {
+		return cfg
+	}
+
+	globalMu.Lock()
+	defer globalMu.Unlock()
+	if globalMapping == nil {
+		globalMapping = NewDefaultMappingConfig()
+	}
 	return globalMapping
 }
 
-// SetGlobalMapping 设置全局映射配置
+// SetGlobalMapping 设置全局映射配置。
 func SetGlobalMapping(cfg *MappingConfig) {
+	globalMu.Lock()
+	defer globalMu.Unlock()
 	globalMapping = cfg
 }

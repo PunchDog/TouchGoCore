@@ -70,12 +70,12 @@ func TestSWD_Detect(t *testing.T) {
 		},
 		{
 			name: "text with sensitive word (pornography)",
-			text: "这是一段包含色情的文本",
+			text: "这是一段包含嫖娼的文本",
 			want: true,
 		},
 		{
 			name: "text with sensitive word (gambling)",
-			text: "这是一段包含赌博的文本",
+			text: "这是一段包含赌钱的文本",
 			want: true,
 		},
 		{
@@ -85,7 +85,7 @@ func TestSWD_Detect(t *testing.T) {
 		},
 		{
 			name: "text with sensitive word (scam)",
-			text: "这是一段包含诈骗的文本",
+			text: "这是一段包含下线提成的文本",
 			want: true,
 		},
 		{
@@ -95,7 +95,7 @@ func TestSWD_Detect(t *testing.T) {
 		},
 		{
 			name: "text with multiple sensitive words",
-			text: "这是一段包含色情和暴力的文本",
+			text: "这是一段包含嫖娼和手枪的文本",
 			want: true,
 		},
 	}
@@ -135,13 +135,13 @@ func TestSWD_Replace(t *testing.T) {
 		},
 		{
 			name:        "text with sensitive word (pornography)",
-			text:        "这是一段包含色情的文本",
+			text:        "这是一段包含嫖娼的文本",
 			replacement: '*',
 			want:        "这是一段包含**的文本",
 		},
 		{
 			name:        "text with sensitive word (gambling)",
-			text:        "这是一段包含赌博的文本",
+			text:        "这是一段包含赌钱的文本",
 			replacement: '*',
 			want:        "这是一段包含**的文本",
 		},
@@ -153,7 +153,7 @@ func TestSWD_Replace(t *testing.T) {
 		},
 		{
 			name:        "text with multiple sensitive words",
-			text:        "这是一段包含色情和暴力的文本",
+			text:        "这是一段包含嫖娼和手枪的文本",
 			replacement: '#',
 			want:        "这是一段包含##和##的文本",
 		},
@@ -196,6 +196,9 @@ func TestSWD_DetectIn(t *testing.T) {
 			t.Fatalf("Failed to add test word %s: %v", word, err)
 		}
 	}
+
+	// 增量改词会按合并窗口延后通知，显式刷新让断言立即基于新词库
+	swd.NotifyObservers()
 
 	tests := []struct {
 		name       string
@@ -410,11 +413,11 @@ func TestSWD_Concurrent(t *testing.T) {
 			defer wg.Done()
 			for j := 0; j < numOperations; j++ {
 				// 并发检测
-				if swd.Detect("这是一段包含色情的文本") != true {
+				if swd.Detect("这是一段包含嫖娼的文本") != true {
 					reportErr(fmt.Errorf("concurrent detect failed"))
 				}
 				// 并发替换
-				if swd.Replace("这是一段包含色情的文本", '*') != "这是一段包含**的文本" {
+				if swd.Replace("这是一段包含嫖娼的文本", '*') != "这是一段包含**的文本" {
 					reportErr(fmt.Errorf("concurrent replace failed"))
 				}
 				// 并发添加和删除
@@ -459,8 +462,8 @@ func TestSWD_Performance(t *testing.T) {
 		t.Fatalf("Failed to load default words: %v", err)
 	}
 
-	longText := "这是一段很长的文本，包含了多个敏感词：色情、暴力、政府、赌博、毒品、脏话、歧视、诈骗。这些词被重复多次："
-	longText += "色情暴力政府赌博毒品脏话歧视诈骗。"
+	longText := "这是一段很长的文本，包含了多个敏感词：嫖娼、手枪、政府、赌钱、毒品、脏话、歧视、下线提成。这些词被重复多次："
+	longText += "嫖娼手枪政府赌钱毒品脏话歧视下线提成。"
 	for i := 0; i < 10; i++ {
 		longText += longText
 	}
@@ -473,7 +476,7 @@ func TestSWD_Performance(t *testing.T) {
 	}{
 		{
 			name:     "short text performance",
-			text:     "这是一段包含色情的文本",
+			text:     "这是一段包含嫖娼的文本",
 			maxTime:  time.Millisecond * 100,
 			numTests: 10000,
 		},
@@ -666,14 +669,14 @@ func TestSWD_Match(t *testing.T) {
 		},
 		{
 			name:     "text with sensitive word",
-			text:     "这是一段包含色情的文本",
-			wantWord: "色情",
+			text:     "这是一段包含嫖娼的文本",
+			wantWord: "嫖娼",
 			wantNil:  false,
 		},
 		{
 			name:     "text with multiple sensitive words",
-			text:     "这是一段包含色情和暴力的文本",
-			wantWord: "色情",
+			text:     "这是一段包含嫖娼和手枪的文本",
+			wantWord: "嫖娼",
 			wantNil:  false,
 		},
 	}
@@ -726,13 +729,13 @@ func TestSWD_MatchAll(t *testing.T) {
 		},
 		{
 			name:      "text with single sensitive word",
-			text:      "这是一段包含色情的文本",
-			wantWords: []string{"色情"},
+			text:      "这是一段包含嫖娼的文本",
+			wantWords: []string{"嫖娼"},
 		},
 		{
 			name:      "text with multiple sensitive words",
-			text:      "这是一段包含色情和暴力的文本",
-			wantWords: []string{"色情", "暴力"},
+			text:      "这是一段包含嫖娼和手枪的文本",
+			wantWords: []string{"嫖娼", "手枪"},
 		},
 	}
 
@@ -780,12 +783,12 @@ func TestSWD_ReplaceWithAsterisk(t *testing.T) {
 		},
 		{
 			name: "text with single sensitive word",
-			text: "这是一段包含色情的文本",
+			text: "这是一段包含嫖娼的文本",
 			want: "这是一段包含**的文本",
 		},
 		{
 			name: "text with multiple sensitive words",
-			text: "这是一段包含色情和暴力的文本",
+			text: "这是一段包含嫖娼和手枪的文本",
 			want: "这是一段包含**和**的文本",
 		},
 	}
@@ -832,12 +835,12 @@ func TestSWD_ReplaceWithStrategy(t *testing.T) {
 		},
 		{
 			name: "text with single sensitive word",
-			text: "这是一段包含色情的文本",
+			text: "这是一段包含嫖娼的文本",
 			want: "这是一段包含[REMOVED]的文本",
 		},
 		{
 			name: "text with multiple sensitive words",
-			text: "这是一段包含色情和暴力的文本",
+			text: "这是一段包含嫖娼和手枪的文本",
 			want: "这是一段包含[REMOVED]和[REMOVED]的文本",
 		},
 	}
@@ -877,29 +880,29 @@ func TestSWD_MatchIn(t *testing.T) {
 		},
 		{
 			name:       "text without sensitive word in category",
-			text:       "这是一段包含暴力的文本",
+			text:       "这是一段包含手枪的文本",
 			categories: []category.Category{category.Pornography},
 			wantNil:    true,
 		},
 		{
 			name:       "text with sensitive word in category",
-			text:       "这是一段包含色情的文本",
+			text:       "这是一段包含嫖娼的文本",
 			categories: []category.Category{category.Pornography},
-			wantWord:   "色情",
+			wantWord:   "嫖娼",
 			wantNil:    false,
 		},
 		{
 			name:       "text with multiple categories",
-			text:       "这是一段包含色情和暴力的文本",
+			text:       "这是一段包含嫖娼和手枪的文本",
 			categories: []category.Category{category.Pornography, category.Violence},
-			wantWord:   "色情",
+			wantWord:   "嫖娼",
 			wantNil:    false,
 		},
 		{
 			name:       "text with multiple categories",
-			text:       "这是一段包含色情和暴力的文本",
+			text:       "这是一段包含嫖娼和手枪的文本",
 			categories: []category.Category{category.Violence},
-			wantWord:   "暴力",
+			wantWord:   "手枪",
 			wantNil:    false,
 		},
 	}
@@ -949,21 +952,21 @@ func TestSWD_MatchAllIn(t *testing.T) {
 		},
 		{
 			name:       "text without sensitive word in category",
-			text:       "这是一段包含暴力的文本",
+			text:       "这是一段包含手枪的文本",
 			categories: []category.Category{category.Pornography},
 			wantWords:  nil,
 		},
 		{
 			name:       "text with sensitive word in category",
-			text:       "这是一段包含色情的文本",
+			text:       "这是一段包含嫖娼的文本",
 			categories: []category.Category{category.Pornography},
-			wantWords:  []string{"色情"},
+			wantWords:  []string{"嫖娼"},
 		},
 		{
 			name:       "text with multiple categories",
-			text:       "这是一段包含色情和暴力的文本",
+			text:       "这是一段包含嫖娼和手枪的文本",
 			categories: []category.Category{category.Pornography, category.Violence},
-			wantWords:  []string{"色情", "暴力"},
+			wantWords:  []string{"嫖娼", "手枪"},
 		},
 	}
 
@@ -1010,21 +1013,21 @@ func TestSWD_ReplaceIn(t *testing.T) {
 		},
 		{
 			name:        "text without sensitive word in category",
-			text:        "这是一段包含暴力的文本",
+			text:        "这是一段包含手枪的文本",
 			replacement: '*',
 			categories:  []category.Category{category.Pornography},
-			want:        "这是一段包含暴力的文本",
+			want:        "这是一段包含手枪的文本",
 		},
 		{
 			name:        "text with sensitive word in category",
-			text:        "这是一段包含色情的文本",
+			text:        "这是一段包含嫖娼的文本",
 			replacement: '*',
 			categories:  []category.Category{category.Pornography},
 			want:        "这是一段包含**的文本",
 		},
 		{
 			name:        "text with multiple categories",
-			text:        "这是一段包含色情和暴力的文本",
+			text:        "这是一段包含嫖娼和手枪的文本",
 			replacement: '#',
 			categories:  []category.Category{category.Pornography, category.Violence},
 			want:        "这是一段包含##和##的文本",
@@ -1065,19 +1068,19 @@ func TestSWD_ReplaceWithAsteriskIn(t *testing.T) {
 		},
 		{
 			name:       "text without sensitive word in category",
-			text:       "这是一段包含暴力的文本",
+			text:       "这是一段包含手枪的文本",
 			categories: []category.Category{category.Pornography},
-			want:       "这是一段包含暴力的文本",
+			want:       "这是一段包含手枪的文本",
 		},
 		{
 			name:       "text with sensitive word in category",
-			text:       "这是一段包含色情的文本",
+			text:       "这是一段包含嫖娼的文本",
 			categories: []category.Category{category.Pornography},
 			want:       "这是一段包含**的文本",
 		},
 		{
 			name:       "text with multiple categories",
-			text:       "这是一段包含色情和暴力的文本",
+			text:       "这是一段包含嫖娼和手枪的文本",
 			categories: []category.Category{category.Pornography, category.Violence},
 			want:       "这是一段包含**和**的文本",
 		},
@@ -1122,19 +1125,19 @@ func TestSWD_ReplaceWithStrategyIn(t *testing.T) {
 		},
 		{
 			name:       "text without sensitive word in category",
-			text:       "这是一段包含暴力的文本",
+			text:       "这是一段包含手枪的文本",
 			categories: []category.Category{category.Pornography},
-			want:       "这是一段包含暴力的文本",
+			want:       "这是一段包含手枪的文本",
 		},
 		{
 			name:       "text with sensitive word in category",
-			text:       "这是一段包含色情的文本",
+			text:       "这是一段包含嫖娼的文本",
 			categories: []category.Category{category.Pornography},
 			want:       "这是一段包含[REMOVED]的文本",
 		},
 		{
 			name:       "text with multiple categories",
-			text:       "这是一段包含色情和暴力的文本",
+			text:       "这是一段包含嫖娼和手枪的文本",
 			categories: []category.Category{category.Pornography, category.Violence},
 			want:       "这是一段包含[REMOVED]和[REMOVED]的文本",
 		},

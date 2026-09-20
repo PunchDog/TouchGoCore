@@ -6,16 +6,17 @@ import (
 	_ "embed"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"touchgocore/swd/config"
+	"touchgocore/swd/config/mappingdata"
 	"touchgocore/swd/core"
 	"touchgocore/swd/types/category"
 	"touchgocore/util"
@@ -28,6 +29,7 @@ type Loader struct {
 	notifyBatchSize int
 	lastNotifyTime  atomic.Value // time.Time
 	notifyInterval  time.Duration
+	notifyScheduled atomic.Bool // 是否已有待执行的补发定时器
 }
 
 // NewLoader 创建新的加载器实例
@@ -147,11 +149,13 @@ func (l *Loader) NotifyObservers() {
 	l.notifyObserversIfNeeded(true)
 }
 
-// notifyObserversIfNeeded 根据条件通知观察者（并发执行）
+// notifyObserversIfNeeded 根据条件通知观察者（并发执行）。
+// 处于合并窗口内时不是丢弃这次变更，而是延后一个周期补发，避免增量改词后检测器永不重建。
 func (l *Loader) notifyObserversIfNeeded(force bool) {
 	if !force {
 		lastNotify := l.lastNotifyTime.Load().(time.Time)
 		if util.CurrentTime().Sub(lastNotify) < l.notifyInterval {
+			l.scheduleNotify()
 			return
 		}
 	}
@@ -187,7 +191,19 @@ func (l *Loader) notifyObserversIfNeeded(force bool) {
 	l.lastNotifyTime.Store(util.CurrentTime())
 }
 
-// AddWord 添加单个敏感词
+// scheduleNotify 安排一次延后补发；同一时刻最多只有一个待执行定时器
+func (l *Loader) scheduleNotify() {
+	if !l.notifyScheduled.CompareAndSwap(false, true) {
+		return
+	}
+	time.AfterFunc(l.notifyInterval, func() {
+		l.notifyScheduled.Store(false)
+		l.notifyObserversIfNeeded(false)
+	})
+}
+
+// AddWord 添加单个敏感词。
+// 变更按合并窗口通知观察者（最多延迟 notifyInterval），需要立即生效时调用 NotifyObservers。
 func (l *Loader) AddWord(word string, cat category.Category) error {
 	if err := l.addWordInternal(word, cat); err != nil {
 		return err
@@ -299,14 +315,15 @@ func (l *Loader) GetWords() map[string]category.Category {
 	return words
 }
 
-// MappingLoader 映射文件加载器
+// MappingLoader 映射表加载器。
+// baseDir 为空时读取随二进制内嵌的映射表；显式指定目录时从磁盘加载，便于运营热替换词表。
 type MappingLoader struct {
 	mu      sync.RWMutex
 	config  *config.MappingConfig
 	baseDir string
 }
 
-// NewMappingLoader 创建新的映射加载器
+// NewMappingLoader 创建新的映射加载器，baseDir 传空字符串表示使用内嵌数据
 func NewMappingLoader(baseDir string) *MappingLoader {
 	return &MappingLoader{
 		config:  config.NewMappingConfig(),
@@ -314,218 +331,41 @@ func NewMappingLoader(baseDir string) *MappingLoader {
 	}
 }
 
-// LoadFromFiles 从文件加载所有映射
+// LoadFromFiles 加载全部映射表，缺少文件或内容非法都会返回错误
 func (ml *MappingLoader) LoadFromFiles() error {
+	root, err := ml.openRoot()
+	if err != nil {
+		return err
+	}
+
+	tables, err := mappingdata.Parse(root)
+	if err != nil {
+		return err
+	}
+
 	ml.mu.Lock()
 	defer ml.mu.Unlock()
+	ml.config.UseTables(tables)
+	return nil
+}
 
-	// 获取映射文件目录
+// openRoot 定位映射表所在目录
+func (ml *MappingLoader) openRoot() (fs.FS, error) {
 	if ml.baseDir == "" {
-		// 获取当前文件的相对路径
-		_, filename, _, _ := runtime.Caller(0)
-		ml.baseDir = filepath.Dir(filename)
+		return mappingdata.FS(), nil
 	}
 
-	mappingsDir := filepath.Join(ml.baseDir, "mappings")
-
-	// 加载全半角映射
-	if err := ml.loadFullWidthMap(mappingsDir); err != nil {
-		return fmt.Errorf("加载全半角映射失败: %w", err)
+	dir := ml.baseDir
+	// 兼容传入映射表的父目录：<dir>/mappings 存在时优先使用
+	sub := filepath.Join(dir, mappingdata.DirName)
+	if info, err := os.Stat(sub); err == nil && info.IsDir() {
+		dir = sub
 	}
 
-	// 加载数字样式映射
-	if err := ml.loadNumberStyleMap(mappingsDir); err != nil {
-		return fmt.Errorf("加载数字样式映射失败: %w", err)
+	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+		return nil, fmt.Errorf("映射表目录不可用: %s", dir)
 	}
-
-	// 加载拼音映射
-	if err := ml.loadPinyinMap(mappingsDir); err != nil {
-		return fmt.Errorf("加载拼音映射失败: %w", err)
-	}
-
-	// 加载同音字映射
-	if err := ml.loadHomophoneMap(mappingsDir); err != nil {
-		return fmt.Errorf("加载同音字映射失败: %w", err)
-	}
-
-	// 加载形近字映射
-	if err := ml.loadSimilarShapeMap(mappingsDir); err != nil {
-		return fmt.Errorf("加载形近字映射失败: %w", err)
-	}
-
-	return nil
-}
-
-// loadFullWidthMap 加载全半角映射
-func (ml *MappingLoader) loadFullWidthMap(dir string) error {
-	file := filepath.Join(dir, "fullwidth.txt")
-	mapping, err := loadSimpleMapping(file)
-	if err != nil {
-		return err
-	}
-
-	// 转换为 rune->rune 映射
-	runesMap := make(map[rune]rune)
-	for k, v := range mapping {
-		if len(k) == 1 {
-			runesMap[rune(k[0])] = rune(v[0])
-		}
-	}
-
-	ml.config.SetFullWidthToHalf(runesMap)
-	return nil
-}
-
-// loadNumberStyleMap 加载数字样式映射
-func (ml *MappingLoader) loadNumberStyleMap(dir string) error {
-	// 合并两个数字样式文件
-	file1 := filepath.Join(dir, "numberstyle.txt")
-	mapping1, err := loadSimpleMapping(file1)
-	if err != nil {
-		return err
-	}
-
-	runesMap := make(map[rune]rune)
-	for k, v := range mapping1 {
-		if len(k) == 1 {
-			runesMap[rune(k[0])] = rune(v[0])
-		}
-	}
-
-	ml.config.SetNumberStyle(runesMap)
-	return nil
-}
-
-// loadPinyinMap 加载拼音映射
-func (ml *MappingLoader) loadPinyinMap(dir string) error {
-	file := filepath.Join(dir, "pinyin.txt")
-	mapping, err := loadSimpleMapping(file)
-	if err != nil {
-		return err
-	}
-
-	// 转换为 string->[]string 映射
-	strMap := make(map[string][]string)
-	for k, v := range mapping {
-		if len(v) > 0 {
-			strMap[k] = strings.Split(v, ",")
-		}
-	}
-
-	ml.config.SetPinyin(strMap)
-	return nil
-}
-
-// loadHomophoneMap 加载同音字映射
-func (ml *MappingLoader) loadHomophoneMap(dir string) error {
-	file := filepath.Join(dir, "homophone.txt")
-	mapping, err := loadSimpleMapping(file)
-	if err != nil {
-		return err
-	}
-
-	// 转换为 rune->[]rune 映射
-	runesMap := make(map[rune][]rune)
-	for k, v := range mapping {
-		if len(k) == 1 {
-			chars := strings.Split(v, ",")
-			runes := make([]rune, 0, len(chars))
-			for _, c := range chars {
-				if len(c) == 1 {
-					runes = append(runes, rune(c[0]))
-				}
-			}
-			runesMap[rune(k[0])] = runes
-		}
-	}
-
-	ml.config.SetHomophone(runesMap)
-	return nil
-}
-
-// loadSimilarShapeMap 加载形近字映射
-func (ml *MappingLoader) loadSimilarShapeMap(dir string) error {
-	// 合并两个形近字文件
-	runesMap := make(map[rune][]rune)
-
-	// 加载中文形近字
-	file1 := filepath.Join(dir, "similar_chinese.txt")
-	mapping1, err := loadSimpleMapping(file1)
-	if err == nil {
-		for k, v := range mapping1 {
-			if len(k) == 1 {
-				chars := strings.Split(v, ",")
-				runes := make([]rune, 0, len(chars))
-				for _, c := range chars {
-					if len(c) == 1 {
-						runes = append(runes, rune(c[0]))
-					}
-				}
-				runesMap[rune(k[0])] = runes
-			}
-		}
-	}
-
-	// 加载字母数字形近字
-	file2 := filepath.Join(dir, "similar_alphanum.txt")
-	mapping2, err := loadSimpleMapping(file2)
-	if err == nil {
-		for k, v := range mapping2 {
-			if len(k) == 1 {
-				chars := strings.Split(v, ",")
-				runes := make([]rune, 0, len(chars))
-				for _, c := range chars {
-					if len(c) == 1 {
-						runes = append(runes, rune(c[0]))
-					}
-				}
-				// 避免覆盖中文映射
-				if _, exists := runesMap[rune(k[0])]; !exists {
-					runesMap[rune(k[0])] = runes
-				}
-			}
-		}
-	}
-
-	ml.config.SetSimilarShape(runesMap)
-	return nil
-}
-
-// loadSimpleMapping 加载简单的键值对映射文件
-func loadSimpleMapping(file string) (map[string]string, error) {
-	f, err := os.Open(file)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-
-	mapping := make(map[string]string)
-	scanner := bufio.NewScanner(f)
-
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-
-		// 跳过空行和注释
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-
-		// 解析键值对
-		parts := strings.SplitN(line, "->", 2)
-		if len(parts) != 2 {
-			continue
-		}
-
-		key := strings.TrimSpace(parts[0])
-		value := strings.TrimSpace(parts[1])
-		mapping[key] = value
-	}
-
-	if err := scanner.Err(); err != nil {
-		return nil, err
-	}
-
-	return mapping, nil
+	return os.DirFS(dir), nil
 }
 
 // GetConfig 获取加载后的配置
@@ -539,14 +379,4 @@ func (ml *MappingLoader) GetConfig() *config.MappingConfig {
 func (ml *MappingLoader) LoadFromDirectory(dir string) error {
 	ml.baseDir = dir
 	return ml.LoadFromFiles()
-}
-
-// LoadFromReader 从 Reader 加载映射（用于测试）
-func LoadFromReader(reader io.Reader) (*config.MappingConfig, error) {
-	cfg := config.NewMappingConfig()
-
-	// 这里简化实现，实际可以从 reader 读取各个映射
-	// 并设置到 cfg 中
-
-	return cfg, nil
 }

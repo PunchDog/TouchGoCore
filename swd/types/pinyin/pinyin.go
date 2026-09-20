@@ -2,30 +2,18 @@ package pinyin
 
 import (
 	"strings"
-	"sync"
 
 	"touchgocore/swd/config"
 )
 
-var (
-	// 全局配置映射
-	mappingConfig *config.MappingConfig
-	once          sync.Once
-)
-
-// SetMappingConfig 设置全局映射配置
+// SetMappingConfig 设置全局映射配置（等价于 config.SetGlobalMapping，保留旧 API）
 func SetMappingConfig(cfg *config.MappingConfig) {
-	mappingConfig = cfg
+	config.SetGlobalMapping(cfg)
 }
 
-// getMappingConfig 获取全局映射配置（懒加载）
+// getMappingConfig 获取全局映射配置
 func getMappingConfig() *config.MappingConfig {
-	once.Do(func() {
-		if mappingConfig == nil {
-			mappingConfig = config.NewMappingConfig()
-		}
-	})
-	return mappingConfig
+	return config.GetGlobalMapping()
 }
 
 // GetCharsFromPinyin 根据拼音获取对应的汉字列表

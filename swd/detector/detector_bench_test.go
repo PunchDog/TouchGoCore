@@ -14,7 +14,7 @@ func BenchmarkDetector_Detect_Simple(b *testing.B) {
 		b.Fatal(err)
 	}
 
-	text := "这是一段包含色情的测试文本"
+	text := "这是一段包含嫖娼的测试文本"
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		d.Detect(text)
@@ -39,7 +39,7 @@ func BenchmarkDetector_Detect_Complex(b *testing.B) {
 
 	d.UpdateAlgoCache()
 
-	text := "这是一段包含色情、暴力、政府、赌博、毒品的复杂测试文本"
+	text := "这是一段包含嫖娼、手枪、六四、赌钱、毒品的复杂测试文本"
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		d.Detect(text)
@@ -53,7 +53,7 @@ func BenchmarkDetector_Match(b *testing.B) {
 		b.Fatal(err)
 	}
 
-	text := "这是一段包含色情的测试文本"
+	text := "这是一段包含嫖娼的测试文本"
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		d.Match(text)
@@ -67,7 +67,7 @@ func BenchmarkDetector_MatchAll(b *testing.B) {
 		b.Fatal(err)
 	}
 
-	text := "这是一段包含色情、暴力、政府、赌博、毒品的测试文本，这些敏感词会重复出现"
+	text := "这是一段包含嫖娼、手枪、六四、赌钱、毒品的测试文本，这些敏感词会重复出现"
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		d.MatchAll(text)
@@ -83,7 +83,7 @@ func BenchmarkDetector_MatchAll_WithDistance(b *testing.B) {
 		b.Fatal(err)
 	}
 
-	text := "这是一段包含色情的测试文本，中间可能有特殊字符"
+	text := "这是一段包含嫖娼的测试文本，中间可能有特殊字符"
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		d.MatchAll(text)
@@ -97,7 +97,7 @@ func BenchmarkDetector_DetectIn(b *testing.B) {
 		b.Fatal(err)
 	}
 
-	text := "这是一段包含色情的测试文本"
+	text := "这是一段包含嫖娼的测试文本"
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		d.DetectIn(text, category.Pornography)
@@ -111,7 +111,7 @@ func BenchmarkDetector_MatchAllIn(b *testing.B) {
 		b.Fatal(err)
 	}
 
-	text := "这是一段包含色情、暴力、政府、赌博、毒品的测试文本"
+	text := "这是一段包含嫖娼、手枪、六四、赌钱、毒品的测试文本"
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		d.MatchAllIn(text, category.Pornography, category.Violence)
@@ -142,7 +142,7 @@ func BenchmarkDetector_Evasion_AllFeatures(b *testing.B) {
 		"ｇａｍｂｌｉｎｇ全角",
 		"赌*博中间加星号",
 		"fa票 (发票的拼音)",
-		"堵博 (赌博的同音字)",
+		"堵博 (赌钱的同音字)",
 	}
 
 	b.ResetTimer()
@@ -160,7 +160,7 @@ func BenchmarkDetector_Concurrent(b *testing.B) {
 		b.Fatal(err)
 	}
 
-	text := "这是一段包含色情的测试文本"
+	text := "这是一段包含嫖娼的测试文本"
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
@@ -177,7 +177,7 @@ func BenchmarkDetector_LongText(b *testing.B) {
 	}
 
 	// 构建长文本
-	text := "这是一段测试文本，包含敏感词色情和暴力。"
+	text := "这是一段测试文本，包含敏感词嫖娼和手枪。"
 	for i := 0; i < 100; i++ {
 		text += text
 	}
@@ -195,7 +195,7 @@ func BenchmarkDetector_ShortText(b *testing.B) {
 		b.Fatal(err)
 	}
 
-	text := "色情"
+	text := "嫖娼"
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {

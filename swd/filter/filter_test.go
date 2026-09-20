@@ -692,6 +692,16 @@ func TestFilter_Replace_OverlappingWords(t *testing.T) {
 			},
 			want: "*******",
 		},
+		{
+			name: "Leftmost match wins even if a later match is longer",
+			text: "xxxxxxxxxxxx",
+			matches: []core.SensitiveWord{
+				{Word: "ab", StartPos: 0, EndPos: 2, Category: category.Discrimination},
+				{Word: "longer", StartPos: 1, EndPos: 10, Category: category.Discrimination},
+				{Word: "cd", StartPos: 10, EndPos: 12, Category: category.Discrimination},
+			},
+			want: "**xxxxxxxx**",
+		},
 	}
 
 	for _, tt := range tests {

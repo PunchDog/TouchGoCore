@@ -64,11 +64,11 @@ func TestOriginPolicyAllows(t *testing.T) {
 }
 
 func TestGetClientIPIgnoresUntrustedXFF(t *testing.T) {
-	prev := wsRunCtx
-	wsRunCtx = corectx.WithCfg(context.Background(), &config.Cfg{
+	prev := wsRunCtx()
+	setWsRunCtx(corectx.WithCfg(context.Background(), &config.Cfg{
 		Ws: &config.WebsocketConfig{TrustedProxies: []string{"10.0.0.1"}},
-	})
-	t.Cleanup(func() { wsRunCtx = prev })
+	}))
+	t.Cleanup(func() { setWsRunCtx(prev) })
 
 	req := httptest.NewRequest(http.MethodGet, "/ws", nil)
 	req.RemoteAddr = "8.8.8.8:1234"
@@ -84,11 +84,11 @@ func TestGetClientIPIgnoresUntrustedXFF(t *testing.T) {
 }
 
 func TestExtractAuthToken(t *testing.T) {
-	prev := wsRunCtx
-	wsRunCtx = corectx.WithCfg(context.Background(), &config.Cfg{
+	prev := wsRunCtx()
+	setWsRunCtx(corectx.WithCfg(context.Background(), &config.Cfg{
 		Ws: &config.WebsocketConfig{AuthTokenHeader: "X-Auth-Token", AuthTokenQuery: "token"},
-	})
-	t.Cleanup(func() { wsRunCtx = prev })
+	}))
+	t.Cleanup(func() { setWsRunCtx(prev) })
 
 	gin.SetMode(gin.TestMode)
 	w := httptest.NewRecorder()

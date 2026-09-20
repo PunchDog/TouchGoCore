@@ -1,7 +1,9 @@
 package websocket
 
 import (
+	"context"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -360,3 +362,71 @@ type rejectCall struct{}
 func (rejectCall) OnConnect(client *Client) bool               { return false }
 func (rejectCall) OnMessage(client *Client, msg proto.Message) {}
 func (rejectCall) OnClose(client *Client)                      {}
+
+// ----------------------------------------------------------------------------
+// 阶段11：Run 装配的队列参数与生命周期上下文必须是原子快照
+// ----------------------------------------------------------------------------
+
+// TestQueueParamsSnapshotNotMixed 回归：一轮 Run 换参期间，正在建连的旧连接
+// 不得拿到「半新半旧」的参数。修复前四个包级普通变量逐个赋值，
+// writeQueueCap 与 dropOnFull 可能来自不同两轮，背压开关也可能整体丢失。
+func TestQueueParamsSnapshotNotMixed(t *testing.T) {
+	useQueueParams(t, wsQueueParams{writeEntries: 8, readEntries: 16, dropOnFull: true})
+	if got := writeQueueCap(); got != 8 {
+		t.Fatalf("✘ 快照未生效: writeQueueCap=%d", got)
+	}
+	// 整体替换后必须一次看到全套新值
+	next := wsQueueParams{writeEntries: 64, readEntries: 128, backpressure: true}
+	wsQueue.Store(&next)
+	if got := writeQueueCap(); got != 64 {
+		t.Fatalf("✘ 换轮后仍读到旧容量: %d", got)
+	}
+	if p := queueParams(); p.dropOnFull || !p.backpressure || p.readEntries != 128 {
+		t.Fatalf("✘ 新旧两轮参数混用: %+v", p)
+	}
+}
+
+// TestWsRunCtxSwapVisibleToReaders 回归：Run 写入的生命周期上下文对
+// 上一轮仍存活的连接协程必须原子可见（旧代码是普通接口变量，并发读写即竞争）。
+func TestWsRunCtxSwapVisibleToReaders(t *testing.T) {
+	prev := wsRunCtx()
+	t.Cleanup(func() { setWsRunCtx(prev) })
+
+	ctxA, cancelA := context.WithCancel(context.Background())
+	ctxB, cancelB := context.WithCancel(context.Background())
+	t.Cleanup(func() { cancelA(); cancelB() })
+
+	setWsRunCtx(ctxA)
+	if wsRunCtx() != ctxA {
+		t.Fatal("✘ 读取到的不是本轮上下文")
+	}
+	stop := make(chan struct{})
+	var seen sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		seen.Add(1)
+		go func() {
+			defer seen.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					_ = wsRunCtx().Done()
+					writeQueueCap()
+				}
+			}
+		}()
+	}
+	for i := 0; i < 50; i++ {
+		setWsRunCtx(ctxB)
+		setWsRunCtx(ctxA)
+	}
+	close(stop)
+	seen.Wait()
+	cancelB()
+	select {
+	case <-wsRunCtx().Done():
+		t.Fatal("✘ 当前快照应为未取消的 ctxA")
+	default:
+	}
+}

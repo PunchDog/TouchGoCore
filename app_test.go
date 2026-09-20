@@ -6,12 +6,15 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"runtime"
 	"sync"
 	"testing"
 	"time"
 
 	"touchgocore/config"
+	"touchgocore/mapmanager"
 	"touchgocore/rpc"
 	"touchgocore/syncmap"
 	"touchgocore/websocket"
@@ -396,5 +399,65 @@ func TestIsLoopbackRequest(t *testing.T) {
 		if got := isLoopbackRequest(req); got != want {
 			t.Errorf("isLoopbackRequest(%q) = %v, 期望 %v", addr, got, want)
 		}
+	}
+}
+
+// TestServiceStartOrderPutsMapBeforeLua 地图服务必须先于 Lua 启动：RunMap 负责把
+// Npc 类注册进 Lua 运行时并装载地图，顺序颠倒时脚本里的 Npc()/SetMapId 全部落空，
+// 且只留下「配置在未知的地图上」这种误导性日志。
+func TestServiceStartOrderPutsMapBeforeLua(t *testing.T) {
+	app := &App{}
+	app.registerServices()
+
+	order := map[string]int{}
+	for i, s := range app.services {
+		order[s.Name()] = i
+	}
+	for _, name := range []string{"timer", "map", "lua"} {
+		if _, ok := order[name]; !ok {
+			t.Fatalf("未注册服务: %s", name)
+		}
+	}
+	if order["map"] > order["lua"] {
+		t.Fatalf("✘ 地图必须早于 Lua 启动: map=%d lua=%d", order["map"], order["lua"])
+	}
+	if order["timer"] > order["map"] {
+		t.Fatalf("✘ 定时器必须最先启动: timer=%d map=%d", order["timer"], order["map"])
+	}
+}
+
+// TestStartRunsNpcValidationWithoutBlocking 启动流程必须真的跑一遍 NPC 配置校验
+// （ValidateNpcs 导出后一度没有任何生产调用方），但校验只出告警：
+// 一处配置写错不该让整个进程起不来。
+func TestStartRunsNpcValidationWithoutBlocking(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "990001.json")
+	if err := os.WriteFile(path, []byte(`{"mapid":990001,"node":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := (&mapmanager.Map{}).Load(path); err != nil {
+		t.Fatalf("装载测试地图失败: %v", err)
+	}
+	t.Cleanup(func() { mapmanager.StopMap(context.Background()) })
+
+	// 无名称、无外观：ValidateNpcs 必然报问题
+	broken := &mapmanager.Npc{}
+	broken.SetMapId(990001)
+	if problems := mapmanager.ValidateNpcs(); len(problems) == 0 {
+		t.Fatal("✘ 前置条件：这份 NPC 配置应被校验报出问题")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	app := &App{
+		ctx:      ctx,
+		cancel:   cancel,
+		Cfg:      &config.Cfg{},
+		services: []Service{&mockService{name: "fake"}},
+	}
+	if err := app.Start(); err != nil {
+		t.Fatalf("✘ NPC 配置问题不该阻断启动: %v", err)
+	}
+	if !app.started {
+		t.Fatal("✘ 启动未完成")
 	}
 }

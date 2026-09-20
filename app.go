@@ -15,6 +15,7 @@ import (
 	"touchgocore/db"
 	"touchgocore/db/dbmap"
 	"touchgocore/localtimer"
+	"touchgocore/mapmanager"
 	"touchgocore/rpc"
 	"touchgocore/util"
 	"touchgocore/vars"
@@ -217,10 +218,12 @@ func (app *App) registerServices() {
 		&timerService{},   // 定时器最先启动，其他服务依赖
 		&metricsService{}, // Metrics 监控
 		&websocketService{},
+		// 地图早于 Lua：RunMap 负责把 Npc 类注册进 Lua 运行时并登记地图，
+		// 脚本里 Npc() / SetMapId 都要求这两件事已经就绪
+		&mapService{},
 		&luaService{},
 		&rpcService{},
 		&telegramService{},
-		&mapService{},
 		&ginService{},
 		&modelAPIService{},
 	}
@@ -247,6 +250,12 @@ func (app *App) Start() error {
 		}
 		startedCount++
 		vars.Info("服务[%s]启动成功", svc.Name())
+	}
+
+	// NPC 由 Lua 脚本创建并挂图，全部服务起来之后才有完整对象可校验；
+	// 放在业务 CallStart 之前，让配置问题先于业务初始化暴露。只告警不阻断启动。
+	if problems := mapmanager.ValidateNpcs(); len(problems) > 0 {
+		vars.Warning("NPC 配置校验共发现 %d 处问题，请按上面的逐条告警修正", len(problems))
 	}
 
 	// 执行业务层初始化回调

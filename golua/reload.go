@@ -185,11 +185,11 @@ func (sw *ScriptWatcher) reloadScript() {
 	oldScript := sw.script
 	sw.mu.Unlock()
 
-	// 深拷贝注册的对象
+	// 拷贝旧实例的登记表（对象本体共享，不复制）
 	objectsCopy := copyRegisteredObjects(oldScript.registeredObjects)
 
-	// 停止旧脚本（但不删除对象）
-	oldScript.Close()
+	// 停止旧脚本：只拆运行时，对象马上要拷给新实例，走 Close() 会把它们 Delete 掉
+	oldScript.closeKeepingObjects()
 
 	// 创建新脚本
 	newScript, err := NewLuaScriptWithContext(sw.ctx, sw.scriptPath)
@@ -262,7 +262,7 @@ func (sw *ScriptWatcher) reloadScript() {
 	}
 }
 
-// copyRegisteredObjects 深拷贝注册对象
+// copyRegisteredObjects 复制登记表的键值对。对象本体是共享指针，不复制
 func copyRegisteredObjects(src *syncmap.MapAny) *syncmap.MapAny {
 	dst := syncmap.NewAny()
 	src.Range(func(key, value interface{}) bool {
@@ -272,12 +272,29 @@ func copyRegisteredObjects(src *syncmap.MapAny) *syncmap.MapAny {
 	return dst
 }
 
-// restoreRegisteredObjects 恢复注册对象
+// restoreRegisteredObjects 把重载前存活的对象挂回新脚本，并把对象号水位推到
+// 已有键之上——否则新脚本的计数器从 1 开始，新 userdata 会顶掉旧对象的注册项。
+//
+// 回挂用 LoadOrStore：重建实例的路径会先把主块跑一遍才走到这里，主块已经用
+// 同样的对象号建了新对象。直接 Store 等于让旧对象盖掉新对象的登记项，新 userdata
+// 还在 Lua 侧活着，之后所有方法调用都落在旧对象上。
 func restoreRegisteredObjects(dst *LuaScript, src *syncmap.MapAny) {
+	var maxUID int64
 	src.Range(func(key, value interface{}) bool {
-		dst.registeredObjects.Store(key, value)
+		if _, loaded := dst.registeredObjects.LoadOrStore(key, value); loaded {
+			vars.Warning("重载时对象号 %v 已被新脚本的实例占用，旧对象不再回挂", key)
+		}
+		if uid, ok := key.(int64); ok && uid > maxUID {
+			maxUID = uid
+		}
 		return true
 	})
+	for {
+		cur := dst.nextObjectID.Load()
+		if cur >= maxUID || dst.nextObjectID.CompareAndSwap(cur, maxUID) {
+			break
+		}
+	}
 }
 
 // GetScript 获取当前脚本
@@ -315,11 +332,12 @@ func (ls *LuaScript) ReloadScript() error {
 func (ls *LuaScript) ReloadScriptWithContext(ctx context.Context) error {
 	vars.Info("manually reloading Lua script: %s", ls.initScriptPath)
 
-	// 深拷贝注册的对象
+	// 拷贝登记表快照（对象本体是共享指针，不复制）：主块重跑后按号回挂，
+	// 同时给 restoreRegisteredObjects 一个「重载前就存在」的判据
 	objectsCopy := copyRegisteredObjects(ls.registeredObjects)
 
-	// 关闭旧状态
-	ls.Close()
+	// 关闭旧状态：只拆运行时，对象要跨这次重载存活
+	ls.closeKeepingObjects()
 
 	// 重新初始化
 	ls.ctx = ctx
@@ -327,17 +345,22 @@ func (ls *LuaScript) ReloadScriptWithContext(ctx context.Context) error {
 		return err
 	}
 
-	// 重新注册函数
+	// 重新注册函数：绑定方式必须与 NewLuaScriptWithContext 一致，
+	// 否则重载之后宿主函数的第 2 个之后的实参会凭空消失
+	registeredFuncsMu.RLock()
 	for funcName, function := range registeredFuncs {
-		ls.runtime.SetEnvGoFunc(ls.env, funcName, function, 1, false)
+		ls.runtime.SetEnvGoFunc(ls.env, funcName, function, 1, true)
 	}
+	registeredFuncsMu.RUnlock()
 
 	// 重新注册类
-	for class := range registeredClasses {
+	registeredClassesMu.RLock()
+	for _, class := range registeredClasses {
 		if err := registerClassWithContext(ctx, class, ls); err != nil {
 			vars.Error("register Lua class failed: %v", err)
 		}
 	}
+	registeredClassesMu.RUnlock()
 
 	// 读取并编译脚本文件
 	source, err := os.ReadFile(ls.initScriptPath)

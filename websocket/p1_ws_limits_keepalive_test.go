@@ -40,9 +40,9 @@ func mustReturn(t *testing.T, d time.Duration, what string, fn func()) {
 // useWsCfg 把 wsRunCtx 换成带配置的生命周期，测试结束自动还原
 func useWsCfg(t *testing.T, cfg *config.Cfg) {
 	t.Helper()
-	prev := wsRunCtx
-	wsRunCtx = corectx.WithCfg(context.Background(), cfg)
-	t.Cleanup(func() { wsRunCtx = prev })
+	prev := wsRunCtx()
+	setWsRunCtx(corectx.WithCfg(context.Background(), cfg))
+	t.Cleanup(func() { setWsRunCtx(prev) })
 }
 
 // ----------------------------------------------------------------------------
@@ -97,14 +97,12 @@ func TestQueueCapacityUnitIsEntries(t *testing.T) {
 		t.Fatalf("✘ 默认队列容量不像「条数」: send=%d recv=%d", defaultSendQueueEntries, defaultRecvQueueEntries)
 	}
 
-	prev := writeQueueEntries
-	t.Cleanup(func() { writeQueueEntries = prev })
-
-	writeQueueEntries = 0
+	prevEntry := wsQueueParams{writeEntries: 0}
+	useQueueParams(t, prevEntry) // 结束前恢复默认快照，避免污染其它用例
 	if got := writeQueueCap(); got != defaultSendQueueEntries {
 		t.Fatalf("✘ 未配置时发送队列容量应为默认条数: got=%d want=%d", got, defaultSendQueueEntries)
 	}
-	writeQueueEntries = 32
+	useQueueParams(t, wsQueueParams{writeEntries: 32})
 	if got := writeQueueCap(); got != 32 {
 		t.Fatalf("✘ 配置的队列容量未生效: %d", got)
 	}
@@ -148,11 +146,11 @@ func TestNextUIDUniqueUnderConcurrency(t *testing.T) {
 // TestDialBackoffHonorsLifecycleCancel 回归（S42）：拨号退避必须可取消。
 // 修复前用裸 time.Sleep，停机途中最坏要睡满 2+4 秒才肯放手。
 func TestDialBackoffHonorsLifecycleCancel(t *testing.T) {
-	prev := wsRunCtx
+	prev := wsRunCtx()
 	ctx, cancel := context.WithCancel(context.Background())
-	wsRunCtx = corectx.WithCfg(ctx, &config.Cfg{})
+	setWsRunCtx(corectx.WithCfg(ctx, &config.Cfg{}))
 	cancel() // 生命周期已结束
-	t.Cleanup(func() { wsRunCtx = prev })
+	t.Cleanup(func() { setWsRunCtx(prev) })
 
 	c := &Client{}
 	start := time.Now()
@@ -285,12 +283,9 @@ func withWorkerPool(t *testing.T, pool *workerPoolState) *workerPoolState {
 // 复用包级 stop 通道时，第二轮 Worker 一启动就收到上一轮的关闭信号（消息再没人
 // 处理），而重复 close 直接 fatal panic。
 func TestWorkerPoolLifecycleIsPerRun(t *testing.T) {
-	prevQueueEntries := readQueueEntries
-	writeQueueEntries, readQueueEntries = 4, 4
+	useQueueParams(t, wsQueueParams{writeEntries: 4, readEntries: 4})
 	prev := withWorkerPool(t, nil)
 	t.Cleanup(func() {
-		readQueueEntries = prevQueueEntries
-		writeQueueEntries = defaultSendQueueEntries
 		workerPool.Store(prev)
 	})
 

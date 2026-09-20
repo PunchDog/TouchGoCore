@@ -78,18 +78,43 @@ func GetAuthFunc() AuthFunc {
 	return wsAuthFunc
 }
 
+// wsQueueParams 是一次 Run 装配的队列/背压参数快照。
+//
+// 四个参数原先是包级普通变量：Run 写入时上一轮连接的写协程还在读，
+// 读写同一 int/bool 就是数据竞争；更要紧的是新旧两轮参数交错，
+// 一条老连接会按下一轮的容量/背压策略开队列。收成一个不可变快照整体替换。
+type wsQueueParams struct {
+	writeEntries int
+	readEntries  int
+	backpressure bool
+	dropOnFull   bool
+}
+
+var wsQueue atomic.Pointer[wsQueueParams]
+
+// queueParams 返回当前生效的队列参数（Run 之前为默认值）。
+func queueParams() wsQueueParams {
+	if p := wsQueue.Load(); p != nil {
+		return *p
+	}
+	return wsQueueParams{
+		writeEntries: defaultSendQueueEntries,
+		readEntries:  defaultRecvQueueEntries,
+	}
+}
+
 var (
-	closeCh            chan bool          = nil
-	msgQueue           chan *msgQueueType = nil
-	wsRunCtx           context.Context    = context.Background()
-	clientpool         *sync.Pool         = nil
-	clientcall         *syncmap.Map[string, *sync.Pool]
-	writeQueueEntries  int  = defaultSendQueueEntries
-	readQueueEntries   int  = defaultRecvQueueEntries
-	enableBackpressure bool = false
-	dropMessageOnFull  bool = false
-	stopOnce           sync.Once
-	tickDone           chan struct{}
+	closeCh    chan bool          = nil
+	msgQueue   chan *msgQueueType = nil
+	clientpool *sync.Pool         = nil
+	clientcall *syncmap.Map[string, *sync.Pool]
+	stopOnce   sync.Once
+	tickDone   chan struct{}
+
+	// runCtxValue 是本轮 Run 的生命周期上下文。Run 写入时上一轮的连接协程
+	// 可能还在 DialContext/Done 上读它，普通接口变量并发读写即数据竞争。
+	// 用 atomic.Pointer 而不是 atomic.Value：后者混存不同具体类型会 panic。
+	runCtxValue atomic.Pointer[context.Context]
 
 	// pingInterval / readTimeout / writeTimeout 是心跳与超时参数，按 Run 生效。
 	// 必须是原子量：Run 写入时上一轮的读写协程可能仍在热循环里读它们，
@@ -112,6 +137,17 @@ func init() {
 func currentPingInterval() time.Duration { return time.Duration(pingInterval.Load()) }
 func currentReadTimeout() time.Duration  { return time.Duration(readTimeout.Load()) }
 func currentWriteTimeout() time.Duration { return time.Duration(writeTimeout.Load()) }
+
+// wsRunCtx 返回当前生命周期上下文；未 Run 过时退化为 Background（永不 Done）。
+func wsRunCtx() context.Context {
+	if p := runCtxValue.Load(); p != nil {
+		return *p
+	}
+	return context.Background()
+}
+
+// setWsRunCtx 装配本轮生命周期上下文，供 Run 使用。
+func setWsRunCtx(ctx context.Context) { runCtxValue.Store(&ctx) }
 
 // workerPoolState 是一次 Run → Stop 生命周期内的并发消费端。
 //
@@ -213,7 +249,7 @@ func Run(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	wsRunCtx = ctx
+	setWsRunCtx(ctx)
 	cfg := corectx.CfgFrom(ctx)
 	if cfg == nil || cfg.Ws == nil {
 		vars.Info("未启动websocket")
@@ -224,17 +260,20 @@ func Run(ctx context.Context) error {
 		clientMap = syncmap.NewMap[int64, *Client]()
 	}
 
-	enableBackpressure = true
-	dropMessageOnFull = cfg.DropOnFull()
-
-	writeQueueEntries = cfg.WriteQueueCapacity(defaultSendQueueEntries)
-	readQueueEntries = cfg.QueueCapacity(defaultRecvQueueEntries)
+	params := wsQueueParams{
+		writeEntries: cfg.WriteQueueCapacity(defaultSendQueueEntries),
+		readEntries:  cfg.QueueCapacity(defaultRecvQueueEntries),
+		// 走到这里说明本轮 Run 已决定启用 WebSocket，背压开关随之生效
+		backpressure: true,
+		dropOnFull:   cfg.DropOnFull(),
+	}
+	wsQueue.Store(&params)
 	applyTimeoutConfig(cfg.Ws)
 
 	closeCh = make(chan bool)
 	tickDone = make(chan struct{})
 	stopOnce = sync.Once{}
-	msgQueue = make(chan *msgQueueType, readQueueEntries)
+	msgQueue = make(chan *msgQueueType, params.readEntries)
 	clientpool = &sync.Pool{
 		New: func() interface{} {
 			return &Client{
@@ -356,7 +395,7 @@ func Tick() {
 		case <-closeCh:
 			shutdownWebsocket()
 			return
-		case <-wsRunCtx.Done():
+		case <-wsRunCtx().Done():
 			shutdownWebsocket()
 			return
 		case read_msg := <-msgQueue:
@@ -425,8 +464,9 @@ func initWorkerPool(size int, shard bool) {
 		size:       size,
 		shardByKey: shard,
 	}
+	entries := queueParams().readEntries
 	for i := 0; i < size; i++ {
-		pool.queues[i] = make(chan *msgQueueType, readQueueEntries)
+		pool.queues[i] = make(chan *msgQueueType, entries)
 		pool.stats[i] = &workerStats{WorkerID: i}
 		pool.stats[i].Running.Store(true)
 		pool.wg.Add(1)

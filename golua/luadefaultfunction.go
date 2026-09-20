@@ -21,7 +21,7 @@ func info(t *rt.Thread, c *rt.GoCont) (rt.Cont, error) {
 	return c.Next(), nil
 }
 
-// debug Lua 内置函数：输出 debug 日志
+// debug Lua 内置函数：输出 debug 日志（Lua 侧名字是 logdebug，不压标准库的 debug 表）
 func debug(t *rt.Thread, c *rt.GoCont) (rt.Cont, error) {
 	msg, err := c.StringArg(0)
 	if err != nil {
@@ -128,6 +128,9 @@ func getpathluafile(t *rt.Thread, c *rt.GoCont) (rt.Cont, error) {
 	}
 
 	next := c.Next()
+	// 成功也把第二个返回值补上：失败分支推的是 (false, msg)，两边形状一致
+	// Lua 侧才能统一写 `local files, msg = getpathluafile(p)`
 	t.Push1(next, rt.TableValue(tbl))
+	t.Push1(next, rt.StringValue("ok"))
 	return next, nil
 }

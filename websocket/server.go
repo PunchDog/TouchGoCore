@@ -69,7 +69,7 @@ type originPolicy struct {
 
 // wsCfg 返回当前生命周期内的 WebSocket 配置快照（未配置时为 nil）
 func wsCfg() *config.WebsocketConfig {
-	cfg := corectx.CfgFrom(wsRunCtx)
+	cfg := corectx.CfgFrom(wsRunCtx())
 	if cfg == nil {
 		return nil
 	}
@@ -151,7 +151,7 @@ func currentMaxMessageSize() int64 {
 	if ws := wsCfg(); ws != nil && ws.MaxMessageSize > 0 {
 		return int64(ws.MaxMessageSize)
 	}
-	if cfg := corectx.CfgFrom(wsRunCtx); cfg != nil && cfg.Server != nil && cfg.Server.MaxMsgSize > 0 {
+	if cfg := corectx.CfgFrom(wsRunCtx()); cfg != nil && cfg.Server != nil && cfg.Server.MaxMsgSize > 0 {
 		return int64(cfg.Server.MaxMsgSize)
 	}
 	return defaultMaxMessageSize

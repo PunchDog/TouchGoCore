@@ -3,6 +3,7 @@ package lua
 import (
 	"context"
 	"fmt"
+	"reflect"
 
 	"touchgocore/util"
 	"touchgocore/vars"
@@ -29,6 +30,10 @@ func CallWithContext(ctx context.Context, funcName string, args ...interface{}) 
 }
 
 // RegisterLuaFunc 注册全局函数到所有 Lua 实例
+//
+// 注册表不知道宿主函数的真实元数，统一按「1 个具名槽 + etc」绑定：
+// 第一个实参用 c.Arg(0)/c.StringArg(0) 取，其余实参只能从 c.Etc() 里取——
+// 具名槽只有 1 格，c.Arg(1) 会直接越界 panic。
 func RegisterLuaFunc(funcName string, function func(t *rt.Thread, c *rt.GoCont) (rt.Cont, error)) error {
 	registeredFuncsMu.Lock()
 	defer registeredFuncsMu.Unlock()
@@ -45,25 +50,37 @@ func RegisterLuaFunc(funcName string, function func(t *rt.Thread, c *rt.GoCont) 
 
 // RegisterLuaClass 注册一个类到所有 Lua 实例
 func RegisterLuaClass(class ILuaClassInterface) error {
-	if class == nil {
+	// class == nil 只挡得住「未装箱的 nil」：(*Npc)(nil) 这类带类型的空指针
+	// 是非空接口，会一路走到 GetClassName 的 reflect.Indirect 上 panic
+	rv := reflect.ValueOf(class)
+	if !rv.IsValid() || (rv.Kind() == reflect.Pointer && rv.IsNil()) {
 		return fmt.Errorf("cannot register nil class")
 	}
-
-	className, err := util.GetClassName(class)
-	if err != nil {
-		return fmt.Errorf("get class name failed: %v", err)
+	// 值类型的方法集不含指针接收者方法，注册进去就是一张空方法表；
+	// 留到建脚本实例时才报，就只剩一行「register Lua class failed」了
+	if rv.Kind() != reflect.Pointer {
+		return fmt.Errorf("类必须以指针形式注册（如 &Npc{}），实际: %T", class)
 	}
+
+	// GetClassName 的第二个返回值是方法名列表，不是 error
+	className, _ := util.GetClassName(class)
 
 	registeredClassesMu.Lock()
 	defer registeredClassesMu.Unlock()
 
 	if registeredClasses == nil {
-		registeredClasses = make(map[ILuaClassInterface]bool)
+		registeredClasses = make(map[string]ILuaClassInterface)
 	}
-	if _, ok := registeredClasses[class]; ok {
-		return fmt.Errorf("class '%s' already registered", className)
+	if existing, ok := registeredClasses[className]; ok {
+		// 类名只取短名，跨包重名会撞在这里；同一类型重复注册则按幂等处理，
+		// 否则每重启一次就多一条记录，注册表只增不减
+		if reflect.TypeOf(existing) == reflect.TypeOf(class) {
+			return nil
+		}
+		return fmt.Errorf("class '%s' already registered by %s, cannot register %s",
+			className, reflect.TypeOf(existing), reflect.TypeOf(class))
 	}
-	registeredClasses[class] = true
+	registeredClasses[className] = class
 	return nil
 }
 

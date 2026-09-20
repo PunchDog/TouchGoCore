@@ -70,16 +70,21 @@ type LuaScript struct {
 	returnValues      []interface{}
 	initScriptPath    string
 	registeredObjects *syncmap.MapAny
-	timer             *luaTimer
-	UID               int64
-	env               *rt.Table
-	ctx               context.Context
-	cancel            context.CancelFunc
+	// nextObjectID 给每个 userdata 分配独立对象号： registeredObjects 的键必须是
+	// 「对象」而不是「脚本」，否则同脚本里创建的第二个对象会覆盖第一个。
+	nextObjectID atomic.Int64
+	timer        *luaTimer
+	UID          int64
+	env          *rt.Table
+	ctx          context.Context
+	cancel       context.CancelFunc
 }
 
 // Init 初始化Lua运行时
 func (ls *LuaScript) Init() error {
-	ls.Close()
+	// 只拆运行时，不回收对象：热重载走的就是 Init，对象登记表与 nextObjectID
+	// 必须跨这次重建存活，否则重载后新 userdata 会顶掉仍在使用的旧对象
+	ls.closeKeepingObjects()
 
 	// 创建上下文
 	parent := luaParentCtx
@@ -104,8 +109,24 @@ func (ls *LuaScript) Init() error {
 	return nil
 }
 
-// Close 关闭Lua运行时
+// Close 关闭脚本实例，并回收本实例创建的全部 Go 对象。
+//
+// 对象生命周期与脚本实例一致，而不是跟 userdata 走 GC：golua 的 rt.NewUserData
+// 不注册终结器（只有 Runtime.NewUserDataValue 才会 addFinalizer），__gc 元方法
+// 永远不触发；即便改成会触发的写法也不对——配置脚本里 `local npc = Npc()` 在主块
+// 返回后就没人了引用，按 GC 回收等于把刚配好的对象删掉。
 func (ls *LuaScript) Close() {
+	ls.closeRuntime()
+	ls.releaseRegisteredObjects()
+}
+
+// closeKeepingObjects 供热重载使用：只拆运行时，Lua 侧创建的对象要跨实例存活。
+func (ls *LuaScript) closeKeepingObjects() {
+	ls.closeRuntime()
+}
+
+// closeRuntime 释放上下文、update 定时器与 Lua 运行时。
+func (ls *LuaScript) closeRuntime() {
 	if ls.cancel != nil {
 		ls.cancel()
 	}
@@ -124,6 +145,21 @@ func (ls *LuaScript) Close() {
 		ls.thread = nil
 		ls.env = nil
 	}
+}
+
+// releaseRegisteredObjects 逐个调用对象的 Delete() 后清空登记表。
+// Range 是「锁内快照、锁外回调」，回调里再触碰登记表不会自锁。
+func (ls *LuaScript) releaseRegisteredObjects() {
+	if ls == nil || ls.registeredObjects == nil {
+		return
+	}
+	ls.registeredObjects.Range(func(_, value interface{}) bool {
+		if data, ok := value.(ILuaClassInterface); ok {
+			data.Delete()
+		}
+		return true
+	})
+	ls.registeredObjects.Clear()
 }
 
 // startTimer 创建并注册脚本 update 定时器。
@@ -210,6 +246,22 @@ func (ls *LuaScript) CallWithContext(ctx context.Context, funcname string, list 
 	}
 }
 
+// RangeRegisteredObjects 遍历本脚本里由 Lua 构造出来的 Go 对象。
+// userdata 只把对象登记在脚本内部，Go 侧逻辑（例如地图取全部 NPC）需要这份
+// 列表时只能走这里，不要去碰 registeredObjects。
+func (ls *LuaScript) RangeRegisteredObjects(fn func(objectUID int64, obj any) bool) {
+	if ls == nil || ls.registeredObjects == nil || fn == nil {
+		return
+	}
+	ls.registeredObjects.Range(func(key, value interface{}) bool {
+		objectUID, ok := key.(int64)
+		if !ok {
+			return true
+		}
+		return fn(objectUID, value)
+	})
+}
+
 // NewLuaScript 创建一个 Lua 脚本实例
 func NewLuaScript(initluapath string) (*LuaScript, error) {
 	return NewLuaScriptWithContext(context.Background(), initluapath)
@@ -229,15 +281,17 @@ func NewLuaScriptWithContext(ctx context.Context, initluapath string) (*LuaScrip
 	}
 
 	// 初始化注册的函数
+	// nArgs=1、hasEtc=true：注册表拿不到宿主函数的真实元数，按 1 个具名槽绑定后
+	// 其余实参才会留在 c.Etc() 里；hasEtc=false 会让 golua 直接丢掉第 2 个之后的参数
 	registeredFuncsMu.RLock()
 	for funcName, function := range registeredFuncs {
-		p.runtime.SetEnvGoFunc(p.env, funcName, function, 1, false)
+		p.runtime.SetEnvGoFunc(p.env, funcName, function, 1, true)
 	}
 	registeredFuncsMu.RUnlock()
 
 	// 注册类
 	registeredClassesMu.RLock()
-	for class := range registeredClasses {
+	for _, class := range registeredClasses {
 		if err := registerClassWithContext(ctx, class, p); err != nil {
 			vars.Error("register Lua class failed: %v", err)
 		}
@@ -268,6 +322,11 @@ func NewLuaScriptWithContext(ctx context.Context, initluapath string) (*LuaScrip
 	// 加入管理列表
 	instanceID := nextInstanceID.Add(1)
 	luaInstancesMu.Lock()
+	// StopLua 会把表置 nil，而 NewLuaScriptWithContext 是公开入口：
+	// 不补建就是一次向 nil map 赋值的 panic
+	if luaInstances == nil {
+		luaInstances = make(map[int64]*LuaScript)
+	}
 	luaInstances[instanceID] = p
 	luaInstancesMu.Unlock()
 	p.UID = instanceID

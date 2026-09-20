@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"touchgocore/config"
 	"touchgocore/metrics"
@@ -21,6 +22,9 @@ var (
 	metricsServer   *http.Server
 	metricsServerMu sync.Mutex
 )
+
+// metricsReadHeaderTimeout 防止慢客户端只发半截请求头就把监控端口占住。
+const metricsReadHeaderTimeout = 5 * time.Second
 
 var (
 	WSMetrics    = metrics.WS
@@ -44,22 +48,48 @@ func StartMetricsServer(port int, token string) {
 
 	InitMetrics()
 
+	addr := "[::]:" + strconv.Itoa(port)
+	// 先绑新端口再动旧服务：直接换掉 metricsServer 的话，端口被占用时
+	// 旧监控已被 Shutdown、新的又起不来，进程从此没有 /metrics。
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		vars.Error("Prometheus metrics 监听 %s 失败: %v", addr, err)
+		return
+	}
+
 	server := &http.Server{
-		Addr:    "[::]:" + strconv.Itoa(port),
-		Handler: newMetricsMux(token),
+		Addr:              addr,
+		Handler:           newMetricsMux(token),
+		ReadHeaderTimeout: metricsReadHeaderTimeout,
 	}
 
 	metricsServerMu.Lock()
+	prev := metricsServer
 	metricsServer = server
 	metricsServerMu.Unlock()
+
+	if prev != nil {
+		// 二次启动（改端口/换 token）必须收掉上一轮：否则旧端口和旧协程
+		// 一直挂在进程里，监控端口越开越多。
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := prev.Shutdown(ctx); err != nil {
+			vars.Error("旧 Prometheus metrics 服务器关闭失败: %v", err)
+		}
+		cancel()
+	}
 
 	go func() {
 		if token == "" {
 			vars.Warning("Prometheus 未配置 token，/metrics 仅允许本机访问，/debug/pprof 已关闭")
 		}
 		vars.Info("Prometheus metrics 服务器启动, 端口: %d", port)
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := server.Serve(ln); err != nil && err != http.ErrServerClosed {
 			vars.Error("Prometheus metrics 服务器错误: %v", err)
+			metricsServerMu.Lock()
+			if metricsServer == server {
+				metricsServer = nil
+			}
+			metricsServerMu.Unlock()
 		}
 	}()
 }
@@ -106,7 +136,7 @@ func metricsAuth(token string, next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		got := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer"))
+		got := strings.TrimSpace(bearerPrefixOf(r.Header.Get("Authorization")))
 		if got == "" {
 			got = r.URL.Query().Get("token")
 		}
@@ -116,6 +146,20 @@ func metricsAuth(token string, next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// bearerPrefixOf 取出 Authorization 头里的凭据。RFC 7235 的 scheme 大小写不敏感，
+// 只 TrimPrefix("Bearer") 会把 "bearer xxx" 的合法客户端整个当成 token 比对而拒掉。
+// 不带 scheme 前缀时按裸凭据处理，沿用原有的宽松行为。
+func bearerPrefixOf(raw string) string {
+	raw = strings.TrimSpace(raw)
+	const scheme = "Bearer"
+	if len(raw) > len(scheme) && strings.EqualFold(raw[:len(scheme)], scheme) {
+		if c := raw[len(scheme)]; c == ' ' || c == '\t' {
+			return strings.TrimSpace(raw[len(scheme):])
+		}
+	}
+	return raw
 }
 
 // profileAuth 保护 pprof：性能剖面会泄露堆内容与内部信息，未配置 token 时直接 404。
@@ -156,8 +200,17 @@ func ShutdownMetrics(ctx context.Context) {
 	if srv == nil {
 		return
 	}
+	// 摘除只认「还是我这一轮」：期间可能已有新的 StartMetricsServer 接管
+	metricsServerMu.Lock()
+	if metricsServer == srv {
+		metricsServer = nil
+	}
+	metricsServerMu.Unlock()
 	if err := srv.Shutdown(ctx); err != nil {
 		vars.Error("Prometheus metrics 关闭失败: %v", err)
+		// Shutdown 超时说明还有连接不放手；不 Close 的话端口一直被占，
+		// 调用方重试或换端口都起不来。
+		_ = srv.Close()
 		return
 	}
 	vars.Info("Prometheus metrics 服务器关闭")

@@ -1,8 +1,12 @@
 package metrics
 
 import (
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
+
+	"touchgocore/vars"
 
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -48,10 +52,10 @@ var (
 		Buckets: prometheus.DefBuckets,
 	}, []string{"method", "path"})
 
-	timerActiveGauge = prometheus.NewGauge(prometheus.GaugeOpts{
+	timerActiveGauge = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "touchgocore_timer_active_count",
 		Help: "当前活跃定时器数量",
-	})
+	}, []string{"name"})
 	timerExecCounter = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "touchgocore_timer_executions_total",
 		Help: "定时器执行总数",
@@ -82,9 +86,12 @@ var (
 	}, []string{"level"})
 )
 
+// Init 把本包的采集器装配进独立 registry。幂等，且永不 panic：
+// 作为库被引入时，注册失败（重名、registry 已被替换）只能让对应指标缺失，
+// 不能把 MustRegister 的 panic 抛进宿主进程的启动路径。
 func Init() {
 	once.Do(func() {
-		for _, c := range []prometheus.Collector{
+		collectors := []prometheus.Collector{
 			wsConnectionsGauge,
 			wsMessagesCounter,
 			wsErrorsCounter,
@@ -100,8 +107,15 @@ func Init() {
 			luaCallLatency,
 			dbConnectionsGauge,
 			logMessagesCounter,
-		} {
-			registry.MustRegister(c)
+			// 不带 Go/Process 采集器时，/metrics 只有一堆业务计数器，
+			// 内存、goroutine、CPU 这些最常见的告警维度全部缺失。
+			prometheus.NewGoCollector(),
+			prometheus.NewProcessCollector(prometheus.ProcessCollectorOpts{}),
+		}
+		for _, c := range collectors {
+			if err := registry.Register(c); err != nil {
+				vars.Error("Prometheus 指标注册失败: %v", err)
+			}
 		}
 	})
 }
@@ -115,23 +129,32 @@ var WS = wsMetrics{}
 
 type wsMetrics struct{}
 
-func (wsMetrics) SetConnections(n float64)     { wsConnectionsGauge.Set(n) }
-func (wsMetrics) IncConnection()               { wsConnectionsGauge.Inc() }
-func (wsMetrics) DecConnection()               { wsConnectionsGauge.Dec() }
-func (wsMetrics) IncMessages(direction string) { wsMessagesCounter.WithLabelValues(direction).Inc() }
-func (wsMetrics) IncErrors(errType string)     { wsErrorsCounter.WithLabelValues(errType).Inc() }
+func (wsMetrics) SetConnections(n float64) { Init(); wsConnectionsGauge.Set(n) }
+func (wsMetrics) IncConnection()           { Init(); wsConnectionsGauge.Inc() }
+func (wsMetrics) DecConnection()           { Init(); wsConnectionsGauge.Dec() }
+func (wsMetrics) IncMessages(direction string) {
+	Init()
+	wsMessagesCounter.WithLabelValues(direction).Inc()
+}
+func (wsMetrics) IncErrors(errType string) {
+	Init()
+	wsErrorsCounter.WithLabelValues(errType).Inc()
+}
 
 var RPC = rpcMetrics{}
 
 type rpcMetrics struct{}
 
 func (rpcMetrics) IncRequests(service, method string) {
+	Init()
 	rpcRequestsCounter.WithLabelValues(service, method).Inc()
 }
 func (rpcMetrics) ObserveLatency(service, method string, duration time.Duration) {
+	Init()
 	rpcLatencyHistogram.WithLabelValues(service, method).Observe(duration.Seconds())
 }
 func (rpcMetrics) IncErrors(service, method, errType string) {
+	Init()
 	rpcErrorsCounter.WithLabelValues(service, method, errType).Inc()
 }
 
@@ -139,19 +162,64 @@ var HTTP = httpMetrics{}
 
 type httpMetrics struct{}
 
+// maxHTTPPathLabels 限制 path 标签的序列数：每个唯一路径一条时间序列，
+// 未做模板收敛时 /user/1、/user/2… 会把 Prometheus 的基数打爆。
+const maxHTTPPathLabels = 256
+
+const httpOtherLabel = "other"
+
+var (
+	httpPathSeen  sync.Map // 已放行的 path 标签
+	httpPathCount atomic.Int64
+)
+
+// httpPathLabel 收敛 path 标签基数：路由模板（含 ':'、'*' 或 '{'）原样保留，
+// 裸路径超过上限后统一归并为 other。
+func httpPathLabel(raw string) string {
+	p := strings.TrimSpace(raw)
+	if p == "" {
+		return httpOtherLabel
+	}
+	if i := strings.IndexAny(p, "?#"); i >= 0 {
+		p = p[:i]
+	}
+	if t := strings.Trim(p, "/"); t == "" {
+		return "/"
+	}
+	if strings.ContainsAny(p, ":*{") {
+		return p // 已是路由模板，序列数由路由条数决定
+	}
+	if _, ok := httpPathSeen.Load(p); ok {
+		return p
+	}
+	if httpPathCount.Add(1) > maxHTTPPathLabels {
+		return httpOtherLabel
+	}
+	httpPathSeen.Store(p, struct{}{})
+	return p
+}
+
 func (httpMetrics) IncRequests(method, path, status string) {
-	httpRequestsCounter.WithLabelValues(method, path, status).Inc()
+	Init()
+	httpRequestsCounter.WithLabelValues(method, httpPathLabel(path), status).Inc()
 }
 func (httpMetrics) ObserveLatency(method, path string, duration time.Duration) {
-	httpLatencyHistogram.WithLabelValues(method, path).Observe(duration.Seconds())
+	Init()
+	httpLatencyHistogram.WithLabelValues(method, httpPathLabel(path)).Observe(duration.Seconds())
 }
 
 var Timer = timerMetrics{}
 
 type timerMetrics struct{}
 
-func (timerMetrics) SetActive(n float64) { timerActiveGauge.Set(n) }
+// SetActive 记录某一类定时器的活跃数；name 由调用方给出（如档位或管理器名），
+// 否则多管理器进程里所有活跃数会互相覆盖成最后一个写入者的值。
+func (timerMetrics) SetActive(name string, n float64) {
+	Init()
+	timerActiveGauge.WithLabelValues(name).Set(n)
+}
 func (timerMetrics) IncExecutions(timerType string) {
+	Init()
 	timerExecCounter.WithLabelValues(timerType).Inc()
 }
 
@@ -159,9 +227,13 @@ var Lua = luaMetrics{}
 
 type luaMetrics struct{}
 
-func (luaMetrics) SetInstances(n float64)   { luaInstancesGauge.Set(n) }
-func (luaMetrics) IncCalls(funcName string) { luaCallCounter.WithLabelValues(funcName).Inc() }
+func (luaMetrics) SetInstances(n float64) { Init(); luaInstancesGauge.Set(n) }
+func (luaMetrics) IncCalls(funcName string) {
+	Init()
+	luaCallCounter.WithLabelValues(funcName).Inc()
+}
 func (luaMetrics) ObserveCallLatency(funcName string, duration time.Duration) {
+	Init()
 	luaCallLatency.WithLabelValues(funcName).Observe(duration.Seconds())
 }
 
@@ -170,6 +242,7 @@ var DB = dbMetrics{}
 type dbMetrics struct{}
 
 func (dbMetrics) SetConnections(dbType, state string, n float64) {
+	Init()
 	dbConnectionsGauge.WithLabelValues(dbType, state).Set(n)
 }
 
@@ -177,4 +250,7 @@ var Log = logMetrics{}
 
 type logMetrics struct{}
 
-func (logMetrics) IncMessages(level string) { logMessagesCounter.WithLabelValues(level).Inc() }
+func (logMetrics) IncMessages(level string) {
+	Init()
+	logMessagesCounter.WithLabelValues(level).Inc()
+}

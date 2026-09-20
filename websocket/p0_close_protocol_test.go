@@ -31,17 +31,15 @@ func wsTestEnv(t *testing.T) {
 
 	oldMap, oldPool, oldCall := clientMap, clientpool, clientcall
 	oldMsgQueue, oldWorkerPool := msgQueue, workerPool.Swap(nil)
-	oldServers, oldBackpressure, oldDrop := takeServers(), enableBackpressure, dropMessageOnFull
-	oldWriteQueue := writeQueueEntries
+	oldServers := takeServers()
 
 	clientMap = syncmap.NewMap[int64, *Client]()
 	clientpool = &sync.Pool{New: func() any { return &Client{} }}
 	clientcall = syncmap.NewMap[string, *sync.Pool]()
 	clientcall.Store("wsTestCall", &sync.Pool{New: func() any { return &defaultCall{} }})
 	msgQueue = make(chan *msgQueueType, 8)
-	enableBackpressure = false
-	dropMessageOnFull = true
-	writeQueueEntries = 16 // 队列容量按「条」计，测试里压小避免无谓分配
+	// 队列容量按「条」计，测试里压小避免无谓分配
+	useQueueParams(t, wsQueueParams{writeEntries: 16, readEntries: 8, dropOnFull: true})
 
 	t.Cleanup(func() {
 		clientMap, clientpool, clientcall = oldMap, oldPool, oldCall
@@ -50,9 +48,14 @@ func wsTestEnv(t *testing.T) {
 		for _, srv := range oldServers {
 			registerServer(srv)
 		}
-		enableBackpressure, dropMessageOnFull = oldBackpressure, oldDrop
-		writeQueueEntries = oldWriteQueue
 	})
+}
+
+// useQueueParams 临时替换队列/背压参数快照，测试结束自动还原。
+func useQueueParams(t *testing.T, p wsQueueParams) {
+	t.Helper()
+	prev := wsQueue.Swap(&p)
+	t.Cleanup(func() { wsQueue.Store(prev) })
 }
 
 // newBareClient 构造一个不依赖网络的客户端实例（常驻协程未启动）。
@@ -93,7 +96,7 @@ func pooledClient(c *Client) bool {
 // 期间执行 Close。修复前在约 100 轮内即可稳定复现 panic（见本次提交的说明）。
 func TestClient_CloseDuringSendNoPanic(t *testing.T) {
 	wsTestEnv(t)
-	dropMessageOnFull = false
+	useQueueParams(t, wsQueueParams{writeEntries: 16, readEntries: 8})
 
 	const rounds = 300
 	const senders = 4

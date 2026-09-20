@@ -102,8 +102,8 @@ func (c *Client) initChannels() {
 
 // writeQueueCap 发送队列容量（单位：条）
 func writeQueueCap() int {
-	if writeQueueEntries > 0 {
-		return writeQueueEntries
+	if n := queueParams().writeEntries; n > 0 {
+		return n
 	}
 	return defaultSendQueueEntries
 }
@@ -113,9 +113,11 @@ func (c *Client) connectionDial(url string) error {
 	const maxRetries = 3
 	retryInterval := time.Second * 2
 	limit := currentMaxMessageSize()
+	// 一次拨号内固定用同一份生命周期上下文：中途换快照会让退避判断盯上下一轮
+	runCtx := wsRunCtx()
 
 	for i := 0; i < maxRetries; i++ {
-		wsConn, _, err := websocket.DefaultDialer.DialContext(wsRunCtx, url, nil)
+		wsConn, _, err := websocket.DefaultDialer.DialContext(runCtx, url, nil)
 		if err == nil {
 			c.wsConnect = wsConn
 			wsConn.SetReadLimit(limit)
@@ -133,8 +135,8 @@ func (c *Client) connectionDial(url string) error {
 		// 退避必须可取消：修复前是裸 time.Sleep，停机途中会把退出流程拖满
 		// 2s+4s+8s；而生命周期已结束时继续重连更是无意义的复活。
 		select {
-		case <-wsRunCtx.Done():
-			return fmt.Errorf("连接中止(生命周期已结束): %w", wsRunCtx.Err())
+		case <-runCtx.Done():
+			return fmt.Errorf("连接中止(生命周期已结束): %w", runCtx.Err())
 		case <-time.After(retryInterval):
 		}
 		retryInterval *= 2 // 指数退避
@@ -240,7 +242,7 @@ func (c *Client) readLoop() {
 		if _, data, err := conn.ReadMessage(); err == nil {
 			if c.Connected() {
 				item := &msgQueueType{uid: c.UID, data: data}
-				if dropMessageOnFull {
+				if queueParams().dropOnFull {
 					select {
 					case msgQueue <- item:
 						c.stats.messagesReceived.Add(1)
@@ -380,12 +382,12 @@ func (c *Client) SendMsg(msg ...any) {
 	}
 
 	// 背压控制：检查通道是否接近满
-	if enableBackpressure {
+	if params := queueParams(); params.backpressure {
 		chanLen := len(c.msgChan)
 		chanCap := cap(c.msgChan)
 		if float64(chanLen) >= float64(chanCap)*BACKPRESSURE_THRESHOLD {
 			vars.Warning("WebSocket 发送通道背压过高: len=%d, cap=%d, client=%s", chanLen, chanCap, c.remoteAddr)
-			if dropMessageOnFull {
+			if params.dropOnFull {
 				metrics.WS.IncErrors("write")
 				vars.Error("WebSocket 发送通道已满，丢弃消息: client=%s", c.remoteAddr)
 				return

@@ -49,42 +49,50 @@ local createNpc = function(config)
     end
 
     -- 创建NPC实例
-    local npc = Npc:new(config.id)
+    -- Go 构造器不带参数：对象号由运行时分配，业务 ID 必须用 SetId 显式设置。
+    -- 写成 Npc:new(id) 会去索引一个 function 值，脚本当场报错。
+    local npc = Npc()
     if not npc then
         error("[NPC] 创建NPC实例失败: id=" .. tostring(config.id))
         return
     end
 
     -- 设置基础属性
+    npc:SetId(config.id)
     npc:SetName(config.name or ("NPC_" .. config.id))
     npc:SetShape(config.shape or "default")
     npc:SetDirection(config.direction or 1)
-    npc:SetMapId(config.map_id or 0)
+    if config.map_id and config.map_id > 0 then
+        npc:SetMapId(config.map_id)
+    end
 
     -- 设置移动路径点
     -- 格式: {{x1,y1}, {x2,y2}, ...} 或 {{x1,y1,z1}, {x2,y2,z2}, ...}
+    -- z 缺省为 0：Go 侧 AddMapPoint(x, y, z) 收 3 个坐标，少传一个会直接报参数不足
     if config.points and #config.points > 0 then
         for _, point in ipairs(config.points) do
             local x = tonumber(point[1]) or 0
             local y = tonumber(point[2]) or 0
             local z = tonumber(point[3]) or 0
-            -- 修复: 只传递2个参数 (原代码错误地传了3个)
             npc:AddMapPoint(x, y, z)
         end
     end
 
     -- 设置商店数据
+    -- 配置里的商品格式: {物品ID, 货币类型, 价格, 限购数量, 刷新类型}
+    -- Go 签名: AddShop(shopId, itemId, costType, maxBuyCnt, cost, refreshType)
+    -- 两者第 4、5 位相反，曾照抄配置顺序传过去，导致价格变成限购数、限购数变成价格
     if config.shops then
         for shopId, items in pairs(config.shops) do
             if type(items) == "table" then
                 for _, item in ipairs(items) do
                     npc:AddShop(
                         shopId,
-                        item[1] or 0,  -- item_id
-                        item[2] or 0,  -- cost_type
+                        item[1] or 0,  -- itemId
+                        item[2] or 0,  -- costType
+                        item[4] or 0,  -- maxBuyCnt
                         item[3] or 0,  -- cost
-                        item[4] or 0,  -- max_buy_cnt
-                        item[5] or "0" -- refresh_type
+                        item[5] or "0" -- refreshType
                     )
                 end
             end
@@ -264,8 +272,8 @@ else
     print("[NPC] NPC创建失败")
 end
 
--- 清理Lua端临时数据
-Npc:destory()
+-- NPC 对象由 Go 侧登记在脚本的对象表里，随脚本实例一起回收。
+-- 这里没有 destory 可调：Npc 表上既无 new 也无 destory，写上去只会让主块报错。
 
 -- ============================================================================
 -- 使用示例: 创建多个NPC
@@ -322,5 +330,4 @@ local function createMultipleNpcs()
 end
 
 createMultipleNpcs()
-Npc.destory()
 --]]

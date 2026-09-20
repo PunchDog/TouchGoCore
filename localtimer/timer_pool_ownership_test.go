@@ -386,11 +386,12 @@ func TestRelease_ExhaustionAutoPools(t *testing.T) {
 	wheelAddTimer(t, m, TimerTypeMillisecond, tm, true)
 	assertWheelConsistent(t, m, TimerTypeMillisecond, 1)
 
+	startTicks := tm.n.Load() // 池实例的业务计数可能非 0
 	task := dispatchAndUnlink(m, TimerTypeMillisecond, tm, p)
 	m.executeTimer(task) // 最后一次执行：HasNext()==false 且仍活跃
 
-	if n := tm.n.Load(); n != 1 {
-		t.Fatalf("✘ 最后一次 Tick 未执行: %d", n)
+	if n := tm.n.Load(); n != startTicks+1 {
+		t.Fatalf("✘ 最后一次 Tick 未执行: 起点 %d 之后为 %d", startTicks, n)
 	}
 	if puts := GetTimerPoolStats().Puts; puts != putsBefore+1 {
 		t.Fatalf("✘ 耗尽后未自动归还对象池: Puts %d -> %d", putsBefore, puts)

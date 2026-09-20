@@ -200,6 +200,8 @@ func TestCleanupWheelHonorsCloseBudget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// 实例可能来自对象池，n 是业务字段（池不复位），起点以认领时刻为准
+	startTicks := tm.n.Load()
 	chainTimer(t, wheel, tm, true)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -211,8 +213,8 @@ func TestCleanupWheelHonorsCloseBudget(t *testing.T) {
 		m.cleanupWheel(wheel, TimerTypeMillisecond)
 	})
 
-	if n := tm.n.Load(); n != 0 {
-		t.Fatalf("✘ 预算耗尽后仍执行了业务 Tick: 次数=%d", n)
+	if n := tm.n.Load(); n != startTicks {
+		t.Fatalf("✘ 预算耗尽后仍执行了业务 Tick: 新增=%d 起点=%d", n-startTicks, startTicks)
 	}
 	if tm.GetParent().IsActive() {
 		t.Fatal("✘ 强制废弃后定时器仍活跃")
@@ -293,12 +295,13 @@ func TestTimeTickSkipsClosedManagerTask(t *testing.T) {
 	}
 	parent := tm.GetParent()
 	parent.isActive.Store(true)
+	startTicks := tm.n.Load() // 池实例的业务计数可能非 0
 
 	currentTimerChannel() <- timerTask{timer: tm, gen: parent.gen.Load(), mgr: stale}
 
 	time.Sleep(300 * time.Millisecond)
-	if n := tm.n.Load(); n != 0 {
-		t.Fatalf("✘ 已关闭管理器的陈旧调度项被执行: Tick=%d", n)
+	if n := tm.n.Load(); n != startTicks {
+		t.Fatalf("✘ 已关闭管理器的陈旧调度项被执行: 新增=%d 起点=%d", n-startTicks, startTicks)
 	}
 }
 
@@ -345,7 +348,8 @@ func TestTimeTickPicksUpRecreatedChannel(t *testing.T) {
 
 	m := NewTimerManager()
 
-	tm, err := NewTimer[*plainTimer](5, InfiniteCount, nil)
+	// 复位业务计数：实例可能来自对象池，下面的 waitUntil 以 0 为基线
+	tm, err := NewTimer[*plainTimer](5, InfiniteCount, func(p *plainTimer) { p.n.Store(0) })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -578,9 +582,11 @@ func TestFacadeAddTimerRollsBackOnFailure(t *testing.T) {
 		t.Fatalf("✘ 变参注册未拒绝 nil 项: %v", err)
 	}
 
+	// 实例可能来自对象池，n 是业务字段（池不复位），只断言「注册失败后没有新增」
+	na0, nb0 := a.n.Load(), b.n.Load()
 	time.Sleep(300 * time.Millisecond)
-	if na, nb := a.n.Load(), b.n.Load(); na != 0 || nb != 0 {
-		t.Fatalf("✘ 注册失败后前半批定时器仍在跑: a=%d b=%d", na, nb)
+	if na, nb := a.n.Load(), b.n.Load(); na != na0 || nb != nb0 {
+		t.Fatalf("✘ 注册失败后前半批定时器仍在跑: a+%d b+%d", a.n.Load()-na0, b.n.Load()-nb0)
 	}
 	if a.GetParent().IsActive() || b.GetParent().IsActive() {
 		t.Fatal("✘ 回滚后定时器仍标记活跃")

@@ -237,6 +237,9 @@ func TestTimer_NoTickAfterRelease(t *testing.T) {
 		t.Fatal(err)
 	}
 	parent := tm.GetParent()
+	// 实例可能来自对象池：n 是业务字段，池不复位（NewTimer 的契约就是让调用方用
+	// initcallback 自己清），因此只断言「本次没有再执行」，不假设起点为 0。
+	startTicks := tm.n.Load()
 
 	// 与当前代次完全一致的调度项：绕开 isValid 的代次闸门，专门考验 beginTick
 	task := timerTask{timer: tm, gen: parent.gen.Load(), mgr: m}
@@ -250,8 +253,8 @@ func TestTimer_NoTickAfterRelease(t *testing.T) {
 
 	m.executeTimer(task)
 
-	if got := tm.n.Load(); got != 0 {
-		t.Fatalf("✘ 已作废实例仍然执行了业务 Tick（执行 %d 次）", got)
+	if got := tm.n.Load(); got != startTicks {
+		t.Fatalf("✘ 已作废实例仍然执行了业务 Tick（执行 %d 次，起点 %d）", got-startTicks, startTicks)
 	}
 	if got := parent.inTick.Load(); got != 0 {
 		t.Fatalf("✘ beginTick 失败后 inTick 仍为 %d，实例永久卡在在飞状态", got)
@@ -345,7 +348,8 @@ func TestWheel_MigrationNeverStrandsTimer(t *testing.T) {
 	const num = 40
 	timers := make([]*plainTimer, 0, num)
 	for i := 0; i < num; i++ {
-		tm, err := NewTimer[*plainTimer](20, InfiniteCount, nil)
+		// 复位业务计数：实例可能来自对象池，下面的「停摆」判据以 0 为基线
+		tm, err := NewTimer[*plainTimer](20, InfiniteCount, func(p *plainTimer) { p.n.Store(0) })
 		if err != nil {
 			t.Fatal(err)
 		}

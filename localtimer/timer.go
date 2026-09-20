@@ -487,6 +487,15 @@ func (t *Timer) removeFromManagerLocked(cleanPool bool) releaseOutcome {
 	return t.requestReleaseLocked()
 }
 
+// claimFromWheel 把归属从 wheel 原子改判为「投递途中」，返回是否争到独占处理权。
+//
+// 时间轮扫描不再整程持有 wheelLock，改为逐节点认领：CAS 成功的一方才可派发，
+// 失败说明业务移除已在轮锁下摘链并扣过计数。投递失败仍要把归属还原回本轮，
+// 否则节点会被 ownedWheel 判给「无轮」而永久停摆。
+func (t *Timer) claimFromWheel(wheel *TimerWheel) bool {
+	return t.wheel.CompareAndSwap(wheel, migratingMarker)
+}
+
 // detachFromWheelLocked 从 t 当前归属的时间轮上摘链并扣减计数，调用方必须已持有 t.mu。
 //
 // 同样独立成方法让 wheelLock 走 defer：临界区内的 panic 若漏出解锁，整个时间轮

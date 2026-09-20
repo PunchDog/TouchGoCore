@@ -814,13 +814,19 @@ func (m *TimerManager) processWheelTick(wheel *TimerWheel, wheelType TimerType) 
 	}
 }
 
-// tickWheelSection 在 wheelLock 临界区内完成派发与迁移，返回因背压丢弃的次数。
+// tickWheelSection 扫描时间轮，派发到期项并下沉到更精确的轮。
+//
+// 判定全程不持 wheelLock：List.Range 只在链表自己的读锁里取快照，回调在锁外跑，
+// 于是一次长扫描不再把业务侧的 Remove 整段排在后面（detachFromWheelLocked 要
+// 同一把锁）。只有真正命中的节点才回锁，且锁内只剩「复核 → 认领 → 投递 → 摘链」
+// 这几步无阻塞动作（投递用非阻塞 select，满了立刻放手）。
+//
+// 认领必须和摘链在同一把轮锁里做：业务移除是「持锁读归属 → 摘链 → 扣计数」的
+// check-then-act，若 CAS 漂在锁外，两边能各自读到同一个归属并各扣一次计数
+// （不变前的整轮持锁恰好挡住了这个交错，实测会让 timerCount 打成负数）。
 func (m *TimerManager) tickWheelSection(wheel *TimerWheel, wheelType TimerType) (dropped int64) {
 	currentTime := util.CurrentMS()
 	ch := currentTimerChannel()
-
-	wheel.wheelLock.Lock()
-	defer wheel.wheelLock.Unlock()
 
 	wheel.tickWheel.Range(func(node list.INode) bool {
 		timer, ok := node.(TimerInterface)
@@ -839,27 +845,14 @@ func (m *TimerManager) tickWheelSection(wheel *TimerWheel, wheelType TimerType) 
 			// 业务已移除，但 RemoveFromManager 与 handleTimerAdd 竞态：
 			// 节点在 wheel 引用写入前就被判为「无轮」而漏摘，随后又被入链。
 			// 它既不会被调度也不会被回收，计数还永远多 1 —— 顺手清掉。
-			node.GetNode().Remove()
-			parent.wheel.Store(nil)
-			wheel.timerCount.Add(-1)
-			m.stats.timersRemoved.Add(1)
+			m.unlinkStale(wheel, parent, node)
 			return true
 		}
 
+		task := timerTask{timer: timer, gen: parent.gen.Load(), mgr: m}
 		if parent.nextTime.Load() <= currentTime {
 			// 时间到达：只有派发成功才摘链，失败则留在轮里下个 tick 重试
-			task := timerTask{timer: timer, gen: parent.gen.Load(), mgr: m}
-			// 先置「投递途中」再发送：反向顺序会让消费端在归属仍指向本轮时
-			// 校验入链条件，把这条调度项当重复入链丢弃。
-			parent.wheel.Store(migratingMarker)
-			select {
-			case ch <- task:
-				node.GetNode().Remove()
-				wheel.timerCount.Add(-1)
-			default:
-				// 通道满：归属必须原样还给本轮，否则本节点被 ownedWheel 判给「无轮」，
-				// 后续每个 tick 都会跳过它，等价于永久停摆。
-				parent.wheel.Store(wheel)
+			if m.commitDispatch(wheel, parent, node, task, ch) == dispatchFull {
 				dropped++
 			}
 			return true
@@ -871,25 +864,70 @@ func (m *TimerManager) tickWheelSection(wheel *TimerWheel, wheelType TimerType) 
 		if newType == wheelType || int(newType) >= len(m.wheels) {
 			return true
 		}
-
-		task := timerTask{timer: timer, gen: parent.gen.Load(), mgr: m}
-		parent.wheel.Store(migratingMarker)
-		select {
-		case m.wheels[newType].addTimerChan <- task:
-			// 迁移成功：归属保持在途标记，由目标轮 handleTimerAdd 认领；
-			// 本轮只负责摘链与扣计数。
-			node.GetNode().Remove()
-			wheel.timerCount.Add(-1)
+		switch m.commitDispatch(wheel, parent, node, task, m.wheels[newType].addTimerChan) {
+		case dispatchSent:
 			m.stats.wheelMigrations.Add(1)
-		default:
-			// 目标时间轮通道已满，归属与链表位置一起还原，等下一个 tick
-			parent.wheel.Store(wheel)
+		case dispatchFull:
 			dropped++
 		}
 		return true
 	})
 
 	return dropped
+}
+
+// commitDispatch 的三种结论。
+const (
+	dispatchSent    int8 = iota // 已投递，节点已摘链并扣减计数
+	dispatchSkipped             // 归属被别的路径拿走，本次什么都没做
+	dispatchFull                // 目标通道满，归属已还原，留在本轮等下个 tick
+)
+
+// commitDispatch 在短临界区内完成复核、认领、投递与摘链扣计数。
+//
+// 先取 parent.mu 再取 wheelLock（与 AddTimer、handleTimerAdd、Remove 同序）：
+// 目标轮的消费协程入链前也要这把 mu 锁，于是它不可能在本协程还挂着这个节点时
+// 抢先 detach 走它 —— 那样本轮的摘链会错摘到目标链上，计数两头漂移。
+//
+// 先置「投递途中」再发送：反向顺序会让消费端在归属仍指向本轮时校验入链条件，
+// 把这条调度项当重复入链丢弃。
+func (m *TimerManager) commitDispatch(wheel *TimerWheel, parent *Timer, node list.INode, task timerTask, dst chan<- timerTask) int8 {
+	parent.mu.Lock()
+	defer parent.mu.Unlock()
+
+	wheel.wheelLock.Lock()
+	defer wheel.wheelLock.Unlock()
+
+	// 从快照判定到抢到锁的这段时间里节点可能已易主：归属仍是本轮才动手
+	if parent.ownedWheel() != wheel || !parent.claimFromWheel(wheel) {
+		return dispatchSkipped
+	}
+	select {
+	case dst <- task:
+		node.GetNode().Remove()
+		wheel.timerCount.Add(-1)
+		return dispatchSent
+	default:
+		// 通道满：归属必须原样还给本轮，否则本节点被 ownedWheel 判给「无轮」，
+		// 后续每个 tick 都会跳过它，等价于永久停摆。
+		parent.wheel.Store(wheel)
+		return dispatchFull
+	}
+}
+
+// unlinkStale 回锁清理「已不活跃却仍挂在轮上」的节点：摘链、扣计数、断开归属。
+// 归属复核与认领同在轮锁内，理由同 commitDispatch。
+func (m *TimerManager) unlinkStale(wheel *TimerWheel, parent *Timer, node list.INode) {
+	wheel.wheelLock.Lock()
+	defer wheel.wheelLock.Unlock()
+
+	if parent.ownedWheel() != wheel || !parent.claimFromWheel(wheel) {
+		return
+	}
+	node.GetNode().Remove()
+	wheel.timerCount.Add(-1)
+	parent.wheel.Store(nil)
+	m.stats.timersRemoved.Add(1)
 }
 
 // cleanupWheel 清理时间轮

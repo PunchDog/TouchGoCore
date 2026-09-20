@@ -38,6 +38,9 @@ var (
 
 func InitMetrics() {
 	metrics.Init()
+	// 时间轮的实时积压由拉取式采集器提供：注册动作放在这里，宿主不调
+	// StartMetricsServer 就不会多挂任何采集器。
+	registerTimerBacklogCollector()
 	vars.Info("Prometheus 指标初始化完成")
 }
 

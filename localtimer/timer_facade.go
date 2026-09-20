@@ -259,3 +259,12 @@ func GetSystemStats() (totalTimers int64, stats TimerStats) {
 	}
 	return
 }
+
+// GetQueueStats 返回此刻调度链路的通道积压；默认管理器不存在（未 Run）时全为 0。
+// 供 /metrics 抓取时读一次，不需要任何常驻上报协程。
+func GetQueueStats() TimerQueueStats {
+	if mgr := defaultTimerManager.Load(); mgr != nil {
+		return mgr.GetQueueStats()
+	}
+	return TimerQueueStats{}
+}

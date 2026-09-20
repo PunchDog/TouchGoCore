@@ -521,6 +521,52 @@ func (m *TimerManager) GetTimerCount() int64 {
 	return total
 }
 
+// GetWheelTimerCount 返回某一档时间轮在链的定时器数量。越界档位返回 0。
+//
+// 与总数分开暴露，是为了让「毫秒轮爆满而其它轮空转」和「五档均匀分布」在监控上
+// 长得不一样——只有前者需要处置。
+func (m *TimerManager) GetWheelTimerCount(wheelType TimerType) int64 {
+	if int(wheelType) < 0 || int(wheelType) >= len(m.wheels) {
+		return 0
+	}
+	if wheel := m.wheels[wheelType]; wheel != nil {
+		return wheel.timerCount.Load()
+	}
+	return 0
+}
+
+// TimerQueueStats 调度链路的即时积压：两级通道的在队任务数与容量。
+//
+// TimerStats 只有累计计数，说得清「一共丢过多少」，看不出「此刻正在堆」。
+// 而通道深度才是「消费端跟不上 / 某个轮协程卡在业务 Tick 里」的实时信号。
+type TimerQueueStats struct {
+	ScheduleLen int   // 全局调度通道 timerChannel 的在队任务数
+	ScheduleCap int   // 其容量；持续贴近说明 TimeTick 消费端跟不上
+	WheelLen    []int // 各档入链通道 addTimerChan 的在队数，下标即 TimerType
+	WheelCap    []int // 对应容量
+}
+
+// GetQueueStats 读取此刻的通道积压。管理器已 Close（通道被释放）或尚未 Run 时
+// 各项为 0；WheelLen/WheelCap 恒与 m.wheels 等长。
+func (m *TimerManager) GetQueueStats() TimerQueueStats {
+	s := TimerQueueStats{
+		WheelLen: make([]int, len(m.wheels)),
+		WheelCap: make([]int, len(m.wheels)),
+	}
+	if ch := currentTimerChannel(); ch != nil {
+		s.ScheduleLen = len(ch)
+		s.ScheduleCap = cap(ch)
+	}
+	for i, wheel := range m.wheels {
+		if wheel == nil {
+			continue
+		}
+		s.WheelLen[i] = len(wheel.addTimerChan)
+		s.WheelCap[i] = cap(wheel.addTimerChan)
+	}
+	return s
+}
+
 // timerRuntime 是一次 Run → TimeStop 生命周期的全部可变状态。
 //
 // 整体用 atomic.Pointer 替换，而不是把 closech / tickWG / ctx 摊成三个裸全局：

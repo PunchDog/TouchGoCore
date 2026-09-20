@@ -3,7 +3,6 @@ package list
 import (
 	"sync"
 	"sync/atomic"
-	"time"
 	"touchgocore/util"
 	"touchgocore/vars"
 )
@@ -30,13 +29,44 @@ func NewList() *List {
 	}
 }
 
-// generateNextID 生成下一个节点ID，使用原子操作保证并发安全
+// generateNextID 生成本链表内单调递增的节点 ID。
+//
+// 旧实现按「距上次取号超过 1 秒就改用当前时间」推进：把纳秒值当毫秒除，
+// 且先 Store 再 Add 两步之间没有原子性，两个并发取号能拿到同一个 ID，
+// 后写者覆盖 nodeMap 里的既有键 → 前一个节点永久查不到（幽灵条目）。
+// 现在用 CAS 推进的「纳秒时钟下限 + 冲突递增」：同纳秒内多次取号也各自唯一。
 func (l *List) generateNextID() int64 {
-	//如果nextID和当前时间相差1秒，就用当前时间作为新的iD,否则+1
-	if util.CurrentMS()-l.nextID.Load()/int64(time.Millisecond) >= 1000 {
-		l.nextID.Store(util.CurrentTime().UnixNano() + 1)
+	for {
+		cur := l.nextID.Load()
+		next := util.CurrentTime().UnixNano()
+		if next <= cur {
+			next = cur + 1
+		}
+		if l.nextID.CompareAndSwap(cur, next) {
+			return next
+		}
 	}
-	return l.nextID.Add(1)
+}
+
+// assignIDLocked 为入链节点取号并登记到索引，调用者必须已持有 mu 锁。
+func (l *List) assignIDLocked(obj *Node, node INode) int64 {
+	// 重新入链的节点可能仍挂在旧 ID 上（遍历期间删除请求被挂起，旧键尚未摘除）：
+	// 不先摘掉就会在 nodeMap 里永久残留一个指向同一节点的幽灵条目。
+	if old := obj.id; old != 0 {
+		if prev, ok := l.nodeMap[old]; ok && prev == node {
+			delete(l.nodeMap, old)
+		}
+	}
+	id := l.generateNextID()
+	if prev, ok := l.nodeMap[id]; ok && prev != node {
+		// 取号本身不会撞，撞了说明外部直接改过 id 字段。静默覆盖会让 prev
+		// 永久查不到，因此留痕后再取一个号，宁可多一次探测也不能丢索引。
+		vars.Error("list 节点 ID 冲突: id=%d, 既有节点将被跳过", id)
+		id = l.generateNextID()
+	}
+	obj.id = id
+	l.nodeMap[id] = node
+	return id
 }
 
 // 长度
@@ -75,8 +105,8 @@ func (l *List) Add(node INode) (bret bool) {
 		obj.nodeType = node
 	}
 
-	obj.id = l.generateNextID()
-	obj.list = l
+	l.assignIDLocked(obj, node)
+	obj.list.Store(l)
 	obj.pre = nil
 	obj.next = nil
 	// 节点重新入链：撤销遍历期间挂起的删除请求
@@ -92,7 +122,6 @@ func (l *List) Add(node INode) (bret bool) {
 		l.tail = node
 	}
 	l.len++
-	l.nodeMap[obj.id] = node // 添加到 map 索引
 	bret = true
 	return
 }
@@ -176,15 +205,23 @@ func (l *List) Range(f func(INode) bool) {
 }
 
 // 清空
+//
+// 遍历进行中（rangeCount>0）时不能把节点归还节点池：并发 Range 已经取了快照，
+// 快照里仍持有这些节点指针，而池中刚进去的节点会立刻被下一次 NewNode 发给
+// 别人 —— 同一块内存一边被清空复用、一边被遍历读取，链表结构随即错乱。
+// 因此这一轮只做摘链不入池，节点由 GC 回收；与 Node.remove 的延迟删除同源，
+// 只是 Clear 必须立即交出空表，无法把回收推迟到遍历收尾，代价是少一次复用。
 func (l *List) Clear() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+
+	release := l.rangeCount.Load() == 0
 
 	// 遍历所有节点并删除，防止内存泄漏
 	node := l.head
 	for node != nil {
 		next := node.GetNode().next
-		l.removeNodeLocked(node.GetNode(), true)
+		l.removeNodeLocked(node.GetNode(), release)
 		node = next
 	}
 	// 确保状态一致
@@ -198,7 +235,7 @@ func (l *List) Clear() {
 // removeNodeLocked 从链表中删除节点，调用者必须已持有 mu 锁。
 // release 为 true 时才归还对象池；Add 复用节点时必须传 false。
 func (l *List) removeNodeLocked(node *Node, release bool) {
-	if node == nil || node.list != l {
+	if node == nil || node.list.Load() != l {
 		return
 	}
 
@@ -213,9 +250,11 @@ func (l *List) removeNodeLocked(node *Node, release bool) {
 		node.next.GetNode().pre = node.pre
 	}
 	l.len--
-	delete(l.nodeMap, node.id)
+	if cur, ok := l.nodeMap[node.id]; ok && cur.GetNode() == node {
+		delete(l.nodeMap, node.id)
+	}
 
-	node.list = nil
+	node.list.Store(nil)
 	node.pre = nil
 	node.next = nil
 	node.id = 0

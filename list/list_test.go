@@ -43,7 +43,7 @@ func TestAdd(t *testing.T) {
 		t.Error("Tail is not the added node")
 	}
 
-	if node.GetNode().list != l {
+	if node.GetNode().list.Load() != l {
 		t.Error("node.list is not the list")
 	}
 }
@@ -235,7 +235,7 @@ func TestRemoveSingle(t *testing.T) {
 		t.Error("Tail should be nil")
 	}
 
-	if node.GetNode().list != nil {
+	if node.GetNode().list.Load() != nil {
 		t.Error("node.list should be nil after remove")
 	}
 }
@@ -586,13 +586,21 @@ func TestConcurrentAdd(t *testing.T) {
 		t.Errorf("expected length 100, got %d", l.Length())
 	}
 
-	// 注意：在高并发场景下，generateNextID 可能产生重复 ID
-	// 这是当前实现的已知问题（依赖系统时间）
-	// 如果需要严格的唯一性，应该使用更好的 ID 生成策略
+	// 取号冲突只可能来自外部篡改 ID 字段，属极端异常：
+	// 静默覆盖会让 prev 永久查不到，这里显式留痕后再为新节点让位取号。
+	// 现在 generateNextID 用「纳秒下限 + CAS 冲突递增」，并发取号必须两两不同。
+	seen := make(map[int64]struct{}, 100)
 	l.Range(func(node INode) bool {
-		_ = node.GetId()
+		id := node.GetId()
+		if _, ok := seen[id]; ok {
+			t.Errorf("重复的节点 ID: %d", id)
+		}
+		seen[id] = struct{}{}
 		return true
 	})
+	if len(seen) != l.Length() {
+		t.Errorf("索引与链表不一致: 唯一ID=%d 长度=%d", len(seen), l.Length())
+	}
 }
 
 // TestConcurrentAddAndRemove 测试并发添加和删除

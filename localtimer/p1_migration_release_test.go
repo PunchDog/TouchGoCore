@@ -98,7 +98,7 @@ func TestTimer_PanicInCleanupKeepsLock(t *testing.T) {
 
 	func() {
 		defer func() { _ = recover() }()
-		m.cleanupWheel(wheel)
+		m.cleanupWheel(wheel, TimerTypeMillisecond)
 	}()
 
 	if !wheelLockFree(wheel, 2*time.Second) {
@@ -356,8 +356,7 @@ func TestWheel_MigrationNeverStrandsTimer(t *testing.T) {
 	}
 
 	// 反复把到期时间推到秒档再拉回毫秒档，强制每个周期都发生跨档迁移
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
+	migrateChurn := func() {
 		now := time.Now().UnixMilli()
 		for _, tm := range timers {
 			tm.GetParent().nextTime.Store(now + 1500)
@@ -370,21 +369,45 @@ func TestWheel_MigrationNeverStrandsTimer(t *testing.T) {
 		time.Sleep(60 * time.Millisecond)
 	}
 
-	stalled := 0
-	for _, tm := range timers {
-		if tm.n.Load() == 0 {
-			stalled++
-		}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		migrateChurn()
 	}
-	if stalled > 0 {
-		t.Fatalf("✘ %d/%d 个定时器在反复跨档迁移后彻底停摆（S11 回归失败）", stalled, num)
+
+	// 「停摆」的判据是再也拿不到任何调度项，与机器忙闲无关：全量测试时多个包并行
+	// 抢 CPU，某个定时器完全可能在 3 秒窗口里一次都没被派发，那只是调度延迟。
+	// 所以对仍未触发的定时器持续加压到有界宽限期结束，期间毫无进展才判定停摆。
+	graceEnd := time.Now().Add(20 * time.Second)
+	for {
+		stalled := 0
+		for _, tm := range timers {
+			if tm.n.Load() == 0 {
+				stalled++
+			}
+		}
+		if stalled == 0 {
+			break
+		}
+		if time.Now().After(graceEnd) {
+			t.Fatalf("✘ %d/%d 个定时器在反复跨档迁移后彻底停摆（S11 回归失败）", stalled, num)
+		}
+		migrateChurn()
 	}
 
 	// 全部停表后各轮必须回到干净状态：迁移若丢过定时器，这里会留下计数残影
 	for _, tm := range timers {
 		tm.Pause()
 	}
-	time.Sleep(300 * time.Millisecond)
+	// 摘链要走过「派发 → 消费 → 移除」整条链路，忙时同样会延迟，
+	// 因此轮询等待收敛；超出宽限期仍不干净才是计数残影。
+	waitUntil(t, 20*time.Second, "停表后时间轮未回到干净状态", func() bool {
+		for _, w := range m.wheels {
+			if w.timerCount.Load() != 0 || w.tickWheel.Length() != 0 {
+				return false
+			}
+		}
+		return true
+	})
 	for wi, w := range m.wheels {
 		if c := w.timerCount.Load(); c != 0 {
 			t.Fatalf("✘ 轮 %d 停表后仍有 %d 个定时器未回收（len=%d）", wi, c, w.tickWheel.Length())

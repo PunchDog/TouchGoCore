@@ -2,6 +2,7 @@ package list
 
 import (
 	"reflect"
+	"sync/atomic"
 	"touchgocore/vars"
 )
 
@@ -17,13 +18,18 @@ type INode interface {
 
 // 实现一个双向链表，支持增删改查
 // 链表节点
+//
+// 归属链表用 atomic.Pointer 而非裸指针：读方（Node.remove、InsertAfter/Before）
+// 必须先拿到归属才能取到对应的 l.mu，也就是「无锁读」；而写方（Add、removeNodeLocked）
+// 在旧链表锁内写 nil、在新链表锁内写新值 —— 同一字段被两把不同的锁保护，
+// 任何一把都拦不住另一把，裸指针就是实打实的数据竞争。
 type Node struct {
-	id       int64       //节点id
-	pre      INode       //上一个节点
-	next     INode       //下一个节点
-	data     interface{} //数据
-	list     *List       //所属链表
-	nodeType INode       //节点类型
+	id       int64                //节点id
+	pre      INode                //上一个节点
+	next     INode                //下一个节点
+	data     interface{}          //数据
+	list     atomic.Pointer[List] //所属链表
+	nodeType INode                //节点类型
 
 	// 内嵌节点保护：只有由节点池分配（acquireNode）的节点才允许归还节点池。
 	// 否则像 `type X struct{ Node }` 这类内嵌节点会被当成独立节点复用，
@@ -75,24 +81,34 @@ func (n *Node) InsertAfter(data interface{}) (newNode INode) {
 		return nil
 	}
 
-	n.list.mu.Lock()
-	defer n.list.mu.Unlock()
+	l := n.list.Load()
+	if l == nil {
+		return nil
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	// 取锁期间本节点可能已被摘链甚至已改嫁到别的链表，此时插入会污染新链表
+	if n.list.Load() != l {
+		return nil
+	}
 
 	newnode := newNode.GetNode()
-	newnode.id = n.list.generateNextID()
+	if newnode == nil {
+		return nil
+	}
+	l.assignIDLocked(newnode, newNode)
 	newnode.pre = n
 	newnode.next = n.next
 	newnode.data = data
-	newnode.list = n.list
+	newnode.list.Store(l)
 
 	if n.next == nil {
-		n.list.tail = newNode
+		l.tail = newNode
 	} else {
 		n.next.GetNode().pre = newNode
 	}
 	n.next = newNode
-	n.list.len++
-	n.list.nodeMap[newnode.id] = newNode // 添加到 map 索引
+	l.len++
 	return
 }
 
@@ -108,24 +124,33 @@ func (n *Node) InsertBefore(data interface{}) (newNode INode) {
 	if newNode == nil {
 		return nil
 	}
-	n.list.mu.Lock()
-	defer n.list.mu.Unlock()
+	l := n.list.Load()
+	if l == nil {
+		return nil
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if n.list.Load() != l {
+		return nil
+	}
 
 	newnode := newNode.GetNode()
-	newnode.id = n.list.generateNextID()
+	if newnode == nil {
+		return nil
+	}
+	l.assignIDLocked(newnode, newNode)
 	newnode.pre = n.pre
 	newnode.next = n
 	newnode.data = data
-	newnode.list = n.list
+	newnode.list.Store(l)
 
 	if n.pre == nil {
-		n.list.head = newNode
+		l.head = newNode
 	} else {
 		n.pre.GetNode().next = newNode
 	}
 	n.pre = newNode
-	n.list.len++
-	n.list.nodeMap[newnode.id] = newNode // 添加到 map 索引
+	l.len++
 	return
 }
 
@@ -144,27 +169,27 @@ func (n *Node) remove(release bool) {
 		return
 	}
 
-	list := n.list
-	if list == nil {
+	l := n.list.Load()
+	if l == nil {
 		return
 	}
 
-	list.mu.Lock()
-	defer list.mu.Unlock()
+	l.mu.Lock()
+	defer l.mu.Unlock()
 
-	if n.list != list {
+	if n.list.Load() != l {
 		return
 	}
 
-	if release && list.rangeCount.Load() > 0 {
+	if release && l.rangeCount.Load() > 0 {
 		// 标记待删除；若遍历期间该节点又被 Add 回本链表，Add 会清掉此标记，
 		// 遍历结束后就不会把它误删。
 		n.delPending = true
-		list.rangeDelList = append(list.rangeDelList, n)
+		l.rangeDelList = append(l.rangeDelList, n)
 		return
 	}
 
-	list.removeNodeLocked(n, release)
+	l.removeNodeLocked(n, release)
 }
 
 // 添加一个节点，如果nodeType为nil，则用默认的ListNode创建

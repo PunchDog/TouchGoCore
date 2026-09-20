@@ -29,8 +29,12 @@ type timerTask struct {
 }
 
 // isValid 判断该调度项是否仍然有效
+//
+// 刻意不检查 mgr.isClosed：收尾路径（cleanupWheel）正是靠关闭管理器时补跑最后一拍
+// 来把定时器交回对象池，一旦在这里判废，在途实例既不被执行也无人回收，永久滞留。
+// 「陈旧调度项跨 Run 复活」由全局通道消费端 timeTick 拦住（见该函数）。
 func (t timerTask) isValid() bool {
-	if t.timer == nil {
+	if t.timer == nil || t.mgr == nil {
 		return false
 	}
 	parent := t.timer.GetParent()
@@ -48,30 +52,38 @@ type TimerWheel struct {
 	addTimerChan chan timerTask // 定时器添加通道
 	isRunning    atomic.Bool    // 是否运行
 	timerCount   atomic.Int64   // 定时器计数（用于监控）
+
+	// mgr 反向归属：摘链发生在 Timer 一侧（RemoveFromManager），那里只有 wheel 指针，
+	// 没有它便无法把「移除」计入所属管理器的统计。
+	mgr *TimerManager
+
+	// lastBackpressureWarn 上次背压告警时间（毫秒）。按轮限频：一条全局限频线会让
+	// 繁忙的毫秒轮把安静的小时轮的告警一并吞掉。
+	lastBackpressureWarn atomic.Int64
 }
 
 // TimerManager 管理所有时间轮
 type TimerManager struct {
-	closeChan   chan struct{}      // 关闭信号
-	wheels      []*TimerWheel      // 时间轮数组
-	maxTimerUID atomic.Int64       // 最大定时器ID
-	isClosed    atomic.Bool        // 是否关闭
-	stats       timerStatsCounters // 内部原子计数
-	wheelWG     sync.WaitGroup
+	closeChan chan struct{}      // 关闭信号
+	wheels    []*TimerWheel      // 时间轮数组
+	isClosed  atomic.Bool        // 是否关闭
+	stats     timerStatsCounters // 内部原子计数
+	wheelWG   sync.WaitGroup
 
-	// 上次背压告警时间（毫秒）。背压时每个时间轮每秒最多告警一条，避免刷爆日志。
-	lastBackpressureWarn atomic.Int64
+	// closeCtx 收尾预算：由 CloseCtx 在发出关闭信号前写入，供 cleanupWheel 逐节点
+	// 判定「还能不能继续等业务回调」。用指针快照而非字段直改，避免与读取方竞态。
+	closeCtx atomic.Pointer[context.Context]
 }
 
 // TimerStats 保存性能统计信息（快照值，非实时引用）
 type TimerStats struct {
 	TimersAdded     int64 // 已添加定时器数量
-	TimersRemoved   int64 // 已移除定时器数量
+	TimersRemoved   int64 // 脱离调度的次数：暂停/移除/耗尽/关闭清场/背压丢弃（含复活前的摘链，不含派发与迁移）
 	TimersExecuted  int64 // 已执行定时器数量
 	TimersDropped   int64 // 因背压被丢弃的调度次数
 	WheelMigrations int64 // 时间轮迁移次数
 
-	TimersRescheduleFailed int64 // 续期重试后仍失败、定时器可能丢失的次数（>0 说明需要告警）
+	TimersRescheduleFailed int64 // 续期重试后仍失败、定时器已被强制归还对象池的次数（>0 说明需要告警）
 }
 
 // timerStatsCounters 管理器内部的原子计数器
@@ -85,21 +97,65 @@ type timerStatsCounters struct {
 	timersRescheduleFailed atomic.Int64
 }
 
-// notifyBackpressure 背压限频告警：每个管理器每秒最多一条。
+// wheelShouldWarn 限频判定：每个时间轮每秒最多一条告警。
 //
-// 必须在释放 wheelLock 之后调用——vars 的异步日志在缓冲写满时会阻塞最长 5 秒
-// （见 vars/async_channel.go 的阻塞模式分支），持锁调用会把整个时间轮拖死。
-func (m *TimerManager) notifyBackpressure(wheelType TimerType, dropped int64) {
+// 各轮独立计数，否则毫秒轮常年背压会把小时轮的告警一并吞掉，
+// 而后者恰恰是「某个低频业务定时器正在丢调度」的唯一线索。
+func wheelShouldWarn(wheel *TimerWheel) bool {
 	now := util.CurrentMS()
-	last := m.lastBackpressureWarn.Load()
+	last := wheel.lastBackpressureWarn.Load()
 	if now-last < 1000 {
-		return
+		return false
 	}
-	if !m.lastBackpressureWarn.CompareAndSwap(last, now) {
+	return wheel.lastBackpressureWarn.CompareAndSwap(last, now)
+}
+
+// notifyBackpressure 背压丢弃告警（确有调度项被丢下）。
+//
+// 必须在释放 wheelLock 与 parent.mu 之后调用——vars 的异步日志在缓冲写满时会
+// 阻塞最长 5 秒（见 vars/async_channel.go 的阻塞模式分支），持锁调用会把整个
+// 时间轮或这把定时器私有锁拖死。
+func (m *TimerManager) notifyBackpressure(wheel *TimerWheel, wheelType TimerType, dropped int64) {
+	if wheel == nil || !wheelShouldWarn(wheel) {
 		return
 	}
 	vars.Warning("定时器背压: 轮=%s, 本次丢弃=%d, 累计丢弃=%d",
 		wheelType.String(), dropped, m.stats.timersDropped.Load())
+}
+
+// notifyHighWatermark 入队通道水位告警：本次入队成功，只是队列已接近上限。
+// 与丢弃告警分开措辞，否则「本次丢弃=0」的背压日志会让人误判为统计出错。
+func (m *TimerManager) notifyHighWatermark(wheel *TimerWheel, wheelType TimerType, used, capacity int64) {
+	if wheel == nil || !wheelShouldWarn(wheel) {
+		return
+	}
+	vars.Warning("定时器入队通道水位过高: 轮=%s, 已用=%d/%d, 累计丢弃=%d",
+		wheelType.String(), used, capacity, m.stats.timersDropped.Load())
+}
+
+// addTimerWarning 一次待发的背压告警。
+//
+// addTimerLocked 全程持有 parent.mu，而 vars 的异步日志在缓冲写满时最长阻塞 5 秒：
+// 持锁写日志等于把这把定时器的 AddTimer/Remove/handleTimerAdd 全部排在这条日志后面。
+// 因此临界区里只登记告警，真正的输出由解锁后的调用方发出。
+type addTimerWarning struct {
+	wheel     *TimerWheel
+	wheelType TimerType
+	dropped   int64 // >0 表示确有调度项被丢弃；0 表示仅水位过高
+	used      int64
+	capacity  int64
+}
+
+// emit 在锁外输出告警
+func (m *TimerManager) emit(w *addTimerWarning) {
+	if w == nil {
+		return
+	}
+	if w.dropped > 0 {
+		m.notifyBackpressure(w.wheel, w.wheelType, w.dropped)
+		return
+	}
+	m.notifyHighWatermark(w.wheel, w.wheelType, w.used, w.capacity)
 }
 
 // AddTimer 向管理器添加定时器（业务首次注册与「先 Pause 再 AddTimer」复活都走这里；
@@ -119,11 +175,14 @@ func (m *TimerManager) AddTimer(timer TimerInterface) error {
 	// 拿着过期校验结果把同一节点二次入链，旧轮 timerCount 永久多 1（幻影 +1）。
 	// 加锁顺序恒为 mu → wheelLock（handleTimerAdd 同序），不存在逆序死锁。
 	parent.mu.Lock()
-	defer parent.mu.Unlock()
-	return m.addTimerLocked(timer, parent, 0)
+	err, warn := m.addTimerLocked(timer, parent, 0)
+	parent.mu.Unlock()
+	m.emit(warn)
+	return err
 }
 
 // addTimerLocked 入队一个调度项，调用方必须已持有 parent.mu。
+// 返回的告警必须在解锁后由调用方 emit，临界区内绝不写日志。
 //
 // renewGen == 0 表示业务注册/复活；非 0 表示到期续期，此时必须携带被派发那条
 // 调度项的代次：代次纹丝未动才继续调度，否则返回 ErrTimerCanceled。少了这道
@@ -131,38 +190,38 @@ func (m *TimerManager) AddTimer(timer TimerInterface) error {
 // 入链（rpc 重连成功后仍在不停重连）。只比代次不比 IsActive：上一次入队失败时
 // 是我们自己把活跃标记回滚成 false 的，要求活跃会让重试永远作废，而业务停表对
 // 一个活跃定时器必定推进代次，代次比对足以拦下复活。
-func (m *TimerManager) addTimerLocked(timer TimerInterface, parent *Timer, renewGen uint64) error {
+func (m *TimerManager) addTimerLocked(timer TimerInterface, parent *Timer, renewGen uint64) (err error, warn *addTimerWarning) {
 	if m.isClosed.Load() {
-		return ErrTimerManagerClosed
+		return ErrTimerManagerClosed, nil
 	}
 
 	if renewGen != 0 {
 		if parent.gen.Load() != renewGen {
-			return ErrTimerCanceled
+			return ErrTimerCanceled, nil
 		}
 		// 代次没动却已进入作废流程：只能是移除时定时器本就不活跃（未推进代次）
 		// 的边角场景。续期方是本协程自己，返回取消即可，不算业务复活失败。
 		if parent.abandoned() {
-			return ErrTimerCanceled
+			return ErrTimerCanceled, nil
 		}
 	} else if parent.abandoned() {
 		// 该实例已永久归还对象池（或正排队等待 endTick 归还），契约上旧主人已放弃
 		// 它，池随时可能把它发给下一个 NewTimer。实例自身分不清「刚归还的我」和
 		// 「已易主的我」，因此一律拒绝复活，宁可让业务显式新建。
 		timerPool.reviveRefused.Add(1)
-		return ErrTimerReleased
+		return ErrTimerReleased, nil
 	}
 
 	// 先选轮再改状态：类型非法时保持定时器原样返回，不必回滚活跃标记。
 	wheelType := parent.GetType()
 	if int(wheelType) >= len(m.wheels) {
-		return ErrTimerInvalidType
+		return ErrTimerInvalidType, nil
 	}
 	wheel := m.wheels[wheelType]
 
 	// 没有分配时，分配唯一ID
 	if parent.uid.Load() == 0 {
-		parent.uid.CompareAndSwap(0, m.maxTimerUID.Add(1))
+		parent.uid.CompareAndSwap(0, globalTimerUID.Add(1))
 	}
 
 	// 清理现有定时器：内部会推进代次，使在途的旧调度项失效，避免重复调度。
@@ -190,9 +249,9 @@ func (m *TimerManager) addTimerLocked(timer TimerInterface, parent *Timer, renew
 	case wheel.addTimerChan <- task:
 		m.stats.timersAdded.Add(1)
 		if float64(chanLen) >= float64(chanCap)*0.9 {
-			m.notifyBackpressure(wheelType, 0)
+			return nil, &addTimerWarning{wheel: wheel, wheelType: wheelType, used: chanLen, capacity: chanCap}
 		}
-		return nil
+		return nil, nil
 	default:
 		// 通道满：丢弃本次调度。入队失败即意味着节点不在任何轮里，
 		// 必须把 isActive 撤回去：留着 true 就是「幻影活跃」——IsActive()
@@ -202,8 +261,9 @@ func (m *TimerManager) addTimerLocked(timer TimerInterface, parent *Timer, renew
 		// 下游 Tick 一旦变慢就会指数级堆积协程直至 OOM。
 		parent.isActive.Store(false)
 		m.stats.timersDropped.Add(1)
-		m.notifyBackpressure(wheelType, 1)
-		return ErrTimerChannelFull
+		// 这条调度项到此为止：既没入链也不会有人再执行，计入「脱离调度」
+		m.stats.timersRemoved.Add(1)
+		return ErrTimerChannelFull, &addTimerWarning{wheel: wheel, wheelType: wheelType, dropped: 1}
 	}
 }
 
@@ -261,8 +321,39 @@ func (m *TimerManager) executeTimer(task timerTask) {
 			return // 续期窗口内业务已 Pause/Remove 或已自行重新注册：本次作废，不算失败
 		}
 		m.stats.timersRescheduleFailed.Add(1)
-		vars.Error("重新调度定时器失败(已重试): uid=%d, %v", task.timer.GetUID(), err)
+		m.notifyTimerLost(task.timer, parent, err)
 	}
+}
+
+// notifyTimerLost 上报「续期彻底失败」的定时器，并把它强制归还对象池。
+//
+// 重试仍失败说明这条调度项已经永久消失：节点不在任何轮里、isActive 也已回滚，
+// 业务侧表现为该定时器的 Tick 再也不触发，且从外部完全无法察觉。这里主动作废
+// 实例（此刻 inTick 仍为 1，归还会由 endTick 落地），把「静默失联」变成一次
+// 显式回收 + 一条可接管的回调，业务据此重建定时器而不是等一个永远不来的 Tick。
+func (m *TimerManager) notifyTimerLost(timer TimerInterface, parent *Timer, cause error) {
+	info := TimerLostInfo{
+		Manager:   m,
+		UID:       timer.GetUID(),
+		Interval:  parent.GetInterval(),
+		Remaining: parent.GetRemainingCount(),
+		Cause:     cause,
+	}
+	vars.Error("定时器续期失败已强制回收: uid=%d, 间隔=%dms, 剩余次数=%d, 原因=%v",
+		info.UID, info.Interval, info.Remaining, cause)
+
+	if fn := onTimerLost.Load(); fn != nil {
+		// 回调来自业务，绝不能让它把收尾（下面的 retire 与 endTick）打断
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					vars.Error("OnTimerLost 回调发生panic: %v", r)
+				}
+			}()
+			(*fn)(info)
+		}()
+	}
+	m.retireAfterExhaustion(parent)
 }
 
 // retireAfterExhaustion 作废执行完最后一拍的定时器并归还对象池。
@@ -292,7 +383,13 @@ func (m *TimerManager) addTimerWithRetry(timer TimerInterface, expectGen uint64)
 
 	var err error
 	for i := 0; i < maxRetry; i++ {
-		err = m.addTimerWithLock(timer, parent, expectGen)
+		var warn *addTimerWarning
+		err, warn = m.addTimerWithLock(timer, parent, expectGen)
+		if warn != nil {
+			// 续期跑在 timeTick 消费协程上：限频告警每秒最多一条，
+			// 且此时 parent.mu 已释放，可以安全输出。
+			m.emit(warn)
+		}
 		if err == nil || !errors.Is(err, ErrTimerChannelFull) {
 			return err
 		}
@@ -306,26 +403,100 @@ func (m *TimerManager) addTimerWithRetry(timer TimerInterface, expectGen uint64)
 
 // addTimerWithLock 取定时器私有锁后入队（续期路径不走 AddTimer 公共入口，
 // 以便把期望代次一路传进临界区）。
-func (m *TimerManager) addTimerWithLock(timer TimerInterface, parent *Timer, expectGen uint64) error {
+func (m *TimerManager) addTimerWithLock(timer TimerInterface, parent *Timer, expectGen uint64) (error, *addTimerWarning) {
 	parent.mu.Lock()
-	defer parent.mu.Unlock()
-	return m.addTimerLocked(timer, parent, expectGen)
+	err, warn := m.addTimerLocked(timer, parent, expectGen)
+	parent.mu.Unlock()
+	return err, warn
 }
 
-// Close 优雅地关闭定时器管理器
+// Close 优雅地关闭定时器管理器（不设收尾时限）
 func (m *TimerManager) Close() {
-	if !m.isClosed.CompareAndSwap(false, true) {
-		return // 已经关闭
+	_ = m.CloseCtx(context.Background())
+}
+
+// CloseCtx 带预算地关闭定时器管理器，返回 ctx 是否为收尾超时而放弃。
+//
+// 收尾必须遍历时间轮并补跑最后一拍的业务回调（cleanupWheel）：一个卡在下游
+// 锁上的 Tick 就能让 TimeStop 永久挂起，进程停不下来。ctx 到期后不再等待，
+// 把剩余定时器强制归还对象池并告警——宁可丢一次回调，也不能丢整个进程退出。
+//
+// 同时把自身从管理器注册表摘除：Run 的「关闭上一轮全部管理器」与业务侧
+// NewTimerManager 的注册一旦交错，新管理器会被 Clear 掉却从未 Close，
+// 它名下 5 个时间轮协程 + 5 个 ticker 就永久泄漏。自摘让「离开注册表」与
+// 「已经 Close」严格同义。
+func (m *TimerManager) CloseCtx(ctx context.Context) bool {
+	if ctx == nil {
+		ctx = context.Background()
 	}
+	if !m.isClosed.CompareAndSwap(false, true) {
+		return false // 已经关闭
+	}
+
+	// 先登记预算再发关闭信号：runWheel 的收尾分支要能立刻读到本次的 ctx
+	m.closeCtx.Store(&ctx)
+	unregisterTimerManager(m)
 
 	// 发送关闭信号
 	close(m.closeChan)
 
-	m.wheelWG.Wait()
+	timedOut := false
+	done := make(chan struct{})
+	go func() {
+		m.wheelWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		// 时间轮协程仍卡在业务回调里：标记已置位，后续 AddTimer 一律被拒，
+		// 这里不能再等，否则整个进程退出流程被一个 Tick 拖死。
+		timedOut = true
+		vars.Error("等待时间轮退出超时，强制结束收尾: 剩余定时器=%d, %v",
+			m.GetTimerCount(), ctx.Err())
+	}
 
 	for _, wheel := range m.wheels {
 		wheel.isRunning.Store(false)
 	}
+	m.drainPendingAdds()
+	return timedOut
+}
+
+// drainPendingAdds 排空各时间轮残留的入队调度项并计入统计。
+//
+// 轮协程已退出，这些 task 永远不会被 handleTimerAdd 消化：对应定时器既不在链上，
+// 也不会有人再执行它。留着不管就是「幻影活跃」——IsActive() 仍报 true，
+// 实例却永远回不了对象池，而且监控上完全看不出这笔损失。
+func (m *TimerManager) drainPendingAdds() {
+	var total int64
+	for _, wheel := range m.wheels {
+	drain:
+		for {
+			select {
+			case task := <-wheel.addTimerChan:
+				total++
+				// task.timer 理论上恒非空（入队方都带实例），零值只可能来自误用，
+				// 这里只断计数不追状态，避免收尾路径反过来 panic。
+				if task.timer != nil {
+					if parent := task.timer.GetParent(); parent != nil {
+						// 撤销 addTimerLocked 置上的活跃标记；管理器已关闭，
+						// 并发的 AddTimer 会在入口直接返回 ErrTimerManagerClosed，不会重写。
+						parent.isActive.Store(false)
+					}
+				}
+			default:
+				break drain
+			}
+		}
+	}
+	if total == 0 {
+		return
+	}
+	m.stats.timersDropped.Add(total)
+	m.stats.timersRemoved.Add(total)
+	vars.Warning("关闭时丢弃入队通道残留调度项: 数量=%d, 累计丢弃=%d",
+		total, m.stats.timersDropped.Load())
 }
 
 // GetStats 返回性能统计信息
@@ -369,9 +540,39 @@ func (rt *timerRuntime) shutdown() {
 	rt.closeOnce.Do(func() { close(rt.closech) })
 }
 
+// TimerLostInfo 描述一个彻底失联（续期重试仍失败、已被强制回收）的定时器。
+type TimerLostInfo struct {
+	Manager   *TimerManager // 归属管理器
+	UID       int64         // 定时器唯一ID
+	Interval  int64         // 执行间隔（毫秒）
+	Remaining int64         // 剩余执行次数，-1 表示无限
+	Cause     error         // 续期失败的最终原因
+}
+
+// onTimerLost 业务注册的失联回调（copy-on-write，读写不竞争）
+var onTimerLost atomic.Pointer[func(TimerLostInfo)]
+
+// SetOnTimerLost 注册「定时器彻底失联」回调；传 nil 取消。
+//
+// 正常路径下该回调永不触发；一旦触发说明下游 Tick 太慢导致调度项被丢弃，
+// 业务必须据此重建定时器。回调在 timeTick 消费协程上执行，禁止阻塞。
+func SetOnTimerLost(fn func(TimerLostInfo)) {
+	if fn == nil {
+		onTimerLost.Store(nil)
+		return
+	}
+	onTimerLost.Store(&fn)
+}
+
 // 全局状态（定时器系统单例相关）
 var (
+	// timerRegistryMu 冻结注册表的「批量关闭」与「单个注册」：Run/TimeStop 取待关
+	// 清单的窗口内，并发 NewTimerManager 必须排在它后面。否则刚建好的管理器会
+	// 落在清单外却被随后的清空抹掉，且从未 Close —— 它名下 5 个时间轮协程 +
+	// 5 个 ticker 永久泄漏。清单内的管理器各自 Close 时自摘，不碰这段临界区。
+	timerRegistryMu     sync.Mutex
 	timerManagerMap     = syncmap.NewMap[*TimerManager, bool]() // map[*TimerManager]bool
+	globalTimerUID      atomic.Int64                            // 定时器ID：跨管理器全局唯一
 	defaultTimerManager atomic.Pointer[TimerManager]
 	timerRT             atomic.Pointer[timerRuntime]
 
@@ -381,6 +582,35 @@ var (
 	timerChannelMu    sync.Mutex
 	timerChannelReady bool
 )
+
+// registerTimerManager 把管理器登记进注册表
+func registerTimerManager(mgr *TimerManager) {
+	timerRegistryMu.Lock()
+	timerManagerMap.Store(mgr, true)
+	timerRegistryMu.Unlock()
+}
+
+// unregisterTimerManager 从注册表摘除管理器（只由该管理器自己的 Close 调用）
+func unregisterTimerManager(mgr *TimerManager) {
+	timerRegistryMu.Lock()
+	timerManagerMap.Delete(mgr)
+	timerRegistryMu.Unlock()
+}
+
+// snapshotTimerManagers 在冻结注册表的窗口内取出当前存量的全部管理器。
+//
+// 返回后立刻放开锁：Close 内部会反过来申请这把锁做自摘，持锁等待退出会自锁。
+func snapshotTimerManagers() []*TimerManager {
+	timerRegistryMu.Lock()
+	defer timerRegistryMu.Unlock()
+
+	mgrs := make([]*TimerManager, 0, timerManagerMap.Length())
+	timerManagerMap.Range(func(mgr *TimerManager, _ bool) bool {
+		mgrs = append(mgrs, mgr)
+		return true
+	})
+	return mgrs
+}
 
 // ensureTimerChannel 确保调度通道已创建（可被 Stop 后重建）
 func ensureTimerChannel() {
@@ -433,6 +663,7 @@ func NewTimerManager() *TimerManager {
 			wheelConfig:  config,
 			tickWheel:    list.NewList(),
 			addTimerChan: make(chan timerTask, MaxAddTimerChannelNum),
+			mgr:          mgr,
 		}
 		wheel.isRunning.Store(true)
 		mgr.wheels[i] = wheel
@@ -445,7 +676,7 @@ func NewTimerManager() *TimerManager {
 		}(wheel, TimerType(i))
 	}
 
-	timerManagerMap.Store(mgr, true)
+	registerTimerManager(mgr)
 	return mgr
 }
 
@@ -468,12 +699,15 @@ func (m *TimerManager) runWheel(wheel *TimerWheel, wheelType TimerType) {
 			select {
 			case <-m.closeChan:
 				wheel.isRunning.Store(false)
-				m.cleanupWheel(wheel)
+				m.cleanupWheel(wheel, wheelType)
 				vars.Info("时间轮停止: %s", wheelType.String())
 
 			case task, ok := <-wheel.addTimerChan:
+				// 通道永不关闭（resetTimerChannel 刻意不 close，见其注释），
+				// 此分支只是防御性兜底：真收到 ok=false 说明上游被改坏了，
+				// 继续循环只会对着 nil 通道空转，直接退出把这个轮暴露出来。
 				if !ok {
-					// 通道已关闭
+					wheel.isRunning.Store(false)
 					return
 				}
 				m.handleTimerAdd(wheel, task)
@@ -574,7 +808,7 @@ func (m *TimerManager) processWheelTick(wheel *TimerWheel, wheelType TimerType) 
 	// 告警必须在解锁之后：vars 异步日志缓冲满时会阻塞最长 5 秒
 	if dropped > 0 {
 		m.stats.timersDropped.Add(dropped)
-		m.notifyBackpressure(wheelType, dropped)
+		m.notifyBackpressure(wheel, wheelType, dropped)
 	}
 }
 
@@ -606,6 +840,7 @@ func (m *TimerManager) tickWheelSection(wheel *TimerWheel, wheelType TimerType) 
 			node.GetNode().Remove()
 			parent.wheel.Store(nil)
 			wheel.timerCount.Add(-1)
+			m.stats.timersRemoved.Add(1)
 			return true
 		}
 
@@ -660,14 +895,53 @@ func (m *TimerManager) tickWheelSection(wheel *TimerWheel, wheelType TimerType) 
 // 关键：业务回调（Tick）必须在完全释放 wheelLock 之后执行。
 // Tick 内部调用 Remove / AddTimer 会再次申请同一把 wheelLock，
 // 若持锁执行会立即自锁，导致 TimeStop 永久挂起（进程停不下来）。
-func (m *TimerManager) cleanupWheel(wheel *TimerWheel) {
+//
+// 收尾预算来自 CloseCtx：每个待补跑的回调执行前都复查一次 ctx，超时就放弃剩余
+// 回调并把实例强制归还对象池。一个卡在下游锁上的 Tick 不该拖死整个进程退出。
+func (m *TimerManager) cleanupWheel(wheel *TimerWheel, wheelType TimerType) {
 	// 阶段一：持锁摘链，收集已过期的定时器（临界区独立成方法，panic 也不会扣住轮锁）
 	expired := m.drainWheelLocked(wheel)
 
+	ctx := context.Background()
+	if p := m.closeCtx.Load(); p != nil {
+		ctx = *p
+	}
+
 	// 阶段二：无锁执行（此时 Tick 内 Remove/AddTimer 都不会再触碰 wheelLock）
-	for _, task := range expired {
+	for i, task := range expired {
+		if ctx.Err() != nil {
+			m.abandonExpired(wheelType, expired[i:])
+			return
+		}
 		m.executeTimer(task)
 	}
+}
+
+// abandonExpired 收尾超时时强制作废剩余定时器并归还对象池。
+//
+// 此刻没有回调在飞（inTick==0），作废结论为 releaseNow，因此必须在解锁后自行
+// 归还——这一步不能省，否则实例既离开了时间轮又留在池外，永久占着内存。
+// drainWheelLocked 已把这批定时器计入 timersRemoved，这里不重复计数。
+func (m *TimerManager) abandonExpired(wheelType TimerType, tasks []timerTask) {
+	for _, task := range tasks {
+		if task.timer == nil {
+			continue
+		}
+		parent := task.timer.GetParent()
+		if parent == nil {
+			continue
+		}
+		parent.mu.Lock()
+		outcome := parent.removeFromManagerLocked(true)
+		parent.mu.Unlock()
+		if outcome == releaseNow {
+			parent.releaseToPool()
+		}
+	}
+	vars.Warning("收尾超时，强制归还定时器: 轮=%s, 数量=%d, 未执行到期回调",
+		wheelType.String(), len(tasks))
+	// 监控口径：这些定时器连最后一次 Tick 都没补上
+	m.stats.timersDropped.Add(int64(len(tasks)))
 }
 
 // drainWheelLocked 持锁清空时间轮，返回需要补跑一次到期回调的调度项。

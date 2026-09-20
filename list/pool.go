@@ -25,7 +25,7 @@ func releaseNode(node *Node) {
 	node.pre = nil
 	node.next = nil
 	node.data = nil
-	node.list = nil
+	node.list.Store(nil)
 	node.nodeType = nil
 	node.delPending = false
 

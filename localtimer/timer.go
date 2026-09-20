@@ -506,6 +506,12 @@ func (t *Timer) detachFromWheelLocked(wheel *TimerWheel) {
 	// 造成计数与链表长度漂移（-1 / 幻影 +1）。
 	wheel.timerCount.Add(-1)
 	t.wheel.Store(nil)
+	// 统计口径挂在「真正摘掉一条链」这一点上：暂停、移除、耗尽回收、复活前清理
+	// 都会经过这里，而派发与迁移走的是 Node.Remove（不改归属为 nil 的语义），
+	// 不会被误计。轮上没有归属管理器时（构造期）留空跳过。
+	if wheel.mgr != nil {
+		wheel.mgr.stats.timersRemoved.Add(1)
+	}
 }
 
 // Remove 公共移除方法：彻底作废本实例——停止调度并归还对象池。

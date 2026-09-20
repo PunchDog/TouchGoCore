@@ -40,16 +40,26 @@ func TestWebsocketListenPathsDedup(t *testing.T) {
 	}
 }
 
-func TestIsAllowedOrigin(t *testing.T) {
-	allowedOrigins = []string{"https://example.com", "*.game.local"}
-	if !isAllowedOrigin("https://example.com", "example.com") {
-		t.Fatal("exact origin")
+func TestOriginPolicyAllows(t *testing.T) {
+	p := originPolicy{
+		allowedOrigins: []string{"https://example.com", "*.game.local"},
+		checkOrigin:    true,
 	}
-	if !isAllowedOrigin("https://a.game.local", "a.game.local") {
-		t.Fatal("wildcard")
+	cases := []struct {
+		host string
+		want bool
+	}{
+		{"example.com", true},
+		{"a.game.local", true},
+		{"evil.com", false},
+		// 通配不得被「拼前缀」绕过
+		{"evil-example.com", false},
+		{"game.local", false}, // 裸域本身不属于子域
 	}
-	if isAllowedOrigin("https://evil.com", "evil.com") {
-		t.Fatal("should reject")
+	for _, c := range cases {
+		if got := p.allows(c.host); got != c.want {
+			t.Fatalf("allows(%q)=%v want %v", c.host, got, c.want)
+		}
 	}
 }
 

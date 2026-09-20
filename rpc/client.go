@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"reflect"
 	"strconv"
 	"sync"
@@ -43,7 +44,7 @@ type RpcClient struct {
 	// 连接 (原子指针：未连接时 Load 返回 nil，避免 atomic.Value.Store(nil) panic)
 	conn atomic.Pointer[grpc.ClientConn]
 	// 流复用: 客户端流
-	stream atomic.Value // message.Grpc_MsgClient
+	stream   atomic.Value // message.Grpc_MsgClient
 	streamMu sync.Mutex
 	// streamCancel 当前流专属 context 的取消函数，随流重建/销毁。
 	// 不能用某一次调用的 timeout ctx 建流：那次调用结束即取消，缓存流会立刻失效。
@@ -56,15 +57,49 @@ type RpcClient struct {
 	useTLS bool
 	// 超时配置
 	timeout time.Duration
-	// 回调接口
-	callbacks *ClientCallbacks
+	// closed 客户端已被主动关闭：关闭后不得再被重连定时器复活
+	closed atomic.Bool
+	// 回调接口（原子指针：SetCallbacks 可与 recvLoop/发送并发）
+	callbacks atomic.Pointer[ClientCallbacks]
+}
+
+// Close 主动关闭客户端：停重连定时器、作废流、唤醒等待中的请求、关连接并从注册表摘除。
+// 幂等，重复调用只清理一次。
+func (c *RpcClient) Close() error {
+	if !c.closed.CompareAndSwap(false, true) {
+		return nil
+	}
+	// 先摘注册表：Close 之后注册表不该再暴露一个已废弃的客户端
+	if rpcClient_ != nil {
+		if cur, ok := rpcClient_.Load(c.serverName); ok && cur == c {
+			rpcClient_.Delete(c.serverName)
+		}
+	}
+	c.connStatus.Store(false)
+	c.invalidateStream(nil)
+	c.failAllPending()
+	if conn := c.conn.Swap(nil); conn != nil {
+		if err := conn.Close(); err != nil {
+			vars.Error("RPC客户端关闭连接失败[%s]: %v", c.fullAddr, err)
+		}
+	}
+	// 所有权交还对象池：注册表里已无引用，Pause 会让这个实例永久悬挂
+	c.Remove()
+	c.triggerOnDisconnected(nil)
+	return nil
+}
+
+// IsClosed 返回客户端是否已被主动关闭。
+func (c *RpcClient) IsClosed() bool {
+	return c.closed.Load()
 }
 
 func (c *RpcClient) Tick() {
-	// 触发重连回调
-	if c.callbacks != nil && c.callbacks.OnReconnecting != nil {
-		c.callbacks.OnReconnecting(c.serverName, 0)
+	if c.closed.Load() {
+		return
 	}
+	// 触发重连回调
+	c.triggerOnReconnecting()
 
 	// 断线重连，链接上了就从计时器里移除
 	conn, err := newClient(c.fullAddr, c.useTLS)
@@ -91,6 +126,9 @@ func (c *RpcClient) Tick() {
 
 // markDisconnected 标记连接断开，并启动重连定时器
 func (c *RpcClient) markDisconnected() {
+	if c.closed.Load() {
+		return
+	}
 	c.connStatus.Store(false)
 	c.invalidateStream(nil)
 	c.failAllPending()
@@ -102,6 +140,10 @@ func (c *RpcClient) markDisconnected() {
 }
 
 func (c *RpcClient) SendMsg(protocol1, protocol2 int32, pb proto.Message, callfunc func(pb1 proto.Message)) {
+	if c.closed.Load() {
+		vars.Error("RPC客户端已关闭[%s]，协议:%d:%d", c.fullAddr, protocol1, protocol2)
+		return
+	}
 	conn := c.conn.Load()
 	if conn == nil {
 		vars.Error("RPC客户端连接未就绪[%s]，协议:%d:%d", c.fullAddr, protocol1, protocol2)
@@ -153,7 +195,19 @@ func (c *RpcClient) SendMsg(protocol1, protocol2 int32, pb proto.Message, callfu
 		vars.Error("RPC客户端等待响应超时[%s] 协议:%d:%d request_id=%d", c.fullAddr, protocol1, protocol2, reqID)
 		return
 	}
+	if isErrorPacket(recv) {
+		// 服务端已明确失败（超时/handler 出错），不必再走一次业务回调
+		err := fmt.Errorf("RPC服务端处理失败[%s] 协议:%d:%d request_id=%d", c.fullAddr, protocol1, protocol2, reqID)
+		vars.Error("%v", err)
+		c.triggerOnError(err)
+		return
+	}
 	c.dispatchRecv(protocol1, protocol2, recv, callfunc)
+}
+
+// isErrorPacket 判断响应帧是否为服务端错误包（Cmd=ErrorCmd，Body 为空）。
+func isErrorPacket(msg *message.FSMessage) bool {
+	return msg != nil && msg.GetHead().GetCmd() == ErrorCmd
 }
 
 // ensureStream 复用或重建长连接流（流 context 与单次调用超时解耦）
@@ -286,13 +340,25 @@ func (c *RpcClient) failAllPending() {
 
 func (c *RpcClient) dispatchRecv(protocol1, protocol2 int32, recv *message.FSMessage, callfunc func(pb1 proto.Message)) {
 	res := util.PasreFSMessage(recv)
-	if callfunc != nil && res != nil {
+	if res == nil {
+		vars.Error("RPC客户端响应解析失败[%s] 协议:%d:%d", c.fullAddr, protocol1, protocol2)
+		return
+	}
+	if callfunc != nil {
 		reflectType := reflect.TypeOf(callfunc)
-		pb1Type := reflectType.In(0)
-		if reflect.TypeOf(res) == pb1Type {
-			callfunc(res)
+		resType := reflect.TypeOf(res)
+		// 签名可能是 func() 或多参，直接 In(0) 会 panic
+		if reflectType.NumIn() != 1 {
+			vars.Error("RPC客户端回调签名不合法[%s] 协议:%d:%d: 需要 func(proto.Message)，实际 %v",
+				c.fullAddr, protocol1, protocol2, reflectType)
+		} else if pb1Type := reflectType.In(0); !resType.AssignableTo(pb1Type) {
+			// 用可赋值判定而不是相等判定：形参常写成 proto.Message 接口，
+			// 与具体响应类型永远不相等，旧写法下业务回调根本不会被调用。
+			vars.Error("RPC客户端回调类型不匹配[%s] 期望:%v 实际:%v", c.fullAddr, pb1Type, resType)
 		} else {
-			vars.Error("RPC客户端回调类型不匹配[%s] 期望:%v 实际:%v", c.fullAddr, pb1Type, reflect.TypeOf(res))
+			callCallback(fmt.Sprintf("client[%s].callfunc %d:%d", c.serverName, protocol1, protocol2), func() {
+				callfunc(res)
+			})
 		}
 	}
 	c.triggerOnMessageReceived(protocol1, protocol2, res)
@@ -353,8 +419,10 @@ func NewRpcClient(servername, addr string, port int) *RpcClient {
 		c.fullAddr = addr + ":" + strconv.Itoa(port)
 		c.serverName = servername
 		c.useTLS = useTLS
-		c.timeout = 30 * time.Second       // 默认超时 30 秒
-		c.callbacks = NewClientCallbacks() // 初始化回调接口
+		// 池化实例可能带着上一次的 closed 标记回来
+		c.closed.Store(false)
+		c.timeout = 30 * time.Second // 默认超时 30 秒
+		c.SetCallbacks(NewClientCallbacks())
 	})
 	if err != nil {
 		vars.Error("创建RPC客户端失败[%s:%d]: %v", addr, port, err)
@@ -381,38 +449,63 @@ func NewRpcClient(servername, addr string, port int) *RpcClient {
 
 // ==================== 回调触发方法（内部使用）====================
 
+// triggerOnReconnecting 触发重连回调
+func (c *RpcClient) triggerOnReconnecting() {
+	cbs := c.callbacks.Load()
+	if cbs != nil && cbs.OnReconnecting != nil {
+		callCallback(fmt.Sprintf("client[%s].OnReconnecting", c.serverName), func() {
+			cbs.OnReconnecting(c.serverName, 0)
+		})
+	}
+}
+
 // triggerOnConnected 触发连接成功回调
 func (c *RpcClient) triggerOnConnected() {
-	if c.callbacks != nil && c.callbacks.OnConnected != nil {
-		c.callbacks.OnConnected(c.serverName)
+	cbs := c.callbacks.Load()
+	if cbs != nil && cbs.OnConnected != nil {
+		callCallback(fmt.Sprintf("client[%s].OnConnected", c.serverName), func() {
+			cbs.OnConnected(c.serverName)
+		})
 	}
 }
 
 // triggerOnDisconnected 触发断开连接回调
 func (c *RpcClient) triggerOnDisconnected(err error) {
-	if c.callbacks != nil && c.callbacks.OnDisconnected != nil {
-		c.callbacks.OnDisconnected(c.serverName, err)
+	cbs := c.callbacks.Load()
+	if cbs != nil && cbs.OnDisconnected != nil {
+		callCallback(fmt.Sprintf("client[%s].OnDisconnected", c.serverName), func() {
+			cbs.OnDisconnected(c.serverName, err)
+		})
 	}
 }
 
 // triggerOnError 触发错误回调
 func (c *RpcClient) triggerOnError(err error) {
-	if c.callbacks != nil && c.callbacks.OnError != nil {
-		c.callbacks.OnError(c.serverName, err)
+	cbs := c.callbacks.Load()
+	if cbs != nil && cbs.OnError != nil {
+		callCallback(fmt.Sprintf("client[%s].OnError", c.serverName), func() {
+			cbs.OnError(c.serverName, err)
+		})
 	}
 }
 
 // triggerOnMessageSent 触发消息发送成功回调
 func (c *RpcClient) triggerOnMessageSent(protocol1, protocol2 int32, req proto.Message) {
-	if c.callbacks != nil && c.callbacks.OnMessageSent != nil {
-		c.callbacks.OnMessageSent(c.serverName, protocol1, protocol2, req)
+	cbs := c.callbacks.Load()
+	if cbs != nil && cbs.OnMessageSent != nil {
+		callCallback(fmt.Sprintf("client[%s].OnMessageSent", c.serverName), func() {
+			cbs.OnMessageSent(c.serverName, protocol1, protocol2, req)
+		})
 	}
 }
 
 // triggerOnMessageReceived 触发消息接收回调
 func (c *RpcClient) triggerOnMessageReceived(protocol1, protocol2 int32, resp proto.Message) {
-	if c.callbacks != nil && c.callbacks.OnMessageReceived != nil {
-		c.callbacks.OnMessageReceived(c.serverName, protocol1, protocol2, resp)
+	cbs := c.callbacks.Load()
+	if cbs != nil && cbs.OnMessageReceived != nil {
+		callCallback(fmt.Sprintf("client[%s].OnMessageReceived", c.serverName), func() {
+			cbs.OnMessageReceived(c.serverName, protocol1, protocol2, resp)
+		})
 	}
 }
 
@@ -420,10 +513,13 @@ func (c *RpcClient) triggerOnMessageReceived(protocol1, protocol2 int32, resp pr
 
 // SetCallbacks 设置客户端回调接口
 func (c *RpcClient) SetCallbacks(callbacks *ClientCallbacks) {
-	c.callbacks = callbacks
+	if callbacks == nil {
+		callbacks = NewClientCallbacks()
+	}
+	c.callbacks.Store(callbacks)
 }
 
 // GetCallbacks 获取客户端回调接口
 func (c *RpcClient) GetCallbacks() *ClientCallbacks {
-	return c.callbacks
+	return c.callbacks.Load()
 }

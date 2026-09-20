@@ -6,6 +6,7 @@ import (
 	"net"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"touchgocore/config"
@@ -44,19 +45,22 @@ type StaticDiscovery struct {
 }
 
 // NewStaticDiscovery 从RpcAddr配置创建静态服务发现
+// servers 与 clients 都要登记：客户端配置里的服务名同样需要被 Resolve 到。
 func NewStaticDiscovery(servers, clients []*config.RpcAddr) *StaticDiscovery {
 	sd := &StaticDiscovery{
 		endpoints: make(map[string][]*ServiceEndpoint),
 	}
 
-	for _, s := range servers {
-		ep := &ServiceEndpoint{
-			Name:   s.Name,
-			Addr:   s.Addr,
-			Port:   s.Port,
-			UseTLS: s.UseTLS,
+	for _, group := range [][]*config.RpcAddr{servers, clients} {
+		for _, s := range group {
+			ep := &ServiceEndpoint{
+				Name:   s.Name,
+				Addr:   s.Addr,
+				Port:   s.Port,
+				UseTLS: s.UseTLS,
+			}
+			sd.endpoints[s.Name] = append(sd.endpoints[s.Name], ep)
 		}
-		sd.endpoints[s.Name] = append(sd.endpoints[s.Name], ep)
 	}
 
 	return sd
@@ -165,19 +169,19 @@ type DiscoveryManager struct {
 	mu        sync.RWMutex
 }
 
-var globalDiscoveryManager *DiscoveryManager
+var globalDiscoveryManager atomic.Pointer[DiscoveryManager]
 
 // InitDiscovery 初始化全局服务发现管理器
 func InitDiscovery(sd ServiceDiscovery) {
-	globalDiscoveryManager = &DiscoveryManager{
+	globalDiscoveryManager.Store(&DiscoveryManager{
 		discovery: sd,
-	}
+	})
 	vars.Info("服务发现管理器初始化完成")
 }
 
 // GetDiscovery 获取全局服务发现管理器
 func GetDiscovery() *DiscoveryManager {
-	return globalDiscoveryManager
+	return globalDiscoveryManager.Load()
 }
 
 // Resolve 解析服务端点
@@ -214,30 +218,3 @@ func (dm *DiscoveryManager) Close() error {
 	}
 	return nil
 }
-
-// ==================== 预留：etcd 服务发现 ====================
-
-// EtcdDiscoveryConfig etcd服务发现配置
-// 当项目需要etcd支持时，取消注释并实现
-type EtcdDiscoveryConfig struct {
-	Endpoints   []string      // etcd集群地址
-	Prefix      string        // 服务注册前缀，如 "/services/"
-	DialTimeout time.Duration // 连接超时
-	TTL         time.Duration // 租约TTL
-}
-
-// EtcdDiscovery 基于etcd的服务发现（预留）
-// 实现步骤:
-// 1. go get go.etcd.io/etcd/client/v3
-// 2. 实现 ServiceDiscovery 接口
-// 3. 使用 InitDiscovery(NewEtcdDiscovery(cfg)) 切换
-//
-// type EtcdDiscovery struct {
-//     client *clientv3.Client
-//     prefix string
-// }
-//
-// func NewEtcdDiscovery(cfg EtcdDiscoveryConfig) (*EtcdDiscovery, error) { ... }
-// func (ed *EtcdDiscovery) Resolve(ctx context.Context, serviceName string) ([]*ServiceEndpoint, error) { ... }
-// func (ed *EtcdDiscovery) Watch(ctx context.Context, serviceName string) (<-chan []*ServiceEndpoint, error) { ... }
-// func (ed *EtcdDiscovery) Close() error { ... }

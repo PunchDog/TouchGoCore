@@ -108,21 +108,13 @@ func Stop(ctx context.Context) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	cfg := corectx.CfgFrom(ctx)
-	if cfg == nil {
-		return
-	}
-	rpcCfg := cfg.RpcOf()
-	if rpcCfg == nil {
-		return
-	}
 
 	// 关闭服务发现
 	if dm := GetDiscovery(); dm != nil {
 		dm.Close()
 	}
 
-	// 停止所有RPC服务器
+	// 停止所有RPC服务器：以注册表为准，配置缺失或改动也要能关掉已起的server
 	serverCount := 0
 	if service_ != nil {
 		service_.Range(func(key string, v1 *RpcServer) bool {
@@ -130,23 +122,20 @@ func Stop(ctx context.Context) {
 			serverCount++
 			return true
 		})
+		service_.Clear()
 	}
 
 	// 关闭所有RPC客户端连接
 	clientCount := 0
 	if rpcClient_ != nil {
-		rpcClient_.Range(func(key string, v1 *RpcClient) bool {
-			// 先取消流 context 放掉 recvLoop，再关连接
-			v1.invalidateStream(nil)
-			if conn := v1.conn.Swap(nil); conn != nil {
-				_ = conn.Close()
-				clientCount++
+		rpcClient_.Range(func(_ string, v1 *RpcClient) bool {
+			if err := v1.Close(); err != nil {
+				vars.Error("RPC客户端关闭失败[%s]: %v", v1.fullAddr, err)
 			}
-
-			// 退出程序，从注册表中移除
-			v1.Remove()
+			clientCount++
 			return true
 		})
+		rpcClient_.Clear()
 	}
 	vars.Info("RPC服务停止: 服务器%d个, 客户端%d个", serverCount, clientCount)
 }

@@ -6,6 +6,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"touchgocore/config"
 	"touchgocore/corectx"
 	"touchgocore/metrics"
 	"touchgocore/syncmap"
@@ -30,10 +31,22 @@ var (
 // ============ 原有代码 ============
 
 const (
-	DEFAULT_WRITE_BUFFER_SIZE = 1024 * 1024
-	DEFAULT_READ_BUFFER_SIZE  = 1024 * 1024
+	// 下面两个常量是队列容量，单位是「条数」而不是字节。
+	//
+	// 修复前它们叫 DEFAULT_WRITE_BUFFER_SIZE / DEFAULT_READ_BUFFER_SIZE，
+	// 值是 1MiB，还被直接当成 chan 容量用：每条连接的发送队列一上来就预留
+	// 100 万个槽（每槽一个 24B 切片头 ≈ 24MB），几百条连接就能把进程吃穿。
+	defaultSendQueueEntries = 1024
+	defaultRecvQueueEntries = 1024
 	// 背压阈值：当通道满于此比例时，记录警告日志
 	BACKPRESSURE_THRESHOLD = 0.9
+)
+
+// 心跳与超时的默认值（毫秒），可被 ws 配置覆盖
+const (
+	defaultPingIntervalMS = 30 * 1000
+	defaultReadTimeoutMS  = 90 * 1000
+	defaultWriteTimeoutMS = 5 * 1000
 )
 
 // ============ 认证函数注册 ============
@@ -62,26 +75,53 @@ func GetAuthFunc() AuthFunc {
 }
 
 var (
-	closeCh              chan bool          = nil
-	msgQueue             chan *msgQueueType = nil
-	wsRunCtx             context.Context    = context.Background()
-	clientpool           *sync.Pool         = nil
-	clientcall           *syncmap.Map[string, *sync.Pool]
-	writeBufferSize      int                  = DEFAULT_WRITE_BUFFER_SIZE
-	readBufferSize       int                  = DEFAULT_READ_BUFFER_SIZE
-	enableBackpressure   bool                 = false
-	dropMessageOnFull    bool                 = false
-	workerPoolEnabled    bool                 = false // 是否启用 Worker Pool
-	workerPoolSize       int                  = 0     // Worker 数量
-	shardByKey           bool                 = false // 是否按UID分片
-	workerPoolQueues     []chan *msgQueueType         // Worker 消息队列
-	workerPoolStop       chan struct{}                // Worker Pool 停止信号
-	workerPoolWaitGroup  sync.WaitGroup               // Worker 等待组
-	workerPoolStats      []*workerStats               // Worker 统计信息
-	workerPoolStatsMutex sync.Mutex                   // 统计信息保护锁
-	stopOnce             sync.Once
-	tickDone             chan struct{}
+	closeCh            chan bool          = nil
+	msgQueue           chan *msgQueueType = nil
+	wsRunCtx           context.Context    = context.Background()
+	clientpool         *sync.Pool         = nil
+	clientcall         *syncmap.Map[string, *sync.Pool]
+	writeQueueEntries  int  = defaultSendQueueEntries
+	readQueueEntries   int  = defaultRecvQueueEntries
+	enableBackpressure bool = false
+	dropMessageOnFull  bool = false
+	stopOnce           sync.Once
+	tickDone           chan struct{}
+
+	// pingInterval / readTimeout / writeTimeout 是心跳与超时参数，按 Run 生效
+	pingInterval = defaultPingIntervalMS * time.Millisecond
+	readTimeout  = defaultReadTimeoutMS * time.Millisecond
+	writeTimeout = defaultWriteTimeoutMS * time.Millisecond
+
+	// workerPool 非 nil 表示并行消费模式；每次 Run 新建，见 workerPoolState 注释
+	workerPool atomic.Pointer[workerPoolState]
 )
+
+// workerPoolState 是一次 Run → Stop 生命周期内的并发消费端。
+//
+// 收进结构体而不是摊成六个包级全局：workerPoolStop 与 workerPoolWaitGroup 跨
+// Run 复用会出两类事故——Stop 只 close 一次通道，第二轮 Run 的 Worker 收到
+// 上一轮的关闭信号立刻退出（消息再没人处理）；重复 close 则直接 fatal panic。
+// WaitGroup 同理，上一轮残留的计数会让本轮 Wait 提前返回。
+type workerPoolState struct {
+	queues     []chan *msgQueueType
+	stats      []*workerStats
+	stop       chan struct{}
+	wg         sync.WaitGroup
+	size       int
+	shardByKey bool
+	// fullCount：Worker 队列满、被迫走兜底路径的次数
+	fullCount atomic.Int64
+	// lastFullWarn：满队列告警的限频时间戳（UnixMilli）
+	lastFullWarn atomic.Int64
+}
+
+// WorkerPoolFullCount 返回 Worker 队列满的兜底次数（串行模式恒为 0）
+func WorkerPoolFullCount() int64 {
+	if p := workerPool.Load(); p != nil {
+		return p.fullCount.Load()
+	}
+	return 0
+}
 
 // workerStats 用于收集 Worker 的统计信息
 type workerStats struct {
@@ -166,13 +206,14 @@ func Run(ctx context.Context) error {
 	enableBackpressure = true
 	dropMessageOnFull = cfg.DropOnFull()
 
-	writeBufferSize = cfg.WriteQueueCapacity(DEFAULT_WRITE_BUFFER_SIZE)
-	readBufferSize = cfg.QueueCapacity(DEFAULT_READ_BUFFER_SIZE)
+	writeQueueEntries = cfg.WriteQueueCapacity(defaultSendQueueEntries)
+	readQueueEntries = cfg.QueueCapacity(defaultRecvQueueEntries)
+	applyTimeoutConfig(cfg.Ws)
 
 	closeCh = make(chan bool)
 	tickDone = make(chan struct{})
 	stopOnce = sync.Once{}
-	msgQueue = make(chan *msgQueueType, readBufferSize)
+	msgQueue = make(chan *msgQueueType, readQueueEntries)
 	clientpool = &sync.Pool{
 		New: func() interface{} {
 			return &Client{
@@ -181,16 +222,13 @@ func Run(ctx context.Context) error {
 		},
 	}
 
-	workerPoolSize = cfg.Ws.WorkerPoolSize
-	if workerPoolSize > 0 {
-		workerPoolEnabled = true
-		shardByKey = cfg.Ws.ShardByKey
-		if shardByKey {
-			vars.Info("WebSocket Worker Pool 启用: %d workers, 按UID分片", workerPoolSize)
+	if size := cfg.Ws.WorkerPoolSize; size > 0 {
+		initWorkerPool(size, cfg.Ws.ShardByKey)
+		if cfg.Ws.ShardByKey {
+			vars.Info("WebSocket Worker Pool 启用: %d workers, 按UID分片", size)
 		} else {
-			vars.Info("WebSocket Worker Pool 启用: %d workers, 非分片模式", workerPoolSize)
+			vars.Info("WebSocket Worker Pool 启用: %d workers, 非分片模式", size)
 		}
-		initWorkerPool()
 	} else {
 		vars.Info("WebSocket 串行处理模式")
 	}
@@ -238,15 +276,39 @@ func Stop(ctx context.Context) {
 	}
 }
 
+// applyTimeoutConfig 读取心跳与超时配置，未配置项沿用默认值。
+func applyTimeoutConfig(ws *config.WebsocketConfig) {
+	pingMS, readMS, writeMS := defaultPingIntervalMS, defaultReadTimeoutMS, defaultWriteTimeoutMS
+	if ws != nil {
+		if ws.PingIntervalMS > 0 {
+			pingMS = ws.PingIntervalMS
+		}
+		if ws.ReadTimeoutMS > 0 {
+			readMS = ws.ReadTimeoutMS
+		}
+		if ws.WriteTimeoutMS > 0 {
+			writeMS = ws.WriteTimeoutMS
+		}
+	}
+	// 读超时必须显著大于 ping 间隔：否则服务端还没发出探测帧，
+	// 读协程就先把自己超时断连，表现为「空闲连接被随机踢掉」。
+	if readMS <= pingMS*2 {
+		vars.Warning("WebSocket read_timeout_ms(%d) 未显著大于 2×ping_interval_ms(%d)，空闲连接可能被误踢",
+			readMS, pingMS)
+	}
+	pingInterval = time.Duration(pingMS) * time.Millisecond
+	readTimeout = time.Duration(readMS) * time.Millisecond
+	writeTimeout = time.Duration(writeMS) * time.Millisecond
+}
+
 func shutdownWebsocket() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	for _, server := range serverList {
+	for _, server := range takeServers() {
 		if err := server.Shutdown(ctx); err != nil {
 			_ = server.Close()
 		}
 	}
 	cancel()
-	serverList = nil
 	if clientMap != nil {
 		clientMap.Range(func(key int64, client *Client) bool {
 			client.Close("")
@@ -255,9 +317,7 @@ func shutdownWebsocket() {
 	}
 	// msgQueue 不做 close：Tick 靠 closeCh/ctx 退出，读协程仍在往里投递，
 	// 关闭会让 send on closed channel 直接 panic。
-	if workerPoolEnabled {
-		stopWorkerPool()
-	}
+	stopWorkerPool()
 }
 
 func Tick() {
@@ -279,8 +339,8 @@ func Tick() {
 			shutdownWebsocket()
 			return
 		case read_msg := <-msgQueue:
-			if workerPoolEnabled {
-				dispatchToWorker(read_msg)
+			if pool := workerPool.Load(); pool != nil {
+				pool.dispatch(read_msg)
 				continue
 			}
 			processMessage(read_msg)
@@ -313,80 +373,122 @@ func processMessage(read_msg *msgQueueType) {
 	}
 }
 
-// initWorkerPool 初始化 Worker Pool
-func initWorkerPool() {
-	workerPoolQueues = make([]chan *msgQueueType, workerPoolSize)
-	workerPoolStats = make([]*workerStats, workerPoolSize)
-	workerPoolStop = make(chan struct{})
-
-	for i := 0; i < workerPoolSize; i++ {
-		workerPoolQueues[i] = make(chan *msgQueueType, readBufferSize)
-		workerPoolStats[i] = &workerStats{
-			WorkerID: i,
-		}
-		workerPoolStats[i].Running.Store(true)
-
-		workerPoolWaitGroup.Add(1)
-		go workerLoop(i, workerPoolQueues[i])
+// initWorkerPool 为本次 Run 新建 Worker Pool。
+//
+// 并发语义（明确契约）：
+//   - shardByKey=true：同一 UID 的消息固定落在同一 Worker，UID 内保序；
+//   - shardByKey=false：轮询派发，跨消息不保证任何顺序；
+//   - 无论哪种，业务 OnMessage 都会被多个 Worker 协程并发调用，
+//     回调实现必须自己保证对共享状态的并发安全。
+func initWorkerPool(size int, shard bool) {
+	if size <= 0 {
+		return
 	}
+	pool := &workerPoolState{
+		queues:     make([]chan *msgQueueType, size),
+		stats:      make([]*workerStats, size),
+		stop:       make(chan struct{}),
+		size:       size,
+		shardByKey: shard,
+	}
+	for i := 0; i < size; i++ {
+		pool.queues[i] = make(chan *msgQueueType, readQueueEntries)
+		pool.stats[i] = &workerStats{WorkerID: i}
+		pool.stats[i].Running.Store(true)
+		pool.wg.Add(1)
+		go pool.workerLoop(i)
+	}
+	workerPool.Store(pool)
 }
 
-// stopWorkerPool 停止 Worker Pool
+// stopWorkerPool 停止本轮 Worker Pool 并取回实例；未启用时直接返回。
 func stopWorkerPool() {
-	close(workerPoolStop)
-	workerPoolWaitGroup.Wait()
+	pool := workerPool.Swap(nil)
+	if pool == nil {
+		return
+	}
+	close(pool.stop)
+	pool.wg.Wait()
 	vars.Info("WebSocket Worker Pool 已停止")
 }
 
-// dispatchToWorker 将消息分发到对应的Worker
-func dispatchToWorker(msg *msgQueueType) {
+// dispatch 把消息投递到对应 Worker 的队列。
+//
+// 本方法跑在 Tick 唯一的消费协程上：这里阻塞 = 全服消息处理停摆，
+// 因此绝不内联执行 processMessage。
+func (pool *workerPoolState) dispatch(msg *msgQueueType) {
 	var workerIdx int
-	if shardByKey {
+	if pool.shardByKey {
 		// 按UID分片：保证同一UID的消息由同一Worker处理，保证顺序性
-		workerIdx = int(msg.uid % int64(workerPoolSize))
+		workerIdx = int(msg.uid % int64(pool.size))
 	} else {
 		// 轮询模式：均匀分配
-		workerIdx = int(serverStats.totalMessages.Load() % int64(workerPoolSize))
+		workerIdx = int(serverStats.totalMessages.Load() % int64(pool.size))
 	}
 
 	UpdateMessageStats()
 
 	select {
-	case workerPoolQueues[workerIdx] <- msg:
-		// 发送成功
+	case pool.queues[workerIdx] <- msg:
+		return
 	default:
-		// Worker队列满，回退到当前goroutine处理
-		workerPoolStats[workerIdx].Errors.Add(1)
-		metrics.WS.IncErrors("queue_full")
-		if dropMessageOnFull {
-			vars.Warning("Worker[%d]队列满，丢弃消息", workerIdx)
-			return
-		}
-		vars.Warning("Worker[%d]队列满，回退到同步处理", workerIdx)
-		processMessage(msg)
 	}
+
+	// Worker 队列满：先回投 msgQueue 兜底，让 Tick 下一轮再试。
+	// 修复前是在这里内联 processMessage——一个慢业务回调就把唯一的消费协程
+	// 占住，所有连接的其它消息一起卡死，等于用「并行」换来了更差的串行。
+	pool.fullCount.Add(1)
+	pool.stats[workerIdx].Errors.Add(1)
+	metrics.WS.IncErrors("queue_full")
+	if pool.shouldWarnFull() {
+		vars.Warning("Worker[%d]队列满，回投接收队列兜底: 累计=%d", workerIdx, pool.fullCount.Load())
+	}
+	select {
+	case msgQueue <- msg:
+		return
+	default:
+	}
+
+	// 接收队列也满：只能丢弃并计数，绝不阻塞消费协程
+	UpdateErrorStats()
+	metrics.WS.IncErrors("drop")
+	vars.Error("Worker 与接收队列同时满，丢弃消息: uid=%d", msg.uid)
+}
+
+// shouldWarnFull 对「队列满」告警按秒限频，避免高负载下日志本身成为瓶颈
+func (pool *workerPoolState) shouldWarnFull() bool {
+	now := util.CurrentMS()
+	last := pool.lastFullWarn.Load()
+	for now-last >= 1000 {
+		if pool.lastFullWarn.CompareAndSwap(last, now) {
+			return true
+		}
+		last = pool.lastFullWarn.Load()
+	}
+	return false
 }
 
 // workerLoop Worker处理循环
-func workerLoop(workerID int, queue chan *msgQueueType) {
-	defer workerPoolWaitGroup.Done()
+func (pool *workerPoolState) workerLoop(workerID int) {
+	defer pool.wg.Done()
 
+	queue := pool.queues[workerID]
 	for {
 		select {
-		case <-workerPoolStop:
+		case <-pool.stop:
 			// 处理剩余消息
 			for len(queue) > 0 {
 				msg := <-queue
 				processMessage(msg)
-				workerPoolStats[workerID].Messages.Add(1)
+				pool.stats[workerID].Messages.Add(1)
 			}
-			workerPoolStats[workerID].Running.Store(false)
+			pool.stats[workerID].Running.Store(false)
 			return
 
 		case msg := <-queue:
 			processMessage(msg)
-			workerPoolStats[workerID].Messages.Add(1)
-			workerPoolStats[workerID].LastMessageAt = util.CurrentTime()
+			pool.stats[workerID].Messages.Add(1)
+			pool.stats[workerID].LastMessageAt = util.CurrentTime()
 		}
 	}
 }

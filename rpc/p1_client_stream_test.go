@@ -70,12 +70,13 @@ func rpcTestEnv(t *testing.T) {
 }
 
 func newFakeClient() *RpcClient {
-	return &RpcClient{
+	c := &RpcClient{
 		serverName: "fake",
 		fullAddr:   "fake://127.0.0.1:0",
 		timeout:    time.Second,
-		callbacks:  NewClientCallbacks(),
 	}
+	c.SetCallbacks(NewClientCallbacks())
+	return c
 }
 
 // startEchoServer 启动一个真实 RPC 服务端并注册回包 handler。
@@ -93,7 +94,7 @@ func startEchoServer(t *testing.T, name string, port int, proto1, proto2 int32, 
 
 	util.RegisterProtocolType(proto1, proto2, wrapperspb.String(""))
 	key := fmt.Sprintf("%s:%d:%d", util.CallRpcMsg, proto1, proto2)
-	id := util.DefaultCallFunc.Register(key, func(_ context.Context, _ *msginfo) proto.Message {
+	id := util.DefaultCallFunc.Register(key, func(_ context.Context, _ *MessageInfo) proto.Message {
 		return wrapperspb.String(resp)
 	})
 	t.Cleanup(func() { util.DefaultCallFunc.Unregister(key, id) })
@@ -112,11 +113,7 @@ func freePort(t *testing.T) int {
 
 // closeTestClient 释放测试客户端持有的流与连接。
 func closeTestClient(c *RpcClient) {
-	c.invalidateStream(nil)
-	if conn := c.conn.Swap(nil); conn != nil {
-		_ = conn.Close()
-	}
-	c.Remove()
+	_ = c.Close()
 }
 
 // TestRpcClient_StreamSurvivesCallTimeout 一次调用结束（含超时）后，

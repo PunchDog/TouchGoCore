@@ -69,6 +69,17 @@ type WebsocketConfig struct {
 	CheckOrigin bool `json:"check_origin"`
 	// 内网连接是否跳过 Origin 验证（仅当 RemoteAddr 为内网且未伪造头时）
 	SkipOriginForIntranet bool `json:"skip_origin_for_intranet"`
+	// Origin 头缺失时是否放行。默认 false：原生客户端确需握手时再显式打开
+	AllowEmptyOrigin bool `json:"allow_empty_origin"`
+	// 握手期读写缓冲（字节），<=0 时用框架默认 4KiB。这是 TCP 暂存缓冲，不是消息上限
+	UpgraderReadBuffer  int `json:"upgrader_read_buffer"`
+	UpgraderWriteBuffer int `json:"upgrader_write_buffer"`
+	// 单条消息大小上限（字节），<=0 时回落到 server.max_msg_size
+	MaxMessageSize int `json:"max_message_size"`
+	// 心跳与超时（毫秒），<=0 时用框架默认值
+	PingIntervalMS int `json:"ping_interval_ms"` // 服务端发 ping 的间隔，默认 30000
+	ReadTimeoutMS  int `json:"read_timeout_ms"`  // 读超时（应 ≥ 2×ping），默认 90000
+	WriteTimeoutMS int `json:"write_timeout_ms"` // 单次写超时，默认 5000
 	// 信任的反向代理，仅这些 RemoteAddr 才读取 X-Forwarded-For / X-Real-IP
 	TrustedProxies []string `json:"trusted_proxies"`
 	// Worker Pool 配置

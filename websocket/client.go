@@ -3,7 +3,6 @@ package websocket
 import (
 	"errors"
 	"fmt"
-	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -16,7 +15,24 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-var maxUID int64 = 0
+// uidSeed 是 UID 发号器的当前水位（纳秒时间戳基线）
+var uidSeed atomic.Int64
+
+// nextUID 取一个全局唯一、单调递增的客户端 UID。
+//
+// 修复前是「CAS 抢时间基线 → Add → 再 Load」三步：Add 与 Load 之间另一个并发
+// 连接可以插进来，两条连接拿到同一个 UID——后写入 clientMap 的把前一条覆盖，
+// 表现为互相踢线且前一条连接的读协程成了无人回收的孤儿。
+// 现在「取号」与「推进号段」合成为一次原子操作。
+func nextUID() int64 {
+	cur := uidSeed.Load()
+	if now := util.CurrentTime().UnixNano(); now > cur {
+		// 让号段追上当前时间；CAS 失败说明并发方已推进过，直接 Add 依然唯一
+		uidSeed.CompareAndSwap(cur, now)
+	}
+	return uidSeed.Add(1)
+}
+
 var clientMap *syncmap.Map[int64, *Client]
 
 // ============ 改进部分 ============
@@ -84,24 +100,25 @@ func (c *Client) initChannels() {
 	c.msgChan = make(chan []byte, writeQueueCap())
 }
 
-// writeQueueCap 发送队列容量（条数）
+// writeQueueCap 发送队列容量（单位：条）
 func writeQueueCap() int {
-	if writeBufferSize > 0 {
-		return writeBufferSize
+	if writeQueueEntries > 0 {
+		return writeQueueEntries
 	}
-	return DEFAULT_WRITE_BUFFER_SIZE
+	return defaultSendQueueEntries
 }
 
 // 新增带重试机制的WebSocket连接方法
 func (c *Client) connectionDial(url string) error {
 	const maxRetries = 3
 	retryInterval := time.Second * 2
+	limit := currentMaxMessageSize()
 
 	for i := 0; i < maxRetries; i++ {
-		wsConn, _, err := websocket.DefaultDialer.Dial(url, nil)
+		wsConn, _, err := websocket.DefaultDialer.DialContext(wsRunCtx, url, nil)
 		if err == nil {
 			c.wsConnect = wsConn
-			wsConn.SetReadLimit(1 << 20)
+			wsConn.SetReadLimit(limit)
 			c.remoteAddr = url
 
 			// ============ 改进：初始化统计 ============
@@ -112,7 +129,14 @@ func (c *Client) connectionDial(url string) error {
 		}
 
 		vars.Error("连接尝试 %d/%d 失败: %v", i+1, maxRetries, err)
-		time.Sleep(retryInterval)
+
+		// 退避必须可取消：修复前是裸 time.Sleep，停机途中会把退出流程拖满
+		// 2s+4s+8s；而生命周期已结束时继续重连更是无意义的复活。
+		select {
+		case <-wsRunCtx.Done():
+			return fmt.Errorf("连接中止(生命周期已结束): %w", wsRunCtx.Err())
+		case <-time.After(retryInterval):
+		}
 		retryInterval *= 2 // 指数退避
 	}
 
@@ -126,44 +150,66 @@ func (c *Client) handleLoop() {
 		}
 		c.Close("")
 		c.finishLoop()
-		runtime.Goexit()
 	}()
 
-	// 设置写超时时间，5秒
-	writeTimeout := 5 * time.Second
+	conn := c.wsConnect
+	if conn == nil {
+		return
+	}
+
+	// 心跳与业务写共用本协程：gorilla 禁止并发写连接，单独起协程发 ping 就得
+	// 再补一把写锁。放在这里天然串行，也不需要第三个常驻协程。
+	pinger := time.NewTicker(pingInterval)
+	defer pinger.Stop()
 
 	for c.Connected() {
 		select {
 		case <-c.closeCh:
 			// 关闭通知：立即退出，交由最后一个退出的协程完成回收
 			return
+
+		case <-pinger.C:
+			if err := c.writePing(conn); err != nil {
+				vars.Error("发送心跳失败: %v, 客户端地址: %s", err, c.remoteAddr)
+				c.Close("发送心跳失败")
+				return
+			}
+
 		case msg, ok := <-c.msgChan:
 			if !ok {
 				return
 			}
-			if c.Connected() {
-				// 设置写超时
-				if err := c.wsConnect.SetWriteDeadline(util.CurrentTime().Add(writeTimeout)); err != nil {
-					vars.Error("设置写超时失败: %v, 客户端地址: %s", err, c.remoteAddr)
-					c.Close("设置写超时失败")
-					return
-				}
-				// 执行写操作
-				if err := c.wsConnect.WriteMessage(websocket.BinaryMessage, msg); err != nil {
-					vars.Error("写消息失败: %v, 客户端地址: %s", err, c.remoteAddr)
-					c.Close("写消息失败")
-					return
-				}
-
-				// ============ 改进：更新统计 ============
-				c.stats.messagesSent.Add(1)
-				c.stats.bytesSent.Add(int64(len(msg)))
-				c.stats.lastActivity.Store(util.CurrentTime())
-			} else {
+			if !c.Connected() {
 				return
 			}
+			// 设置写超时：对端不收时 WriteMessage 会永久阻塞，把本协程
+			// 连同这条连接的发送队列钉死，背压也变成死锁。
+			if err := conn.SetWriteDeadline(util.CurrentTime().Add(writeTimeout)); err != nil {
+				vars.Error("设置写超时失败: %v, 客户端地址: %s", err, c.remoteAddr)
+				c.Close("设置写超时失败")
+				return
+			}
+			// 执行写操作
+			if err := conn.WriteMessage(websocket.BinaryMessage, msg); err != nil {
+				vars.Error("写消息失败: %v, 客户端地址: %s", err, c.remoteAddr)
+				c.Close("写消息失败")
+				return
+			}
+
+			// ============ 改进：更新统计 ============
+			c.stats.messagesSent.Add(1)
+			c.stats.bytesSent.Add(int64(len(msg)))
+			c.stats.lastActivity.Store(util.CurrentTime())
 		}
 	}
+}
+
+// writePing 发送一次 ping 控制帧（带写超时）
+func (c *Client) writePing(conn *websocket.Conn) error {
+	if err := conn.SetWriteDeadline(util.CurrentTime().Add(writeTimeout)); err != nil {
+		return err
+	}
+	return conn.WriteMessage(websocket.PingMessage, nil)
 }
 
 func (c *Client) readLoop() {
@@ -173,11 +219,25 @@ func (c *Client) readLoop() {
 		}
 		c.Close("")
 		c.finishLoop()
-		runtime.Goexit()
 	}()
 
+	conn := c.wsConnect
+	if conn == nil {
+		return
+	}
+
+	// 读超时 + pong 续期：修复前 ReadMessage 完全没有 deadline，对端拔网线或
+	// 留下半开连接时本协程永久阻塞，Client 实例与底层 socket 一起泄漏到进程退出。
+	conn.SetPongHandler(func(string) error {
+		return conn.SetReadDeadline(util.CurrentTime().Add(readTimeout))
+	})
+
 	for c.Connected() {
-		if _, data, err := c.wsConnect.ReadMessage(); err == nil {
+		if err := conn.SetReadDeadline(util.CurrentTime().Add(readTimeout)); err != nil {
+			vars.Error("设置读超时失败: %v, 客户端地址: %s", err, c.remoteAddr)
+			return
+		}
+		if _, data, err := conn.ReadMessage(); err == nil {
 			if c.Connected() {
 				item := &msgQueueType{uid: c.UID, data: data}
 				if dropMessageOnFull {
@@ -376,17 +436,7 @@ func (c *Client) SendMsg(msg ...any) {
 
 // 修改InitConnection为NewClient
 func NewClient(connType interface{}, remoteAddr string, className string) (*Client, error) {
-	now := util.CurrentTime().UnixNano()
-	for {
-		cur := atomic.LoadInt64(&maxUID)
-		if cur != 0 && cur <= now+1 {
-			break
-		}
-		if atomic.CompareAndSwapInt64(&maxUID, cur, now) {
-			break
-		}
-	}
-	atomic.AddInt64(&maxUID, 1)
+	uid := nextUID()
 
 	var client *Client = nil
 	if clientpool != nil {
@@ -405,7 +455,7 @@ func NewClient(connType interface{}, remoteAddr string, className string) (*Clie
 	client.liveLoops.Store(0)
 	client.iCallName = className
 
-	client.UID = atomic.LoadInt64(&maxUID)
+	client.UID = uid
 	client.remoteAddr = remoteAddr
 	client.initChannels()
 
@@ -421,7 +471,7 @@ func NewClient(connType interface{}, remoteAddr string, className string) (*Clie
 		}
 	case *websocket.Conn: // 服务端接收连接模式
 		client.wsConnect = v
-		v.SetReadLimit(1 << 20)
+		v.SetReadLimit(currentMaxMessageSize())
 	default:
 		client.Close("无效的连接类型参数")
 		return nil, errors.New("无效的连接类型参数")

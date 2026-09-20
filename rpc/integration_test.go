@@ -50,7 +50,7 @@ func TestRPCRoundTripRequestID(t *testing.T) {
 
 	util.RegisterProtocolType(3, 1, wrapperspb.String(""))
 	key := fmt.Sprintf("%s:%d:%d", util.CallRpcMsg, 3, 1)
-	handler := func(_ context.Context, _ *msginfo) proto.Message {
+	handler := func(_ context.Context, _ *MessageInfo) proto.Message {
 		return wrapperspb.String("pong")
 	}
 	util.DefaultCallFunc.Register(key, handler)

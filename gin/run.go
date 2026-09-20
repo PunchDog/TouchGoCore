@@ -19,7 +19,10 @@ import (
 )
 
 var (
-	routerMap  = make(map[string]func(ctx *gin.Context))
+	routerMap = make(map[string]func(ctx *gin.Context))
+	// routerMu 保护 routerMap：RegisterRouter 可能在 Run 之后由业务动态调用，
+	// 而 Run 会整表遍历注册路由。
+	routerMu   sync.Mutex
 	httpServer *http.Server
 	httpMu     sync.Mutex
 )
@@ -34,11 +37,21 @@ type methodCacheEntry struct {
 }
 
 // methodCache 全局方法缓存，避免每次请求都做反射查找
+// key = 类型名.方法名#接收者地址：同名类型的不同实例必须各自缓存，
+// 否则后注册的实例会覆盖前者（路由错乱），且缓存会长期钉住先注册的实例。
 var methodCache sync.Map // map[string]*methodCacheEntry
+
+// receiverKey 返回接收者的身份标识；非指针接收者退化为类型名。
+func receiverKey(rcvr reflect.Value) string {
+	if rcvr.Kind() == reflect.Ptr {
+		return strconv.FormatUint(uint64(rcvr.Pointer()), 16)
+	}
+	return rcvr.Type().String()
+}
 
 // getMethodCacheEntry 获取或创建方法缓存条目
 func getMethodCacheEntry(rcvr reflect.Value, sname, mname string) (*methodCacheEntry, error) {
-	cacheKey := sname + "." + mname
+	cacheKey := sname + "." + mname + "#" + receiverKey(rcvr)
 	if entry, ok := methodCache.Load(cacheKey); ok {
 		return entry.(*methodCacheEntry), nil
 	}
@@ -98,7 +111,7 @@ func RegisterRouter(class IRouterInterface, timeoutmap map[string]int64) {
 			continue
 		}
 
-		routerMap[callbackmsg] = func(ctx *gin.Context) {
+		handler := func(ctx *gin.Context) {
 			// 默认 15s，避免慢接口拖死 worker；CheckUrlNow 批量探测外网，单独放宽到 60s
 			reqTimeout := 15 * time.Second
 			if sec, h := timeoutmap[ctx.FullPath()]; h {
@@ -128,6 +141,15 @@ func RegisterRouter(class IRouterInterface, timeoutmap map[string]int64) {
 			// 回消息（使用预缓存的返回值类型）
 			sendResponse(ctx, result, entry.returnKinds)
 		}
+
+		routerMu.Lock()
+		if _, dup := routerMap[callbackmsg]; dup {
+			// URL 由「类型名/方法名」推导，同类型的第二个实例必然与第一个撞同一批路径，
+			// 这里以后者覆盖前者；需要两套实例并存请拆分类型或用不同路由前缀。
+			vars.Error("路由 %s 重复注册（同名类型的多个实例），本次注册的实例将覆盖先前实例", callbackmsg)
+		}
+		routerMap[callbackmsg] = handler
+		routerMu.Unlock()
 	}
 }
 
@@ -194,7 +216,14 @@ func Run(ctx context.Context) error {
 		ginServer.Use(cors.New(corsCfg))
 	}
 
-	for router, fn := range routerMap {
+	routerMu.Lock()
+	routes := make(map[string]func(ctx *gin.Context), len(routerMap))
+	for k, v := range routerMap {
+		routes[k] = v
+	}
+	routerMu.Unlock()
+
+	for router, fn := range routes {
 		r := strings.Split(router, "|")
 		if len(r) == 1 {
 			ginServer.Any(router, fn)
@@ -219,8 +248,15 @@ func Run(ctx context.Context) error {
 	}
 
 	addr := "[::]:" + strconv.Itoa(cfg.Web.HTTPPort)
+	useTLS := cfg.Web.TLS != nil && cfg.Web.TLS.Enable
+	// 先占端口再报成功：ListenAndServe 在 goroutine 里异步失败时，
+	// 靠 sleep 等错误会既误报「启动成功」又漏掉端口占用。
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		vars.Error("web服务监听失败[%s]: %v", addr, err)
+		return err
+	}
 	srv := &http.Server{
-		Addr:    addr,
 		Handler: ginServer,
 		BaseContext: func(_ net.Listener) context.Context {
 			return ctx
@@ -230,20 +266,21 @@ func Run(ctx context.Context) error {
 	httpServer = srv
 	httpMu.Unlock()
 
-	useTLS := cfg.Web.TLS != nil && cfg.Web.TLS.Enable
 	errCh := make(chan error, 1)
 	go func() {
 		var err error
 		if useTLS {
-			err = srv.ListenAndServeTLS(cfg.Web.TLS.CertFile, cfg.Web.TLS.KeyFile)
+			err = srv.ServeTLS(ln, cfg.Web.TLS.CertFile, cfg.Web.TLS.KeyFile)
 		} else {
-			err = srv.ListenAndServe()
+			err = srv.Serve(ln)
 		}
 		if err != nil && err != http.ErrServerClosed {
 			vars.Error("web服务运行出错:%v", err)
 			errCh <- err
 		}
 	}()
+	// Serve 的失败（证书读不到等）会立刻回炉，这里给一次短窗口确认，
+	// 之后端口已绑定，启动结论不再依赖等待时长。
 	select {
 	case err := <-errCh:
 		return err
@@ -296,9 +333,14 @@ func ginLogger() gin.HandlerFunc {
 func Stop(ctx context.Context) error {
 	httpMu.Lock()
 	srv := httpServer
+	// 置空：已关掉的 server 不能再被第二次 Stop（或 Run 之后的清理）复用
+	httpServer = nil
 	httpMu.Unlock()
 	if srv == nil {
 		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 	return srv.Shutdown(ctx)
 }

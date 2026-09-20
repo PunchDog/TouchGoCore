@@ -21,14 +21,18 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+// defaultAuthMode 未配置 rpc.auth 或未填 mode 时按 token 处理（fail-closed）。
+// 需要匿名互通必须显式写 mode=none——开放 RPC 端口只校验 client-name 存在与否，等于无鉴权。
+const defaultAuthMode = "token"
+
 func authMode() string {
 	cfg := rpcAuthCfg()
 	if cfg == nil {
-		return "none"
+		return defaultAuthMode
 	}
 	mode := strings.ToLower(strings.TrimSpace(cfg.Mode))
 	if mode == "" {
-		return "none"
+		return defaultAuthMode
 	}
 	return mode
 }
@@ -76,9 +80,13 @@ func authenticate(ctx context.Context) error {
 		}
 		return status.Error(codes.Unauthenticated, "client-name not in allowlist")
 	case "token":
+		cfg := rpcAuthCfg()
+		if cfg == nil || strings.TrimSpace(cfg.Token) == "" {
+			// 默认即 token：漏配 token 时宁可拒绝所有连接，也不能放行空口令
+			return status.Error(codes.Unauthenticated, "rpc.auth.token is not configured")
+		}
 		token := bearerToken(md)
-		expected := rpcAuthCfg().Token
-		if token == "" || subtle.ConstantTimeCompare([]byte(token), []byte(expected)) != 1 {
+		if token == "" || subtle.ConstantTimeCompare([]byte(token), []byte(cfg.Token)) != 1 {
 			return status.Error(codes.Unauthenticated, "invalid token")
 		}
 		if clientName == "" {
@@ -200,7 +208,20 @@ func warnInsecureRPC(name string, useTLS bool) {
 	if rpc := activeRpcCfg(); rpc != nil && rpc.TLS != nil && rpc.TLS.Enable && rpc.TLS.SkipForIntranet {
 		vars.Warning("gRPC[%s] skip_for_intranet=true，内网明文可被伪造身份；生产请设为 false", name)
 	}
-	if authMode() == "none" {
-		vars.Warning("gRPC[%s] auth.mode=none，仅校验 client-name 是否存在，可被伪造", name)
+	cfg := rpcAuthCfg()
+	if cfg == nil || strings.TrimSpace(cfg.Mode) == "" {
+		vars.Error("gRPC[%s] 未配置 rpc.auth.mode，已按 %s 处理；需要匿名互通请显式设置 mode=none", name, defaultAuthMode)
+	}
+	switch authMode() {
+	case "none":
+		vars.Error("gRPC[%s] auth.mode=none，仅校验 client-name 是否存在——能连上端口的进程即可冒充任意服务名，生产环境必须改用 allowlist/token/mtls", name)
+	case "token":
+		if cfg == nil || strings.TrimSpace(cfg.Token) == "" {
+			vars.Error("gRPC[%s] auth.mode=token 但未配置 rpc.auth.token，所有客户端连接都会被拒绝", name)
+		}
+	case "allowlist":
+		if cfg == nil || len(cfg.AllowList) == 0 {
+			vars.Error("gRPC[%s] auth.mode=allowlist 但 rpc.auth.allowlist 为空，所有客户端连接都会被拒绝", name)
+		}
 	}
 }

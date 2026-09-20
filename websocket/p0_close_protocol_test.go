@@ -30,27 +30,28 @@ func wsTestEnv(t *testing.T) {
 	t.Helper()
 
 	oldMap, oldPool, oldCall := clientMap, clientpool, clientcall
-	oldMsgQueue, oldWorkerEnabled, oldWorkerPool := msgQueue, workerPoolEnabled, workerPoolQueues
-	oldServers, oldBackpressure, oldDrop := serverList, enableBackpressure, dropMessageOnFull
-	oldWriteBuffer := writeBufferSize
+	oldMsgQueue, oldWorkerPool := msgQueue, workerPool.Swap(nil)
+	oldServers, oldBackpressure, oldDrop := takeServers(), enableBackpressure, dropMessageOnFull
+	oldWriteQueue := writeQueueEntries
 
 	clientMap = syncmap.NewMap[int64, *Client]()
 	clientpool = &sync.Pool{New: func() any { return &Client{} }}
 	clientcall = syncmap.NewMap[string, *sync.Pool]()
 	clientcall.Store("wsTestCall", &sync.Pool{New: func() any { return &defaultCall{} }})
 	msgQueue = make(chan *msgQueueType, 8)
-	workerPoolEnabled = false
-	workerPoolQueues = nil
-	serverList = nil
 	enableBackpressure = false
 	dropMessageOnFull = true
-	writeBufferSize = 16 // 默认值按「条数」被误用成 1MB，测试里压小避免无谓分配
+	writeQueueEntries = 16 // 队列容量按「条」计，测试里压小避免无谓分配
 
 	t.Cleanup(func() {
 		clientMap, clientpool, clientcall = oldMap, oldPool, oldCall
-		msgQueue, workerPoolEnabled, workerPoolQueues = oldMsgQueue, oldWorkerEnabled, oldWorkerPool
-		serverList, enableBackpressure, dropMessageOnFull = oldServers, oldBackpressure, oldDrop
-		writeBufferSize = oldWriteBuffer
+		msgQueue = oldMsgQueue
+		workerPool.Store(oldWorkerPool)
+		for _, srv := range oldServers {
+			registerServer(srv)
+		}
+		enableBackpressure, dropMessageOnFull = oldBackpressure, oldDrop
+		writeQueueEntries = oldWriteQueue
 	})
 }
 

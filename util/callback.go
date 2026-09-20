@@ -1,4 +1,4 @@
-﻿package util
+package util
 
 import (
 	"context"
@@ -109,31 +109,6 @@ type CallFunction struct {
 	// writeMu 串行化 Register/Unregister 的读-改-写，防止并发注册丢更新；
 	// Do 路径仍走 syncmap 无锁读（copy-on-write 保证快照一致）。
 	writeMu sync.Mutex
-	// Deprecated: retCh/retMu/bRet 存在竞态条件，请使用 DoWithRet 替代
-	retCh []reflect.Value // 返回值收集（已废弃，保留向后兼容）
-	retMu sync.Mutex      // 返回值保护锁（已废弃）
-	bRet  atomic.Bool     // 是否收集返回值（已废弃）
-}
-
-// SetDoRet 标记后续 Do 调用需要收集返回值
-//
-// Deprecated: 存在竞态条件，并发调用 Do 时返回值可能错乱。
-// 请使用 DoWithRet 替代，DoWithRet 是线程安全的。
-func (c *CallFunction) SetDoRet() {
-	c.retMu.Lock()
-	c.retCh = make([]reflect.Value, 0, 16)
-	c.retMu.Unlock()
-	c.bRet.Store(true)
-}
-
-// GetRet 获取收集到的返回值
-//
-// Deprecated: 存在竞态条件，请使用 DoWithRet 替代。
-func (c *CallFunction) GetRet() []reflect.Value {
-	c.retMu.Lock()
-	defer c.retMu.Unlock()
-	c.bRet.Store(false)
-	return c.retCh
 }
 
 // convertArg 将 argVal 转换为目标类型 targetType。
@@ -213,10 +188,10 @@ func callFunctionArgs(fn interface{}, args ...interface{}) ([]reflect.Value, err
 	return callArgs, nil
 }
 
-// 使用回调函数
+// 使用回调函数，只表达「回调组是否全部正常执行」，不收集返回值。
 //
-// 注意：当 bRet 为 true 时，Do 会将返回值写入共享的 retCh，
-// 这在并发场景下不安全。推荐使用 DoWithRet 获取返回值。
+// 需要返回值一律用 DoWithRet / DoWithRetCtx：它们把结果放在调用栈上，
+// 并发触发同一 key 时不会互相串结果。
 func (c *CallFunction) Do(key any, values ...any) (ok bool) {
 	defer func() {
 		if err := recover(); err != nil {
@@ -226,6 +201,8 @@ func (c *CallFunction) Do(key any, values ...any) (ok bool) {
 	}()
 
 	if l, has := c.fn.Load(key); has {
+		// 只要有一个回调崩掉就不能算成功，否则调用方按「无人处理」的分支误报
+		ok = true
 		entries := l.([]callbackEntry)
 		for _, e := range entries {
 			args, err := callFunctionArgs(e.fn, values...)
@@ -233,19 +210,11 @@ func (c *CallFunction) Do(key any, values ...any) (ok bool) {
 				vars.Debug("参数转换失败: %v", err)
 				continue
 			}
-			ret, panicked := callOneCallback(e.fn, args)
-			if panicked != nil {
+			if _, panicked := callOneCallback(e.fn, args); panicked != nil {
 				vars.Error("调用回调函数失败 key=%v: %v", key, panicked)
 				ok = false
-				continue
-			}
-			if c.bRet.Load() {
-				c.retMu.Lock()
-				c.retCh = append(c.retCh, ret...)
-				c.retMu.Unlock()
 			}
 		}
-		ok = true
 	}
 	return
 }

@@ -30,9 +30,9 @@ type Repository[T any] struct {
 
 // repoHooks 缓存反射元信息 + 自动建表状态
 type repoHooks[T any] struct {
-	instance   T
-	gormSchema *schema.Schema
-	cache      *sync.Map
+	instance    T
+	gormSchema  *schema.Schema
+	cache       *sync.Map
 	autoMigrate bool
 	migrated    atomic.Bool
 }
@@ -56,18 +56,36 @@ func (r *Repository[T]) Client() *Client { return r.client }
 // Context 返回当前 ctx
 func (r *Repository[T]) Context() context.Context { return r.ctx }
 
-// gormDB 返回带 ctx 的 gorm.DB
+// gormDB 返回带 ctx 的 gorm.DB。客户端已关闭/未初始化时返回 nil，
+// 由调用前的 engine 守卫转成错误，避免在 nil 指针上链式查询。
 func (r *Repository[T]) gormDB() *gorm.DB {
 	if r.db != nil {
 		return r.db.WithContext(r.ctx)
 	}
-	return r.client.engine.WithContext(r.ctx)
+	engine := r.client.engine.Load()
+	if engine == nil {
+		return nil
+	}
+	return engine.WithContext(r.ctx)
+}
+
+// ensureEngine 在所有走客户端连接池的路径前确认引擎可用。
+// 事务/会话仓储自带 db，不依赖 client 生命周期。
+func (r *Repository[T]) ensureEngine(op string) error {
+	if r.db != nil || r.client == nil {
+		return nil
+	}
+	_, err := r.client.engineOrErr(op)
+	return err
 }
 
 // ensureSchema 懒加载 gorm schema
 func (r *Repository[T]) ensureSchema() (*schema.Schema, error) {
 	if r.hooks.gormSchema != nil {
 		return r.hooks.gormSchema, nil
+	}
+	if err := r.ensureEngine("ensureSchema"); err != nil {
+		return nil, err
 	}
 	s, err := schema.Parse(&r.hooks.instance, r.hooks.cache, r.gormDB().Config.NamingStrategy)
 	if err != nil {
@@ -99,6 +117,9 @@ func (r *Repository[T]) TableName() string {
 //  - 首次执行失败且错误为「表不存在」 → AutoMigrate(T) + 标记 migrated + 重试一次
 //  - 其他错误 / 迁移失败 → 透传
 func (r *Repository[T]) runWithAutoMigrate(ctx context.Context, op string, fn func() error) error {
+	if err := r.ensureEngine(op); err != nil {
+		return err
+	}
 	if !r.hooks.autoMigrate {
 		return fn()
 	}
@@ -406,6 +427,9 @@ func (r *Repository[T]) DeleteHard(ctx context.Context, id any) error {
 // AutoMigrate 手动建表（不依赖 Option 开关）
 func (r *Repository[T]) AutoMigrate(ctx context.Context) error {
 	r2 := r.WithContext(ctx)
+	if err := r2.ensureEngine("AutoMigrate"); err != nil {
+		return err
+	}
 	start := time.Now()
 	if err := r2.gormDB().AutoMigrate(new(T)); err != nil {
 		return newError("AutoMigrate", err, classify(err), "", nil, time.Since(start))

@@ -123,7 +123,7 @@ type RpcConfig struct {
 	Client []*RpcAddr `json:"client"`
 	// TLS 配置
 	TLS *RpcTLSConfig `json:"tls"`
-	// 鉴权，缺省为 none（仅校验 client-name 存在）
+	// 鉴权，缺省为 token（配置缺失即拒绝所有连接）；显式 mode=none 才放行
 	Auth *RpcAuthConfig `json:"auth"`
 }
 

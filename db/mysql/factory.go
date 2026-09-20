@@ -2,8 +2,6 @@ package mysql
 
 import (
 	"context"
-
-	"gorm.io/gorm"
 )
 
 // makeHooks 创建 hooks 并继承 Client 的 autoMigrate 开关
@@ -49,12 +47,4 @@ func NewSessionRepository[T any](s *Session) *Repository[T] {
 		ctx:    s.ctx,
 		hooks:  makeHooks[T](s.client),
 	}
-}
-
-// ensureGormDB 内部助手
-func (r *Repository[T]) ensureGormDB() *gorm.DB {
-	if r.db != nil {
-		return r.db
-	}
-	return r.client.engine
 }

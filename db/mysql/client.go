@@ -5,8 +5,8 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -28,10 +28,10 @@ const (
 
 // Client 是 MySQL 客户端入口
 type Client struct {
-	cfg    *config.MySqlDBConfig
-	engine *gorm.DB
+	cfg *config.MySqlDBConfig
+	// 原子指针：Close 会置空，读侧必须经 engineOrErr 取值而不是裸读字段
+	engine atomic.Pointer[gorm.DB]
 	opts   options
-	mu     sync.RWMutex
 	closed atomic.Bool
 }
 
@@ -116,6 +116,48 @@ func (c *Client) poolKey() string {
 	return cfg.Host + "-" + cfg.DBName + "-" + cfg.Username + "-" + hex.EncodeToString(sum[:8])
 }
 
+// engineOrErr 取当前可用引擎；未初始化或已关闭时返回错误而不是 nil，
+// 否则调用方拿到 nil *gorm.DB 后链式调用会直接 panic。
+func (c *Client) engineOrErr(op string) (*gorm.DB, error) {
+	if c.closed.Load() {
+		return nil, wrap(op, errors.New("mysql: client closed"), KindConnFailed)
+	}
+	engine := c.engine.Load()
+	if engine == nil {
+		return nil, wrap(op, errors.New("mysql: client not initialized"), KindConnFailed)
+	}
+	return engine, nil
+}
+
+// closeEngine 尽力关闭引擎底层 socket，用于失败路径与重复连接的回收
+func closeEngine(engine *gorm.DB) {
+	if engine == nil {
+		return
+	}
+	sqlDB, err := engine.DB()
+	if err != nil || sqlDB == nil {
+		return
+	}
+	if err := sqlDB.Close(); err != nil {
+		vars.Warning("MySQL 关闭 socket 失败: %v", err)
+	}
+}
+
+// reportPoolMetrics 上报当前连接池水位；引擎不可用时静默跳过，不影响拨号结果
+func (c *Client) reportPoolMetrics(hook MetricsHook) {
+	engine := c.engine.Load()
+	if engine == nil || hook == nil {
+		return
+	}
+	sqlDB, err := engine.DB()
+	if err != nil || sqlDB == nil {
+		return
+	}
+	stats := sqlDB.Stats()
+	hook.OnConnection("idle", float64(stats.Idle))
+	hook.OnConnection("open", float64(stats.OpenConnections))
+}
+
 // connectOnly 尝试从全局注册表复用现有 *gorm.DB，复用 socket 连接池。
 // 命中后 c.engine 被填充，返回 true；未命中返回 false，调用方继续执行完整初始化。
 func (c *Client) connectOnly(key string) bool {
@@ -141,6 +183,9 @@ func (c *Client) connectOnly(key string) bool {
 		return false
 	}
 	cancel()
+	// 命中即接管：不填充 engine 会让复用路径返回一个空壳客户端，
+	// 调用方任何查询都在 nil 指针上 panic
+	c.engine.Store(engine)
 	return true
 }
 
@@ -159,12 +204,7 @@ func NewClient(cfg *config.MySqlDBConfig, opts ...Option) (*Client, error) {
 
 	// 命中既有连接，直接复用
 	if c.connectOnly(key) {
-		sqlDB, _ := c.engine.DB()
-		if sqlDB != nil {
-			stats := sqlDB.Stats()
-			o.metricsHook.OnConnection("idle", float64(stats.Idle))
-			o.metricsHook.OnConnection("open", float64(stats.OpenConnections))
-		}
+		c.reportPoolMetrics(o.metricsHook)
 		vars.Info("MySQL 复用连接 key=%s host=%s db=%s", key, cfg.Host, cfg.DBName)
 		return c, nil
 	}
@@ -181,6 +221,8 @@ func NewClient(cfg *config.MySqlDBConfig, opts ...Option) (*Client, error) {
 	}
 	sqlDB, err := engine.DB()
 	if err != nil {
+		// 拨号已成功，失败路径必须回收，否则这套连接永久泄漏
+		closeEngine(engine)
 		return nil, wrap("Open", err, KindConnFailed)
 	}
 	if cfg.MaxIdleConns > 0 {
@@ -196,11 +238,22 @@ func NewClient(cfg *config.MySqlDBConfig, opts ...Option) (*Client, error) {
 	}
 	vars.Info("MySQL 连接成功 host=%s db=%s", cfg.Host, cfg.DBName)
 
-	c.engine = engine
-	dbmap.Global.Store(key, engine)
-	stats := sqlDB.Stats()
-	o.metricsHook.OnConnection("idle", float64(stats.Idle))
-	o.metricsHook.OnConnection("open", float64(stats.OpenConnections))
+	// 并发同配置拨号会各建一套连接：以 LoadOrStore 定胜负，落败方关闭自己的连接并接管胜者，
+	// 否则后写覆盖注册表，先写的连接既没人关也没人用
+	if actual, loaded := dbmap.Global.LoadOrStore(key, engine); loaded {
+		prev, ok := actual.(*gorm.DB)
+		if !ok || prev == nil {
+			// 注册表里是脏值：用本次连接覆盖它
+			dbmap.Global.Store(key, engine)
+			c.engine.Store(engine)
+		} else {
+			closeEngine(engine)
+			c.engine.Store(prev)
+		}
+	} else {
+		c.engine.Store(engine)
+	}
+	c.reportPoolMetrics(o.metricsHook)
 	return c, nil
 }
 
@@ -209,27 +262,25 @@ func (c *Client) Close() error {
 	if !c.closed.CompareAndSwap(false, true) {
 		return nil
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	sqlDB, err := c.engine.DB()
-	if err == nil && sqlDB != nil {
-		if err := sqlDB.Close(); err != nil {
-			vars.Warning("MySQL 关闭 socket 失败: %v", err)
+	engine := c.engine.Swap(nil)
+	if engine != nil {
+		closeEngine(engine)
+		// 比对删除：注册表里的实例若已被新连接替换，不能把新连接的键删掉
+		key := c.poolKey()
+		if v, ok := dbmap.Global.Load(key); ok && v == any(engine) {
+			dbmap.Global.Delete(key)
 		}
 	}
-	dbmap.Global.Delete(c.poolKey())
-	c.engine = nil
 	return nil
 }
 
 // Ping 健康检查
 func (c *Client) Ping(ctx context.Context) error {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	if c.closed.Load() {
-		return wrap("Ping", fmt.Errorf("client closed"), KindConnFailed)
+	engine, err := c.engineOrErr("Ping")
+	if err != nil {
+		return err
 	}
-	sqlDB, err := c.engine.DB()
+	sqlDB, err := engine.DB()
 	if err != nil {
 		return wrap("Ping", err, KindConnFailed)
 	}
@@ -241,7 +292,11 @@ func (c *Client) Ping(ctx context.Context) error {
 
 // Stats 返回当前连接池状态
 func (c *Client) Stats() (sql.DBStats, error) {
-	sqlDB, err := c.engine.DB()
+	engine, err := c.engineOrErr("Stats")
+	if err != nil {
+		return sql.DBStats{}, err
+	}
+	sqlDB, err := engine.DB()
 	if err != nil {
 		return sql.DBStats{}, wrap("Stats", err, KindConnFailed)
 	}
@@ -251,8 +306,8 @@ func (c *Client) Stats() (sql.DBStats, error) {
 // Config 返回不可变配置
 func (c *Client) Config() *config.MySqlDBConfig { return c.cfg }
 
-// Engine 返回内部 gorm.DB
-func (c *Client) Engine() *gorm.DB { return c.engine }
+// Engine 返回内部 gorm.DB；客户端已关闭时返回 nil，调用方需自行判空
+func (c *Client) Engine() *gorm.DB { return c.engine.Load() }
 
 // AutoMigrateEnabled 返回是否启用了「表不存在自动建表」。
 // Repository[T] 通过此判断决定是否在查询前后做迁移检测。
@@ -265,14 +320,15 @@ func (c *Client) WithContext(ctx context.Context) *Session {
 
 // BeginTx 开启事务
 func (c *Client) BeginTx(ctx context.Context, opts ...*sql.TxOptions) (*Tx, error) {
-	if c.closed.Load() {
-		return nil, wrap("BeginTx", fmt.Errorf("client closed"), KindConnFailed)
+	engine, err := c.engineOrErr("BeginTx")
+	if err != nil {
+		return nil, err
 	}
 	var gormOpts *sql.TxOptions
 	if len(opts) > 0 {
 		gormOpts = opts[0]
 	}
-	tx := c.engine.WithContext(ctx).Begin(gormOpts)
+	tx := engine.WithContext(ctx).Begin(gormOpts)
 	if tx.Error != nil {
 		return nil, newError("BeginTx", tx.Error, classify(tx.Error), "", nil, 0)
 	}
@@ -281,7 +337,11 @@ func (c *Client) BeginTx(ctx context.Context, opts ...*sql.TxOptions) (*Tx, erro
 
 // Raw 提供 gorm 逃生舱
 func (c *Client) Raw(ctx context.Context, fn func(tx *gorm.DB) error) error {
-	err := fn(c.engine.WithContext(ctx))
+	engine, err := c.engineOrErr("Raw")
+	if err != nil {
+		return err
+	}
+	err = fn(engine.WithContext(ctx))
 	if err == nil {
 		return nil
 	}

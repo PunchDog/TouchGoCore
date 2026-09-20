@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"touchgocore/config"
 	"touchgocore/corectx"
@@ -31,23 +32,44 @@ const (
 )
 
 var (
-	globalBot      *tgbotapi.BotAPI
-	closeCh        chan any
-	stopOnce       sync.Once
-	telegramWG     sync.WaitGroup
-	telegramRunCtx = context.Background()
+	// globalBot 原子指针：Start/Stop 与 SendMessage 分属不同 goroutine
+	globalBot atomic.Pointer[tgbotapi.BotAPI]
+	// currentCancel 当前轮询协程的取消函数，由 runTimeMu 保护；nil 表示未在运行
+	currentCancel context.CancelFunc
+	runTimeMu     sync.Mutex
+	telegramWG    sync.WaitGroup
+	// 只读快照：TelegramStart 写入，各回调经 runCtx() 读取。
+	// 用 atomic.Pointer 而不是 atomic.Value：后者要求具体类型一致，
+	// 而 context.Context 的实现类型会随调用方变化（emptyCtx/valueCtx），存第二个即 panic。
+	telegramRunCtx atomic.Pointer[context.Context]
 )
 
+func init() {
+	setRunCtx(context.Background())
+	util.DefaultCallFunc.Register(util.CallTelegramMsg+"StartMessage", SendPhotoMessage)
+}
+
+func setRunCtx(ctx context.Context) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	c := ctx
+	telegramRunCtx.Store(&c)
+}
+
+func runCtx() context.Context {
+	if p := telegramRunCtx.Load(); p != nil {
+		return *p
+	}
+	return context.Background()
+}
+
 func telegramCfg() *config.TelegramConfig {
-	cfg := corectx.CfgFrom(telegramRunCtx)
+	cfg := corectx.CfgFrom(runCtx())
 	if cfg == nil {
 		return nil
 	}
 	return cfg.Telegram
-}
-
-func init() {
-	util.DefaultCallFunc.Register(util.CallTelegramMsg+"StartMessage", SendPhotoMessage)
 }
 
 func SendPhotoMessage(bot *tgbotapi.BotAPI, chatID int64, desc, bannerURL string) error {
@@ -107,14 +129,13 @@ func SendPhotoMessage(bot *tgbotapi.BotAPI, chatID int64, desc, bannerURL string
 
 // 发送消息
 func SendMessage(chatID int64, desc string) error {
-	msg := tgbotapi.NewMessage(chatID, desc)
-	// 发送消息
-	if globalBot == nil {
+	bot := globalBot.Load()
+	if bot == nil {
 		vars.Error("telegram bot未初始化")
 		return fmt.Errorf("telegram bot未初始化")
 	}
-
-	if _, err := globalBot.Send(msg); err != nil {
+	msg := tgbotapi.NewMessage(chatID, desc)
+	if _, err := bot.Send(msg); err != nil {
 		vars.Error("telegram send message error: %v", err)
 		return err
 	}
@@ -196,7 +217,7 @@ func TelegramStart(ctx context.Context) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	telegramRunCtx = ctx
+	setRunCtx(ctx)
 	tg := telegramCfg()
 	if tg == nil {
 		vars.Info("不启动Telegram")
@@ -215,15 +236,12 @@ func TelegramStart(ctx context.Context) {
 		return
 	}
 
-	globalBot = bot
 	bot.Debug = util.DEBUG
 	vars.Info("Authorized on account: %s", bot.Self.UserName)
 
 	u := tgbotapi.NewUpdate(0)
 	u.Timeout = 60
 	updates := bot.GetUpdatesChan(u)
-	closeCh = make(chan any)
-	stopOnce = sync.Once{}
 
 	timer, err := localtimer.NewTimer[*telegramTimer](util.MILLISECONDS_OF_MINUTE, -1, func(t *telegramTimer) {
 		t.bot = bot
@@ -236,51 +254,68 @@ func TelegramStart(ctx context.Context) {
 	if err := localtimer.AddTimer(timer); err != nil {
 		vars.Error("telegram 维护定时器注册失败: %v", err)
 	}
+	// 只有真的会起轮询才对外可见，否则失败路径会留下一个没人清理的 bot
+	globalBot.Store(bot)
+
+	// 每轮轮询持有自己的取消函数：Stop 只作废当前这一轮，
+	// 旧协程不会改盯新一轮的信号而永久泄漏
+	loopCtx, cancel := context.WithCancel(ctx)
+	runTimeMu.Lock()
+	prevCancel := currentCancel
+	currentCancel = cancel
+	runTimeMu.Unlock()
+	if prevCancel != nil {
+		prevCancel()
+	}
 
 	telegramWG.Add(1)
 	go func() {
 		defer telegramWG.Done()
-		// Remove = 彻底作废并归还对象池。下面三条退出分支互斥且移除后立即 return，
-		// 协程此后不再触碰 timer，实例确实永久弃用，因此不需要改用 Pause。
-		for {
-			select {
-			case <-ctx.Done():
-				timer.Remove()
-				return
-			case <-closeCh:
-				timer.Remove()
-				return
-			case update, ok := <-updates:
-				if !ok {
-					timer.Remove()
-					return
-				}
-				if update.Message != nil {
-					handleMessage(bot, update.Message)
-				} else if update.CallbackQuery != nil {
-					handleCallback(bot, update.CallbackQuery)
-				}
-			}
-		}
+		// Remove = 彻底作废并归还对象池。轮询退出后本轮 timer 不再被任何地方引用，
+		// 实例确实永久弃用，因此不需要改用 Pause。
+		runUpdates(loopCtx, bot, updates, timer.Remove)
 	}()
 }
 
+// runUpdates 消费本轮 updates，直到本轮 ctx 取消、更新流关闭或父 ctx 结束。
+// bot/updates/timer 清理全部按轮传入，不读包级状态，重启后旧轮不会误用新轮的资源。
+func runUpdates(ctx context.Context, bot *tgbotapi.BotAPI, updates <-chan tgbotapi.Update, onClose func()) {
+	if onClose != nil {
+		defer onClose()
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case update, ok := <-updates:
+			if !ok {
+				return
+			}
+			if update.Message != nil {
+				handleMessage(bot, update.Message)
+			} else if update.CallbackQuery != nil {
+				handleCallback(bot, update.CallbackQuery)
+			}
+		}
+	}
+}
+
+// TelegramStop 停止当前这一轮轮询并等待协程退出。未启动时为 no-op，可重复调用。
 func TelegramStop(ctx context.Context) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if tg := telegramCfg(); tg == nil || tg.BotToken == "" {
-		return
+	runTimeMu.Lock()
+	cancel := currentCancel
+	currentCancel = nil
+	runTimeMu.Unlock()
+
+	if bot := globalBot.Swap(nil); bot != nil {
+		bot.StopReceivingUpdates()
 	}
-	stopOnce.Do(func() {
-		if globalBot != nil {
-			globalBot.StopReceivingUpdates()
-		}
-		globalBot = nil
-		if closeCh != nil {
-			close(closeCh)
-		}
-	})
+	if cancel != nil {
+		cancel()
+	}
 	done := make(chan struct{})
 	go func() {
 		telegramWG.Wait()

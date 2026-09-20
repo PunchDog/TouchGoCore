@@ -18,7 +18,7 @@ func TestTelegramStart_NilConfigNoPanic(t *testing.T) {
 		}
 	}()
 	TelegramStart(context.Background())
-	if globalBot != nil {
+	if globalBot.Load() != nil {
 		t.Fatal("无配置不应创建 bot")
 	}
 }

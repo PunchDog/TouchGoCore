@@ -171,6 +171,7 @@ func (p *TimerPool) Get(cls TimerInterface) TimerInterface {
 			// 认领成功：粘性释放标记随所有权一并转移给新主人
 			parent.released.Store(false)
 			parent.pendingRelease.Store(false)
+			parent.putClaimed.Store(false)
 			p.gets.Add(1)
 			return obj
 		}
@@ -217,6 +218,7 @@ func (p *TimerPool) Put(cls TimerInterface) {
 		// 无池可归：撤销标记，别把实例留在「谁都不认」的中间态
 		parent.released.Store(false)
 		parent.pendingRelease.Store(false)
+		parent.putClaimed.Store(false)
 		parent.inPool.Store(false)
 		return
 	}
@@ -266,6 +268,11 @@ type Timer struct {
 	inTick atomic.Int32
 	// pendingRelease Tick 在飞期间收到的作废请求，由 endTick 在回调结束后补做归还。
 	pendingRelease atomic.Bool
+	// putClaimed 归还抢占标记：Tick 在飞期间挂起的作废请求（由 endTick 补做）与
+	// 业务侧再次 Remove 可能同时判定为 releaseNow，两边都去 Put 就会争抢同一次归还。
+	// Put 里的 inPool CAS 是最后一道闸，但只有在这里抢占才能保证「收尾只做一次」，
+	// 也让统计口径（Puts）不被无意义的重复调用污染。实例被下一个主人认领时重置。
+	putClaimed atomic.Bool
 }
 
 // Init 初始化定时器
@@ -336,15 +343,25 @@ const (
 // Put 一定在解锁之后：sync.Pool 会执行用户代码，且归还完成瞬间实例就可能被别的
 // NewTimer 取走，持着业务私有锁做这件事等于把新主人的初始化排在旧主人的锁上。
 func (t *Timer) RemoveFromManager(cleanPool bool) {
-	t.mu.Lock()
-	outcome := t.removeFromManagerLocked(cleanPool)
-	t.mu.Unlock()
-	if outcome == releaseNow {
+	if outcome := t.removeWithLock(cleanPool); outcome == releaseNow {
 		t.releaseToPool()
 	}
 }
 
+// removeWithLock 在 t.mu 保护下执行移除。
+//
+// 临界区独立成方法只为让 mu 通过 defer 释放：摘链路径上的任何 panic 都不会把
+// 这把私有锁永久扣住，否则该实例后续的 AddTimer/Remove/handleTimerAdd 会全部挂死。
+func (t *Timer) removeWithLock(cleanPool bool) releaseOutcome {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.removeFromManagerLocked(cleanPool)
+}
+
 // requestReleaseLocked 判定归还方式，调用方必须已持有 t.mu。
+//
+// 判定为「立即归还」时同步抢占 putClaimed：两条路径（endTick 补做与业务 Remove）
+// 同时得出 releaseNow 时，只有抢占成功的一方真正执行 Put。
 func (t *Timer) requestReleaseLocked() releaseOutcome {
 	// 凭证闸在最前：手工构造的宿主对象连「池」这个概念都不该参与
 	if !t.fromPool.Load() {
@@ -363,6 +380,9 @@ func (t *Timer) requestReleaseLocked() releaseOutcome {
 		t.pendingRelease.Store(true)
 		return releaseDeferred
 	}
+	if !t.putClaimed.CompareAndSwap(false, true) {
+		return releaseAlready // 另一方已抢占本次归还
+	}
 	return releaseNow
 }
 
@@ -378,8 +398,29 @@ func (t *Timer) releaseToPool() {
 	}
 }
 
-// beginTick 标记业务回调开始执行（由 executeTimer 调用）
-func (t *Timer) beginTick() { t.inTick.Add(1) }
+// beginTick 登记一次业务回调执行，返回 false 表示本次调度项已作废、调用方必须放弃回调。
+//
+// isValid 校验与真正的「在飞」标记之间总有窗口：期间实例可能被 Remove 归还对象池、
+// 又被下一个 NewTimer 认领并推进代次。若只增计数不复核，就会与全新主人同时写同一块
+// 内存（use-after-free 到池对象）。这里先增在飞计数、再校验代次与作废标记，两次原子
+// 操作构成 Dekker 配对：池的认领方也是「先改所有权标记、后读在飞计数」，
+// 因此双方不可能同时认为自己是唯一持有者。
+func (t *Timer) beginTick(expectGen uint64) bool {
+	t.inTick.Add(1)
+
+	if t.gen.Load() != expectGen {
+		// 实例已易主（或本条是陈旧的重复调度项）：只撤销在飞标记，
+		// 绝不替新主人做归还收尾。
+		t.inTick.Add(-1)
+		return false
+	}
+	if t.abandoned() || t.inPool.Load() {
+		// 代次没动却已进入作废流程：走正常 endTick，让挂起的归还请求照常落地。
+		t.endTick()
+		return false
+	}
+	return true
+}
 
 // endTick 结束一次回调：把在飞期间挂起的归还请求补做掉。
 //
@@ -423,33 +464,14 @@ func (t *Timer) removeFromManagerLocked(cleanPool bool) releaseOutcome {
 		t.nextGen()
 
 		// 只在摘链这一小段持锁，绝不在持锁状态下调用业务回调（Put 同理）
-		if wheel := t.wheel.Load(); wheel != nil {
-			wheel.wheelLock.Lock()
-			// 持锁后复核归属：processWheelTick 可能已在它的临界区里摘链、扣减计数
-			// 并把 wheel 置 nil，此时再减一次就会把计数打成负数。
-			stillOurs := t.wheel.Load() == wheel
-			// 归属未变才允许摘链扣减。归属已变更（本节点已被摘链并重新入链到别的轮）
-			// 时绝不能再无条件 Node.Remove：那会把节点从「当前归属轮」的链表里无锁
-			// 扯出，且归属轮的 timerCount 无人扣减，形成永久幻影 +1（count=1 而
-			// len=0）。节点归属已易主，其收尾交由新归属轮的派发/清理路径，计数自然配对。
-			if stillOurs {
-				t.Node.Remove()
-				// 「摘链 → 减计数 → 清引用」三者必须在同一把 wheelLock 临界区内
-				// 原子完成：若清引用延后到解锁之后，processWheelTick 的派发/清理
-				// 分支可能在这段间隙里看到一个「已不在链却仍挂着 wheel 引用」的
-				// 节点，或入链方在间隙入链后被本处的 Store(nil) 无痕清掉归属，
-				// 造成计数与链表长度漂移（-1 / 幻影 +1）。
-				wheel.timerCount.Add(-1)
-				t.wheel.Store(nil)
-			}
-			wheel.wheelLock.Unlock()
+		if wheel := t.ownedWheel(); wheel != nil {
+			t.detachFromWheelLocked(wheel)
 		} else {
 			// mu 持有下 handleTimerAdd 无法并发入链，wheel==nil ⇒ 节点必然不在任何
 			// 链表中，这里的 Node.Remove 只是防御性兜底（无链可摘时为 no-op）。
 			t.Node.Remove()
 		}
-		// stillOurs 为 false 时归属已被别处清掉（轮引用非本轮或已置 nil），
-		// 这里兜底再清一次为幂等操作；正常路径已在上方临界区内完成。
+		// 归属可能已在别处被清掉（甚至是在途标记），这里兜底再清一次为幂等操作。
 		t.wheel.Store(nil)
 	}
 
@@ -457,6 +479,33 @@ func (t *Timer) removeFromManagerLocked(cleanPool bool) releaseOutcome {
 		return releaseNone
 	}
 	return t.requestReleaseLocked()
+}
+
+// detachFromWheelLocked 从 t 当前归属的时间轮上摘链并扣减计数，调用方必须已持有 t.mu。
+//
+// 同样独立成方法让 wheelLock 走 defer：临界区内的 panic 若漏出解锁，整个时间轮
+// 会被永久扣住（该轮所有定时器停摆，Close 也永远等不到协程退出）。
+func (t *Timer) detachFromWheelLocked(wheel *TimerWheel) {
+	wheel.wheelLock.Lock()
+	defer wheel.wheelLock.Unlock()
+
+	// 持锁后复核归属：processWheelTick 可能已在它的临界区里摘链、扣减计数
+	// 并把 wheel 置 nil，此时再减一次就会把计数打成负数。
+	if t.wheel.Load() != wheel {
+		return
+	}
+	// 归属未变才允许摘链扣减。归属已变更（本节点已被摘链并重新入链到别的轮）
+	// 时绝不能再无条件 Node.Remove：那会把节点从「当前归属轮」的链表里无锁
+	// 扯出，且归属轮的 timerCount 无人扣减，形成永久幻影 +1（count=1 而
+	// len=0）。节点归属已易主，其收尾交由新归属轮的派发/清理路径，计数自然配对。
+	t.Node.Remove()
+	// 「摘链 → 减计数 → 清引用」三者必须在同一把 wheelLock 临界区内
+	// 原子完成：若清引用延后到解锁之后，processWheelTick 的派发/清理
+	// 分支可能在这段间隙里看到一个「已不在链却仍挂着 wheel 引用」的
+	// 节点，或入链方在间隙入链后被本处的 Store(nil) 无痕清掉归属，
+	// 造成计数与链表长度漂移（-1 / 幻影 +1）。
+	wheel.timerCount.Add(-1)
+	t.wheel.Store(nil)
 }
 
 // Remove 公共移除方法：彻底作废本实例——停止调度并归还对象池。

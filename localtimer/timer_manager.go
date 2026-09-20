@@ -219,9 +219,13 @@ func (m *TimerManager) executeTimer(task timerTask) {
 	parent := task.timer.GetParent()
 
 	// 在飞标记：Tick 执行期间禁止把实例归还对象池，否则新主人会和这个回调同时
-	// 写同一块内存。endTick 必须是本函数最后一个动作——它返回后实例随时已易主，
+	// 写同一块内存。beginTick 内部会复核代次与作废状态，校验通过后到真正打上
+	// 在飞标记之间不存在可被池认领的窗口；失败说明实例已易主，直接放弃本次回调。
+	// endTick 必须是本函数最后一个动作——它返回后实例随时已易主，
 	// 再读一次 task.timer 就是踩别人的对象。
-	parent.beginTick()
+	if !parent.beginTick(task.gen) {
+		return
+	}
 	defer parent.endTick()
 
 	func() {
@@ -481,6 +485,23 @@ func (m *TimerManager) runWheel(wheel *TimerWheel, wheelType TimerType) {
 	}
 }
 
+// migratingMarker 是「节点已离开原轮、调度项正在投递途中」的占位归属。
+//
+// 投递必须先把归属改成该标记、再往目标通道发送：原先是「先投通道、后置 wheel=nil」，
+// 目标轮的消费协程可能在本协程改写归属之前就跑完 handleTimerAdd 的校验，看到旧轮引用
+// 仍在便判定「已入链」而丢弃这条调度项；本协程随后置 nil，节点于是两头无归属、
+// 原轮计数已扣减、目标轮永不接收 —— 定时器永久停摆，且计数毫无漂移可查。
+// handleTimerAdd 的认领条件因此放宽为「无归属或持有该标记」。
+var migratingMarker = &TimerWheel{}
+
+// ownedWheel 返回节点真正归属的时间轮；处于在途标记状态时视为「无归属」。
+func (t *Timer) ownedWheel() *TimerWheel {
+	if w := t.wheel.Load(); w != migratingMarker {
+		return w
+	}
+	return nil
+}
+
 // handleTimerAdd 处理定时器添加到时间轮
 func (m *TimerManager) handleTimerAdd(wheel *TimerWheel, task timerTask) {
 	if !task.isValid() {
@@ -518,14 +539,21 @@ func (m *TimerManager) handleTimerAdd(wheel *TimerWheel, task timerTask) {
 		return
 	}
 
-	// 节点已在某个时间轮中则丢弃本次入链：能走到这里且 wheel 非空，说明节点
-	// 已带着当前代次正确在链（或已易主到别的轮），再次入链只会让计数多加。
-	if parent.wheel.Load() != nil {
+	// 节点已真实归属某个轮（不是「投递途中」的占位标记）才丢弃本次入链：能走到
+	// 这里且归属非空，说明节点已带着当前代次正确在链（或已易主到别的轮），
+	// 再次入链只会让计数多加。处于 migratingMarker 的正是刚从原轮摘链、投给本轮
+	// 的迁移项，必须认领，否则原轮计数已扣、目标轮不接手，定时器永久停摆。
+	if cur := parent.wheel.Load(); cur != nil && cur != migratingMarker {
 		return
 	}
 
+	// 入链失败必须回滚归属且不加计数：list.Add 内部 recover 后返回 false 时
+	// 节点并不在链表里，留着归属或计数都会形成永久幻影 +1。
+	if !wheel.tickWheel.Add(node) {
+		parent.wheel.Store(nil)
+		return
+	}
 	parent.wheel.Store(wheel)
-	wheel.tickWheel.Add(node)
 	// 计数只在「节点真正入链」处自增，与 processWheelTick / cleanupWheel 的
 	// 自减严格配对。放在 AddTimer 里统计的是入队次数，迁移到达不经过那里，
 	// 会让计数每次迁移净减一。
@@ -537,12 +565,27 @@ func (m *TimerManager) handleTimerAdd(wheel *TimerWheel, task timerTask) {
 // 背压原则：通道满就把定时器留在当前轮等下一个 tick 重试，绝不新开协程。
 // 原先的「go executeTimer」在毫秒轮上是 1ms 一次的无限 fork 源，
 // 消费端只有单个 TimeTick 协程且同步执行业务 Tick，下游一慢就会堆积到 OOM。
+//
+// 本函数只做无锁的准备工作，临界区整体交给 tickWheelSection：那里的 panic
+// 必须能释放 wheelLock，否则一次异常就把这个轮永久扣死（Close 随之挂死）。
 func (m *TimerManager) processWheelTick(wheel *TimerWheel, wheelType TimerType) {
+	dropped := m.tickWheelSection(wheel, wheelType)
+
+	// 告警必须在解锁之后：vars 异步日志缓冲满时会阻塞最长 5 秒
+	if dropped > 0 {
+		m.stats.timersDropped.Add(dropped)
+		m.notifyBackpressure(wheelType, dropped)
+	}
+}
+
+// tickWheelSection 在 wheelLock 临界区内完成派发与迁移，返回因背压丢弃的次数。
+func (m *TimerManager) tickWheelSection(wheel *TimerWheel, wheelType TimerType) (dropped int64) {
 	currentTime := util.CurrentMS()
 	ch := currentTimerChannel()
-	var dropped int64
 
 	wheel.wheelLock.Lock()
+	defer wheel.wheelLock.Unlock()
+
 	wheel.tickWheel.Range(func(node list.INode) bool {
 		timer, ok := node.(TimerInterface)
 		if !ok {
@@ -552,8 +595,8 @@ func (m *TimerManager) processWheelTick(wheel *TimerWheel, wheelType TimerType) 
 		if parent == nil {
 			return true
 		}
-		// 已被迁移到别的轮：归目标轮处理
-		if parent.wheel.Load() != wheel {
+		// 已被迁移到别的轮或正在投递途中：归目标轮处理
+		if parent.ownedWheel() != wheel {
 			return true
 		}
 		if !parent.IsActive() {
@@ -569,12 +612,17 @@ func (m *TimerManager) processWheelTick(wheel *TimerWheel, wheelType TimerType) 
 		if parent.nextTime.Load() <= currentTime {
 			// 时间到达：只有派发成功才摘链，失败则留在轮里下个 tick 重试
 			task := timerTask{timer: timer, gen: parent.gen.Load(), mgr: m}
+			// 先置「投递途中」再发送：反向顺序会让消费端在归属仍指向本轮时
+			// 校验入链条件，把这条调度项当重复入链丢弃。
+			parent.wheel.Store(migratingMarker)
 			select {
 			case ch <- task:
 				node.GetNode().Remove()
-				parent.wheel.Store(nil)
 				wheel.timerCount.Add(-1)
 			default:
+				// 通道满：归属必须原样还给本轮，否则本节点被 ownedWheel 判给「无轮」，
+				// 后续每个 tick 都会跳过它，等价于永久停摆。
+				parent.wheel.Store(wheel)
 				dropped++
 			}
 			return true
@@ -588,26 +636,23 @@ func (m *TimerManager) processWheelTick(wheel *TimerWheel, wheelType TimerType) 
 		}
 
 		task := timerTask{timer: timer, gen: parent.gen.Load(), mgr: m}
+		parent.wheel.Store(migratingMarker)
 		select {
 		case m.wheels[newType].addTimerChan <- task:
-			// 迁移成功，handleTimerAdd 会重新设置 wheel 并自增目标轮计数
+			// 迁移成功：归属保持在途标记，由目标轮 handleTimerAdd 认领；
+			// 本轮只负责摘链与扣计数。
 			node.GetNode().Remove()
-			parent.wheel.Store(nil)
 			wheel.timerCount.Add(-1)
 			m.stats.wheelMigrations.Add(1)
 		default:
-			// 目标时间轮通道已满，保持在当前时间轮等下一个 tick
+			// 目标时间轮通道已满，归属与链表位置一起还原，等下一个 tick
+			parent.wheel.Store(wheel)
 			dropped++
 		}
 		return true
 	})
-	wheel.wheelLock.Unlock()
 
-	// 告警必须在解锁之后：vars 异步日志缓冲满时会阻塞最长 5 秒
-	if dropped > 0 {
-		m.stats.timersDropped.Add(dropped)
-		m.notifyBackpressure(wheelType, dropped)
-	}
+	return dropped
 }
 
 // cleanupWheel 清理时间轮
@@ -616,10 +661,20 @@ func (m *TimerManager) processWheelTick(wheel *TimerWheel, wheelType TimerType) 
 // Tick 内部调用 Remove / AddTimer 会再次申请同一把 wheelLock，
 // 若持锁执行会立即自锁，导致 TimeStop 永久挂起（进程停不下来）。
 func (m *TimerManager) cleanupWheel(wheel *TimerWheel) {
-	// 阶段一：持锁摘链，收集已过期的定时器
-	var expired []timerTask
+	// 阶段一：持锁摘链，收集已过期的定时器（临界区独立成方法，panic 也不会扣住轮锁）
+	expired := m.drainWheelLocked(wheel)
 
+	// 阶段二：无锁执行（此时 Tick 内 Remove/AddTimer 都不会再触碰 wheelLock）
+	for _, task := range expired {
+		m.executeTimer(task)
+	}
+}
+
+// drainWheelLocked 持锁清空时间轮，返回需要补跑一次到期回调的调度项。
+func (m *TimerManager) drainWheelLocked(wheel *TimerWheel) (expired []timerTask) {
 	wheel.wheelLock.Lock()
+	defer wheel.wheelLock.Unlock()
+
 	currentTime := util.CurrentMS()
 
 	wheel.tickWheel.Range(func(node list.INode) bool {
@@ -629,6 +684,11 @@ func (m *TimerManager) cleanupWheel(wheel *TimerWheel) {
 		}
 		parent := timer.GetParent()
 		if parent == nil {
+			return true
+		}
+		// 已投递途中的节点不归本轮收尾：它的归属已是在途标记，
+		// 由接收方或续期方负责，这里再动它会把别人的调度项打断。
+		if parent.ownedWheel() != wheel {
 			return true
 		}
 		// 无论是否到期都要断开 wheel 引用：本函数随后会 Clear 整个轮并把计数归零，
@@ -646,10 +706,5 @@ func (m *TimerManager) cleanupWheel(wheel *TimerWheel) {
 	wheel.tickWheel.Clear()
 	wheel.timerCount.Store(0)
 	m.stats.timersRemoved.Add(removedCount)
-	wheel.wheelLock.Unlock()
-
-	// 阶段二：无锁执行（此时 Tick 内 Remove/AddTimer 都不会再触碰 wheelLock）
-	for _, task := range expired {
-		m.executeTimer(task)
-	}
+	return expired
 }

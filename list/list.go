@@ -16,7 +16,11 @@ type List struct {
 	rangeDelList []INode         //删除列表
 	rangeCount   atomic.Int32    //正在遍历的goroutine计数（替代 dellock bool，线程安全）
 	nextID       atomic.Int64    //下一个节点ID（使用原子操作）
-	nodeMap      map[int64]INode //节点ID映射，支持O(1)查询
+	nodeMap      map[int64]INode //节点ID映射，支持O(1)查询；indexed=false 时始终为 nil
+	// indexed 决定是否维护 ID 索引。取号（CAS + 时钟）与每次 Add/Remove 的
+	// map 写删只在需要按 ID 查询时才有意义，时间轮这类只走 Range/Remove 的
+	// 热路径纯属白付。构造后不可变，因此读取无需加锁。
+	indexed bool
 }
 
 // 创建一个链表
@@ -26,7 +30,16 @@ func NewList() *List {
 		tail:    nil,
 		len:     0,
 		nodeMap: make(map[int64]INode),
+		indexed: true,
 	}
+}
+
+// NewUnindexedList 创建不维护 ID 索引的链表。
+//
+// 适用于只按顺序遍历/删除、从不按 ID 取节点的场景（时间轮的每一档就是这种）。
+// 代价与约束：Get 恒返回 nil，节点的 GetId 恒为 0；需要按 ID 查询请用 NewList。
+func NewUnindexedList() *List {
+	return &List{}
 }
 
 // generateNextID 生成本链表内单调递增的节点 ID。
@@ -49,7 +62,11 @@ func (l *List) generateNextID() int64 {
 }
 
 // assignIDLocked 为入链节点取号并登记到索引，调用者必须已持有 mu 锁。
+// 不维护索引的链表直接跳过：节点 id 保持 0，Get 也查不到任何东西。
 func (l *List) assignIDLocked(obj *Node, node INode) int64 {
+	if !l.indexed {
+		return 0
+	}
 	// 重新入链的节点可能仍挂在旧 ID 上（遍历期间删除请求被挂起，旧键尚未摘除）：
 	// 不先摘掉就会在 nodeMap 里永久残留一个指向同一节点的幽灵条目。
 	if old := obj.id; old != 0 {
@@ -140,7 +157,7 @@ func (l *List) Tail() INode {
 	return l.tail
 }
 
-// 获取一个节点
+// 获取一个节点；不维护索引的链表（NewUnindexedList）恒返回 nil。
 func (l *List) Get(id int64) INode {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
@@ -229,7 +246,9 @@ func (l *List) Clear() {
 	l.tail = nil
 	l.len = 0
 	l.rangeDelList = nil
-	l.nodeMap = make(map[int64]INode) // 重建 map，清理所有引用
+	if l.indexed {
+		l.nodeMap = make(map[int64]INode) // 重建 map，清理所有引用
+	}
 }
 
 // removeNodeLocked 从链表中删除节点，调用者必须已持有 mu 锁。
@@ -250,8 +269,10 @@ func (l *List) removeNodeLocked(node *Node, release bool) {
 		node.next.GetNode().pre = node.pre
 	}
 	l.len--
-	if cur, ok := l.nodeMap[node.id]; ok && cur.GetNode() == node {
-		delete(l.nodeMap, node.id)
+	if l.indexed {
+		if cur, ok := l.nodeMap[node.id]; ok && cur.GetNode() == node {
+			delete(l.nodeMap, node.id)
+		}
 	}
 
 	node.list.Store(nil)

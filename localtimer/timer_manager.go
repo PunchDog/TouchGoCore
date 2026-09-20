@@ -660,8 +660,10 @@ func NewTimerManager() *TimerManager {
 	// 初始化时间轮
 	for i, config := range wheelConfigs {
 		wheel := &TimerWheel{
-			wheelConfig:  config,
-			tickWheel:    list.NewList(),
+			wheelConfig: config,
+			// 时间轮只按顺序遍历与摘除节点，从不按 ID 查节点，
+			// 用无索引链表省掉每次入链取号（CAS+时钟）与 map 写删。
+			tickWheel:    list.NewUnindexedList(),
 			addTimerChan: make(chan timerTask, MaxAddTimerChannelNum),
 			mgr:          mgr,
 		}

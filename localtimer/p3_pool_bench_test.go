@@ -1,6 +1,7 @@
 package localtimer
 
 import (
+	"context"
 	"testing"
 
 	"touchgocore/util"
@@ -55,6 +56,25 @@ func BenchmarkNewTimerParallel(b *testing.B) {
 			timerPool.Put(tm)
 		}
 	})
+}
+
+// BenchmarkTimerAddRemove 端到端测量「新建 + 入轮 + 移除」：入轮由时间轮协程
+// 执行链表 Add，摘除走 Node.Remove，正是 S63 索引开销所在的位置。
+func BenchmarkTimerAddRemove(b *testing.B) {
+	Run(context.Background())
+	defer TimeStop(context.Background())
+
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		tm, err := NewTimer[*plainTimer](3600*1000, InfiniteCount, nil)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if err := AddTimer(tm); err != nil {
+			b.Fatal(err)
+		}
+		tm.Remove()
+	}
 }
 
 // BenchmarkPoolKeyShortName 单列键推导成本：util.GetClassName 内含 reflect.Indirect

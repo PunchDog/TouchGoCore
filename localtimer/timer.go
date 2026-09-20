@@ -7,7 +7,6 @@ import (
 	"sync/atomic"
 
 	"touchgocore/list"
-	"touchgocore/syncmap"
 	"touchgocore/util"
 )
 
@@ -88,10 +87,16 @@ type TimerInterface interface {
 	IsActive() bool
 }
 
-// TimerPool 为定时器提供类型安全的对象池管理
+// TimerPool 为定时器提供类型安全的对象池管理。
+//
+// 池按 reflect.Type 分组，不按类型短名：GetClassName 只给短名，两个包里的同名
+// 定时器会共用一个 sync.Pool，而池的 New 闭包锁死在首个调用方的元素类型上，
+// 后到的类型会从池里领到别包实例，最终在 NewTimer 断言回 T 时 panic。
+// 顺带避开热路径反射：GetClassName 每次都要 reflect.Indirect 并拼装全部方法名
+// （本机实测单次 45 次分配 / 2.7KB），旧实现 Get、Put 各调一次。
 type TimerPool struct {
-	once sync.Once
-	pool *syncmap.Map[string, *sync.Pool] // map[reflect.Type]*sync.Pool
+	// 键为 reflect.Type（指针类型本身），值为该类型的对象池。
+	pools sync.Map
 
 	// 池行为计数。sync.Pool 没有可观测长度，「Remove 是否真的回了池」「有没有
 	// 把非池实例塞进池」这类契约只能靠自己的计数器暴露出来供监控与测试断言。
@@ -123,38 +128,40 @@ func GetTimerPoolStats() TimerPoolStats {
 // 有界即可：超出就说明池里几乎全是活跃实例，再捞只是浪费，直接新建。
 const maxPoolGetAttempts = 8
 
+// poolFor 返回 tp 对应的对象池，首次访问时建池。
+//
+// tp 必须是指针类型（NewTimer 已校验）：元素类型用于 reflect.New 造实例。
+func (p *TimerPool) poolFor(tp reflect.Type) *sync.Pool {
+	if v, ok := p.pools.Load(tp); ok {
+		return v.(*sync.Pool)
+	}
+	elem := tp.Elem()
+	// LoadOrStore 而非 Store：并发首次调用时只会保留一个池。
+	// 各自 Store 会后写覆盖前写，被覆盖那个池里已归还的对象就此孤儿。
+	created := &sync.Pool{
+		New: func() interface{} {
+			obj := reflect.New(elem).Interface().(TimerInterface)
+			// 新造实例视作「仍在池中待认领」，与归还后的状态统一，
+			// Get 的 CAS 才能一致地判定所有权。
+			if parent := obj.GetParent(); parent != nil {
+				parent.inPool.Store(true)
+				// 池发放凭证：只有从这里诞生的实例才允许日后 Put 回池。
+				// 粘性标记，永不清除。
+				parent.fromPool.Store(true)
+			}
+			return obj
+		},
+	}
+	actual, _ := p.pools.LoadOrStore(tp, created)
+	return actual.(*sync.Pool)
+}
+
 // Get 从池中获取定时器，成功后调用方即成为该实例的唯一主人。
 //
 // 所有权靠 Timer.inPool 的 CAS 转移：池中条目只有处于「等待认领」状态才发得出
 // 去，取到不可认领的条目就丢弃再取，绝不把别人手里的实例发第二份。
 func (p *TimerPool) Get(cls TimerInterface) TimerInterface {
-	// once 保证并发首次调用只会初始化一次（原来的裸 nil 判断存在数据竞争）
-	p.once.Do(func() {
-		if p.pool == nil {
-			p.pool = syncmap.NewMap[string, *sync.Pool]()
-		}
-	})
-	tpname, _ := util.GetClassName(cls)
-	pool, ok := p.pool.Load(tpname)
-	if !ok {
-		tp := reflect.TypeOf(cls).Elem()
-		// LoadOrStore 而非 Store：并发首次调用时只会保留一个池。
-		// 各自 Store 会后写覆盖前写，被覆盖那个池里已归还的对象就此孤儿。
-		pool, _ = p.pool.LoadOrStore(tpname, &sync.Pool{
-			New: func() interface{} {
-				obj := reflect.New(tp).Interface().(TimerInterface)
-				// 新造实例视作「仍在池中待认领」，与归还后的状态统一，
-				// 上面的 CAS 才能一致地判定所有权。
-				if parent := obj.GetParent(); parent != nil {
-					parent.inPool.Store(true)
-					// 池发放凭证：只有从这里诞生的实例才允许日后 Put 回池。
-					// 粘性标记，永不清除。
-					parent.fromPool.Store(true)
-				}
-				return obj
-			},
-		})
-	}
+	pool := p.poolFor(reflect.TypeOf(cls))
 
 	for i := 0; i < maxPoolGetAttempts; i++ {
 		obj := pool.Get().(TimerInterface)
@@ -194,7 +201,7 @@ func (p *TimerPool) Get(cls TimerInterface) TimerInterface {
 // 堆积成百上千份，NewTimer 于是把活实例再发给别人，两个逻辑定时器共用一个
 // 对象，彼此的代次互相把对方的调度项判为过期，表现为定时器彻底不再 Tick。
 func (p *TimerPool) Put(cls TimerInterface) {
-	if cls == nil || p.pool == nil {
+	if cls == nil {
 		return
 	}
 	parent := cls.GetParent()
@@ -212,8 +219,7 @@ func (p *TimerPool) Put(cls TimerInterface) {
 		return // 已在池中：重复归还直接丢弃
 	}
 	parent.released.Store(true)
-	tpname, _ := util.GetClassName(cls)
-	pool, ok := p.pool.Load(tpname)
+	pool, ok := p.pools.Load(reflect.TypeOf(cls))
 	if !ok {
 		// 无池可归：撤销标记，别把实例留在「谁都不认」的中间态
 		parent.released.Store(false)
@@ -222,11 +228,11 @@ func (p *TimerPool) Put(cls TimerInterface) {
 		parent.inPool.Store(false)
 		return
 	}
-	pool.Put(cls)
+	pool.(*sync.Pool).Put(cls)
 	p.puts.Add(1)
 }
 
-var timerPool = &TimerPool{pool: syncmap.NewMap[string, *sync.Pool]()}
+var timerPool = &TimerPool{}
 
 // Timer 表示基础定时器结构
 // 说明：定时器会被多个协程同时访问（业务协程 Remove/AddTimer、时间轮协程调度、
@@ -635,6 +641,26 @@ func (t *Timer) GetRemainingCount() int64 {
 	}
 }
 
+// timerPrototypes 缓存「只为推导类型而存在的原型实例」。
+//
+// NewTimer 需要一个具体类型的非 nil 实例去向池认领对象，而池现在按 reflect.Type
+// 取键，原型的全部作用就剩一个动态类型 —— 每种类型留一份共用即可，
+// 不必每次调用都 reflect.New 一个（原型永不入池，也不会被业务持有）。
+var timerPrototypes sync.Map
+
+// prototypeFor 返回 tp（必须是指针类型）对应的原型实例。
+func prototypeFor(tp reflect.Type) (TimerInterface, bool) {
+	if cached, ok := timerPrototypes.Load(tp); ok {
+		return cached.(TimerInterface), true
+	}
+	proto, ok := reflect.New(tp.Elem()).Interface().(TimerInterface)
+	if !ok {
+		return nil, false
+	}
+	actual, _ := timerPrototypes.LoadOrStore(tp, proto)
+	return actual.(TimerInterface), true
+}
+
 // NewTimer 创建新的定时器实例，实例来自对象池（T 必须是指针类型，如 *MyTimer）。
 // 返回 T 供调用方直接断言回具体类型使用。
 // initcallback 在 Init 完成后、返回前调用，入参为池中实例（含复用实例），
@@ -655,9 +681,8 @@ func NewTimer[T TimerInterface](interval, count int64, initcallback func(t T)) (
 		return zero, ErrTimerInvalidInterval
 	}
 
-	// 构造真实原型实例：不能用 zero（类型化 nil 指针）直接入池 ——
-	// GetClassName 内部 reflect.Indirect 对 nil 指针取 Elem 会 panic。
-	prototype, ok := reflect.New(tp.Elem()).Interface().(T)
+	// 原型不能是 zero（类型化 nil 指针）：池的认领路径要靠它的动态类型。
+	prototype, ok := prototypeFor(tp)
 	if !ok {
 		return zero, ErrTimerInvalidType
 	}

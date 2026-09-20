@@ -59,14 +59,18 @@ func (m *Map[K, V]) Clear() {
 
 // ClearAll removes all entries from the map after invoking the callback for each.
 // The callback function 'fn' returns true to continue iteration, false to stop.
-// The callback is invoked while holding the write lock - no Store/Delete operations
-// on this map are allowed within the callback.
+// A nil fn clears the map without callbacks.
 //
 // ClearAll is designed for cleanup scenarios where elements need to be
 // processed before removal, such as closing resources or releasing references.
 func (m *Map[K, V]) ClearAll(fn func(k K, v V) bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if fn == nil {
+		m.mp = make(map[K]V)
+		m.num.Store(0)
+		return
+	}
 	for k, v := range m.mp {
 		if !fn(k, v) {
 			break
@@ -106,13 +110,27 @@ func (m *Map[K, V]) Load(k K) (v V, ok bool) {
 
 // Range calls fn for each key-value pair in the map.
 // If fn returns false, Range stops the iteration.
-// The callback is invoked while holding a read lock.
+//
+// 迭代基于锁内快照、锁外回调：回调中可以安全调用 Delete/Store/Range，
+// 不会再因持有读锁而自死锁。代价是回调看到的是一致性快照，
+// 遍历期间的并发修改不反映到本次遍历。
 func (m *Map[K, V]) Range(fn func(k K, v V) bool) {
+	if fn == nil {
+		return
+	}
+
 	m.mu.RLock()
-	defer m.mu.RUnlock()
+	keys := make([]K, 0, len(m.mp))
+	vals := make([]V, 0, len(m.mp))
 	for k, v := range m.mp {
-		if !fn(k, v) {
-			break
+		keys = append(keys, k)
+		vals = append(vals, v)
+	}
+	m.mu.RUnlock()
+
+	for i := range keys {
+		if !fn(keys[i], vals[i]) {
+			return
 		}
 	}
 }
@@ -136,24 +154,27 @@ func (m *Map[K, V]) List(sortFunc func(d1, d2 V) bool) []V {
 // RangeBySort iterates over key-value pairs in sorted order.
 // If sortFunc is nil, behaves like Range.
 // sortFunc should compare values: return true if d1 should come before d2.
+// 与 Range 一致：快照与排序在锁内完成，回调在锁外执行，避免回调内改表死锁。
 func (m *Map[K, V]) RangeBySort(fn func(k K, v V) bool, sortFunc func(d1, d2 V) bool) {
+	if fn == nil {
+		return
+	}
 	if sortFunc == nil {
 		m.Range(fn)
 		return
 	}
-
-	m.mu.RLock()
-	defer m.mu.RUnlock()
 
 	type sortTemp struct {
 		key   K
 		value V
 	}
 
+	m.mu.RLock()
 	pairs := make([]sortTemp, 0, len(m.mp))
 	for k, v := range m.mp {
 		pairs = append(pairs, sortTemp{k, v})
 	}
+	m.mu.RUnlock()
 
 	sort.Slice(pairs, func(i, j int) bool {
 		return sortFunc(pairs[i].value, pairs[j].value)
@@ -161,7 +182,7 @@ func (m *Map[K, V]) RangeBySort(fn func(k K, v V) bool, sortFunc func(d1, d2 V) 
 
 	for _, pair := range pairs {
 		if !fn(pair.key, pair.value) {
-			break
+			return
 		}
 	}
 }

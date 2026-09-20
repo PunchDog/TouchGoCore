@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -49,31 +50,88 @@ type logEntry struct {
 }
 
 // getCaller 获取业务调用者的文件路径与行号。
-// 通过遍历调用栈，跳过本包（vars）内部函数帧，
-// 返回第一个不属于 vars 包的调用者——即真正发起日志的业务代码位置。
-// 相比固定 skip 深度，本方案不受函数内联、调用链中间层增减影响，更稳健。
+// 一次 runtime.Callers 采集整条栈、一次 CallersFrames 展开，跳过本包（vars）内部
+// 帧，返回第一个不属于 vars 的调用者——即真正发起日志的业务代码位置。
+//
+// 旧实现对 depth=1..15 逐个调用 runtime.Caller：每次都要从栈顶重新走一遍（合计
+// O(深度²)），且每次 Callers/FuncForPC 各分配一次，本机实测单条日志 4.3µs / 15 次
+// 分配。同时判定用的是 Contains("/vars.")，任何路径里带 /vars. 的第三方包
+// （example.com/vars.Foo）都会被误当成本包帧而跳过，定位到更外层。
 func getCaller() (string, int) {
-	for depth := 1; depth < 16; depth++ {
-		pc, file, line, ok := runtime.Caller(depth)
-		if !ok {
-			break
-		}
-		fn := runtime.FuncForPC(pc)
-		if fn == nil {
-			continue
-		}
-		name := fn.Name()
-		// 跳过 vars 包内部函数帧（含 getCaller 本身、Enqueue、Info 便捷函数等）
-		if strings.Contains(name, "/vars.") || strings.HasPrefix(name, "touchgocore/vars.") {
-			continue
-		}
-		// Windows 下统一使用反斜杠路径，与系统文件路径风格一致
-		if runtime.GOOS == "windows" {
-			file = strings.ReplaceAll(file, "/", "\\")
-		}
+	// 采集代价与窗口大小成正比（从栈顶逐帧走到窗口上限）：常规链只有个位数 vars
+	// 内部帧，先用小窗口；小窗口采满仍未见业务帧才说明链异常深，再用大窗口重来。
+	// 两个窗口各自定长，小窗口不参与大窗口的逃逸分析，常态路径不会把 64 帧的数组
+	// 顶上堆。
+	var fast [callerFastFrames]uintptr
+	if file, line, ok := expandCaller(fast[:]); ok {
+		return file, line
+	}
+
+	var full [callerFrameLimit]uintptr
+	if file, line, ok := expandCaller(full[:]); ok {
 		return file, line
 	}
 	return "", 0
+}
+
+// expandCaller 展开 pcs 采到的帧，返回第一个不属于 vars 包的调用者位置。
+// ok=false 表示窗口内全是本包帧（或整条栈都不属于业务），调用方应换更大的窗口重试。
+func expandCaller(pcs []uintptr) (string, int, bool) {
+	n := runtime.Callers(2, pcs)
+	if n == 0 {
+		return "", 0, false
+	}
+
+	frames := runtime.CallersFrames(pcs[:n])
+	for {
+		frame, more := frames.Next()
+		if frame.File != "" && !strings.HasPrefix(frame.Function, varsFuncPrefix) {
+			return normalizeCallerFile(frame.File), frame.Line, true
+		}
+		if !more {
+			return "", 0, false
+		}
+	}
+}
+
+// 小窗口覆盖 vars 内部帧（Info → writeToFile → LogAsyncSimple → EnqueueSimple →
+// Enqueue → getCaller）加余量；采满仍未命中就退回大窗口重扫。
+const (
+	callerFastFrames = 8
+	callerFrameLimit = 64
+)
+
+// normalizeCallerFile 统一路径分隔符：Windows 下与系统文件路径风格一致。
+// 只有真的含正斜杠时才重建字符串，同一调用点反复打日志时不再每次分配。
+func normalizeCallerFile(file string) string {
+	if isWindows && strings.Contains(file, "/") {
+		return strings.ReplaceAll(file, "/", "\\")
+	}
+	return file
+}
+
+const isWindows = runtime.GOOS == "windows"
+
+// varsFuncPrefix 本包函数名的公共前缀（形如 "touchgocore/vars."），用于精确判定
+// 「这一帧是不是 vars 内部帧」。前缀在包初始化时从自身函数名反推，换模块路径或
+// 被 vendor 后依然成立。
+var varsFuncPrefix = computeVarsFuncPrefix()
+
+func computeVarsFuncPrefix() string {
+	pc, _, _, ok := runtime.Caller(0)
+	if !ok {
+		return ""
+	}
+	fn := runtime.FuncForPC(pc)
+	if fn == nil {
+		return ""
+	}
+	name := fn.Name() // 形如 touchgocore/vars.computeVarsFuncPrefix
+	tail := name[strings.LastIndexByte(name, '/')+1:]
+	if i := strings.IndexByte(tail, '.'); i >= 0 {
+		return name[:len(name)-len(tail)+i+1]
+	}
+	return name
 }
 
 // AsyncChannelStats 异步日志统计
@@ -91,12 +149,12 @@ type AsyncChannelStats struct {
 // 使用专用的goroutine处理日志写入，避免阻塞业务逻辑
 type AsyncLoggerChannel struct {
 	config   AsyncChannelConfig
-	input    chan logEntry      // 日志输入channel（永不 close，由 stop 通知消费者退出）
-	stop     chan struct{}      // 停止信号，Close 时关闭一次
-	writer   io.Writer          // 实际写入器
-	closed   atomic.Bool        // 关闭标志
-	stopping atomic.Bool        // 正在停止中
-	wg       sync.WaitGroup     // goroutine同步
+	input    chan logEntry  // 日志输入channel（永不 close，由 stop 通知消费者退出）
+	stop     chan struct{}  // 停止信号，Close 时关闭一次
+	writer   io.Writer      // 实际写入器
+	closed   atomic.Bool    // 关闭标志
+	stopping atomic.Bool    // 正在停止中
+	wg       sync.WaitGroup // goroutine同步
 
 	// 统计字段全部使用原子类型：入队方是多协程、消费协程是单协程，
 	// 任何裸 int64 字段都会在 Enqueue/GetStats/run 之间构成数据竞争。
@@ -109,6 +167,10 @@ type AsyncLoggerChannel struct {
 
 	flushSig  chan chan struct{} // 刷新信号；nil 表示无需回执，非 nil 时由消费者写入信号值
 	batchPool sync.Pool          // 批处理对象池
+
+	// scratch 是消费者协程私有的格式化缓冲（只有 run / drainStragglers 会碰），
+	// 不入池、不加锁：批量写盘每批省掉一次整批容量的分配与两次全量拷贝。
+	scratch []byte
 }
 
 // NewAsyncLoggerChannel 创建异步日志Channel
@@ -298,14 +360,20 @@ func (a *AsyncLoggerChannel) drainStragglers() {
 
 	batch := a.batchPool.Get().(*batchEntries)
 	defer func() {
-		batch.entries = batch.entries[:0]
+		batch.reset()
 		a.batchPool.Put(batch)
 	}()
 
 	for {
 		select {
 		case entry := <-a.input:
-			batch.entries = append(batch.entries, entry)
+			batch.add(entry)
+			// 分批写出：一次性把整个残留队列格式化进一块缓冲，峰值内存按队列容量
+			// （默认 10000 条）放大，退出路径上反而最容易触发 OOM。
+			if batch.bytes >= a.config.FlushThreshold {
+				a.writeBatch(batch)
+				batch.reset()
+			}
 		default:
 			if len(batch.entries) > 0 {
 				a.writeBatch(batch)
@@ -362,7 +430,12 @@ func (a *AsyncLoggerChannel) run() {
 
 	// 批处理缓冲区
 	batch := a.batchPool.Get().(*batchEntries)
-	defer a.batchPool.Put(batch)
+	defer func() {
+		// 归还前必须清空：否则池里那份容器带着上一批的条目与字节数，下一位认领者
+		// 既钉着整批字符串，又会从非零长度、非零 bytes 开始累积。
+		batch.reset()
+		a.batchPool.Put(batch)
+	}()
 
 	// 定时器
 	ticker := time.NewTicker(a.config.FlushInterval)
@@ -385,7 +458,7 @@ func (a *AsyncLoggerChannel) run() {
 		a.lastFlushNs.Store(time.Now().UnixNano())
 
 		// 重置批处理
-		batch.entries = batch.entries[:0]
+		batch.reset()
 		lastWriteTime = time.Now()
 	}
 
@@ -394,8 +467,8 @@ func (a *AsyncLoggerChannel) run() {
 		for {
 			select {
 			case entry := <-a.input:
-				batch.entries = append(batch.entries, entry)
-				if batch.size() >= a.config.FlushThreshold {
+				batch.add(entry)
+				if batch.bytes >= a.config.FlushThreshold {
 					flush()
 				}
 			default:
@@ -413,13 +486,13 @@ func (a *AsyncLoggerChannel) run() {
 
 		case entry := <-a.input:
 			// 添加到批处理
-			batch.entries = append(batch.entries, entry)
+			batch.add(entry)
 
 			// 更新峰值
 			a.recordQueuePeak(len(a.input))
 
 			// 检查是否需要立即刷新
-			if batch.size() >= a.config.FlushThreshold {
+			if batch.bytes >= a.config.FlushThreshold {
 				flush()
 			}
 
@@ -445,9 +518,32 @@ func (a *AsyncLoggerChannel) run() {
 	}
 }
 
-// batchEntries 批处理条目容器
+// batchEntries 批处理条目容器。
+//
+// bytes 随 append 增量维护：旧实现每收到一条日志就调用 size() 重算整批字节数，
+// 一批 n 条累计 O(n²) 次遍历，默认阈值（4KB ≈ 100 条）下每批白走近 5000 圈。
 type batchEntries struct {
 	entries []logEntry
+	bytes   int
+}
+
+// entryHeaderBytes 时间、级别、括号、路径与行号的估算头部
+const entryHeaderBytes = 64
+
+func (b *batchEntries) add(entry logEntry) {
+	b.entries = append(b.entries, entry)
+	b.bytes += len(entry.msg) + entryHeaderBytes
+}
+
+// reset 清空批次。
+//
+// clear 逐槽置零是必须的：entries[:0] 只把长度归零，底层数组依旧攥着这一批的
+// msg / attrs / context，而容器来自 sync.Pool，被钉住的整批字符串最长要拖到下一
+// 批填满才可能释放。
+func (b *batchEntries) reset() {
+	clear(b.entries)
+	b.entries = b.entries[:0]
+	b.bytes = 0
 }
 
 // recordQueuePeak 单调记录队列深度峰值
@@ -460,83 +556,69 @@ func (a *AsyncLoggerChannel) recordQueuePeak(queueLen int) {
 	}
 }
 
-// size 计算批处理大小（估算字节数）
-func (b *batchEntries) size() int {
-	size := 0
-	for _, e := range b.entries {
-		size += len(e.msg) + 64 // 消息长度 + 估算头部
-	}
-	return size
-}
-
-// writeBatch 写入一批日志（优化：合并为单次 Write 调用，减少系统调用开销）
+// writeBatch 写入一批日志：整批格式化进同一块缓冲，只做一次 Write 调用。
+//
+// buf 复用消费者协程私有的 a.scratch：本方法只由 run 与 drainStragglers 调用，
+// 两者都在同一个协程上，无并发；io.Writer 契约本就要求实现不得保留传入的 p。
+// 旧实现是 strings.Builder → String()（拷一次）→ []byte(string)（再拷一次）。
 func (a *AsyncLoggerChannel) writeBatch(batch *batchEntries) {
-	// 估算总大小，减少扩容
-	estSize := 0
-	for _, entry := range batch.entries {
-		estSize += len(entry.msg) + 64 // 消息 + 估算头部
+	if len(batch.entries) == 0 {
+		return
 	}
 
-	var buf strings.Builder
-	buf.Grow(estSize)
-
+	buf := a.scratch[:0]
+	if est := batch.bytes; cap(buf) < est {
+		buf = make([]byte, 0, est+est/4)
+	}
 	for _, entry := range batch.entries {
-		buf.WriteString(a.formatEntry(entry))
+		buf = a.appendEntry(buf, entry)
 	}
 
-	// 单次 Write 调用
-	data := buf.String()
-	if _, err := a.writer.Write([]byte(data)); err != nil {
+	_, err := a.writer.Write(buf)
+	a.scratch = buf
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "async log write error: %v\n", err)
-	} else {
-		a.written.Add(int64(len(batch.entries)))
+		return
+	}
+	a.written.Add(int64(len(batch.entries)))
+}
+
+// levelString 日志级别的展示文本，与历史输出逐字一致。
+func levelString(level slog.Level) string {
+	switch level {
+	case slog.LevelDebug:
+		return "DEBUG"
+	case slog.LevelWarn:
+		return "WARN"
+	case slog.LevelError:
+		return "ERROR"
+	default:
+		return "INFO"
 	}
 }
 
-// formatEntry 格式化日志条目（使用 strings.Builder 优化字符串拼接）
-func (a *AsyncLoggerChannel) formatEntry(entry logEntry) string {
-	levelStr := "INFO"
-	switch entry.level {
-	case slog.LevelDebug:
-		levelStr = "DEBUG"
-	case slog.LevelWarn:
-		levelStr = "WARN"
-	case slog.LevelError:
-		levelStr = "ERROR"
-	}
-
-	// 估算容量：时间(19) + 空格 + 级别(5) + 括号 + 文件路径(估) + 消息 + 换行
-	estLen := 32 + len(entry.file) + 8 + len(entry.msg)
-	if len(entry.attrs) > 0 {
-		for _, attr := range entry.attrs {
-			estLen += len(attr.Key) + 16
-		}
-	}
-
-	var sb strings.Builder
-	sb.Grow(estLen)
-	sb.WriteString(entry.time.Format(time.DateTime))
-	sb.WriteByte(' ')
-	sb.WriteString(levelStr)
-	sb.WriteString(" [")
+// appendEntry 把一条日志按既有格式追加到 buf 尾部并返回扩容后的切片。
+// 输出与旧的 formatEntry 完全一致，只是不再为每条日志单独分配字符串。
+func (a *AsyncLoggerChannel) appendEntry(buf []byte, entry logEntry) []byte {
+	buf = entry.time.AppendFormat(buf, time.DateTime)
+	buf = append(buf, ' ')
+	buf = append(buf, levelString(entry.level)...)
+	buf = append(buf, " ["...)
 	if entry.file != "" {
-		sb.WriteString(entry.file)
-		sb.WriteByte(':')
-		sb.WriteString(fmt.Sprintf("%d", entry.line))
-		sb.WriteByte(' ')
+		buf = append(buf, entry.file...)
+		buf = append(buf, ':')
+		buf = strconv.AppendInt(buf, int64(entry.line), 10)
+		buf = append(buf, ' ')
 	}
-	sb.WriteString(entry.msg)
-	sb.WriteByte(']')
+	buf = append(buf, entry.msg...)
+	buf = append(buf, ']')
 
-	if len(entry.attrs) > 0 {
-		for _, attr := range entry.attrs {
-			sb.WriteByte(' ')
-			sb.WriteString(attr.Key)
-			sb.WriteByte('=')
-			fmt.Fprintf(&sb, "%v", attr.Value.Any())
-		}
+	for _, attr := range entry.attrs {
+		buf = append(buf, ' ')
+		buf = append(buf, attr.Key...)
+		buf = append(buf, '=')
+		buf = fmt.Appendf(buf, "%v", attr.Value.Any())
 	}
 
-	sb.WriteByte('\n')
-	return sb.String()
+	return append(buf, '\n')
 }

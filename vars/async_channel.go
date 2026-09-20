@@ -91,7 +91,8 @@ type AsyncChannelStats struct {
 // 使用专用的goroutine处理日志写入，避免阻塞业务逻辑
 type AsyncLoggerChannel struct {
 	config    AsyncChannelConfig
-	input     chan logEntry      // 日志输入channel
+	input     chan logEntry      // 日志输入channel（永不 close，由 stop 通知消费者退出）
+	stop      chan struct{}      // 停止信号，Close 时关闭一次
 	writer    io.Writer          // 实际写入器
 	closed    atomic.Bool        // 关闭标志
 	stopping  atomic.Bool        // 正在停止中
@@ -101,7 +102,7 @@ type AsyncLoggerChannel struct {
 	dropped   atomic.Int64       // 丢弃的日志数
 	queued    atomic.Int64       // 入队日志数
 	written   atomic.Int64       // 写入日志数
-	flushSig  chan chan struct{} // 刷新信号（使用chan chan实现回调）
+	flushSig  chan chan struct{} // 刷新信号；nil 表示无需回执，非 nil 时由消费者写入信号值
 	batchPool sync.Pool          // 批处理对象池
 }
 
@@ -126,8 +127,9 @@ func NewAsyncLoggerChannel(writer io.Writer, config AsyncChannelConfig) *AsyncLo
 	ch := &AsyncLoggerChannel{
 		config:   config,
 		input:    make(chan logEntry, config.BufferSize),
+		stop:     make(chan struct{}),
 		writer:   writer,
-		flushSig: make(chan chan struct{}, 1), // 使用 chan chan struct{} 来传递回调
+		flushSig: make(chan chan struct{}, 1), // 传递回调 channel（nil 表示无需回执）
 	}
 
 	// 初始化批处理对象池
@@ -179,13 +181,17 @@ func (a *AsyncLoggerChannel) Enqueue(level slog.Level, msg string, attrs []slog.
 		}
 	}
 
-	// 阻塞模式：等待写入
+	// 阻塞模式：等待写入；关闭进行中立即放弃，避免消费者退出后卡满超时
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
 	select {
 	case a.input <- entry:
 		return true
-	case <-time.After(5 * time.Second): // 5秒超时
+	case <-a.stop:
 		a.dropped.Add(1)
-		a.stats.TotalDropped++
+		return false
+	case <-timer.C:
+		a.dropped.Add(1)
 		return false
 	}
 }
@@ -195,22 +201,15 @@ func (a *AsyncLoggerChannel) EnqueueSimple(level slog.Level, msg string) bool {
 	return a.Enqueue(level, msg, nil, nil)
 }
 
-// sharedNoopChan 共享的无操作channel（用于无回调的刷新）
-var sharedNoopChan = make(chan struct{})
-
-func init() {
-	close(sharedNoopChan)
-}
-
 // Flush 手动刷新缓冲区（不带回调）
 func (a *AsyncLoggerChannel) Flush() error {
 	if a.closed.Load() {
 		return fmt.Errorf("channel is closed")
 	}
 
-	// 发送刷新信号（使用共享的无回调channel）
+	// 发送刷新信号（nil 表示无需回执，消费者不会 close 任何共享 channel）
 	select {
-	case a.flushSig <- sharedNoopChan:
+	case a.flushSig <- nil:
 	default:
 	}
 	return nil
@@ -218,30 +217,37 @@ func (a *AsyncLoggerChannel) Flush() error {
 
 // FlushAndWait 刷新并等待完成
 func (a *AsyncLoggerChannel) FlushAndWait(timeout time.Duration) error {
+	if a.closed.Load() {
+		return fmt.Errorf("channel is closed")
+	}
+
 	done := make(chan struct{}, 1)
 
 	select {
 	case a.flushSig <- done:
-	default:
-		// 已经有一个flush在等待
+	case <-time.After(timeout):
+		return fmt.Errorf("flush signal busy after %v", timeout)
 	}
 
 	select {
 	case <-done:
 		return nil
+	case <-a.stop:
+		return fmt.Errorf("channel is closed")
 	case <-time.After(timeout):
 		return fmt.Errorf("flush timeout after %v", timeout)
 	}
 }
 
-// Close 关闭channel，等待所有日志写入完成
+// Close 停止接收新日志，等待队列排空并写完后关闭底层 writer。
+// 数据通道 input 不再 close：消费者靠 stop 退出并主动排空 input，
+// 从而避免与并发 Enqueue 竞争导致的 send-on-closed panic。
 func (a *AsyncLoggerChannel) Close() error {
 	if !a.closed.CompareAndSwap(false, true) {
 		return nil // 已经关闭
 	}
 
-	// 关闭输入channel
-	close(a.input)
+	close(a.stop)
 
 	// 等待goroutine结束（带超时）
 	done := make(chan struct{})
@@ -250,19 +256,25 @@ func (a *AsyncLoggerChannel) Close() error {
 		close(done)
 	}()
 
+	var waitErr error
 	select {
 	case <-done:
 		// 正常结束
 	case <-time.After(10 * time.Second):
-		return fmt.Errorf("close timeout, some logs may not be written")
+		waitErr = fmt.Errorf("close timeout, some logs may not be written")
 	}
 
 	// 关闭底层writer
 	if closer, ok := a.writer.(io.Closer); ok {
-		return closer.Close()
+		if err := closer.Close(); err != nil {
+			if waitErr != nil {
+				return fmt.Errorf("%w; %v", waitErr, err)
+			}
+			return err
+		}
 	}
 
-	return nil
+	return waitErr
 }
 
 // GetStats 获取统计信息
@@ -341,15 +353,29 @@ func (a *AsyncLoggerChannel) run() {
 		lastWriteTime = time.Now()
 	}
 
-	for {
-		select {
-		case entry, ok := <-a.input:
-			if !ok {
-				// Channel关闭，刷写剩余数据
+	// 排空 input 中剩余条目并写入（关闭流程与停止信号共用）
+	drainInput := func() {
+		for {
+			select {
+			case entry := <-a.input:
+				batch.entries = append(batch.entries, entry)
+				if batch.size() >= a.config.FlushThreshold {
+					flush()
+				}
+			default:
 				flush()
 				return
 			}
+		}
+	}
 
+	for {
+		select {
+		case <-a.stop:
+			drainInput()
+			return
+
+		case entry := <-a.input:
 			// 添加到批处理
 			batch.entries = append(batch.entries, entry)
 
@@ -373,8 +399,14 @@ func (a *AsyncLoggerChannel) run() {
 
 		case callback := <-a.flushSig:
 			flush()
-			// 关闭回调 channel（发送方通过检查 channel 是否关闭来判断）
-			close(callback)
+			// 通知调用方：向回调 channel 写入信号值而非 close，
+			// 使同一 channel 可被多次安全通知，也不存在重复关闭风险。
+			if callback != nil {
+				select {
+				case callback <- struct{}{}:
+				default:
+				}
+			}
 		}
 	}
 }

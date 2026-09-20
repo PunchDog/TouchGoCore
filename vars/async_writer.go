@@ -67,10 +67,20 @@ func (a *AsyncWriteSyncer) Sync() error {
 	done := make(chan struct{}, 1)
 	select {
 	case a.flush <- done:
-		<-done
+	case <-time.After(2 * time.Second):
+		// 队列被占用，退化为不阻塞
 		return nil
-	default:
+	case <-a.stop:
 		return nil
+	}
+
+	select {
+	case <-done:
+		return nil
+	case <-a.stop:
+		return nil
+	case <-time.After(2 * time.Second):
+		return fmt.Errorf("async writer sync timeout")
 	}
 }
 
@@ -111,13 +121,14 @@ func (a *AsyncWriteSyncer) run() {
 				a.flushBuffer()
 			}
 
-		case <-a.flush:
+		case done := <-a.flush:
+			// 先排空已提交的写入再落盘，保证 Sync 返回即代表此前所有 Write 已可见
+			a.drainInput()
 			a.flushBuffer()
-			// 通知flush完成
-			select {
-			case done := <-a.flush:
+			// 通知flush完成（done 由调用方创建，必须在此关闭，
+			// 否则 zap 的 Sync() 会永久等待）
+			if done != nil {
 				close(done)
-			default:
 			}
 
 		case <-flushInterval.C:
@@ -126,7 +137,21 @@ func (a *AsyncWriteSyncer) run() {
 			}
 
 		case <-a.stop:
+			// 先排空 input，避免关闭时丢失缓冲区内尚未落盘的日志
+			a.drainInput()
 			a.flushBuffer()
+			return
+		}
+	}
+}
+
+// drainInput 非阻塞地把 input 中已提交的写入搬到缓冲区
+func (a *AsyncWriteSyncer) drainInput() {
+	for {
+		select {
+		case data := <-a.input:
+			a.buffer = append(a.buffer, data...)
+		default:
 			return
 		}
 	}

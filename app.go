@@ -94,8 +94,7 @@ func NewApp(serverName string) (*App, error) {
 	app.initLogger()
 
 	// 设置CPU核数
-	runtime.GOMAXPROCS(0)
-	vars.Info("加载核心配置")
+	app.setupMaxProcs()
 
 	// 初始化数据库
 	if err := app.initDatabase(); err != nil {
@@ -157,6 +156,16 @@ func (app *App) initLogger() {
 	vars.Info("%s", showsr)
 	vars.Info("%s", centerstr)
 	vars.Info("%s", showsr)
+}
+
+// setupMaxProcs 按配置设置 CPU 核数；未配置则保留运行时默认值
+func (app *App) setupMaxProcs() {
+	if app.Cfg == nil || app.Cfg.Server == nil || app.Cfg.Server.MaxProcs <= 0 {
+		vars.Info("加载核心配置, GOMAXPROCS 使用运行时默认值: %d", runtime.GOMAXPROCS(0))
+		return
+	}
+	prev := runtime.GOMAXPROCS(app.Cfg.Server.MaxProcs)
+	vars.Info("加载核心配置, GOMAXPROCS: %d -> %d", prev, app.Cfg.Server.MaxProcs)
 }
 
 // initDatabase 初始化数据库连接
@@ -230,8 +239,9 @@ func (app *App) Start() error {
 	startedCount := 0
 	for _, svc := range app.services {
 		if err := svc.Start(app.ctx); err != nil {
+			// 回滚已启动的服务，同样给独立预算，避免卡死在退出路上
 			for i := startedCount - 1; i >= 0; i-- {
-				_ = app.services[i].Stop(app.ctx)
+				_ = stopService(app.services[i], minServiceStopBudget)
 			}
 			return fmt.Errorf("启动服务[%s]失败: %w", svc.Name(), err)
 		}
@@ -247,37 +257,31 @@ func (app *App) Start() error {
 	return nil
 }
 
+// minServiceStopBudget 单个服务停止的最小时间预算，
+// 防止服务多或总预算小导致靠后的服务只分到接近 0 的时间而被误判为超时。
+const minServiceStopBudget = 2 * time.Second
+
 // Shutdown 优雅关闭所有服务（反向顺序）
 func (app *App) Shutdown(timeout time.Duration) error {
 	app.mu.Lock()
 	defer app.mu.Unlock()
 
 	if !app.started {
+		app.cancel()
 		app.closeDatabase()
 		return nil
 	}
 
-	// 创建带超时的关闭上下文
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
+	deadline := time.Now().Add(timeout)
 
-	// 反向关闭服务
+	// 先取消 app.ctx：各服务的 Run 循环都靠 ctx.Done 退出，
+	// 若等到 Stop 之后再取消，Stop 等循环退出、循环等 Stop 取消，会互相卡住。
+	app.cancel()
+
 	var errs []error
 	for i := len(app.services) - 1; i >= 0; i-- {
-		svc := app.services[i]
-		done := make(chan error, 1)
-		go func() {
-			done <- svc.Stop(ctx)
-		}()
-
-		select {
-		case err := <-done:
-			if err != nil {
-				errs = append(errs, fmt.Errorf("停止服务[%s]出错: %w", svc.Name(), err))
-			}
-			vars.Info("服务[%s]已停止", svc.Name())
-		case <-ctx.Done():
-			errs = append(errs, fmt.Errorf("停止服务[%s]超时", svc.Name()))
+		if err := stopService(app.services[i], serviceStopBudget(deadline, i+1)); err != nil {
+			errs = append(errs, err)
 		}
 	}
 
@@ -286,15 +290,52 @@ func (app *App) Shutdown(timeout time.Duration) error {
 
 	app.closeDatabase()
 
+	// 日志最后关闭，保证上面的关闭过程都能落盘
 	vars.Shutdown()
 
 	app.started = false
-	app.cancel()
 
 	if len(errs) > 0 {
 		return fmt.Errorf("关闭过程中发生错误: %v", errs)
 	}
 	return nil
+}
+
+// serviceStopBudget 把总剩余时间按待停服务数均分，并保证最小预算
+func serviceStopBudget(deadline time.Time, remainingServices int) time.Duration {
+	if remainingServices < 1 {
+		remainingServices = 1
+	}
+	budget := time.Until(deadline) / time.Duration(remainingServices)
+	if budget < minServiceStopBudget {
+		return minServiceStopBudget
+	}
+	return budget
+}
+
+// stopService 在独立预算内停止服务；超时不阻塞后续服务，
+// done 带缓冲，确保迟到的返回值不会让协程永久阻塞。
+func stopService(svc Service, budget time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- svc.Stop(ctx) }()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			wrapped := fmt.Errorf("停止服务[%s]出错: %w", svc.Name(), err)
+			vars.Error("%v", wrapped)
+			return wrapped
+		}
+		vars.Info("服务[%s]已停止", svc.Name())
+		return nil
+	case <-ctx.Done():
+		timedOut := fmt.Errorf("停止服务[%s]超时(%s)", svc.Name(), budget)
+		vars.Error("%v", timedOut)
+		return timedOut
+	}
 }
 
 func (app *App) closeDatabase() {

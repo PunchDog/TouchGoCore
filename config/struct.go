@@ -143,6 +143,7 @@ type ServerConfig struct {
 	WriteBuffer  int    `json:"write_buffer"` // 写缓冲大小
 	ReadBuffer   int    `json:"read_buffer"`  // 读缓冲大小
 	Backpressure bool   `json:"backpressure"` // 是否启用背压
+	MaxProcs     int    `json:"max_procs"`    // GOMAXPROCS，<=0 时保留运行时默认值
 }
 
 // Metrics 监控配置

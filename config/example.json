@@ -61,6 +61,7 @@
             "https://example.com"
         ],
         "check_origin": true,
+        "skip_origin_for_intranet说明": "内网且请求不带 Origin 时放行；带 Origin 仍比对 allowed_origins",
         "skip_origin_for_intranet": false,
         "allow_empty_origin说明": "Origin 头缺失时是否放行；浏览器跨站握手必定带 Origin，仅原生客户端需要打开",
         "allow_empty_origin": false,
@@ -147,7 +148,9 @@
         "fps": 30,
         "version": "1.0.0",
         "max_msg_size": 1048576,
+        "write_buffer说明": "写队列容量（消息条数，不是字节）；0 表示用框架默认 4096",
         "write_buffer": 4096,
+        "read_buffer说明": "读队列容量（消息条数，不是字节）；历史上这里填过字节值（如 1048576），按新语义会开出百万槽队列，需换算成条数",
         "read_buffer": 4096,
         "backpressure": true
     },

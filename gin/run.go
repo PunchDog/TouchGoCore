@@ -283,6 +283,15 @@ func Run(ctx context.Context) error {
 	// 之后端口已绑定，启动结论不再依赖等待时长。
 	select {
 	case err := <-errCh:
+		// Serve/ServeTLS 失败时不会替调用方关监听器：不释放就把端口永久占住，
+		// 一次配置写错就得重启整个进程才能再起来。
+		_ = ln.Close()
+		httpMu.Lock()
+		// 只摘自己：期间可能有另一次 Run 已经装上了新 server
+		if httpServer == srv {
+			httpServer = nil
+		}
+		httpMu.Unlock()
 		return err
 	case <-time.After(100 * time.Millisecond):
 	}

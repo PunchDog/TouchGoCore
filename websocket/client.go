@@ -159,7 +159,7 @@ func (c *Client) handleLoop() {
 
 	// 心跳与业务写共用本协程：gorilla 禁止并发写连接，单独起协程发 ping 就得
 	// 再补一把写锁。放在这里天然串行，也不需要第三个常驻协程。
-	pinger := time.NewTicker(pingInterval)
+	pinger := time.NewTicker(currentPingInterval())
 	defer pinger.Stop()
 
 	for c.Connected() {
@@ -184,7 +184,7 @@ func (c *Client) handleLoop() {
 			}
 			// 设置写超时：对端不收时 WriteMessage 会永久阻塞，把本协程
 			// 连同这条连接的发送队列钉死，背压也变成死锁。
-			if err := conn.SetWriteDeadline(util.CurrentTime().Add(writeTimeout)); err != nil {
+			if err := conn.SetWriteDeadline(util.CurrentTime().Add(currentWriteTimeout())); err != nil {
 				vars.Error("设置写超时失败: %v, 客户端地址: %s", err, c.remoteAddr)
 				c.Close("设置写超时失败")
 				return
@@ -206,7 +206,7 @@ func (c *Client) handleLoop() {
 
 // writePing 发送一次 ping 控制帧（带写超时）
 func (c *Client) writePing(conn *websocket.Conn) error {
-	if err := conn.SetWriteDeadline(util.CurrentTime().Add(writeTimeout)); err != nil {
+	if err := conn.SetWriteDeadline(util.CurrentTime().Add(currentWriteTimeout())); err != nil {
 		return err
 	}
 	return conn.WriteMessage(websocket.PingMessage, nil)
@@ -229,11 +229,11 @@ func (c *Client) readLoop() {
 	// 读超时 + pong 续期：修复前 ReadMessage 完全没有 deadline，对端拔网线或
 	// 留下半开连接时本协程永久阻塞，Client 实例与底层 socket 一起泄漏到进程退出。
 	conn.SetPongHandler(func(string) error {
-		return conn.SetReadDeadline(util.CurrentTime().Add(readTimeout))
+		return conn.SetReadDeadline(util.CurrentTime().Add(currentReadTimeout()))
 	})
 
 	for c.Connected() {
-		if err := conn.SetReadDeadline(util.CurrentTime().Add(readTimeout)); err != nil {
+		if err := conn.SetReadDeadline(util.CurrentTime().Add(currentReadTimeout())); err != nil {
 			vars.Error("设置读超时失败: %v, 客户端地址: %s", err, c.remoteAddr)
 			return
 		}
@@ -434,6 +434,19 @@ func (c *Client) SendMsg(msg ...any) {
 	}
 }
 
+// runConnectGate 执行业务 OnConnect 并收敛 panic：
+// 外部回调 panic 冒到 HTTP 处理协程只会静默掐断连接，既没有日志也没有失败计数，
+// 排查时表现为「客户端莫名连不上」。panic 与返回 false 同样按拒绝处理。
+func (client *Client) runConnectGate() (ok bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			vars.Error("WebSocket OnConnect 回调 panic, 客户端: %s: %v", client.remoteAddr, r)
+			ok = false
+		}
+	}()
+	return client.OnConnect(client)
+}
+
 // 修改InitConnection为NewClient
 func NewClient(connType interface{}, remoteAddr string, className string) (*Client, error) {
 	uid := nextUID()
@@ -499,7 +512,8 @@ func NewClient(connType interface{}, remoteAddr string, className string) (*Clie
 		client.ICall = &defaultCall{}
 	}
 
-	if !client.OnConnect(client) {
+	// 业务 OnConnect 是外部回调：panic 必须收敛在这里，见 runConnectGate
+	if !client.runConnectGate() {
 		client.Close("连接初始化失败")
 		return nil, errors.New("连接回调验证失败")
 	}
@@ -514,8 +528,9 @@ func NewClient(connType interface{}, remoteAddr string, className string) (*Clie
 	go client.handleLoop()
 
 	// ============ 改进：更新服务器统计 ============
+	// 只记连接数：totalMessages 的口径是「真正处理掉的消息条数」（见 UpdateStatsFromMessage），
+	// 在建立连接时 +1 会让每条连接虚增一条消息；派发侧的丢弃/解析失败另有错误计数。
 	UpdateConnectionStats(true)
-	UpdateMessageStats()
 
 	return client, nil
 }

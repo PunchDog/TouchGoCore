@@ -40,6 +40,10 @@ const (
 	defaultRecvQueueEntries = 1024
 	// 背压阈值：当通道满于此比例时，记录警告日志
 	BACKPRESSURE_THRESHOLD = 0.9
+	// Worker 队列满时的兜底重试预算：只在目标队列上有界等待，超时即丢弃并计数。
+	// 预算太小会在突发下丢消息，太大则把唯一消费协程按住太久（全服停摆），故取毫秒级。
+	dispatchRetryBudget   = 20 * time.Millisecond
+	dispatchRetryInterval = 500 * time.Microsecond
 )
 
 // 心跳与超时的默认值（毫秒），可被 ws 配置覆盖
@@ -87,14 +91,27 @@ var (
 	stopOnce           sync.Once
 	tickDone           chan struct{}
 
-	// pingInterval / readTimeout / writeTimeout 是心跳与超时参数，按 Run 生效
-	pingInterval = defaultPingIntervalMS * time.Millisecond
-	readTimeout  = defaultReadTimeoutMS * time.Millisecond
-	writeTimeout = defaultWriteTimeoutMS * time.Millisecond
+	// pingInterval / readTimeout / writeTimeout 是心跳与超时参数，按 Run 生效。
+	// 必须是原子量：Run 写入时上一轮的读写协程可能仍在热循环里读它们，
+	// 普通 time.Duration 变量在并发读写下是数据竞争（不是「读到旧值」而是 UB）。
+	pingInterval atomic.Int64 // 纳秒
+	readTimeout  atomic.Int64
+	writeTimeout atomic.Int64
 
 	// workerPool 非 nil 表示并行消费模式；每次 Run 新建，见 workerPoolState 注释
 	workerPool atomic.Pointer[workerPoolState]
 )
+
+func init() {
+	pingInterval.Store(defaultPingIntervalMS * int64(time.Millisecond))
+	readTimeout.Store(defaultReadTimeoutMS * int64(time.Millisecond))
+	writeTimeout.Store(defaultWriteTimeoutMS * int64(time.Millisecond))
+}
+
+// currentPingInterval 等取值器：连接协程热循环读取，必须与 Run 的写入原子一致
+func currentPingInterval() time.Duration { return time.Duration(pingInterval.Load()) }
+func currentReadTimeout() time.Duration  { return time.Duration(readTimeout.Load()) }
+func currentWriteTimeout() time.Duration { return time.Duration(writeTimeout.Load()) }
 
 // workerPoolState 是一次 Run → Stop 生命周期内的并发消费端。
 //
@@ -111,6 +128,10 @@ type workerPoolState struct {
 	shardByKey bool
 	// fullCount：Worker 队列满、被迫走兜底路径的次数
 	fullCount atomic.Int64
+	// dispatchSeq：轮询模式自己的派发序号。
+	// 不能借用 serverStats.totalMessages——那个计数只在消息真正被处理时递增，
+	// 队列持续满、解析连续失败时它不涨，所有消息会一直粘在同一个 Worker 上。
+	dispatchSeq atomic.Uint64
 	// lastFullWarn：满队列告警的限频时间戳（UnixMilli）
 	lastFullWarn atomic.Int64
 }
@@ -296,9 +317,9 @@ func applyTimeoutConfig(ws *config.WebsocketConfig) {
 		vars.Warning("WebSocket read_timeout_ms(%d) 未显著大于 2×ping_interval_ms(%d)，空闲连接可能被误踢",
 			readMS, pingMS)
 	}
-	pingInterval = time.Duration(pingMS) * time.Millisecond
-	readTimeout = time.Duration(readMS) * time.Millisecond
-	writeTimeout = time.Duration(writeMS) * time.Millisecond
+	pingInterval.Store(int64(time.Duration(pingMS) * time.Millisecond))
+	readTimeout.Store(int64(time.Duration(readMS) * time.Millisecond))
+	writeTimeout.Store(int64(time.Duration(writeMS) * time.Millisecond))
 }
 
 func shutdownWebsocket() {
@@ -348,29 +369,42 @@ func Tick() {
 	}
 }
 
-// processMessage 处理单条消息（从Tick中提取，便于Worker Pool复用）
-func processMessage(read_msg *msgQueueType) {
-	if client, h := clientMap.Load(read_msg.uid); h {
-		// 检查客户端是否已关闭，防止竞态条件
-		if client.IsClose() {
-			return
-		}
-		pbmsg := util.ParseFSMessage(read_msg.data)
-		if pbmsg != nil {
-			if client != nil {
-				client.UpdateStatsFromMessage(read_msg.data)
-			}
-			client.OnMessage(client, pbmsg)
-		} else {
+// processMessage 处理单条消息，并把业务回调的 panic 收敛在这里。
+//
+// 串行模式下本函数跑在 Tick 唯一的消费协程上，Worker Pool 模式下跑在常驻 Worker 上：
+// 两种情况 panic 逃逸都会永久吃掉一个消费者，表现为「跑一段时间后消息全部堆积」，
+// 所以绝不能让业务回调的 panic 冒到调用方。返回 true 表示本次处理崩过。
+func processMessage(read_msg *msgQueueType) (panicked bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			panicked = true
 			UpdateErrorStats()
-			metrics.WS.IncErrors("parse")
-			vars.Error("解析消息失败，客户端: %d", read_msg.uid)
+			metrics.WS.IncErrors("panic")
+			vars.Error("WebSocket 业务回调 panic, uid=%d: %v", read_msg.uid, r)
 		}
-	} else {
+	}()
+
+	client, h := clientMap.Load(read_msg.uid)
+	if !h {
 		UpdateErrorStats()
 		metrics.WS.IncErrors("not_found")
 		vars.Error("客户端未找到: %d", read_msg.uid)
+		return false
 	}
+	// 检查客户端是否已关闭，防止竞态条件
+	if client.IsClose() {
+		return false
+	}
+	pbmsg := util.ParseFSMessage(read_msg.data)
+	if pbmsg == nil {
+		UpdateErrorStats()
+		metrics.WS.IncErrors("parse")
+		vars.Error("解析消息失败，客户端: %d", read_msg.uid)
+		return false
+	}
+	client.UpdateStatsFromMessage(read_msg.data)
+	client.OnMessage(client, pbmsg)
+	return false
 }
 
 // initWorkerPool 为本次 Run 新建 Worker Pool。
@@ -414,45 +448,78 @@ func stopWorkerPool() {
 
 // dispatch 把消息投递到对应 Worker 的队列。
 //
-// 本方法跑在 Tick 唯一的消费协程上：这里阻塞 = 全服消息处理停摆，
-// 因此绝不内联执行 processMessage。
+// 本方法跑在 Tick 唯一的消费协程上：这里长时间阻塞 = 全服消息处理停摆，
+// 因此绝不内联执行 processMessage，兜底重试也有硬预算。
 func (pool *workerPoolState) dispatch(msg *msgQueueType) {
 	var workerIdx int
 	if pool.shardByKey {
 		// 按UID分片：保证同一UID的消息由同一Worker处理，保证顺序性
 		workerIdx = int(msg.uid % int64(pool.size))
 	} else {
-		// 轮询模式：均匀分配
-		workerIdx = int(serverStats.totalMessages.Load() % int64(pool.size))
+		// 轮询模式：均匀分配，序号由池自己推进，不依赖业务处理计数
+		workerIdx = int(pool.dispatchSeq.Add(1) % uint64(pool.size))
 	}
 
-	UpdateMessageStats()
+	if pool.tryDispatch(workerIdx, msg, pool.shardByKey) {
+		return
+	}
 
+	// 目标 Worker 满：只在本队列上做有界重试，绝不回投 msgQueue。
+	// 回投会让这条消息排到「同 UID 更新的消息」之后，直接破坏 shard_by_key 的保序契约；
+	// 而 msgQueue 唯一的消费者就是当前协程，下一轮立刻取到同一条、再撞满、再回投 = 零退避忙等。
+	if !pool.waitQueueSlot(workerIdx, msg) {
+		pool.dropDispatched(workerIdx, msg)
+	}
+}
+
+// tryDispatch 非阻塞投递；非分片模式下目标满时顺延试探其它 Worker（无保序要求，换取吞吐）。
+func (pool *workerPoolState) tryDispatch(workerIdx int, msg *msgQueueType, keepOrder bool) bool {
 	select {
 	case pool.queues[workerIdx] <- msg:
-		return
+		return true
 	default:
 	}
+	if keepOrder {
+		return false
+	}
+	for i := 1; i < pool.size; i++ {
+		idx := (workerIdx + i) % pool.size
+		select {
+		case pool.queues[idx] <- msg:
+			return true
+		default:
+		}
+	}
+	return false
+}
 
-	// Worker 队列满：先回投 msgQueue 兜底，让 Tick 下一轮再试。
-	// 修复前是在这里内联 processMessage——一个慢业务回调就把唯一的消费协程
-	// 占住，所有连接的其它消息一起卡死，等于用「并行」换来了更差的串行。
+// waitQueueSlot 在预算内等待目标队列腾出位置；退出条件：投递成功、池停止、预算耗尽。
+func (pool *workerPoolState) waitQueueSlot(workerIdx int, msg *msgQueueType) bool {
+	deadline := time.Now().Add(dispatchRetryBudget)
+	for {
+		if time.Now().After(deadline) {
+			return false
+		}
+		select {
+		case pool.queues[workerIdx] <- msg:
+			return true
+		case <-pool.stop:
+			// 停机路径不再兜底重投，交给自己丢弃计数，避免把消息投进已无人消费的队列
+			return false
+		case <-time.After(dispatchRetryInterval):
+		}
+	}
+}
+
+// dropDispatched 记录一次因队列满而发生的丢弃
+func (pool *workerPoolState) dropDispatched(workerIdx int, msg *msgQueueType) {
 	pool.fullCount.Add(1)
 	pool.stats[workerIdx].Errors.Add(1)
+	UpdateErrorStats()
 	metrics.WS.IncErrors("queue_full")
 	if pool.shouldWarnFull() {
-		vars.Warning("Worker[%d]队列满，回投接收队列兜底: 累计=%d", workerIdx, pool.fullCount.Load())
+		vars.Warning("Worker队列满，重试预算内仍未腾出位置，丢弃: 累计=%d uid=%d", pool.fullCount.Load(), msg.uid)
 	}
-	select {
-	case msgQueue <- msg:
-		return
-	default:
-	}
-
-	// 接收队列也满：只能丢弃并计数，绝不阻塞消费协程
-	UpdateErrorStats()
-	metrics.WS.IncErrors("drop")
-	vars.Error("Worker 与接收队列同时满，丢弃消息: uid=%d", msg.uid)
 }
 
 // shouldWarnFull 对「队列满」告警按秒限频，避免高负载下日志本身成为瓶颈
@@ -479,18 +546,26 @@ func (pool *workerPoolState) workerLoop(workerID int) {
 			// 处理剩余消息
 			for len(queue) > 0 {
 				msg := <-queue
-				processMessage(msg)
-				pool.stats[workerID].Messages.Add(1)
+				pool.safeProcess(workerID, msg)
 			}
 			pool.stats[workerID].Running.Store(false)
 			return
 
 		case msg := <-queue:
-			processMessage(msg)
-			pool.stats[workerID].Messages.Add(1)
-			pool.stats[workerID].LastMessageAt = util.CurrentTime()
+			pool.safeProcess(workerID, msg)
 		}
 	}
+}
+
+// safeProcess 执行一条消息的业务处理并维护该 Worker 的计数。
+//
+// panic 已在 processMessage 内收敛：这里拿返回值补错误计数，Worker 协程本身不受影响。
+func (pool *workerPoolState) safeProcess(workerID int, msg *msgQueueType) {
+	if processMessage(msg) {
+		pool.stats[workerID].Errors.Add(1)
+	}
+	pool.stats[workerID].Messages.Add(1)
+	pool.stats[workerID].LastMessageAt = util.CurrentTime()
 }
 
 // ============ 新增改进功能 ============

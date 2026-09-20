@@ -42,13 +42,13 @@ func within(d time.Duration, cond func() bool) bool {
 func rpcTestEnvCfg(t *testing.T, cfg *config.Cfg) {
 	t.Helper()
 	prevCfg := config.Cfg_
-	prevRunCtx := rpcRunCtx
+	prevRunCtx := runCtx()
 	config.Cfg_ = cfg
-	rpcRunCtx = corectx.WithCfg(context.Background(), cfg)
+	setRunCtx(corectx.WithCfg(context.Background(), cfg))
 	UseRegistry(syncmap.NewMap[string, *RpcServer](), syncmap.NewMap[string, *RpcClient]())
 	t.Cleanup(func() {
 		config.Cfg_ = prevCfg
-		rpcRunCtx = prevRunCtx
+		setRunCtx(prevRunCtx)
 	})
 }
 
@@ -420,7 +420,9 @@ func TestServerCallbacksPanicContained(t *testing.T) {
 	srv.triggerOnServerStarted() // 不 panic 即通过
 }
 
-// TestMessageReceivedCallbackRejects 回调返回 false 必须真正拦下消息（不再进 handler）。
+// TestMessageReceivedCallbackRejects 回调返回 false 必须真正拦下消息（不再进 handler），
+// 并且要把拒绝如实告知客户端。修复前拒绝分支只丢消息不回包，客户端只能空等满
+// 自己的调用超时，业务侧看到的是「超时」而不是「被拒」。
 func TestMessageReceivedCallbackRejects(t *testing.T) {
 	rpcNoneAuthEnv(t)
 	var handled atomic.Int32
@@ -436,9 +438,44 @@ func TestMessageReceivedCallbackRejects(t *testing.T) {
 	})
 
 	client := dialClient(t, "reject-client", port)
-	client.timeout = time.Second
-	client.SendMsg(124, 124, wrapperspb.String("ping"), nil)
+	client.timeout = 10 * time.Second // 远超本机调度耗时，只有错误包能让它早退
 
+	errs := make(chan error, 4)
+	client.SetCallbacks(&ClientCallbacks{OnError: func(_ string, err error) {
+		select {
+		case errs <- err:
+		default:
+		}
+	}})
+
+	bizCalled := make(chan struct{})
+	blocked := make(chan struct{})
+	started := time.Now()
+	go func() {
+		client.SendMsg(124, 124, wrapperspb.String("ping"), func(proto.Message) { close(bizCalled) })
+		close(blocked)
+	}()
+	select {
+	case <-blocked:
+	case <-time.After(4 * time.Second):
+		t.Fatal("✘ 被拒消息没有回错误包，客户端一直等自己的调用超时")
+	}
+	if elapsed := time.Since(started); elapsed > 3*time.Second {
+		t.Fatalf("✘ 拒绝回包耗时 %v，未走错误包路径", elapsed)
+	}
+	select {
+	case err := <-errs:
+		if err == nil {
+			t.Fatal("✘ OnError 收到 nil")
+		}
+	default:
+		t.Fatal("✘ 被拒未触发 OnError，客户端分不清拒绝与超时")
+	}
+	select {
+	case <-bizCalled:
+		t.Fatal("✘ 错误包被当成响应交给了业务回调")
+	default:
+	}
 	if n := handled.Load(); n != 0 {
 		t.Fatalf("✘ 回调已拒绝，handler 仍执行了 %d 次", n)
 	}

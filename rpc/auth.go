@@ -26,7 +26,13 @@ import (
 const defaultAuthMode = "token"
 
 func authMode() string {
-	cfg := rpcAuthCfg()
+	return authModeOf(rpcAuthCfg())
+}
+
+// authModeOf 对一份配置快照求鉴权模式。
+// 调用方必须先取快照再判模式：分两次读 rpcAuthCfg() 时，两次之间配置换掉
+// 就会拿到「mode=allowlist 但 cfg 为 nil」的组合，遍历 cfg.AllowList 直接空指针。
+func authModeOf(cfg *config.RpcAuthConfig) string {
 	if cfg == nil {
 		return defaultAuthMode
 	}
@@ -38,7 +44,7 @@ func authMode() string {
 }
 
 func activeCfg() *config.Cfg {
-	return corectx.CfgFrom(rpcRunCtx)
+	return corectx.CfgFrom(runCtx())
 }
 
 func activeRpcCfg() *config.RpcConfig {
@@ -58,7 +64,9 @@ func rpcAuthCfg() *config.RpcAuthConfig {
 }
 
 func authenticate(ctx context.Context) error {
-	mode := authMode()
+	// 单次快照：mode 与名单/口令必须来自同一份配置，否则鉴权判定会用到撕裂状态
+	cfg := rpcAuthCfg()
+	mode := authModeOf(cfg)
 	md, _ := metadata.FromIncomingContext(ctx)
 	clientName := firstMD(md, "client-name")
 
@@ -72,7 +80,9 @@ func authenticate(ctx context.Context) error {
 		if clientName == "" {
 			return status.Error(codes.Unauthenticated, "missing client-name")
 		}
-		cfg := rpcAuthCfg()
+		if cfg == nil || len(cfg.AllowList) == 0 {
+			return status.Error(codes.Unauthenticated, "rpc.auth.allowlist is not configured")
+		}
 		for _, name := range cfg.AllowList {
 			if name == clientName {
 				return nil
@@ -80,7 +90,6 @@ func authenticate(ctx context.Context) error {
 		}
 		return status.Error(codes.Unauthenticated, "client-name not in allowlist")
 	case "token":
-		cfg := rpcAuthCfg()
 		if cfg == nil || strings.TrimSpace(cfg.Token) == "" {
 			// 默认即 token：漏配 token 时宁可拒绝所有连接，也不能放行空口令
 			return status.Error(codes.Unauthenticated, "rpc.auth.token is not configured")
@@ -128,7 +137,8 @@ func bearerToken(md metadata.MD) string {
 		return ""
 	}
 	const prefix = "Bearer "
-	if strings.HasPrefix(raw, prefix) {
+	// RFC 7235 的 scheme 大小写不敏感：只认 "Bearer " 会把 "bearer xxx" 的合法客户端拒掉
+	if len(raw) >= len(prefix) && strings.EqualFold(raw[:len(prefix)], prefix) {
 		return strings.TrimSpace(raw[len(prefix):])
 	}
 	return raw
@@ -212,7 +222,7 @@ func warnInsecureRPC(name string, useTLS bool) {
 	if cfg == nil || strings.TrimSpace(cfg.Mode) == "" {
 		vars.Error("gRPC[%s] 未配置 rpc.auth.mode，已按 %s 处理；需要匿名互通请显式设置 mode=none", name, defaultAuthMode)
 	}
-	switch authMode() {
+	switch authModeOf(cfg) {
 	case "none":
 		vars.Error("gRPC[%s] auth.mode=none，仅校验 client-name 是否存在——能连上端口的进程即可冒充任意服务名，生产环境必须改用 allowlist/token/mtls", name)
 	case "token":

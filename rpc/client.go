@@ -83,9 +83,11 @@ func (c *RpcClient) Close() error {
 			vars.Error("RPC客户端关闭连接失败[%s]: %v", c.fullAddr, err)
 		}
 	}
+	// 回调必须在交还对象池之前触发：Remove 之后这个实例可能立刻被下一个客户端复用，
+	// 回调里读到的 UID/地址/状态就成了别人的数据
+	c.triggerOnDisconnected(nil)
 	// 所有权交还对象池：注册表里已无引用，Pause 会让这个实例永久悬挂
 	c.Remove()
-	c.triggerOnDisconnected(nil)
 	return nil
 }
 
@@ -107,6 +109,12 @@ func (c *RpcClient) Tick() {
 		vars.Error("RPC客户端连接失败[%s]: %v", c.fullAddr, err)
 		// 触发错误回调
 		c.triggerOnError(err)
+		return
+	}
+	// 拨号期间可能正好被 Close：这个实例已交还对象池，继续往下会把别人的
+	// 新客户端连上服务器并触发一套连接回调
+	if c.closed.Load() {
+		_ = conn.Close()
 		return
 	}
 	// 换连接必须关掉旧连接，否则每次重连都会泄漏一套传输层与 goroutine
@@ -300,15 +308,21 @@ func (c *RpcClient) recvLoop(stream message.Grpc_MsgClient) {
 			rid = recv.GetHead().GetRequestId()
 		}
 		if rid != 0 {
-			if ch, ok := c.pending.Load(rid); ok {
-				select {
-				case ch.(chan *message.FSMessage) <- recv:
-				default:
-				}
+			v, ok := c.pending.Load(rid)
+			if !ok {
+				// request_id 有值但无人等待：等待方已超时退出的残留响应。
+				// 修复前这里会继续走「投给任意等待者」的兜底，把 A 的响应交给 B，
+				// 业务拿到一条看着正常、内容完全无关的消息。
+				vars.Error("RPC客户端收到无法关联的响应[%s] request_id=%d", c.fullAddr, rid)
 				continue
 			}
+			select {
+			case v.(chan *message.FSMessage) <- recv:
+			default:
+			}
+			continue
 		}
-		// request_id=0：旧服务端兼容，投递给任意一个等待中的请求
+		// request_id=0：旧服务端不回填 head.request_id，只能投递给任意一个等待中的请求
 		delivered := false
 		c.pending.Range(func(_, value any) bool {
 			select {

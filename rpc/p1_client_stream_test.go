@@ -58,14 +58,14 @@ func rpcTestEnv(t *testing.T) {
 	t.Helper()
 
 	prevCfg := config.Cfg_
-	prevRunCtx := rpcRunCtx
+	prevRunCtx := runCtx()
 	cfg := &config.Cfg{Rpc: &config.RpcConfig{Auth: &config.RpcAuthConfig{Mode: "none"}}}
 	config.Cfg_ = cfg
-	rpcRunCtx = corectx.WithCfg(context.Background(), cfg)
+	setRunCtx(corectx.WithCfg(context.Background(), cfg))
 	UseRegistry(syncmap.NewMap[string, *RpcServer](), syncmap.NewMap[string, *RpcClient]())
 	t.Cleanup(func() {
 		config.Cfg_ = prevCfg
-		rpcRunCtx = prevRunCtx
+		setRunCtx(prevRunCtx)
 	})
 }
 

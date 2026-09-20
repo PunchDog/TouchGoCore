@@ -115,12 +115,56 @@ type RpcServer struct {
 	stopped            atomic.Bool
 	closeOnce          sync.Once
 	handlerSem         chan struct{}
-	// 使用独立的 CallFunction 实例，避免全局单例并发问题
+	// handler 回调表：业务通过 util.DefaultCallFunc 按「CallRpcMsg:协议号:协议号」注册，
+	// 因此所有 RpcServer 实例共享同一张表（协议号全局唯一是既有约定）
 	callFunc *util.CallFunction
 	// 回调接口（原子指针：SetCallbacks 可能与 recv/Send 并发）
 	callbacks atomic.Pointer[ServerCallbacks]
 	// 正在执行的 handler 数量。超时只丢弃结果；handler 须自行尊重 ctx，运行时不会强杀 goroutine。
 	inFlight atomic.Int64
+	// drainDeadline：本轮停机排空截止时间（UnixNano，0 表示未设置）
+	drainDeadline atomic.Int64
+	// readClose 只停「接收+解析」这一段；关闭后 readChannel 转交完存量才退出。
+	// 停机必须分两段：先停上游、等它把存量交给下游，再停 handleChannel。
+	// 两段一起停的话，readchannel 里的存量会因为下游先退场而永久失联。
+	readClose chan struct{}
+	readOnce  sync.Once
+	// readGone/handleGone 在两个常驻协程退出时关闭：停机要等「接收段把存量转交完」，
+	// 用通道而不是 WaitGroup——Add 与 Wait 并发会撞上 WaitGroup 的使用限制。
+	readGone   chan struct{}
+	handleGone chan struct{}
+}
+
+// closeRead 发出「停止接收」信号，幂等。
+// readClose 为 nil 表示这个实例是外部直接构造的（未走 StartGrpcServer），无接收段可停。
+func (s *RpcServer) closeRead() {
+	if s.readClose == nil {
+		return
+	}
+	s.readOnce.Do(func() { close(s.readClose) })
+}
+
+// startLoops 启动接收段与处理段两个常驻协程，并登记各自的退出信号。
+func (s *RpcServer) startLoops() {
+	go func() {
+		defer close(s.readGone)
+		s.readChannel()
+	}()
+	go func() {
+		defer close(s.handleGone)
+		s.handleChannel()
+	}()
+}
+
+// waitGone 等待某个常驻协程退出，最多等 budget。
+func waitGone(ch chan struct{}, budget time.Duration) {
+	if ch == nil {
+		return
+	}
+	select {
+	case <-ch:
+	case <-time.After(budget):
+	}
 }
 
 // handlerResult 单次 handler 执行结果。bret=false 表示失败（未注册、panic、ctx 已结束）。
@@ -171,25 +215,33 @@ func (s *RpcServer) Msg(stream message.Grpc_MsgServer) error {
 
 		p1 := msg.GetHead().GetProtocol1()
 		p2 := msg.GetHead().GetProtocol2()
-		// 收到拒绝就不再入队，否则回调的放行判定形同虚设
-		if !s.triggerOnMessageReceived(clientNameKey, p1, p2, msg) {
-			vars.Info("RPC服务器[%s]回调拒绝消息,协议号:%d:%d, 客户端:%s", s.name, p1, p2, clientNameKey)
-			continue
-		}
-
 		var reqID uint64
 		if msg.GetHead() != nil {
 			reqID = msg.GetHead().GetRequestId()
 		}
-		select {
-		case s.readchannel <- &MessageInfo{
+		item := &MessageInfo{
 			Req:           msg,
 			ClientNameKey: clientNameKey,
 			Protol1:       p1,
 			Protol2:       p2,
 			RequestID:     reqID,
-		}:
+		}
+		// 收到拒绝就不再入队，否则回调的放行判定形同虚设；
+		// 但必须回一个错误包，不然客户端只能空等满自己的调用超时才知道被拒。
+		if !s.triggerOnMessageReceived(clientNameKey, p1, p2, msg) {
+			vars.Info("RPC服务器[%s]回调拒绝消息,协议号:%d:%d, 客户端:%s", s.name, p1, p2, clientNameKey)
+			s.sendErrorPacket(item)
+			continue
+		}
+
+		select {
+		case s.readchannel <- item:
 			// 发送成功
+		case <-s.readClose:
+			vars.Info("RPC服务器[%s]停止接收，退回消息 协议号:%d:%d, 客户端:%s", s.name, p1, p2, clientNameKey)
+			s.sendErrorPacket(item)
+			// 接收段已经在交还存量，继续 Recv 只会把更多请求送进无人消费的队列
+			return nil
 		case <-s.done:
 			vars.Info("RPC服务器已停止，丢弃接收到的消息[%s]", clientNameKey)
 			return nil
@@ -260,6 +312,8 @@ func (s *RpcServer) sendErrorPacket(msg *MessageInfo) {
 	if msg.RequestID == 0 {
 		return
 	}
+	// Body 必须是空切片而不是 nil：FSMessage 是 proto2，body 标了 required，
+	// 缺 presence 的帧在 Send 时直接 marshaling 失败，错误包一个都发不出去。
 	rsp := &message.FSMessage{
 		Head: &message.Head{
 			Protocol1: proto.Int32(msg.Protol1),
@@ -267,6 +321,7 @@ func (s *RpcServer) sendErrorPacket(msg *MessageInfo) {
 			RequestId: proto.Uint64(msg.RequestID),
 			Cmd:       proto.String(ErrorCmd),
 		},
+		Body: []byte{},
 	}
 	if err := s.sendToSession(msg.ClientNameKey, rsp); err != nil {
 		vars.Error("RPC服务端回错误包失败[%s] 协议号:%d:%d request_id=%d: %v",
@@ -278,53 +333,156 @@ func (s *RpcServer) sendErrorPacket(msg *MessageInfo) {
 func (s *RpcServer) readChannel() {
 	for {
 		select {
+		case <-s.readClose:
+			s.drainRead()
+			return
+		// 异常路径（Serve 失败、直接构造的实例）只关了 done：这里也必须收工，
+		// 但仍要把已接收的存量交出去，别让客户端干等超时。
 		case <-s.done:
+			s.drainRead()
 			return
 		case msg := <-s.readchannel:
-			req := util.PasreFSMessage(msg.Req)
-			if req == nil {
-				continue
-			}
-			// 不带 done 分支的话，停机时 handlechannel 一满这个 goroutine 就永久卡死
-			select {
-			case s.handlechannel <- &MessageInfo{
-				Req:           req,
-				ClientNameKey: msg.ClientNameKey,
-				Protol1:       msg.Protol1,
-				Protol2:       msg.Protol2,
-				RequestID:     msg.RequestID,
-			}:
-			case <-s.done:
-				return
-			}
+			s.forward(msg)
 		}
 	}
+}
+
+// forward 解析请求并转交下游处理协程。
+func (s *RpcServer) forward(msg *MessageInfo) {
+	if msg == nil {
+		return
+	}
+	req := util.PasreFSMessage(msg.Req)
+	if req == nil {
+		// 协议未注册/Body 解码失败：客户端在等这一条的回包，明确拒绝比静默丢弃友好
+		vars.Error("RPC服务端解析请求失败[%s] 协议号:%d:%d, 客户端:%s",
+			s.name, msg.Protol1, msg.Protol2, msg.ClientNameKey)
+		s.sendErrorPacket(msg)
+		return
+	}
+	item := &MessageInfo{
+		Req:           req,
+		ClientNameKey: msg.ClientNameKey,
+		Protol1:       msg.Protol1,
+		Protol2:       msg.Protol2,
+		RequestID:     msg.RequestID,
+	}
+	// 不带 done 分支的话，停机时 handlechannel 一满这个 goroutine 就永久卡死
+	select {
+	case s.handlechannel <- item:
+	case <-s.done:
+		s.runSerial(item)
+	}
+}
+
+// drainRead 停机信号到达后把 readchannel 的存量转交下游。
+//
+// 这些请求已经从客户端流里读走了，客户端在等回包；只清 handlechannel
+// 而放过 readchannel，等于把这一段队列里的请求无声吞掉。
+func (s *RpcServer) drainRead() {
+	for {
+		select {
+		case msg := <-s.readchannel:
+			s.forward(msg)
+		default:
+			return
+		}
+	}
+}
+
+// runSerial 停机兜底：下游协程已收工时，由当前协程串行把存量跑完。
+//
+// 只有 Stop 排过截止时间才允许兜底：没有截止时间说明这不是一次有预算的停机
+// （Serve 启动失败、异常构造的实例），此时明确回错误包比无预算地跑 handler 安全。
+func (s *RpcServer) runSerial(msg *MessageInfo) {
+	remain := s.drainRemaining()
+	if remain <= 0 {
+		s.rejectQueued(msg)
+		return
+	}
+	select {
+	case s.handlerSem <- struct{}{}:
+	case <-time.After(remain):
+		s.rejectQueued(msg)
+		return
+	}
+	s.handleOne(msg)
+}
+
+// drainRemaining 距排空截止时间的剩余量：>0 还剩多久，<=0 已超时或本轮无排空预算。
+func (s *RpcServer) drainRemaining() time.Duration {
+	deadline := s.drainDeadline.Load()
+	if deadline <= 0 {
+		return 0
+	}
+	return time.Until(time.Unix(0, deadline))
+}
+
+// rejectQueued 排空预算内再也放不下时，明确给对端一个错误包并留痕，
+// 而不是让客户端干等到自己的超时。
+func (s *RpcServer) rejectQueued(msg *MessageInfo) {
+	vars.Error("RPC停机排空溢出，丢弃请求[%s] 协议号:%d:%d, 客户端:%s",
+		s.name, msg.Protol1, msg.Protol2, msg.ClientNameKey)
+	s.sendErrorPacket(msg)
 }
 
 // 操作数据：每条消息交给独立 goroutine 处理，串行 await 会让一个慢 handler
 // 拖住整条流水线；令牌仍由 handler goroutine 归还，保证并发上限是真实在跑的 handler 数。
+//
+// 退出只认 s.done：停机由 Stop 按「先停接收、再排空处理」两段驱动，
+// 跟着 app.ctx 一起退会让还在转交的存量找不到下游。
 func (s *RpcServer) handleChannel() {
 	for {
 		select {
 		case <-s.done:
-			return
-		case <-rpcRunCtx.Done():
+			s.drainBacklog()
 			return
 		case msg := <-s.handlechannel:
-			select {
-			case s.handlerSem <- struct{}{}:
-				go s.handleOne(msg)
-			case <-s.done:
-				return
-			case <-rpcRunCtx.Done():
-				return
-			}
+			s.startHandle(msg)
 		}
 	}
 }
 
-// handleOne 处理单条消息：等待 handler 结果或超时，然后回包。调用方已占用一个 handlerSem 令牌。
+// startHandle 占用一个并发令牌后异步处理一条消息。
+func (s *RpcServer) startHandle(msg *MessageInfo) {
+	select {
+	case s.handlerSem <- struct{}{}:
+		go s.handleOne(msg)
+	case <-s.done:
+		s.runSerial(msg)
+	}
+}
+
+// drainBacklog 停机信号到达后消化 handlechannel 里的存量请求。
+//
+// 这些请求已经收进服务端队列（对端在等回包），退出时直接丢弃等于让它们全部等到超时；
+// 存量以串行方式处理，避免停机瞬间又拉起一批并发 handler。
+func (s *RpcServer) drainBacklog() {
+	for {
+		select {
+		case msg := <-s.handlechannel:
+			s.runSerial(msg)
+		default:
+			return
+		}
+	}
+}
+
+// handleOne 处理单条消息：等待 handler 结果或超时，然后回包。
+//
+// 调用方已占用一个 handlerSem 令牌，令牌由这里的 handler 协程归还。
+// 「取到令牌 → 协程真正跑起来」之间任何一步崩掉都必须把令牌还回去，
+// 否则并发令牌只减不增，服务会在若干次异常后彻底停止处理请求。
 func (s *RpcServer) handleOne(msg *MessageInfo) {
+	// handlerStarted 之前令牌仍归本函数负责。
+	// 归还必须第一个登记：下面的 context 构造、metrics、反射取值任何一步崩掉，
+	// 都发生在 handler 协程起来之前，晚登记一步就是一次永久令牌泄漏。
+	handlerStarted := false
+	defer func() {
+		if !handlerStarted {
+			<-s.handlerSem
+		}
+	}()
 	defer func() {
 		if r := recover(); r != nil {
 			vars.Error("处理gRPC请求panic,协议号:%d:%d, 客户端:%s: %v",
@@ -332,7 +490,9 @@ func (s *RpcServer) handleOne(msg *MessageInfo) {
 		}
 	}()
 
-	parent := rpcRunCtx
+	// handler 挂在工作上下文上，而不是 app.ctx：见 workParent 的说明，
+	// 否则「先 cancel 再 Stop」的关闭顺序会在第一毫秒就掐死全部在途请求。
+	parent := workParent()
 	if parent == nil {
 		parent = context.Background()
 	}
@@ -345,6 +505,7 @@ func (s *RpcServer) handleOne(msg *MessageInfo) {
 
 	resultCh := make(chan handlerResult, 1)
 	s.inFlight.Add(1)
+	handlerStarted = true
 	go func() {
 		defer func() { <-s.handlerSem }()
 		defer s.inFlight.Add(-1)
@@ -443,9 +604,11 @@ func classifyResult(result handlerResult) (proto.Message, resultKind) {
 	return v, resultOK
 }
 
-// 关闭服务
+// closeDone 发出「处理段也停止」的信号，幂等。
+// 一并关闭 readClose：Serve 失败等异常路径只调本函数，不能留下永不自家的接收协程。
 func (s *RpcServer) closeDone() {
 	s.closeOnce.Do(func() {
+		s.closeRead()
 		close(s.done)
 	})
 }
@@ -454,12 +617,19 @@ func (s *RpcServer) Stop(ctx context.Context) {
 	if !s.stopped.CompareAndSwap(false, true) {
 		return
 	}
-	s.closeDone()
+	grace := time.Duration(gracefulStopBudget_.Load())
+	drain := time.Duration(drainBudget_.Load())
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	// App 的关闭顺序是「先 cancel app.ctx，再逐个 Stop」，传进来的 ctx 到这里必然已经 Done。
+	// 若把它当成「调用方等不及」，GracefulStop 会在第一毫秒被换成 Stop() 强杀：
+	// 在途 handler 的回包全部丢失，后面的两段排空也只剩空转。
+	// 调用方要真正提前中止，应该用 SetShutdownBudget 收紧预算。
+	if ctx.Err() != nil {
+		ctx = context.Background()
+	}
 	if s.service != nil {
-		grace := time.Duration(gracefulStopBudget_.Load())
 		done := make(chan struct{})
 		go func() {
 			s.service.GracefulStop()
@@ -474,8 +644,25 @@ func (s *RpcServer) Stop(ctx context.Context) {
 		}
 	}
 
-	drain := time.Duration(drainBudget_.Load())
-	deadline := time.Now().Add(drain)
+	// 排空截止时间从这里才立起来：GracefulStop 可能已经吃掉整个 grace，
+	// 提前立的话这里剩余量恒为负，每条存量都会被「预算已尽」直接拒掉。
+	s.drainDeadline.Store(time.Now().Add(drain).UnixNano())
+
+	// 两段式停机：先停接收段并等它把 readchannel 的存量转交出去，
+	// 再停处理段。同时关闭两个信号的话，存量会因为下游已退场而永久失联。
+	// 每段只吃上一段的剩余量，整轮排空合计不超过 drain。
+	s.closeRead()
+	waitGone(s.readGone, s.drainRemaining())
+	s.closeDone()
+
+	// 排空：等处理协程消化完队列存量
+	waitGone(s.handleGone, s.drainRemaining())
+	// 两条常驻协程收工后，仍滞留在队列里的请求不会再有人碰：
+	// 接收段退出与 drainRead 之间存在竞态（select 随机选中入队分支），
+	// 这里兜底清干净，让它们拿到错误包而不是干等到客户端超时。
+	s.drainLeftover()
+	// 已经交给独立协程的 handler 可能仍在跑（含超时后仍不返回的），再等一轮收敛
+	deadline := time.Now().Add(s.drainRemaining())
 	for s.inFlight.Load() > 0 && time.Now().Before(deadline) {
 		time.Sleep(20 * time.Millisecond)
 	}
@@ -486,6 +673,20 @@ func (s *RpcServer) Stop(ctx context.Context) {
 	s.triggerOnServerStopped()
 
 	vars.Info("RPC服务器停止[%s]", s.name)
+}
+
+// drainLeftover 清掉两条常驻协程退出后仍留在队列里的请求，逐个回错误包。
+func (s *RpcServer) drainLeftover() {
+	for {
+		select {
+		case msg := <-s.readchannel:
+			s.rejectQueued(msg)
+		case msg := <-s.handlechannel:
+			s.rejectQueued(msg)
+		default:
+			return
+		}
+	}
 }
 
 func StartGrpcServer(name string, port int, useTLS bool) error {
@@ -559,6 +760,9 @@ func StartGrpcServer(name string, port int, useTLS bool) error {
 		readchannel:        make(chan *MessageInfo, channelSize),
 		handlechannel:      make(chan *MessageInfo, channelSize),
 		done:               make(chan struct{}),
+		readClose:          make(chan struct{}),
+		readGone:           make(chan struct{}),
+		handleGone:         make(chan struct{}),
 		callFunc:           util.DefaultCallFunc,
 		nametoclientstream: syncmap.NewMap[string, *clientSession](),
 		handlerSem:         make(chan struct{}, defaultHandlerConcurrency),
@@ -577,8 +781,7 @@ func StartGrpcServer(name string, port int, useTLS bool) error {
 		}
 	}(service)
 
-	go service.readChannel()
-	go service.handleChannel()
+	service.startLoops()
 
 	service_.Store(name, service)
 	vars.Info("gRPC服务启动成功,端口:%d", port)

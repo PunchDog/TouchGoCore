@@ -3,6 +3,8 @@ package rpc
 import (
 	"context"
 	"fmt"
+	"sync"
+	"sync/atomic"
 	"touchgocore/corectx"
 	"touchgocore/syncmap"
 	"touchgocore/vars"
@@ -16,13 +18,70 @@ const (
 
 var channelSize = defaultChannelSize
 
-var rpcRunCtx = context.Background()
+// rpcRunCtx 本轮 Run 的生命周期上下文。原子指针：server/auth 协程每轮 select 都要
+// 读它的 Done()，用普通变量会与下一轮 Run 的赋值构成数据竞争。
+var rpcRunCtx atomic.Pointer[context.Context]
 
-func Run(ctx context.Context) error {
+// runCtx 取当前生命周期上下文；未 Run 过时返回 Background。
+func runCtx() context.Context {
+	if p := rpcRunCtx.Load(); p != nil {
+		return *p
+	}
+	return context.Background()
+}
+
+// setRunCtx 安装生命周期上下文（Run 与测试装配用）。
+func setRunCtx(ctx context.Context) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	rpcRunCtx = ctx
+	rpcRunCtx.Store(&ctx)
+}
+
+// rpcWorkCtx 是 handler 的父上下文，只由本轮 Stop 在排空预算用尽后取消。
+//
+// 它刻意不继承 app.ctx：App 的关闭顺序是先 cancel 再逐个 Stop，若 handler 也挂在
+// app.ctx 上，正在处理的请求会在 Shutdown 的第一毫秒全部收到 ctx.Done，
+// GracefulStop 与 in-flight 排空就都成了空转（收到的请求必然回错误包）。
+var (
+	workMu        sync.Mutex
+	rpcWorkCtx    context.Context = context.Background()
+	rpcWorkCancel context.CancelFunc
+)
+
+// workParent 返回当前这一轮 handler 的父上下文。
+func workParent() context.Context {
+	workMu.Lock()
+	defer workMu.Unlock()
+	return rpcWorkCtx
+}
+
+// resetWorkCtx 为新一轮 Run 建立独立的 handler 上下文，并作废上一轮的残留。
+func resetWorkCtx() {
+	workMu.Lock()
+	defer workMu.Unlock()
+	if rpcWorkCancel != nil {
+		rpcWorkCancel()
+	}
+	rpcWorkCtx, rpcWorkCancel = context.WithCancel(context.Background())
+}
+
+// cancelWorkCtx 在排空结束后取消 handler 上下文，防止卡死的 handler 永久持有资源。
+// 取消后立刻把父上下文复位：StartGrpcServer 是公开 API，允许不经 Run 再起一轮，
+// 留着已取消的那个会让之后每个 handler 一进来就 ctx.Done。
+func cancelWorkCtx() {
+	workMu.Lock()
+	defer workMu.Unlock()
+	if rpcWorkCancel != nil {
+		rpcWorkCancel()
+		rpcWorkCancel = nil
+	}
+	rpcWorkCtx = context.Background()
+}
+
+func Run(ctx context.Context) error {
+	setRunCtx(ctx)
+	resetWorkCtx()
 	root := corectx.CfgFrom(ctx)
 	if root == nil {
 		vars.Info("RPC配置为空，跳过RPC服务启动")
@@ -138,6 +197,8 @@ func Stop(ctx context.Context) {
 		rpcClient_.Clear()
 	}
 	vars.Info("RPC服务停止: 服务器%d个, 客户端%d个", serverCount, clientCount)
+	// 排空窗口已过：还卡着的 handler 到此为止，随生命周期一起结束
+	cancelWorkCtx()
 }
 
 // UseRegistry 将 RPC 服务端/客户端表绑定到调用方提供的 map（App 优先，全局 fallback）。

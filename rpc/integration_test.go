@@ -23,13 +23,13 @@ func TestRPCRoundTripRequestID(t *testing.T) {
 		},
 	}
 	prev := config.Cfg_
-	prevCtx := rpcRunCtx
+	prevCtx := runCtx()
 	config.Cfg_ = cfg
-	rpcRunCtx = corectx.WithCfg(context.Background(), cfg)
+	setRunCtx(corectx.WithCfg(context.Background(), cfg))
 	UseRegistry(syncmap.NewMap[string, *RpcServer](), syncmap.NewMap[string, *RpcClient]())
 	t.Cleanup(func() {
 		config.Cfg_ = prev
-		rpcRunCtx = prevCtx
+		setRunCtx(prevCtx)
 	})
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")

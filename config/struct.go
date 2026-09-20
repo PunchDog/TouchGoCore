@@ -67,7 +67,8 @@ type WebsocketConfig struct {
 	AllowedOrigins []string `json:"allowed_origins"`
 	// 是否启用 Origin 验证（建议生产环境为 true）
 	CheckOrigin bool `json:"check_origin"`
-	// 内网连接是否跳过 Origin 验证（仅当 RemoteAddr 为内网且未伪造头时）
+	// 内网连接在「请求不带 Origin」时直接放行（原生客户端/服务间调用）；
+	// 只要对端报了 Origin 就照常比对白名单，内网不是跨站请求的豁免区
 	SkipOriginForIntranet bool `json:"skip_origin_for_intranet"`
 	// Origin 头缺失时是否放行。默认 false：原生客户端确需握手时再显式打开
 	AllowEmptyOrigin bool `json:"allow_empty_origin"`
@@ -151,8 +152,8 @@ type ServerConfig struct {
 	FPS          int    `json:"fps"`          // 帧率
 	Version      string `json:"version"`      // 版本号
 	MaxMsgSize   int    `json:"max_msg_size"` // 最大消息大小
-	WriteBuffer  int    `json:"write_buffer"` // 写缓冲大小
-	ReadBuffer   int    `json:"read_buffer"`  // 读缓冲大小
+	WriteBuffer  int    `json:"write_buffer"` // 写队列容量（消息条数，不是字节）
+	ReadBuffer   int    `json:"read_buffer"`  // 读队列容量（消息条数，不是字节；旧配置的字节值需换算）
 	Backpressure bool   `json:"backpressure"` // 是否启用背压
 	MaxProcs     int    `json:"max_procs"`    // GOMAXPROCS，<=0 时保留运行时默认值
 }

@@ -321,54 +321,115 @@ func TestWorkerPoolLifecycleIsPerRun(t *testing.T) {
 	mustReturn(t, 3*time.Second, "stopWorkerPool(第二轮)", stopWorkerPool)
 }
 
-// TestWorkerFullRequeuesInsteadOfBlockingConsumer 回归（S44）：Worker 队列满时
-// 只能兜底回投或丢弃计数，绝不能内联执行——dispatch 跑在唯一的消费协程上，
-// 一次内联就把全部连接的其它消息一起拖停。
-func TestWorkerFullRequeuesInsteadOfBlockingConsumer(t *testing.T) {
+// TestWorkerFullDropsWithinBudget 回归（S44 整改）：Worker 队列满时只能在有界
+// 预算内重试目标队列，预算耗尽即丢弃计数。
+//
+// 旧实现的兜底是「回投 msgQueue」，而 msgQueue 唯一的消费者就是调用 dispatch 的
+// 当前协程——回投等于下一轮立刻取出同一条、再撞满、再回投（零退避忙等），
+// 还会让这条消息排到同 UID 后续消息之后，破坏 shard_by_key 的保序契约。
+func TestWorkerFullDropsWithinBudget(t *testing.T) {
 	prevQueue := msgQueue
-	prevEntries := readQueueEntries
-	msgQueue = make(chan *msgQueueType, 1)
-	readQueueEntries = 4
-	t.Cleanup(func() {
-		msgQueue = prevQueue
-		readQueueEntries = prevEntries
-	})
+	msgQueue = make(chan *msgQueueType, 4)
+	t.Cleanup(func() { msgQueue = prevQueue })
 
 	pool := &workerPoolState{
-		queues: []chan *msgQueueType{make(chan *msgQueueType)}, // 无缓冲：必定满
-		stats:  []*workerStats{{WorkerID: 0}},
-		stop:   make(chan struct{}),
-		size:   1,
+		queues:     []chan *msgQueueType{make(chan *msgQueueType)}, // 无缓冲：必定满
+		stats:      []*workerStats{{WorkerID: 0}},
+		stop:       make(chan struct{}),
+		size:       1,
+		shardByKey: true,
 	}
 	withWorkerPool(t, pool)
 
 	msg := &msgQueueType{uid: 42, data: []byte("payload")}
-	mustReturn(t, time.Second, "Worker 队列满时 dispatch 内联执行", func() {
+	start := time.Now()
+	mustReturn(t, time.Second, "Worker 队列满时 dispatch 挂死", func() {
 		pool.dispatch(msg)
 	})
-
-	select {
-	case got := <-msgQueue:
-		if got != msg {
-			t.Fatal("✘ 兜底路径没有回投原消息")
-		}
-	default:
-		t.Fatal("✘ Worker 队列满时未回投接收队列")
+	if elapsed := time.Since(start); elapsed > dispatchRetryBudget*4 {
+		t.Fatalf("✘ 重试没有硬预算，耗时 %v 超过预算 %v 的 4 倍", elapsed, dispatchRetryBudget)
 	}
+
 	if n := pool.fullCount.Load(); n != 1 {
-		t.Fatalf("✘ 兜底次数未计数: %d", n)
+		t.Fatalf("✘ 队列满未计入丢弃: %d", n)
 	}
+	if len(msgQueue) != 0 {
+		t.Fatalf("✘ 队列满仍回投了接收队列，破坏保序: len=%d", len(msgQueue))
+	}
+	if len(pool.queues[0]) != 0 {
+		t.Fatalf("✘ 消息被投进了已满的 Worker 队列: len=%d", len(pool.queues[0]))
+	}
+	if e := pool.stats[0].Errors.Load(); e != 1 {
+		t.Fatalf("✘ Worker 错误计数未增加: %d", e)
+	}
+}
 
-	// 接收队列也满：只能丢弃并计数，仍然不许阻塞
-	msgQueue <- &msgQueueType{uid: 1}
-	mustReturn(t, time.Second, "两级队列皆满时 dispatch 阻塞", func() {
-		pool.dispatch(msg)
-	})
-	if len(msgQueue) != 1 {
-		t.Fatalf("✘ 接收队列已满却塞进了新消息: len=%d", len(msgQueue))
+// TestShardModeNeverSpillsToOtherWorker 回归（S44 整改）：保序模式下目标 Worker 满
+// 时绝不顺延到别的 Worker，否则同一 UID 的消息会被两个协程并发处理。
+func TestShardModeNeverSpillsToOtherWorker(t *testing.T) {
+	pool := &workerPoolState{
+		queues: []chan *msgQueueType{
+			make(chan *msgQueueType),    // 目标：无缓冲，必定满
+			make(chan *msgQueueType, 8), // 邻居：空着也不许用
+		},
+		stats:      []*workerStats{{WorkerID: 0}, {WorkerID: 1}},
+		stop:       make(chan struct{}),
+		size:       2,
+		shardByKey: true,
 	}
-	if n := pool.fullCount.Load(); n != 2 {
-		t.Fatalf("✘ 第二次兜底未计数: %d", n)
+	withWorkerPool(t, pool)
+
+	if pool.tryDispatch(0, &msgQueueType{uid: 0}, pool.shardByKey) {
+		t.Fatal("✘ 保序模式下消息顺延到了其它 Worker")
+	}
+	if len(pool.queues[1]) != 0 {
+		t.Fatalf("✘ 邻居队列被写入: len=%d", len(pool.queues[1]))
+	}
+}
+
+// TestNonShardModeSpillsToFreeWorker 回归（S44 整改）：无保序要求时目标满应顺延到
+// 空闲 Worker 换取吞吐，而不是直接丢消息。
+func TestNonShardModeSpillsToFreeWorker(t *testing.T) {
+	pool := &workerPoolState{
+		queues: []chan *msgQueueType{
+			make(chan *msgQueueType),    // 目标：必定满
+			make(chan *msgQueueType, 8), // 邻居：可用
+		},
+		stats:      []*workerStats{{WorkerID: 0}, {WorkerID: 1}},
+		stop:       make(chan struct{}),
+		size:       2,
+		shardByKey: false,
+	}
+	withWorkerPool(t, pool)
+
+	msg := &msgQueueType{uid: 1, data: []byte("x")}
+	if !pool.tryDispatch(0, msg, pool.shardByKey) {
+		t.Fatal("✘ 非保序模式下未顺延到空闲 Worker")
+	}
+	if got := <-pool.queues[1]; got != msg {
+		t.Fatal("✘ 顺延后写入的不是原消息")
+	}
+}
+
+// TestWaitQueueSlotExitsOnStop 回归（S44 整改）：停机信号必须立刻终结重试，
+// 否则 shutdownWebsocket 会带着最多 size×预算 的延迟收尾。
+func TestWaitQueueSlotExitsOnStop(t *testing.T) {
+	pool := &workerPoolState{
+		queues:     []chan *msgQueueType{make(chan *msgQueueType)},
+		stats:      []*workerStats{{WorkerID: 0}},
+		stop:       make(chan struct{}),
+		size:       1,
+		shardByKey: true,
+	}
+	withWorkerPool(t, pool)
+	close(pool.stop)
+
+	start := time.Now()
+	if pool.waitQueueSlot(0, &msgQueueType{uid: 7}) {
+		t.Fatal("✘ 池已停止却报告投递成功")
+	}
+	if elapsed := time.Since(start); elapsed > dispatchRetryBudget {
+		t.Fatalf("✘ 停止信号未立刻终结重试: %v", elapsed)
 	}
 }
 

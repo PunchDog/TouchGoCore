@@ -24,10 +24,10 @@ type Cfg struct {
 	//
 	// Deprecated: 请使用 json:"rpc"。
 	RpcPort  *RpcConfig      `json:"rpc_port"`
-	Rpc      *RpcConfig      `json:"rpc"`      // gRPC 配置
-	Telegram *TelegramConfig `json:"telegram"` //telegram配置
-	Server   *ServerConfig   `json:"server"`   // 服务器全局配置
-	Metrics  *MetricsConfig  `json:"metrics"`  // Prometheus 监控配置
+	Rpc      *RpcConfig      `json:"rpc"`       // gRPC 配置
+	Telegram *TelegramConfig `json:"telegram"`  //telegram配置
+	Server   *ServerConfig   `json:"server"`    // 服务器全局配置
+	Metrics  *MetricsConfig  `json:"metrics"`   // Prometheus 监控配置
 	ModelAPI *ModelAPIConfig `json:"model_api"` // 模型API接入配置（OpenAI 兼容接口）
 	//其他配置
 	Other interface{} `json:"other_data"` //其他配置,需要自行传入想要的数据模型

@@ -160,8 +160,13 @@ func currentMaxMessageSize() int64 {
 // check 实现 gorilla 的 CheckOrigin 契约
 func (p originPolicy) check(r *http.Request) bool {
 	clientIP := getDirectIP(r)
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
 
-	if p.skipOriginForIntranet && util.IsIntranetIP(clientIP) {
+	// 内网豁免只覆盖「原生客户端/服务间调用不发 Origin」这一种场景。
+	// 修复前它整条跳过白名单校验：内网一台被控主机（或 DNS rebinding 把浏览器
+	// 指向 127.0.0.1）带着任意恶意站点发出的跨站握手就能直接进门，
+	// check_origin 的白名单在内网侧完全失效。
+	if p.skipOriginForIntranet && origin == "" && util.IsIntranetIP(clientIP) {
 		return true
 	}
 
@@ -170,7 +175,6 @@ func (p originPolicy) check(r *http.Request) bool {
 		return true
 	}
 
-	origin := strings.TrimSpace(r.Header.Get("Origin"))
 	if origin == "" {
 		// 浏览器发起的跨站握手必定带 Origin，缺 Origin 的多是原生客户端/服务间调用。
 		// 修复前这里退化成 isAllowedOrigin(r.Host, r.Host)——自己和自己比对，

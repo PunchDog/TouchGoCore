@@ -62,7 +62,8 @@ func (l *List) generateNextID() int64 {
 }
 
 // assignIDLocked 为入链节点取号并登记到索引，调用者必须已持有 mu 锁。
-// 不维护索引的链表直接跳过：节点 id 保持 0，Get 也查不到任何东西。
+// 不维护索引的链表直接跳过：入链前 detach 已把 id 归零（removeNodeLocked），
+// 节点本就带着 0 进来，Get 也查不到任何东西。
 func (l *List) assignIDLocked(obj *Node, node INode) int64 {
 	if !l.indexed {
 		return 0

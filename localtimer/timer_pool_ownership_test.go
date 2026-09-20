@@ -214,7 +214,7 @@ func TestTickReschedule_RenewalCanceledAfterPause(t *testing.T) {
 	}
 	wheelAddTimer(t, m, TimerTypeMillisecond, tm, true)
 
-	task := dispatchAndUnlink(m, TimerTypeMillisecond, tm, p)
+	task := dispatchAndUnlink(t, m, TimerTypeMillisecond, tm, p)
 	assertWheelConsistent(t, m, TimerTypeMillisecond, 0)
 
 	// 派发之后、续期之前，业务抢先停表（本用例直连停表以覆盖该窗口）
@@ -249,7 +249,7 @@ func TestTickReschedule_RenewalCanceledAfterPause(t *testing.T) {
 		t.Fatal(err)
 	}
 	wheelAddTimer(t, m, TimerTypeMillisecond, tm, true)
-	task2 := dispatchAndUnlink(m, TimerTypeMillisecond, tm, p)
+	task2 := dispatchAndUnlink(t, m, TimerTypeMillisecond, tm, p)
 	if err := m.addTimerWithRetry(tm, task2.gen); err != nil {
 		t.Fatalf("✘ 代次未变的续期应当成功: %v", err)
 	}
@@ -276,7 +276,7 @@ func TestRelease_TickInnerRemovePoolsExactlyOnce(t *testing.T) {
 	}
 	wheelAddTimer(t, m, TimerTypeMillisecond, tm, true)
 
-	task := dispatchAndUnlink(m, TimerTypeMillisecond, tm, p)
+	task := dispatchAndUnlink(t, m, TimerTypeMillisecond, tm, p)
 	m.executeTimer(task) // Tick 内 Remove：此刻 inTick==1，只能挂起归还请求
 
 	if ticks := tm.ticked.Load(); ticks != 1 {
@@ -316,7 +316,7 @@ func TestRelease_PauseInsideTickIsNotPooled(t *testing.T) {
 	}
 	wheelAddTimer(t, m, TimerTypeMillisecond, tm, true)
 
-	task := dispatchAndUnlink(m, TimerTypeMillisecond, tm, p)
+	task := dispatchAndUnlink(t, m, TimerTypeMillisecond, tm, p)
 	m.executeTimer(task)
 
 	if puts := GetTimerPoolStats().Puts; puts != putsBefore {
@@ -387,7 +387,7 @@ func TestRelease_ExhaustionAutoPools(t *testing.T) {
 	assertWheelConsistent(t, m, TimerTypeMillisecond, 1)
 
 	startTicks := tm.n.Load() // 池实例的业务计数可能非 0
-	task := dispatchAndUnlink(m, TimerTypeMillisecond, tm, p)
+	task := dispatchAndUnlink(t, m, TimerTypeMillisecond, tm, p)
 	m.executeTimer(task) // 最后一次执行：HasNext()==false 且仍活跃
 
 	if n := tm.n.Load(); n != startTicks+1 {

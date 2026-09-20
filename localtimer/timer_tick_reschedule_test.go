@@ -40,7 +40,7 @@ func newRawWheelManager() *TimerManager {
 	for i, config := range []int64{1, 1000, 60000, 600000, 3600000} {
 		m.wheels[i] = &TimerWheel{
 			wheelConfig:  config,
-			tickWheel:    list.NewList(),
+			tickWheel:    list.NewUnindexedList(), // 与生产一致：时间轮不维护 ID 索引
 			addTimerChan: make(chan timerTask, MaxAddTimerChannelNum),
 		}
 	}
@@ -87,17 +87,35 @@ func assertWheelRequeueOnce(t *testing.T, m *TimerManager, wi TimerType, tm Time
 	wheelAddTimer(t, m, wi, tm, false)
 }
 
-// dispatchAndUnlink 复刻 processWheelTick 派发分支的临界区（摘链、清归属、计数 -1），
-// 并在摘链前捕获当前代次（executeTimer 的续期 AddTimer 会再推进代次）。
-func dispatchAndUnlink(m *TimerManager, wi TimerType, timer TimerInterface, parent *Timer) timerTask {
-	wheel := m.wheels[wi]
-	wheel.wheelLock.Lock()
-	parent.GetNode().Remove()
-	parent.wheel.Store(nil)
-	wheel.timerCount.Add(-1)
+// dispatchAndUnlink 走生产派发入口（commitDispatch）：认领归属 → 投递全局调度
+// 通道 → 摘链扣计数，再把这条任务从通道里取出来交给 executeTimer，等价于
+// TimeTick 消费端拿走它。
+//
+// 早期版本是手写复刻那段临界区（摘链 + Store(nil) + 计数 -1），与改造后的协议
+// 已经漂移：真实路径写的是 migratingMarker 而不是 nil，且摘链前要先过 CAS。
+// 复刻版测得再绿也证明不了生产代码，所以改成直接调用被测函数。
+// 代次在投递前捕获，与 executeTimer 续期时比对的正是这条调度项的代次。
+func dispatchAndUnlink(t *testing.T, m *TimerManager, wi TimerType, timer TimerInterface, parent *Timer) timerTask {
+	t.Helper()
+	ch := currentTimerChannel()
 	task := timerTask{timer: timer, gen: parent.gen.Load(), mgr: m}
-	wheel.wheelLock.Unlock()
-	return task
+	node, ok := timer.(list.INode)
+	if !ok {
+		t.Fatalf("✘ 测试定时器未实现 list.INode: %T", timer)
+	}
+	if got := m.commitDispatch(m.wheels[wi], parent, node, task, ch); got != dispatchSent {
+		t.Fatalf("✘ 生产派发入口拒绝派发本定时器: result=%d", got)
+	}
+	for {
+		select {
+		case got := <-ch:
+			if got.timer == timer {
+				return got
+			}
+		default:
+			t.Fatal("✘ 结论是已投递，调度通道里却取不到这条任务")
+		}
+	}
 }
 
 // assertWheelConsistent 断言某个裸轮计数与链表严格一致（无并发时可精确相等）。
@@ -138,7 +156,7 @@ func TestTickReschedule_InfiniteTimerReentersQueue(t *testing.T) {
 	const rounds = 3
 	for r := 0; r < rounds; r++ {
 		beforeGen := p.gen.Load()
-		task := dispatchAndUnlink(m, TimerTypeMillisecond, tm, p)
+		task := dispatchAndUnlink(t, m, TimerTypeMillisecond, tm, p)
 		assertWheelConsistent(t, m, TimerTypeMillisecond, 0)
 
 		m.executeTimer(task)
@@ -215,7 +233,7 @@ func TestTickReschedule_FiniteCountUntilExhausted(t *testing.T) {
 			}
 
 			for r := int64(0); r < tc.ticks; r++ {
-				task := dispatchAndUnlink(m, TimerTypeMillisecond, tm, p)
+				task := dispatchAndUnlink(t, m, TimerTypeMillisecond, tm, p)
 				m.executeTimer(task)
 
 				if got := tm.n.Load(); got != r+1 {

@@ -174,6 +174,12 @@ type AsyncLoggerChannel struct {
 }
 
 // NewAsyncLoggerChannel 创建异步日志Channel
+//
+// writer 契约：批量落盘时传入 Write 的切片由本通道复用（下一次写入会原地覆写
+// 其内容），实现不得保留 p，只能在调用期间读取或自行拷贝。标准库 io.Writer 已
+// 有此要求，此处明示是因为自定义 writer 最常见的违规写法就是 `buf = append(buf, p...)`
+// 之后异步消费——那样会读到脏数据。仓库内置的 RotatingFileWriter 与
+// AsyncWriteSyncer 都在 Write 内同步落盘或先拷贝，满足该契约。
 func NewAsyncLoggerChannel(writer io.Writer, config AsyncChannelConfig) *AsyncLoggerChannel {
 	if config.BufferSize <= 0 {
 		config.BufferSize = DefaultAsyncChannelConfig().BufferSize

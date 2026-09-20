@@ -260,11 +260,19 @@ func GetSystemStats() (totalTimers int64, stats TimerStats) {
 	return
 }
 
-// GetQueueStats 返回此刻调度链路的通道积压；默认管理器不存在（未 Run）时全为 0。
+// GetQueueStats 返回此刻调度链路的通道积压；默认管理器不存在（未 Run）时各项为 0，
+// 但 WheelLen/WheelCap 仍按 DefaultWheelCount 给足长度。
+//
+// 长度不能省成 nil：/metrics 的抓取方按「每档一条序列」配告警，序列缺失（absent）
+// 与取值为 0 在 Prometheus 里是两回事，进程启动窗口和 TimeStop 之后会让整档
+// 序列凭空消失，规则查不到数据而不是查到 0。
 // 供 /metrics 抓取时读一次，不需要任何常驻上报协程。
 func GetQueueStats() TimerQueueStats {
 	if mgr := defaultTimerManager.Load(); mgr != nil {
 		return mgr.GetQueueStats()
 	}
-	return TimerQueueStats{}
+	return TimerQueueStats{
+		WheelLen: make([]int, DefaultWheelCount),
+		WheelCap: make([]int, DefaultWheelCount),
+	}
 }

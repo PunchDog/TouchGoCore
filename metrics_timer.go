@@ -73,6 +73,9 @@ func (timerBacklogCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 
 	total, stats := localtimer.GetSystemStats()
+	// 这两个 _total 取的是「当前这轮 Run → TimeStop 生命周期」的累计值，因此
+	// 重建管理器（Run/TimeStop/Run）会让它们回到 0。Counter 归零是 Prometheus
+	// rate() 明确处理的 reset，不影响告警，但跨重启做趋势比对时要知道这里有个断点。
 	ch <- prometheus.MustNewConstMetric(
 		timerDroppedDesc, prometheus.CounterValue, float64(stats.TimersDropped))
 	ch <- prometheus.MustNewConstMetric(
@@ -88,12 +91,14 @@ func (timerBacklogCollector) Collect(ch chan<- prometheus.Metric) {
 	// 每轮在链数按档读：只报总数的话，「毫秒轮爆满而其它轮空转」与「均匀分布」
 	// 长得一模一样，而前者才是要处置的那种。
 	ch <- prometheus.MustNewConstMetric(timerInWheelDesc, prometheus.GaugeValue, float64(total), "all")
-	if mgr := localtimer.GetDefaultManager(); mgr != nil {
-		for i := range queue.WheelLen {
-			wheel := localtimer.TimerType(i)
-			ch <- prometheus.MustNewConstMetric(timerInWheelDesc, prometheus.GaugeValue,
-				float64(mgr.GetWheelTimerCount(wheel)), wheel.String())
+	mgr := localtimer.GetDefaultManager()
+	for i := range queue.WheelLen {
+		var depth int64
+		if mgr != nil {
+			depth = mgr.GetWheelTimerCount(localtimer.TimerType(i))
 		}
+		ch <- prometheus.MustNewConstMetric(timerInWheelDesc, prometheus.GaugeValue,
+			float64(depth), localtimer.TimerType(i).String())
 	}
 }
 

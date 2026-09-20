@@ -77,17 +77,26 @@ func TestTimerBacklogMetricsExposed(t *testing.T) {
 	localtimer.Run(ctx)
 	defer localtimer.TimeStop(context.Background())
 
-	tm, err := localtimer.NewTimer[*backlogNoopTimer](20, localtimer.InfiniteCount, nil)
+	// 间隔取 60 秒而不是几十毫秒：毫秒级定时器会在断言期间被派发、续期、离链，
+	// 「在链数」随之波动，断言只能写成 >=1 这种恒真的宽松形式。分钟轮上的它整个
+	// 用例期间都不会迁移，数值可精确核对。
+	tm, err := localtimer.NewTimer[*backlogNoopTimer](60*1000, localtimer.InfiniteCount, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := localtimer.AddTimer(tm); err != nil {
 		t.Fatal(err)
 	}
+	// 等入链通道被轮协程消化（否则 queue_depth 与 in_wheel 都还是 0）
 	time.Sleep(150 * time.Millisecond)
 
+	poolBefore, ok := seriesValue(mustGather(t)["touchgocore_timer_pool_in_use"], "", "")
+	if !ok {
+		t.Fatal("✘ 缺少池外借指标")
+	}
+
 	InitMetrics()
-	fams := gatherTimerFamilies(t)
+	fams := mustGather(t)
 
 	depth := fams["touchgocore_timer_queue_depth"]
 	if depth == nil {
@@ -96,34 +105,111 @@ func TestTimerBacklogMetricsExposed(t *testing.T) {
 	if _, ok := seriesValue(depth, "queue", "schedule"); !ok {
 		t.Fatal("✘ queue_depth 未含 schedule 序列")
 	}
-	for _, wheel := range []string{"millisecond", "second", "minute", "ten-minute", "hour"} {
+	for _, wheel := range wheelSeriesNames {
 		if _, ok := seriesValue(depth, "queue", "wheel:"+wheel); !ok {
 			t.Fatalf("✘ queue_depth 缺少入链通道序列 wheel:%s", wheel)
 		}
 	}
-	if fams["touchgocore_timer_queue_capacity"] == nil {
-		t.Fatal("✘ 缺少通道容量指标")
-	}
 
-	inWheel, ok := seriesValue(fams["touchgocore_timer_in_wheel"], "wheel", "all")
-	if !ok {
-		t.Fatal("✘ 缺少在链定时器总数指标")
+	// 容量不能只断「族存在」：它是告警表达式里的分母，读成 0 会让所有
+	// 「深度/容量」比率告警恒假，而这正是最容易写错又最难发现的一种缺失。
+	capacity := fams["touchgocore_timer_queue_capacity"]
+	wantSchedule := float64(localtimer.MaxTimerChannelNum)
+	if v, ok := seriesValue(capacity, "queue", "schedule"); !ok || v != wantSchedule {
+		t.Fatalf("✘ schedule 容量异常: got=%v want=%v", v, wantSchedule)
 	}
-	if inWheel < 1 {
-		t.Fatalf("✘ 已注册的定时器未体现在 in_wheel 指标上: %v", inWheel)
-	}
-
-	for _, name := range []string{"touchgocore_timer_dropped_total",
-		"touchgocore_timer_reschedule_failed_total", "touchgocore_timer_pool_in_use"} {
-		if v, ok := seriesValue(fams[name], "", ""); ok && v < 0 {
-			t.Fatalf("✘ %s 出现负值: %v", name, v)
-		} else if !ok {
-			t.Fatalf("✘ 缺少指标 %s", name)
+	for _, wheel := range wheelSeriesNames {
+		want := float64(localtimer.MaxAddTimerChannelNum)
+		if v, ok := seriesValue(capacity, "queue", "wheel:"+wheel); !ok || v != want {
+			t.Fatalf("✘ wheel:%s 容量异常: got=%v ok=%v want=%v", wheel, v, ok, want)
 		}
 	}
 
+	inWheel := fams["touchgocore_timer_in_wheel"]
+	total, ok := seriesValue(inWheel, "wheel", "all")
+	if !ok {
+		t.Fatal("✘ 缺少在链定时器总数指标")
+	}
+	if total != 1 {
+		t.Fatalf("✘ 在链总数与用例注册数不符: got=%v want=1", total)
+	}
+	// 按档序列：总数相同的「毫秒轮爆满」与「均匀分布」必须长得不一样
+	perWheel := 0.0
+	for _, wheel := range wheelSeriesNames {
+		v, ok := seriesValue(inWheel, "wheel", wheel)
+		if !ok {
+			t.Fatalf("✘ in_wheel 缺少按档序列 wheel=%s", wheel)
+		}
+		perWheel += v
+	}
+	if v, _ := seriesValue(inWheel, "wheel", "minute"); v != 1 {
+		t.Fatalf("✘ 60 秒间隔的定时器没落在分钟档: got=%v", v)
+	}
+	if perWheel != total {
+		t.Fatalf("✘ 各档在链数与总数对不上: sum=%v all=%v", perWheel, total)
+	}
+
+	for _, name := range []string{"touchgocore_timer_dropped_total",
+		"touchgocore_timer_reschedule_failed_total"} {
+		if v, ok := seriesValue(fams[name], "", ""); !ok {
+			t.Fatalf("✘ 缺少指标 %s", name)
+		} else if v < 0 {
+			t.Fatalf("✘ %s 出现负值: %v", name, v)
+		}
+	}
+
+	// 外借量必须能「涨」：只断非负的话，把口径写反成 Puts-Gets（负数）或恒 0 都能通过
+	tm2, err := localtimer.NewTimer[*backlogNoopTimer](60*1000, localtimer.InfiniteCount, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tm2.Remove()
+	if after, ok := seriesValue(mustGather(t)["touchgocore_timer_pool_in_use"], "", ""); !ok || after < poolBefore+1 {
+		t.Fatalf("✘ 新认领一个定时器后外借量没有增加: before=%v after=%v", poolBefore, after)
+	}
+
 	tm.Remove()
-	t.Log("✔ 时间轮积压、容量、丢弃/续期失败与池空闲量均可从 /metrics 读到")
+	t.Log("✔ 时间轮积压、容量、按档在链数、丢弃/续期失败与池外借量均可从 /metrics 读到")
+}
+
+// mustGather 抓取一次并只保留时间轮指标族。
+func mustGather(t *testing.T) map[string]*dto.MetricFamily {
+	t.Helper()
+	InitMetrics()
+	return gatherTimerFamilies(t)
+}
+
+// wheelSeriesNames 五档轮的标签文本，与 TimerType.String() 逐字一致。
+var wheelSeriesNames = []string{"millisecond", "second", "minute", "ten-minute", "hour"}
+
+// TestTimerBacklogSeriesSurviveWithoutManager 回归（阶段12 复核 F2）：默认管理器
+// 不存在（尚未 Run、或 TimeStop 之后）时，按档序列必须仍以 0 出现。
+//
+// Prometheus 里「序列缺失」和「取值为 0」不是一回事：整档序列凭空消失时，
+// 按 wheel 配的告警规则查不到数据而不是查到 0，等于在最需要观察的启动/收尾窗口
+// 静默失明。
+func TestTimerBacklogSeriesSurviveWithoutManager(t *testing.T) {
+	localtimer.TimeStop(context.Background()) // 幂等；此时 defaultTimerManager 为空
+	if mgr := localtimer.GetDefaultManager(); mgr != nil {
+		t.Skip("默认管理器仍在，前序用例未收尾")
+	}
+
+	fams := mustGather(t)
+	for _, name := range []string{"touchgocore_timer_queue_depth", "touchgocore_timer_queue_capacity",
+		"touchgocore_timer_in_wheel"} {
+		labelKey, prefix := "queue", "wheel:"
+		if name == "touchgocore_timer_in_wheel" {
+			labelKey, prefix = "wheel", ""
+		}
+		for _, wheel := range wheelSeriesNames {
+			key := prefix + wheel
+			if v, ok := seriesValue(fams[name], labelKey, key); !ok {
+				t.Fatalf("✘ 未 Run 时 %s 缺少 %s 序列（序列缺失 ≠ 0，告警规则会失明）", name, key)
+			} else if v != 0 {
+				t.Fatalf("✘ 未 Run 时 %s 的 %s 应为 0, got=%v", name, key, v)
+			}
+		}
+	}
 }
 
 // TestTimerBacklogCollectorRegistersOnce 回归（S66）：InitMetrics 会被宿主启动流程
@@ -141,6 +227,11 @@ func TestTimerBacklogCollectorRegistersOnce(t *testing.T) {
 	after := len(gatherTimerFamilies(t)["touchgocore_timer_queue_depth"].GetMetric())
 	if before != after {
 		t.Fatalf("✘ 重复 InitMetrics 导致序列翻倍: %d -> %d", before, after)
+	}
+	// 光比序列条数还证明不了「本采集器真的在 registry 里」——同名指标族也可能
+	// 被别处注册出来。手动再注册一次必须撞 AlreadyRegistered，才算坐实。
+	if err := metrics.Registry().Register(timerBacklogCollector{}); err == nil {
+		t.Fatal("✘ 重复注册竟然成功，说明 InitMetrics 里根本没把采集器装进去")
 	}
 }
 

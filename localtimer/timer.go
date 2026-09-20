@@ -709,6 +709,14 @@ func NewTimer[T TimerInterface](interval, count int64, initcallback func(t T)) (
 	// isActive=true 的窗口内会被旧代次的在途调度项命中，导致过期回调被误执行。
 	parent.uid.Store(0)
 	parent.nextGen()
+	// 上一位主人的「投递途中」占位标记可能跟着实例进池：续期通道满时回滚只撤了
+	// isActive、没清归属，随后强制归还就带着这个标记回来了。ownedWheel 把它视为
+	// 「无归属」所以不会误摘链，但让新主人一认领就背着别人的在途状态毫无必要，
+	// 也会让「池中实例必须干净」这条前置断言偶发红。真实归属（非标记）不清，
+	// 那说明节点确实还挂在某轮上，必须留给 AddTimer 的摘链路径正确处理并扣计数。
+	if parent.wheel.Load() == migratingMarker {
+		parent.wheel.Store(nil)
+	}
 
 	if err := parent.Init(interval, count, timer); err != nil {
 		timerPool.Put(timer)

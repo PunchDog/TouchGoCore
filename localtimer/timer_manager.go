@@ -848,8 +848,9 @@ func (m *TimerManager) handleTimerAdd(wheel *TimerWheel, task timerTask) {
 // 原先的「go executeTimer」在毫秒轮上是 1ms 一次的无限 fork 源，
 // 消费端只有单个 TimeTick 协程且同步执行业务 Tick，下游一慢就会堆积到 OOM。
 //
-// 本函数只做无锁的准备工作，临界区整体交给 tickWheelSection：那里的 panic
-// 必须能释放 wheelLock，否则一次异常就把这个轮永久扣死（Close 随之挂死）。
+// 本函数自身不持任何轮锁：扫描判定在 tickWheelSection 里以无锁快照进行，
+// 只有命中的节点会进 commitDispatch / unlinkStale 的短临界区，两处都以 defer
+// 释放 wheelLock，因此即便临界区内 panic 也不会把这个轮永久扣死（Close 随之挂死）。
 func (m *TimerManager) processWheelTick(wheel *TimerWheel, wheelType TimerType) {
 	dropped := m.tickWheelSection(wheel, wheelType)
 
@@ -962,8 +963,17 @@ func (m *TimerManager) commitDispatch(wheel *TimerWheel, parent *Timer, node lis
 }
 
 // unlinkStale 回锁清理「已不活跃却仍挂在轮上」的节点：摘链、扣计数、断开归属。
-// 归属复核与认领同在轮锁内，理由同 commitDispatch。
+// 归属复核、认领与摘链同在锁内，理由同 commitDispatch。
+//
+// parent.mu 不能省：只挂 wheelLock 时，本协程认领完（归属已是 migratingMarker）
+// 之后、摘链之前，并发的 AddTimer 复活能走完 mu → 目标轮锁把节点入进另一个轮
+// ——handleTimerAdd 认 migratingMarker 为「无归属」，正是为迁移项放行的一条路。
+// 随后本协程的 Remove() 摘的是新主的链、扣的却是本轮计数，最后的 Store(nil)
+// 又把新主的归属抹掉：新轮永久幻影 +1，定时器彻底脱离调度。
 func (m *TimerManager) unlinkStale(wheel *TimerWheel, parent *Timer, node list.INode) {
+	parent.mu.Lock()
+	defer parent.mu.Unlock()
+
 	wheel.wheelLock.Lock()
 	defer wheel.wheelLock.Unlock()
 

@@ -55,7 +55,7 @@ func within(t *testing.T, d time.Duration, what string, fn func()) {
 func newTestWheel(mgr *TimerManager, config int64, chanCap int) *TimerWheel {
 	return &TimerWheel{
 		wheelConfig:  config,
-		tickWheel:    list.NewList(),
+		tickWheel:    list.NewUnindexedList(), // 与生产一致：时间轮不维护 ID 索引
 		addTimerChan: make(chan timerTask, chanCap),
 		mgr:          mgr,
 	}

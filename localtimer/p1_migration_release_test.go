@@ -37,7 +37,7 @@ func (f *failAddTimer) GetNode() *list.Node { panic("cannot resolve node") }
 func newStandaloneWheel(config int64) *TimerWheel {
 	return &TimerWheel{
 		wheelConfig:  config,
-		tickWheel:    list.NewList(),
+		tickWheel:    list.NewUnindexedList(), // 与生产一致：时间轮不维护 ID 索引
 		addTimerChan: make(chan timerTask, MaxAddTimerChannelNum),
 	}
 }

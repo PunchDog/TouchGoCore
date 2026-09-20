@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -391,7 +392,18 @@ func TestSWD_Concurrent(t *testing.T) {
 	var wg sync.WaitGroup
 	wg.Add(numGoroutines)
 
-	errChan := make(chan error, numGoroutines*numOperations)
+	// 每轮迭代最多产生 4 条错误；容量必须覆盖最坏情况，
+	// 且消费者在 wg.Wait() 之后，阻塞发送会造成死锁 → 非阻塞发送 + 丢弃计数
+	const maxErrPerOp = 4
+	errChan := make(chan error, numGoroutines*numOperations*maxErrPerOp)
+	var droppedErrs atomic.Int64
+	reportErr := func(e error) {
+		select {
+		case errChan <- e:
+		default:
+			droppedErrs.Add(1)
+		}
+	}
 
 	for i := 0; i < numGoroutines; i++ {
 		go func(id int) {
@@ -399,19 +411,19 @@ func TestSWD_Concurrent(t *testing.T) {
 			for j := 0; j < numOperations; j++ {
 				// 并发检测
 				if swd.Detect("这是一段包含色情的文本") != true {
-					errChan <- fmt.Errorf("concurrent detect failed")
+					reportErr(fmt.Errorf("concurrent detect failed"))
 				}
 				// 并发替换
 				if swd.Replace("这是一段包含色情的文本", '*') != "这是一段包含**的文本" {
-					errChan <- fmt.Errorf("concurrent replace failed")
+					reportErr(fmt.Errorf("concurrent replace failed"))
 				}
 				// 并发添加和删除
 				word := fmt.Sprintf("测试词%d-%d", id, j)
 				if err := swd.AddWord(word, category.Custom); err != nil {
-					errChan <- fmt.Errorf("concurrent add word failed: %v", err)
+					reportErr(fmt.Errorf("concurrent add word failed: %v", err))
 				}
 				if err := swd.RemoveWord(word); err != nil {
-					errChan <- fmt.Errorf("concurrent remove word failed: %v", err)
+					reportErr(fmt.Errorf("concurrent remove word failed: %v", err))
 				}
 			}
 		}(i)
@@ -420,8 +432,15 @@ func TestSWD_Concurrent(t *testing.T) {
 	wg.Wait()
 	close(errChan)
 
+	reported := 0
 	for err := range errChan {
-		t.Errorf("Concurrent test error: %v", err)
+		if reported < 10 {
+			t.Errorf("Concurrent test error: %v", err)
+			reported++
+		}
+	}
+	if n := droppedErrs.Load(); n > 0 {
+		t.Errorf("并发测试错误超出通道容量，丢弃 %d 条", n)
 	}
 }
 

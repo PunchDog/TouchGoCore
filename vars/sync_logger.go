@@ -116,11 +116,11 @@ func (lm *LoggerManager) GetLogger() *slog.Logger {
 
 // SetLevel 动态设置日志级别
 func (lm *LoggerManager) SetLevel(level string) error {
-	lm.mu.Lock()
-	defer lm.mu.Unlock()
-
 	if strings.EqualFold(level, LogLevelOff) {
+		lm.mu.Lock()
+		lm.config.LogLevel = level
 		lm.isEnabled = false
+		lm.mu.Unlock()
 		return nil
 	}
 
@@ -129,13 +129,23 @@ func (lm *LoggerManager) SetLevel(level string) error {
 		return fmt.Errorf("%w: %v", ErrInvalidLogLevel, err)
 	}
 
-	// 重新初始化日志器
+	// 锁内摘走旧资源引用（init 会再次取锁，持锁调用将自死锁）
+	lm.mu.Lock()
 	lm.config.LogLevel = level
-	if err := lm.init(); err != nil {
-		return err
+	oldFile, oldZap := lm.file, lm.zapLogger
+	lm.file, lm.zapLogger, lm.logger, lm.isEnabled = nil, nil, nil, false
+	lm.mu.Unlock()
+
+	// 锁外关闭旧文件句柄
+	if oldZap != nil {
+		_ = oldZap.Sync()
+	}
+	if oldFile != nil {
+		_ = oldFile.Close()
 	}
 
-	return nil
+	// 重新初始化日志器
+	return lm.init()
 }
 
 // IsEnabled 检查日志是否启用

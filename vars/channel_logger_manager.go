@@ -254,19 +254,18 @@ func (m *ChannelLoggerManager) GetLoadFactor() float64 {
 
 // SetLevel 动态设置日志级别（需要重新初始化）
 func (m *ChannelLoggerManager) SetLevel(level string) error {
+	// 锁内摘走旧资源引用（init 会再次取锁，持锁调用将自死锁；channel.Close 会等在途日志，也必须在锁外）
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	m.config.LogLevel = level
+	oldChannel, oldWriter := m.channel, m.writer
+	m.channel, m.writer = nil, nil
+	m.mu.Unlock()
 
-	// 关闭旧的
-	if m.channel != nil {
-		m.channel.Close()
-		m.channel = nil
+	if oldChannel != nil {
+		oldChannel.Close()
 	}
-	if m.writer != nil {
-		m.writer.Close()
-		m.writer = nil
+	if oldWriter != nil {
+		oldWriter.Close()
 	}
 
 	// 重新初始化

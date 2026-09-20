@@ -198,9 +198,13 @@ func TelegramStart(ctx context.Context) {
 	}
 	telegramRunCtx = ctx
 	tg := telegramCfg()
+	if tg == nil {
+		vars.Info("不启动Telegram")
+		return
+	}
 	//其他位置设置了key,就用其他地方设置的替换
 	util.DefaultCallFunc.Do(util.CallTelegramMsg+"BotKey", &tg.BotToken)
-	if tg == nil || tg.BotToken == "" {
+	if tg.BotToken == "" {
 		vars.Info("不启动Telegram")
 		return
 	}

@@ -181,7 +181,7 @@ func PostMultipartForm(fields []MultipartFormField, uri string) (respBody []byte
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, err
+		return nil, fmt.Errorf("http post multipart error : uri=%v , statusCode=%v", uri, resp.StatusCode)
 	}
 	respBody, err = ioutil.ReadAll(resp.Body)
 	return

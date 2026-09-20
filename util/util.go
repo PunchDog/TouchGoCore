@@ -4,15 +4,14 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"fmt"
+	randv2 "math/rand/v2"
 	"net"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
-	"touchgocore/random"
 )
 
 type IPInfo struct {
@@ -31,39 +30,24 @@ type IPData struct {
 	Isp       string `json:"isp"`
 }
 
-// 全局线程安全随机数生成器（避免每次调用创建新实例）
-var (
-	globalRand     *random.Random
-	globalRandOnce sync.Once
-)
-
-// initGlobalRand 初始化全局随机数生成器
-func initGlobalRand() {
-	globalRand = random.New(time.Now().UnixNano())
-}
-
-// 随机64位（优化：使用全局随机数生成器，避免每次创建 rand.Rand）
+// 随机64位，返回 [0, max)；max<=0 时返回 0
+// 使用 math/rand/v2 顶层函数：内置协程安全，避免共享非线程安全实例
 func RandInt(max int64) int64 {
-	if max == 0 {
+	if max <= 0 {
 		return 0
 	}
-	globalRandOnce.Do(initGlobalRand)
-	return globalRand.NextInt64()
+	return randv2.Int64N(max)
 }
 
-// 随机范围（优化：使用全局随机数生成器）
+// 随机范围 [min, max)；max<min 时自动交换，相等时返回 min
 func RandRange(max int64, min int64) (ret int64) {
-	globalRandOnce.Do(initGlobalRand)
-	if max-min == 0 {
-		ret = min
-	} else if max-min > 0 {
-		ret = int64(globalRand.NextInt64()%(max-min) + int64(min))
-	} else {
-		// max-min < 0
-		min = min + 1
-		ret = int64(globalRand.NextInt64()%(min-max) + int64(max))
+	if min > max {
+		min, max = max, min
 	}
-	return
+	if max == min {
+		return min
+	}
+	return min + randv2.Int64N(max-min)
 }
 
 // MD5 实现 :主要是针对 字符串的加密

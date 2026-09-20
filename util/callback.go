@@ -10,35 +10,84 @@ import (
 	"touchgocore/vars"
 )
 
-// 注册回调函数
-func (c *CallFunction) Register(key any, fn any) {
-	var funcs []any
-	if l, has := c.fn.Load(key); has {
-		old := l.([]any)
-		funcs = make([]any, len(old), len(old)+1)
-		copy(funcs, old)
-	}
-	funcs = append(funcs, fn)
-	c.fn.Store(key, funcs)
+// callbackEntry 一次注册的回调：ID 用于精确注销（func 值不可比较，DeepEqual 对闭包恒 false）
+type callbackEntry struct {
+	id uint64
+	fn any
 }
 
-// 取消注册回调函数
-func (c *CallFunction) Unregister(key any, fn any) bool {
+var callbackID atomic.Uint64
+
+// 注册回调函数，返回可用于注销的 ID
+func (c *CallFunction) Register(key any, fn any) uint64 {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	id := callbackID.Add(1)
+	var entries []callbackEntry
 	if l, has := c.fn.Load(key); has {
-		funcs := l.([]any)
-		for i, f := range funcs {
-			if reflect.DeepEqual(f, fn) {
-				newFuncs := append(funcs[:i], funcs[i+1:]...)
-				if len(newFuncs) == 0 {
-					c.fn.Delete(key)
-				} else {
-					c.fn.Store(key, newFuncs)
-				}
-				return true
+		old := l.([]callbackEntry)
+		entries = make([]callbackEntry, len(old), len(old)+1)
+		copy(entries, old)
+	}
+	entries = append(entries, callbackEntry{id: id, fn: fn})
+	c.fn.Store(key, entries)
+	return id
+}
+
+// 取消注册回调函数：idOrFn 可传 Register 返回的 ID(uint64)，也可传函数值本身（按代码地址匹配，删除最先命中的一条）
+func (c *CallFunction) Unregister(key any, idOrFn any) bool {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	l, has := c.fn.Load(key)
+	if !has {
+		return false
+	}
+	entries := l.([]callbackEntry)
+	out := make([]callbackEntry, 0, len(entries))
+	removed := false
+	switch arg := idOrFn.(type) {
+	case uint64:
+		for _, e := range entries {
+			if !removed && e.id == arg {
+				removed = true
+				continue
 			}
+			out = append(out, e)
+		}
+	default:
+		v := reflect.ValueOf(idOrFn)
+		if v.Kind() != reflect.Func {
+			return false
+		}
+		target := v.Pointer()
+		for _, e := range entries {
+			if !removed && reflect.ValueOf(e.fn).Pointer() == target {
+				removed = true
+				continue
+			}
+			out = append(out, e)
 		}
 	}
-	return false
+	if !removed {
+		return false
+	}
+	if len(out) == 0 {
+		c.fn.Delete(key)
+	} else {
+		c.fn.Store(key, out)
+	}
+	return true
+}
+
+// callOneCallback 执行单个回调并隔离 panic，返回 (返回值, panic值)
+func callOneCallback(fn any, args []reflect.Value) (rets []reflect.Value, panicked any) {
+	defer func() {
+		if r := recover(); r != nil {
+			panicked = r
+			rets = nil
+		}
+	}()
+	return reflect.ValueOf(fn).Call(args), nil
 }
 
 const (
@@ -56,7 +105,10 @@ var DefaultCallFunc = &CallFunction{
 }
 
 type CallFunction struct {
-	fn *syncmap.MapAny // key -> 函数列表映射
+	fn *syncmap.MapAny // key -> []callbackEntry 映射
+	// writeMu 串行化 Register/Unregister 的读-改-写，防止并发注册丢更新；
+	// Do 路径仍走 syncmap 无锁读（copy-on-write 保证快照一致）。
+	writeMu sync.Mutex
 	// Deprecated: retCh/retMu/bRet 存在竞态条件，请使用 DoWithRet 替代
 	retCh []reflect.Value // 返回值收集（已废弃，保留向后兼容）
 	retMu sync.Mutex      // 返回值保护锁（已废弃）
@@ -174,15 +226,19 @@ func (c *CallFunction) Do(key any, values ...any) (ok bool) {
 	}()
 
 	if l, has := c.fn.Load(key); has {
-		funcs := l.([]any)
-		for _, fn := range funcs {
-			args, err := callFunctionArgs(fn, values...)
+		entries := l.([]callbackEntry)
+		for _, e := range entries {
+			args, err := callFunctionArgs(e.fn, values...)
 			if err != nil {
 				vars.Debug("参数转换失败: %v", err)
 				continue
 			}
-			method := reflect.ValueOf(fn)
-			ret := method.Call(args)
+			ret, panicked := callOneCallback(e.fn, args)
+			if panicked != nil {
+				vars.Error("调用回调函数失败 key=%v: %v", key, panicked)
+				ok = false
+				continue
+			}
 			if c.bRet.Load() {
 				c.retMu.Lock()
 				c.retCh = append(c.retCh, ret...)
@@ -206,15 +262,18 @@ func (c *CallFunction) DoWithRet(key any, values ...any) ([]reflect.Value, bool)
 	var results []reflect.Value
 
 	if l, has := c.fn.Load(key); has {
-		funcs := l.([]any)
-		for _, fn := range funcs {
-			args, err := callFunctionArgs(fn, values...)
+		entries := l.([]callbackEntry)
+		for _, e := range entries {
+			args, err := callFunctionArgs(e.fn, values...)
 			if err != nil {
 				vars.Debug("参数转换失败: %v", err)
 				continue
 			}
-			method := reflect.ValueOf(fn)
-			ret := method.Call(args)
+			ret, panicked := callOneCallback(e.fn, args)
+			if panicked != nil {
+				vars.Error("调用回调函数失败 key=%v: %v", key, panicked)
+				continue
+			}
 			results = append(results, ret...)
 		}
 		return results, true
@@ -258,8 +317,8 @@ func (c *CallFunction) DoWithRetCtx(ctx context.Context, key any, values ...any)
 
 	var results []reflect.Value
 	if l, has := c.fn.Load(key); has {
-		funcs := l.([]any)
-		for _, fn := range funcs {
+		entries := l.([]callbackEntry)
+		for _, e := range entries {
 			if ctx != nil {
 				select {
 				case <-ctx.Done():
@@ -267,13 +326,16 @@ func (c *CallFunction) DoWithRetCtx(ctx context.Context, key any, values ...any)
 				default:
 				}
 			}
-			args, err := callFunctionArgs(fn, injectContext(ctx, fn, values)...)
+			args, err := callFunctionArgs(e.fn, injectContext(ctx, e.fn, values)...)
 			if err != nil {
 				vars.Debug("参数转换失败: %v", err)
 				continue
 			}
-			method := reflect.ValueOf(fn)
-			ret := method.Call(args)
+			ret, panicked := callOneCallback(e.fn, args)
+			if panicked != nil {
+				vars.Error("调用回调函数失败 key=%v: %v", key, panicked)
+				continue
+			}
 			results = append(results, ret...)
 		}
 		return results, true

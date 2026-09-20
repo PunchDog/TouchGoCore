@@ -344,17 +344,11 @@ func createZapCore(cfg LogConfig) (zapcore.Core, *os.File, error) {
 
 	multiWriter := zapcore.NewMultiWriteSyncer(writers...)
 
-	// 设置日志级别
-	zapLevel := zap.DebugLevel
-	switch strings.ToUpper(cfg.LogLevel) {
-	case "DEBUG":
-		zapLevel = zap.DebugLevel
-	case "INFO":
-		zapLevel = zap.InfoLevel
-	case "WARN":
-		zapLevel = zap.WarnLevel
-	case "ERROR":
-		zapLevel = zap.ErrorLevel
+	// 设置日志级别（未知级别直接报错，不再默默退化成 Debug）
+	zapLevel, err := zapLevelFor(cfg.LogLevel)
+	if err != nil {
+		_ = file.Close()
+		return nil, nil, err
 	}
 
 	core := zapcore.NewCore(

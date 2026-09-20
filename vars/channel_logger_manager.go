@@ -17,14 +17,21 @@ import (
 // ChannelLoggerManager 基于异步Channel的日志管理器
 type ChannelLoggerManager struct {
 	config      LogConfig
-	channel     *AsyncLoggerChannel
 	slogHandler *OptimizedZapSlogHandler
 	zapLogger   *zap.Logger
 	isEnabled   atomic.Bool
 	mu          sync.RWMutex
 	writer      io.WriteCloser
-	writeLevel  atomic.Int32 // 文件写入的最低级别（低于该级别的日志不写入文件）；off 时用高哨兵值禁用
-	off         atomic.Bool  // 日志级别是否被配置为 off（完全静默）
+
+	// asyncWriter 是 zap 的异步落盘包装，必须在 zap 之后、writer 之前关闭，
+	// 否则缓冲区里的日志会随进程退出丢失（createOptimizedZapCore 内部创建，需回传持有）。
+	asyncWriter *AsyncWriteSyncer
+
+	// channel 由 SetLevel/Close 换绑、由任意业务协程读取，必须原子快照
+	channel atomic.Pointer[AsyncLoggerChannel]
+
+	writeLevel atomic.Int32 // 文件写入的最低级别（低于该级别的日志不写入文件）；off 时用高哨兵值禁用
+	off        atomic.Bool  // 日志级别是否被配置为 off（完全静默）
 }
 
 // NewChannelLoggerManager 创建基于Channel的日志管理器
@@ -48,7 +55,11 @@ func NewChannelLoggerManager(cfg LogConfig) (*ChannelLoggerManager, error) {
 func (m *ChannelLoggerManager) init() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.initLocked()
+}
 
+// initLocked 真正的初始化流程，调用方必须持有 m.mu 写锁
+func (m *ChannelLoggerManager) initLocked() error {
 	// 解析并记录文件写入级别与 off 状态（供 Info/Warning/Error 等函数按等级过滤文件写入）
 	m.writeLevel.Store(int32(parseLogLevel(m.config.LogLevel)))
 	m.off.Store(strings.EqualFold(m.config.LogLevel, LogLevelOff))
@@ -60,12 +71,13 @@ func (m *ChannelLoggerManager) init() error {
 	}
 
 	// 创建优化的Zap核心
-	core, writer, err := createOptimizedZapCore(m.config)
+	core, writer, asyncWriter, err := createOptimizedZapCore(m.config)
 	if err != nil {
 		return err
 	}
 
 	m.writer = writer
+	m.asyncWriter = asyncWriter
 
 	// 创建Zap logger
 	m.zapLogger = zap.New(core,
@@ -73,14 +85,8 @@ func (m *ChannelLoggerManager) init() error {
 		zap.AddCallerSkip(m.config.CallerSkip),
 	)
 
-	// 转换日志级别
-	var slogLevel slog.Level
-	if err := slogLevel.UnmarshalText([]byte(m.config.LogLevel)); err != nil {
-		return fmt.Errorf("%w: %v", ErrInvalidLogLevel, err)
-	}
-
-	// 创建slog处理器
-	m.slogHandler = NewOptimizedZapSlogHandler(m.zapLogger, slogLevel, m.config.CallerSkip)
+	// 创建slog处理器（off 由 parseLogLevel 折成高于所有级别的哨兵，不再走 UnmarshalText 报错）
+	m.slogHandler = NewOptimizedZapSlogHandler(m.zapLogger, parseLogLevel(m.config.LogLevel), m.config.CallerSkip)
 
 	m.isEnabled.Store(true)
 	return nil
@@ -90,7 +96,11 @@ func (m *ChannelLoggerManager) init() error {
 func (m *ChannelLoggerManager) initWithChannel() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.initWithChannelLocked()
+}
 
+// initWithChannelLocked 建立旋转写入器与异步Channel，调用方必须持有 m.mu 写锁
+func (m *ChannelLoggerManager) initWithChannelLocked() error {
 	// 创建旋转写入器
 	rotatingWriter, err := NewRotatingFileWriter(
 		m.config.LogPath,
@@ -111,7 +121,7 @@ func (m *ChannelLoggerManager) initWithChannel() error {
 	channelConfig.BufferSize = m.config.AsyncBufferSize
 	channelConfig.DropOnFull = false // 阻塞模式，保证不丢日志
 
-	m.channel = NewAsyncLoggerChannel(rotatingWriter, channelConfig)
+	m.channel.Store(NewAsyncLoggerChannel(rotatingWriter, channelConfig))
 	m.isEnabled.Store(true)
 
 	return nil
@@ -119,20 +129,22 @@ func (m *ChannelLoggerManager) initWithChannel() error {
 
 // LogAsync 异步记录日志（通过Channel）
 func (m *ChannelLoggerManager) LogAsync(level slog.Level, msg string, attrs ...slog.Attr) {
-	if !m.isEnabled.Load() || m.channel == nil {
+	channel := m.channel.Load()
+	if !m.isEnabled.Load() || channel == nil {
 		return
 	}
 
-	m.channel.Enqueue(level, msg, attrs, nil)
+	channel.Enqueue(level, msg, attrs, nil)
 }
 
 // LogAsyncSimple 简单异步日志（消息应已格式化）
 func (m *ChannelLoggerManager) LogAsyncSimple(level slog.Level, msg string) {
-	if !m.isEnabled.Load() || m.channel == nil {
+	channel := m.channel.Load()
+	if !m.isEnabled.Load() || channel == nil {
 		return
 	}
 
-	m.channel.EnqueueSimple(level, msg)
+	channel.EnqueueSimple(level, msg)
 }
 
 // GetLogger 获取slog.Logger
@@ -149,13 +161,16 @@ func (m *ChannelLoggerManager) GetLogger() *slog.Logger {
 
 // Flush 刷新日志
 func (m *ChannelLoggerManager) Flush() error {
+	if channel := m.channel.Load(); channel != nil {
+		return channel.FlushAndWait(5 * time.Second)
+	}
+
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	if m.channel != nil {
-		return m.channel.FlushAndWait(5 * time.Second)
+	if m.asyncWriter != nil {
+		return m.asyncWriter.Sync()
 	}
-
 	if m.zapLogger != nil {
 		return m.zapLogger.Sync()
 	}
@@ -169,21 +184,30 @@ func (m *ChannelLoggerManager) Close() error {
 		return nil
 	}
 
+	// 关闭Channel（会等待在途日志写完，不能持锁执行）
+	if channel := m.channel.Swap(nil); channel != nil {
+		if err := channel.Close(); err != nil {
+			return err
+		}
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
-
-	// 关闭Channel
-	if m.channel != nil {
-		m.channel.Close()
-		m.channel = nil
-	}
 
 	// 刷新Zap logger
 	if m.zapLogger != nil {
 		_ = m.zapLogger.Sync()
 	}
 
-	// 关闭writer
+	// 再关 zap 的异步包装，把缓冲区里最后一段日志落到文件
+	if m.asyncWriter != nil {
+		if err := m.asyncWriter.Close(); err != nil {
+			return err
+		}
+		m.asyncWriter = nil
+	}
+
+	// 最后关闭底层writer
 	if m.writer != nil {
 		if err := m.writer.Close(); err != nil {
 			return err
@@ -230,46 +254,65 @@ func (m *ChannelLoggerManager) ShouldWriteFile(level slog.Level) bool {
 
 // GetStats 获取Channel统计
 func (m *ChannelLoggerManager) GetStats() AsyncChannelStats {
-	if m.channel != nil {
-		return m.channel.GetStats()
+	if channel := m.channel.Load(); channel != nil {
+		return channel.GetStats()
 	}
 	return AsyncChannelStats{}
 }
 
 // IsHealthy 健康检查
 func (m *ChannelLoggerManager) IsHealthy() bool {
-	if m.channel != nil {
-		return m.channel.IsHealthy()
+	if channel := m.channel.Load(); channel != nil {
+		return channel.IsHealthy()
 	}
 	return m.isEnabled.Load()
 }
 
 // GetLoadFactor 获取负载因子
 func (m *ChannelLoggerManager) GetLoadFactor() float64 {
-	if m.channel != nil {
-		return m.channel.GetLoadFactor()
+	if channel := m.channel.Load(); channel != nil {
+		return channel.GetLoadFactor()
 	}
 	return 0
 }
 
 // SetLevel 动态设置日志级别（需要重新初始化）
 func (m *ChannelLoggerManager) SetLevel(level string) error {
+	if _, err := zapLevelFor(level); err != nil {
+		return err
+	}
+
 	// 锁内摘走旧资源引用（init 会再次取锁，持锁调用将自死锁；channel.Close 会等在途日志，也必须在锁外）
 	m.mu.Lock()
 	m.config.LogLevel = level
-	oldChannel, oldWriter := m.channel, m.writer
-	m.channel, m.writer = nil, nil
+	oldWriter, oldAsyncWriter := m.writer, m.asyncWriter
+	m.writer, m.asyncWriter = nil, nil
+	m.slogHandler = nil
 	m.mu.Unlock()
+
+	oldChannel := m.channel.Swap(nil)
 
 	if oldChannel != nil {
 		oldChannel.Close()
+	}
+	if oldAsyncWriter != nil {
+		oldAsyncWriter.Close()
 	}
 	if oldWriter != nil {
 		oldWriter.Close()
 	}
 
-	// 重新初始化
-	return m.init()
+	// 重新初始化；异步模式下 initLocked 只置标志位，必须把 Channel 一并重建，
+	// 否则换绑后的 writer 没有生产者，日志会静默全丢。
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.initLocked(); err != nil {
+		return err
+	}
+	if m.config.Async && m.config.AsyncBufferSize > 0 {
+		return m.initWithChannelLocked()
+	}
+	return nil
 }
 
 // ==================== 全局Channel日志管理器 ====================

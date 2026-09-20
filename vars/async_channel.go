@@ -90,18 +90,23 @@ type AsyncChannelStats struct {
 // AsyncLoggerChannel 异步日志Channel
 // 使用专用的goroutine处理日志写入，避免阻塞业务逻辑
 type AsyncLoggerChannel struct {
-	config    AsyncChannelConfig
-	input     chan logEntry      // 日志输入channel（永不 close，由 stop 通知消费者退出）
-	stop      chan struct{}      // 停止信号，Close 时关闭一次
-	writer    io.Writer          // 实际写入器
-	closed    atomic.Bool        // 关闭标志
-	stopping  atomic.Bool        // 正在停止中
-	wg        sync.WaitGroup     // goroutine同步
-	mu        sync.RWMutex       // 统计信息锁
-	stats     AsyncChannelStats  // 统计信息
-	dropped   atomic.Int64       // 丢弃的日志数
-	queued    atomic.Int64       // 入队日志数
-	written   atomic.Int64       // 写入日志数
+	config   AsyncChannelConfig
+	input    chan logEntry      // 日志输入channel（永不 close，由 stop 通知消费者退出）
+	stop     chan struct{}      // 停止信号，Close 时关闭一次
+	writer   io.Writer          // 实际写入器
+	closed   atomic.Bool        // 关闭标志
+	stopping atomic.Bool        // 正在停止中
+	wg       sync.WaitGroup     // goroutine同步
+
+	// 统计字段全部使用原子类型：入队方是多协程、消费协程是单协程，
+	// 任何裸 int64 字段都会在 Enqueue/GetStats/run 之间构成数据竞争。
+	queued       atomic.Int64 // 入队日志数
+	written      atomic.Int64 // 写入日志数
+	dropped      atomic.Int64 // 丢弃的日志数
+	queuePeak    atomic.Int64 // 队列峰值
+	writeLatency atomic.Int64 // 最近一次批量写入耗时（ns）
+	lastFlushNs  atomic.Int64 // 上次刷新时间（UnixNano，0 表示从未刷新）
+
 	flushSig  chan chan struct{} // 刷新信号；nil 表示无需回执，非 nil 时由消费者写入信号值
 	batchPool sync.Pool          // 批处理对象池
 }
@@ -176,7 +181,6 @@ func (a *AsyncLoggerChannel) Enqueue(level slog.Level, msg string, attrs []slog.
 			return true
 		default:
 			a.dropped.Add(1)
-			a.stats.TotalDropped++
 			return false
 		}
 	}
@@ -223,18 +227,25 @@ func (a *AsyncLoggerChannel) FlushAndWait(timeout time.Duration) error {
 
 	done := make(chan struct{}, 1)
 
+	// 用可停止的定时器：time.After 在成功路径上仍会残留一个直到超时才回收的定时器
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
 	select {
 	case a.flushSig <- done:
-	case <-time.After(timeout):
+	case <-a.stop:
+		return fmt.Errorf("channel is closed")
+	case <-timer.C:
 		return fmt.Errorf("flush signal busy after %v", timeout)
 	}
 
+	timer.Reset(timeout)
 	select {
 	case <-done:
 		return nil
 	case <-a.stop:
 		return fmt.Errorf("channel is closed")
-	case <-time.After(timeout):
+	case <-timer.C:
 		return fmt.Errorf("flush timeout after %v", timeout)
 	}
 }
@@ -259,7 +270,9 @@ func (a *AsyncLoggerChannel) Close() error {
 	var waitErr error
 	select {
 	case <-done:
-		// 正常结束
+		// 消费者退出后，仍可能有在途条目刚刚完成入队，由关闭方补写，
+		// 否则这些日志既不计入落盘也不计入丢弃，静默消失
+		a.drainStragglers()
 	case <-time.After(10 * time.Second):
 		waitErr = fmt.Errorf("close timeout, some logs may not be written")
 	}
@@ -277,21 +290,46 @@ func (a *AsyncLoggerChannel) Close() error {
 	return waitErr
 }
 
-// GetStats 获取统计信息
+// drainStragglers 在消费者退出后补写 input 中的在途条目（单协程调用）
+func (a *AsyncLoggerChannel) drainStragglers() {
+	if len(a.input) == 0 {
+		return
+	}
+
+	batch := a.batchPool.Get().(*batchEntries)
+	defer func() {
+		batch.entries = batch.entries[:0]
+		a.batchPool.Put(batch)
+	}()
+
+	for {
+		select {
+		case entry := <-a.input:
+			batch.entries = append(batch.entries, entry)
+		default:
+			if len(batch.entries) > 0 {
+				a.writeBatch(batch)
+			}
+			return
+		}
+	}
+}
+
+// GetStats 获取统计信息。
+// 各字段各自原子，跨字段不保证同一瞬间的一致性（例如 TotalEnqueued 可能比
+// TotalWritten+TotalDropped 多出仍在队列中的在途条目）。
 func (a *AsyncLoggerChannel) GetStats() AsyncChannelStats {
 	stats := AsyncChannelStats{
 		TotalEnqueued: a.queued.Load(),
 		TotalWritten:  a.written.Load(),
 		TotalDropped:  a.dropped.Load(),
-		QueuePeak:     a.stats.QueuePeak,
+		QueuePeak:     a.queuePeak.Load(),
 		BufferUsed:    len(a.input),
+		WriteLatency:  time.Duration(a.writeLatency.Load()),
 	}
-
-	a.mu.RLock()
-	stats.WriteLatency = a.stats.WriteLatency
-	stats.LastFlush = a.stats.LastFlush
-	a.mu.RUnlock()
-
+	if ns := a.lastFlushNs.Load(); ns > 0 {
+		stats.LastFlush = time.Unix(0, ns)
+	}
 	return stats
 }
 
@@ -343,10 +381,8 @@ func (a *AsyncLoggerChannel) run() {
 		latency := time.Since(start)
 
 		// 更新统计
-		a.mu.Lock()
-		a.stats.WriteLatency = latency
-		a.stats.LastFlush = time.Now()
-		a.mu.Unlock()
+		a.writeLatency.Store(int64(latency))
+		a.lastFlushNs.Store(time.Now().UnixNano())
 
 		// 重置批处理
 		batch.entries = batch.entries[:0]
@@ -380,11 +416,7 @@ func (a *AsyncLoggerChannel) run() {
 			batch.entries = append(batch.entries, entry)
 
 			// 更新峰值
-			queueLen := len(a.input)
-			currentPeak := atomic.LoadInt64(&a.stats.QueuePeak)
-			if int64(queueLen) > currentPeak {
-				atomic.CompareAndSwapInt64(&a.stats.QueuePeak, currentPeak, int64(queueLen))
-			}
+			a.recordQueuePeak(len(a.input))
 
 			// 检查是否需要立即刷新
 			if batch.size() >= a.config.FlushThreshold {
@@ -398,7 +430,9 @@ func (a *AsyncLoggerChannel) run() {
 			}
 
 		case callback := <-a.flushSig:
-			flush()
+			// 先排空已提交的入队再回执，否则 FlushAndWait 可能在条目尚未
+			// 被消费时就返回，调用方以为日志已落盘
+			drainInput()
 			// 通知调用方：向回调 channel 写入信号值而非 close，
 			// 使同一 channel 可被多次安全通知，也不存在重复关闭风险。
 			if callback != nil {
@@ -414,6 +448,16 @@ func (a *AsyncLoggerChannel) run() {
 // batchEntries 批处理条目容器
 type batchEntries struct {
 	entries []logEntry
+}
+
+// recordQueuePeak 单调记录队列深度峰值
+func (a *AsyncLoggerChannel) recordQueuePeak(queueLen int) {
+	for {
+		old := a.queuePeak.Load()
+		if int64(queueLen) <= old || a.queuePeak.CompareAndSwap(old, int64(queueLen)) {
+			return
+		}
+	}
 }
 
 // size 计算批处理大小（估算字节数）
@@ -445,9 +489,7 @@ func (a *AsyncLoggerChannel) writeBatch(batch *batchEntries) {
 	if _, err := a.writer.Write([]byte(data)); err != nil {
 		fmt.Fprintf(os.Stderr, "async log write error: %v\n", err)
 	} else {
-		writtenCount := int64(len(batch.entries))
-		a.written.Add(writtenCount)
-		a.stats.TotalWritten += writtenCount
+		a.written.Add(int64(len(batch.entries)))
 	}
 }
 

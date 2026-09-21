@@ -466,7 +466,7 @@ func (t *Timer) removeFromManagerLocked(cleanPool bool) releaseOutcome {
 	// 只有「活跃 → 不活跃」这一次转换才允许推进代次和摘链扣计数：
 	// 重复执行会把 timerCount 打成负数。
 	if t.isActive.CompareAndSwap(true, false) {
-		// 令在途的旧调度项失效（可能还躺在 timerChannel / addTimerChan 中）
+		// 令在途的旧调度项失效（可能还躺在某一条调度分片通道 / addTimerChan 中）
 		t.nextGen()
 
 		// 只在摘链这一小段持锁，绝不在持锁状态下调用业务回调（Put 同理）

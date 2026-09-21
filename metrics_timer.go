@@ -1,6 +1,7 @@
 package touchgocore
 
 import (
+	"strconv"
 	"sync"
 
 	"touchgocore/localtimer"
@@ -30,6 +31,13 @@ var (
 	timerQueueCapacityDesc = prometheus.NewDesc(
 		"touchgocore_timer_queue_capacity",
 		"调度/入链通道容量，深度长期贴近即为背压前兆", []string{"queue"}, nil)
+	timerShardDepthDesc = prometheus.NewDesc(
+		"touchgocore_timer_schedule_shard_depth",
+		"各调度分片通道此刻的在队调度项数（S68；某一片贴到容量即为该片消费端卡住）",
+		[]string{"shard"}, nil)
+	timerShardCapacityDesc = prometheus.NewDesc(
+		"touchgocore_timer_schedule_shard_capacity",
+		"每条调度分片通道的容量，各片之和即允许的调度积压总量", []string{"shard"}, nil)
 	timerInWheelDesc = prometheus.NewDesc(
 		"touchgocore_timer_in_wheel",
 		"各时间轮中在链的定时器数量", []string{"wheel"}, nil)
@@ -47,6 +55,8 @@ var (
 func (timerBacklogCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- timerQueueDepthDesc
 	ch <- timerQueueCapacityDesc
+	ch <- timerShardDepthDesc
+	ch <- timerShardCapacityDesc
 	ch <- timerInWheelDesc
 	ch <- timerDroppedDesc
 	ch <- timerRescheduleFailedDesc
@@ -60,6 +70,17 @@ func (timerBacklogCollector) Collect(ch chan<- prometheus.Metric) {
 		timerQueueDepthDesc, prometheus.GaugeValue, float64(queue.ScheduleLen), "schedule")
 	ch <- prometheus.MustNewConstMetric(
 		timerQueueCapacityDesc, prometheus.GaugeValue, float64(queue.ScheduleCap), "schedule")
+	// 逐片深度另起指标名（S68）：把 "schedule:i" 塞进 queue 标签的话，
+	// 不按计划过滤的 sum(queue_depth) 会把总量与各片量一起再加一遍。
+	// 单看总深度也看不出问题——4 片时某一片满而总深度只走到 25%，
+	// 按总量配的阈值永远不响，所以每片的深度与容量各出一条序列。
+	for i, depth := range queue.ScheduleShardLen {
+		shard := strconv.Itoa(i)
+		ch <- prometheus.MustNewConstMetric(
+			timerShardDepthDesc, prometheus.GaugeValue, float64(depth), shard)
+		ch <- prometheus.MustNewConstMetric(
+			timerShardCapacityDesc, prometheus.GaugeValue, float64(queue.ScheduleShardCap), shard)
+	}
 	for i, depth := range queue.WheelLen {
 		wheel := localtimer.TimerType(i).String()
 		ch <- prometheus.MustNewConstMetric(

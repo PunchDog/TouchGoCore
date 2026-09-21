@@ -7,6 +7,7 @@ package touchgocore
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -114,6 +115,11 @@ func TestTimerBacklogMetricsExposed(t *testing.T) {
 	// 容量不能只断「族存在」：它是告警表达式里的分母，读成 0 会让所有
 	// 「深度/容量」比率告警恒假，而这正是最容易写错又最难发现的一种缺失。
 	capacity := fams["touchgocore_timer_queue_capacity"]
+	shardDepth := fams["touchgocore_timer_schedule_shard_depth"]
+	shardCapacity := fams["touchgocore_timer_schedule_shard_capacity"]
+	if shardDepth == nil || shardCapacity == nil {
+		t.Fatalf("✘ 缺少调度分片积压指标，现有时间轮指标：%v", keysOf(fams))
+	}
 	wantSchedule := float64(localtimer.MaxTimerChannelNum)
 	if v, ok := seriesValue(capacity, "queue", "schedule"); !ok || v != wantSchedule {
 		t.Fatalf("✘ schedule 容量异常: got=%v want=%v", v, wantSchedule)
@@ -123,6 +129,28 @@ func TestTimerBacklogMetricsExposed(t *testing.T) {
 		if v, ok := seriesValue(capacity, "queue", "wheel:"+wheel); !ok || v != want {
 			t.Fatalf("✘ wheel:%s 容量异常: got=%v ok=%v want=%v", wheel, v, ok, want)
 		}
+	}
+
+	// 逐片序列（S68）另用一组指标名，不塞进 queue 标签：那样不按计划过滤的
+	// sum(queue_depth) 会把总量与各片量重复计入。默认单片也必须出这片序列，
+	// 否则开关一开整组序列凭空出现，看板上历史全断。
+	shards := localtimer.ScheduleShards()
+	sumShardCap := float64(0)
+	for i := 0; i < shards; i++ {
+		name := strconv.Itoa(i)
+		if _, ok := seriesValue(shardDepth, "shard", name); !ok {
+			t.Fatalf("✘ schedule_shard_depth 缺少分片序列 %s（共 %d 片）", name, shards)
+		}
+		v, ok := seriesValue(shardCapacity, "shard", name)
+		if !ok || v <= 0 {
+			t.Fatalf("✘ schedule_shard_capacity 缺少分片序列 %s: got=%v ok=%v", name, v, ok)
+		}
+		sumShardCap += v
+	}
+	// 各片容量 = 总容量整除片数，不整除时余数弃掉，所以允许比总容量小 (片数-1)。
+	if sumShardCap > wantSchedule || wantSchedule-sumShardCap >= float64(shards) {
+		t.Fatalf("✘ 各片容量与总容量不是一套: sum=%v schedule=%v shards=%d",
+			sumShardCap, wantSchedule, shards)
 	}
 
 	inWheel := fams["touchgocore_timer_in_wheel"]
@@ -207,6 +235,20 @@ func TestTimerBacklogSeriesSurviveWithoutManager(t *testing.T) {
 				t.Fatalf("✘ 未 Run 时 %s 缺少 %s 序列（序列缺失 ≠ 0，告警规则会失明）", name, key)
 			} else if v != 0 {
 				t.Fatalf("✘ 未 Run 时 %s 的 %s 应为 0, got=%v", name, key, v)
+			}
+		}
+	}
+
+	// 分片序列同理（S68）：未 Run 时深度与容量都报 0（此刻没有通道，报「理论每片
+	// 容量」会让 depth/capacity 算出 0% 而看着像健康运行），但序列本身必须在。
+	for _, name := range []string{"touchgocore_timer_schedule_shard_depth",
+		"touchgocore_timer_schedule_shard_capacity"} {
+		for i := 0; i < localtimer.ScheduleShards(); i++ {
+			key := strconv.Itoa(i)
+			if v, ok := seriesValue(fams[name], "shard", key); !ok {
+				t.Fatalf("✘ 未 Run 时 %s 缺少 shard=%s 序列", name, key)
+			} else if v != 0 {
+				t.Fatalf("✘ 未 Run 时 %s 的 shard=%s 应为 0, got=%v", name, key, v)
 			}
 		}
 	}

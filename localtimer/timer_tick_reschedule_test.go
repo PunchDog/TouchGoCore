@@ -21,7 +21,7 @@ import (
 //   重新入链后计数与链表恢复一致；次数耗尽则不再入队。
 //
 // 调度拓扑提醒：AddTimer/续期写入的是 wheel.addTimerChan（轮私有通道），
-// processWheelTick 到期派发才写入全局 timerChannel。测试 1/2 直驱 executeTimer
+// processWheelTick 到期派发才按 uid 写入调度分片通道（默认 1 片）。测试 1/2 直驱 executeTimer
 // 并消费轮通道，排除时间片竞态；测试 3 走完整 Run/TimeTick/时间轮链路。
 //
 // 运行方式：

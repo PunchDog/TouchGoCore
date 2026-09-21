@@ -20,8 +20,9 @@ import (
 // 对象池复用给另一个业务，这条在途的旧调度项必须丢弃，否则会对同一个实例
 // 重复调度、甚至操作已被别人复用的对象（即「幽灵定时器 / 串号」问题）。
 //
-// mgr 记录归属管理器。timerChannel 是全局共享的，若不带上归属，消费端只能
-// 一律交给默认管理器执行并续期，非默认管理器的定时器首次触发后就被改嫁了。
+// mgr 记录归属管理器。调度通道是全局共享的（分片后各管理器仍共用同一套分片），
+// 若不带上归属，消费端只能一律交给默认管理器执行并续期，
+// 非默认管理器的定时器首次触发后就被改嫁了。
 type timerTask struct {
 	timer TimerInterface
 	gen   uint64
@@ -544,10 +545,17 @@ func (m *TimerManager) GetWheelTimerCount(wheelType TimerType) int64 {
 // TimerStats 只有累计计数，说得清「一共丢过多少」，看不出「此刻正在堆」。
 // 而通道深度才是「消费端跟不上 / 某个轮协程卡在业务 Tick 里」的实时信号。
 type TimerQueueStats struct {
-	ScheduleLen int   // 全局调度通道 timerChannel 的在队任务数
-	ScheduleCap int   // 其容量；持续贴近说明 TimeTick 消费端跟不上
-	WheelLen    []int // 各档入链通道 addTimerChan 的在队数，下标即 TimerType
-	WheelCap    []int // 对应容量
+	// ScheduleLen 全部分片调度通道的在队任务数之和（S68）。分片只是把一条队列
+	// 切成 N 条，总量口径不变，便于与分片化之前的看板/告警继续对齐。
+	ScheduleLen int
+	ScheduleCap int // 各分片容量之和；持续贴近说明消费端跟不上
+	// ScheduleShardLen 每片各自的在队数，下标即分片号（S68）。
+	// 只有总和不够用：某一片被慢回调占死时它已经在丢弃调度项，
+	// 而总和只涨到 1/N，按总量配的阈值永远不会响。
+	ScheduleShardLen []int
+	ScheduleShardCap int // 单片容量（各片相同）
+	WheelLen         []int
+	WheelCap         []int
 }
 
 // GetQueueStats 读取此刻的通道积压。管理器已 Close（通道被释放）或尚未 Run 时
@@ -557,9 +565,13 @@ func (m *TimerManager) GetQueueStats() TimerQueueStats {
 		WheelLen: make([]int, len(m.wheels)),
 		WheelCap: make([]int, len(m.wheels)),
 	}
-	if ch := currentTimerChannel(); ch != nil {
-		s.ScheduleLen = len(ch)
-		s.ScheduleCap = cap(ch)
+	channels := currentTimerChannels()
+	s.ScheduleShardLen = make([]int, len(channels))
+	s.ScheduleShardCap = int(shardCapFor(len(channels)))
+	for i, shard := range channels {
+		s.ScheduleShardLen[i] = len(shard)
+		s.ScheduleLen += len(shard)
+		s.ScheduleCap += cap(shard)
 	}
 	for i, wheel := range m.wheels {
 		if wheel == nil {
@@ -583,6 +595,10 @@ type timerRuntime struct {
 	closeOnce sync.Once
 	tickWG    sync.WaitGroup
 	ctx       context.Context
+
+	// degraded：本轮生命周期里有分片消费协程 panic 退出（S68）。置位后其余分片
+	// 照常消费，但健康检查报告「未运行」——半死不活的状态不该对外报正常。
+	degraded atomic.Bool
 }
 
 // shutdown 关闭本轮生命周期，幂等且并发安全
@@ -626,9 +642,10 @@ var (
 	defaultTimerManager atomic.Pointer[TimerManager]
 	timerRT             atomic.Pointer[timerRuntime]
 
-	// timerChannel 刻意保持全局、跨生命周期共享：
+	// timerChannels 刻意保持全局、跨生命周期共享：
 	// NewTimerManager 可以在未 Run 的情况下独立调用，此时也得有地方派发。
-	timerChannel      chan timerTask
+	// S68 起为分片数组：下标即分片号，一条分片一个消费协程，同一 uid 恒定落同一分片。
+	timerChannels     []chan timerTask
 	timerChannelMu    sync.Mutex
 	timerChannelReady bool
 )
@@ -662,14 +679,37 @@ func snapshotTimerManagers() []*TimerManager {
 	return mgrs
 }
 
-// ensureTimerChannel 确保调度通道已创建（可被 Stop 后重建）
+// shardCapFor 单片容量：总容量按片数均分（S68），非法片数按 1 片算，且不低于 1。
+func shardCapFor(n int) int64 {
+	if n < 1 {
+		n = 1
+	}
+	per := MaxTimerChannelNum / int64(n)
+	if per < 1 {
+		per = 1
+	}
+	return per
+}
+
+// ensureTimerChannel 确保调度通道已创建（可被 Stop 后重建）。
+//
+// 分片数在建通道这一刻定死（S68）：每片容量为 MaxTimerChannelNum/分片数，
+// 因此「整套通道的总容量」与既往单通道时一致——放开消费者不该顺带把
+// 允许的积压量放大 N 倍，那只会把一个慢消费者的堆积摊成 N 份。
 func ensureTimerChannel() {
 	timerChannelMu.Lock()
 	defer timerChannelMu.Unlock()
-	if !timerChannelReady || timerChannel == nil {
-		timerChannel = make(chan timerTask, MaxTimerChannelNum)
-		timerChannelReady = true
+	if timerChannelReady && len(timerChannels) > 0 {
+		return
 	}
+	n := effectiveShards()
+	per := shardCapFor(n)
+	channels := make([]chan timerTask, n)
+	for i := range channels {
+		channels[i] = make(chan timerTask, per)
+	}
+	timerChannels = channels
+	timerChannelReady = true
 }
 
 // resetTimerChannel 释放调度通道。
@@ -678,15 +718,55 @@ func ensureTimerChannel() {
 func resetTimerChannel() {
 	timerChannelMu.Lock()
 	defer timerChannelMu.Unlock()
-	timerChannel = nil
+	timerChannels = nil
 	timerChannelReady = false
 }
 
-// currentTimerChannel 返回当前调度通道快照（无通道时为 nil）
-func currentTimerChannel() chan timerTask {
+// currentTimerChannels 返回当前调度通道数组快照（无通道时为 nil）。
+// 快照整体取自一次加锁，消费端与统计端不会读到「长度与元素不同源」的半成品。
+func currentTimerChannels() []chan timerTask {
 	timerChannelMu.Lock()
 	defer timerChannelMu.Unlock()
-	return timerChannel
+	return timerChannels
+}
+
+// currentTimerChannel 返回 0 号分片通道（无通道时为 nil）。
+//
+// 未开启分片（默认）时它就是唯一的调度通道；开了分片时只代表第 0 片。
+// 保留这个入口是给「直投/直排单条通道」的测试与统计用的，生产派发一律走
+// shardOf，不要拿本函数当「那条通道」。
+func currentTimerChannel() chan timerTask {
+	if channels := currentTimerChannels(); len(channels) > 0 {
+		return channels[0]
+	}
+	return nil
+}
+
+// scheduleChannelAt 取第 shard 号分片通道。数组尚未建立或下标越界时返回 nil。
+func scheduleChannelAt(shard int) chan timerTask {
+	channels := currentTimerChannels()
+	if shard < 0 || shard >= len(channels) {
+		return nil
+	}
+	return channels[shard]
+}
+
+// shardOf 在通道数组快照里按 uid 取分片通道。
+//
+// 派发路径拿快照而不是逐节点查全局：一次 tick 要派发几十个节点，逐节点加锁读
+// 通道数组等于把分片决策成本重新贴回轮协程上（实测 256 节点 1.7µs 对 10.2µs）。
+//
+// 空快照返回 nil 是可接受的入参：commitDispatch 的投递是非阻塞 select，nil 分支
+// 永不就绪，于是走 default 判「通道满」，节点留在原轮等下一拍重试——与未 Run 时
+// 的既往行为一致。
+func shardOf(channels []chan timerTask, uid int64) chan timerTask {
+	if len(channels) == 0 {
+		return nil
+	}
+	if uid < 0 {
+		uid = -uid
+	}
+	return channels[uid%int64(len(channels))]
 }
 
 // defaultWheelConfigs 每档轮的精度（毫秒）：毫秒/秒/分钟/10分钟/小时。
@@ -873,7 +953,8 @@ func (m *TimerManager) handleTimerAdd(wheel *TimerWheel, task timerTask) {
 //
 // 背压原则：通道满就把定时器留在当前轮等下一个 tick 重试，绝不新开协程。
 // 原先的「go executeTimer」在毫秒轮上是 1ms 一次的无限 fork 源，
-// 消费端只有单个 TimeTick 协程且同步执行业务 Tick，下游一慢就会堆积到 OOM。
+// 而消费端同步执行业务 Tick，下游一慢就会堆积到 OOM。
+// 消费端可以是多个分片协程（S68），但每一片只有一个消费者，且满不满按片判定。
 //
 // 本函数自身不持任何轮锁：扫描判定在 tickWheelSection 里以无锁快照进行，
 // 只有命中的节点会进 commitDispatch / unlinkStale 的短临界区，两处都以 defer
@@ -905,7 +986,9 @@ func (m *TimerManager) processWheelTick(wheel *TimerWheel, wheelType TimerType) 
 // （不变前的整轮持锁恰好挡住了这个交错，实测会让 timerCount 打成负数）。
 func (m *TimerManager) tickWheelSection(wheel *TimerWheel, wheelType TimerType) (dropped int64) {
 	currentTime := util.CurrentMS()
-	ch := currentTimerChannel()
+	// 通道数组快照取一次：到期节点按各自 uid 落到不同分片（S68），而本轮扫描期间
+	// 分片数不可能变（改分片只在 TimeStop→Run 之间生效）。
+	channels := currentTimerChannels()
 
 	wheel.tickWheel.RangeWindow(currentTime, func(node list.INode) bool {
 		timer, ok := node.(TimerInterface)
@@ -931,7 +1014,7 @@ func (m *TimerManager) tickWheelSection(wheel *TimerWheel, wheelType TimerType) 
 		task := timerTask{timer: timer, gen: parent.gen.Load(), mgr: m}
 		if parent.nextTime.Load() <= currentTime {
 			// 时间到达：只有派发成功才摘链，失败则留在轮里下个 tick 重试
-			if m.commitDispatch(wheel, parent, node, task, ch) == dispatchFull {
+			if m.commitDispatch(wheel, parent, node, task, shardOf(channels, parent.uid.Load())) == dispatchFull {
 				dropped++
 			}
 			return true

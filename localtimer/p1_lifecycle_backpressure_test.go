@@ -342,7 +342,7 @@ func TestTimeTickPicksUpRecreatedChannel(t *testing.T) {
 	timerRT.Store(rt)
 	exited := make(chan struct{})
 	go func() {
-		timeTick(rt)
+		timeTick(rt, 0)
 		close(exited)
 	}()
 

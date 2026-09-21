@@ -75,24 +75,23 @@ func TestBatchEntriesResetClearsBackingArray(t *testing.T) {
 
 // TestAppendEntryMatchesHistoricalFormat 输出格式与旧的 formatEntry 逐字一致，
 // 含 attrs 分支（生产入口 channel_logger_manager 会真的带 attrs 进来）。
+// S70 起这条格式化被消费者批量写和降级同步写共用，两者必须逐字相同才能落进同一个文件。
 func TestAppendEntryMatchesHistoricalFormat(t *testing.T) {
-	a := &AsyncLoggerChannel{}
-
 	entry := sampleEntry("登录成功")
-	got := string(a.appendEntry(nil, entry))
+	got := string(appendEntry(nil, entry))
 	if want := "2026-09-21 10:00:00 INFO [business/handler.go:42 登录成功]\n"; got != want {
 		t.Fatalf("✘ 无字段格式变了:\n got=%q\nwant=%q", got, want)
 	}
 
 	entry.level = slog.LevelError
 	entry.attrs = []slog.Attr{slog.String("uid", "1001"), slog.Int("code", 7)}
-	got = string(a.appendEntry(nil, entry))
+	got = string(appendEntry(nil, entry))
 	if want := "2026-09-21 10:00:00 ERROR [business/handler.go:42 登录成功] uid=1001 code=7\n"; got != want {
 		t.Fatalf("✘ 带字段格式变了:\n got=%q\nwant=%q", got, want)
 	}
 
 	// file 为空（拿不到调用点）时不能输出空的 "[]" 之外的多余分隔符
-	got = string(a.appendEntry(nil, logEntry{level: slog.LevelWarn, msg: "m", time: entry.time}))
+	got = string(appendEntry(nil, logEntry{level: slog.LevelWarn, msg: "m", time: entry.time}))
 	if want := "2026-09-21 10:00:00 WARN [m]\n"; got != want {
 		t.Fatalf("✘ 无调用点格式变了:\n got=%q\nwant=%q", got, want)
 	}

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -17,11 +18,16 @@ import (
 // ChannelLoggerManager 基于异步Channel的日志管理器
 type ChannelLoggerManager struct {
 	config      LogConfig
-	slogHandler *OptimizedZapSlogHandler
+	slogHandler slog.Handler
 	zapLogger   *zap.Logger
 	isEnabled   atomic.Bool
 	mu          sync.RWMutex
 	writer      io.WriteCloser
+
+	// channelMode：本管理器跑的是「异步通道 + 旋转写入器」还是「zap 直写」。
+	// 两条路的落地格式本就不同（文本 / JSON），降级分支必须按模式选，
+	// 不能在有通道模式时突然写出 zap 的 JSON。
+	channelMode atomic.Bool
 
 	// asyncWriter 是 zap 的异步落盘包装，必须在 zap 之后、writer 之前关闭，
 	// 否则缓冲区里的日志会随进程退出丢失（createOptimizedZapCore 内部创建，需回传持有）。
@@ -66,9 +72,15 @@ func (m *ChannelLoggerManager) initLocked() error {
 
 	// 检查是否禁用
 	if m.config.Async && m.config.AsyncBufferSize > 0 {
+		// 通道模式：zap 不参与，落盘由 initWithChannelLocked 建的旋转写入器 +
+		// AsyncLoggerChannel 负责。先置模式再置 isEnabled，让降级分支在
+		// 「通道还没建好」的窗口里也知道该走文本而不是 zap。
+		m.channelMode.Store(true)
 		m.isEnabled.Store(true)
 		return nil
 	}
+
+	m.channelMode.Store(false)
 
 	// 创建优化的Zap核心
 	core, writer, asyncWriter, err := createOptimizedZapCore(m.config)
@@ -122,6 +134,8 @@ func (m *ChannelLoggerManager) initWithChannelLocked() error {
 	channelConfig.DropOnFull = false // 阻塞模式，保证不丢日志
 
 	m.channel.Store(NewAsyncLoggerChannel(rotatingWriter, channelConfig))
+	m.slogHandler = newChannelSlogHandler(m)
+	m.channelMode.Store(true)
 	m.isEnabled.Store(true)
 
 	return nil
@@ -129,31 +143,102 @@ func (m *ChannelLoggerManager) initWithChannelLocked() error {
 
 // LogAsync 异步记录日志（通过Channel）
 func (m *ChannelLoggerManager) LogAsync(level slog.Level, msg string, attrs ...slog.Attr) {
-	channel := m.channel.Load()
-	if !m.isEnabled.Load() || channel == nil {
-		return
-	}
-
-	channel.Enqueue(level, msg, attrs, nil)
+	m.writeLogged(level, msg, attrs)
 }
 
 // LogAsyncSimple 简单异步日志（消息应已格式化）
 func (m *ChannelLoggerManager) LogAsyncSimple(level slog.Level, msg string) {
-	channel := m.channel.Load()
-	if !m.isEnabled.Load() || channel == nil {
+	m.writeLogged(level, msg, nil)
+}
+
+// writeLogged 文件落地的唯一入口（S70）。
+//
+// 三条分支都只认这一个管理器手里的 writer，不存在「另开一个日志管理器、再开一个
+// 文件句柄」的旁路：旁路的句柄不认识旋转，日志轮转之后它还继续往已被改名的备份文件
+// 里写，主文件从此看不出后一半现场。
+//
+// 级别过滤放在这里而不是调用方：异步通道自己不看级别，此前绕过门面直接调
+// LogAsyncSimple 的调用方能把 debug 灌进 info 级别的文件里。
+func (m *ChannelLoggerManager) writeLogged(level slog.Level, msg string, attrs []slog.Attr) {
+	if !m.accepts(level) {
+		return
+	}
+	file, line := getCaller()
+	m.submit(logEntry{level: level, msg: msg, time: time.Now(), attrs: attrs, file: file, line: line})
+}
+
+// enqueueRecord 投递一条调用点已解析好的记录（slog 入口带 Record.PC，不能再扫栈）。
+func (m *ChannelLoggerManager) enqueueRecord(entry logEntry) {
+	if !m.accepts(entry.level) {
+		return
+	}
+	m.submit(entry)
+}
+
+// accepts 该级别的日志是否需要写文件
+func (m *ChannelLoggerManager) accepts(level slog.Level) bool {
+	return m.isEnabled.Load() && !m.off.Load() && m.ShouldWriteFile(level)
+}
+
+// submit 按当前模式选落地路径：
+//   - 通道在：投递给消费者（常态）；
+//   - 通道模式但通道不在（SetLevel 换绑窗口、Close 之后仍有零星调用）：同步写同一个
+//     文件句柄，格式与消费者逐字相同；
+//   - 非通道模式：走 zap，写出该模式本来的 JSON。
+func (m *ChannelLoggerManager) submit(entry logEntry) {
+	if channel := m.channel.Load(); channel != nil {
+		channel.enqueue(entry)
+		return
+	}
+	if !m.channelMode.Load() {
+		m.logViaHandler(entry)
+		return
+	}
+	m.writeEntrySync(entry)
+}
+
+// writeEntrySync 通道缺席时同步落到同一个文件句柄。
+// 旋转写入器自带锁且写入即追加，与消费者协程并存时不会互相截断。
+func (m *ChannelLoggerManager) writeEntrySync(entry logEntry) {
+	m.mu.RLock()
+	writer := m.writer
+	m.mu.RUnlock()
+	if writer == nil {
 		return
 	}
 
-	channel.EnqueueSimple(level, msg)
+	if _, err := writer.Write(appendEntry(nil, entry)); err != nil {
+		fmt.Fprintf(os.Stderr, "sync log write error: %v\n", err)
+	}
 }
 
-// GetLogger 获取slog.Logger
+// logViaHandler 非通道模式（zap 直写）下落地：属性照原样带进记录，不因为换路径就丢字段
+func (m *ChannelLoggerManager) logViaHandler(entry logEntry) {
+	m.mu.RLock()
+	handler := m.slogHandler
+	m.mu.RUnlock()
+	if handler == nil {
+		return
+	}
+
+	record := slog.NewRecord(entry.time, entry.level, entry.msg, 0)
+	record.AddAttrs(entry.attrs...)
+	_ = handler.Handle(entry.context, record)
+}
+
+// GetLogger 获取slog.Logger。
+//
+// 通道模式下它返回接进通道的那个 handler（S70）：此前 slogHandler 只在非异步分支里
+// 建，异步模式下恒为 nil，于是 slog.SetDefault(m.GetLogger()) 等于把默认器换成
+// slog.Default() 自己，slog.Info 一类调用永远进不了日志文件——门面 vars.Info 走的是
+// 另一条路（LogAsyncSimple），所以只有直接用 slog 的宿主会踩到。
 func (m *ChannelLoggerManager) GetLogger() *slog.Logger {
 	m.mu.RLock()
-	defer m.mu.RUnlock()
+	handler := m.slogHandler
+	m.mu.RUnlock()
 
-	if m.slogHandler != nil {
-		return slog.New(m.slogHandler)
+	if handler != nil {
+		return slog.New(handler)
 	}
 
 	return slog.Default()
@@ -317,36 +402,70 @@ func (m *ChannelLoggerManager) SetLevel(level string) error {
 
 // ==================== 全局Channel日志管理器 ====================
 
-var (
-	globalChannelLogger *ChannelLoggerManager
-	channelOnce         sync.Once
-)
+// globalChannelLogger 全库唯一的文件日志落地点。
+// 读写由 vars.go 的 loggerMu 保护（S70 起门面 Initialize/Shutdown 与这里的导出入口共用同一把锁），
+// 业务侧读取走 GetChannelLogger，靠 atomic 快照拿到的是完整指针。
+var globalChannelLogger *ChannelLoggerManager
 
-// InitializeChannelLogger 初始化全局Channel日志管理器
+// initializeChannelLoggerLocked 建立全局管理器。调用方必须持有 loggerMu。
+//
+// 这里不再有 sync.Once：Once 让「Shutdown 之后重新 Initialize」静默返回 nil，
+// 而宿主在测试里关一次再开一次是常态，旧写法会把第二次的配置整份丢掉。
+// 是否已初始化改由 loggerActive 判定，放在 vars.Initialize 里。
+func initializeChannelLoggerLocked(cfg LogConfig) (*ChannelLoggerManager, error) {
+	manager, err := NewChannelLoggerManager(cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	// 如果启用异步，使用Channel模式
+	if cfg.Async {
+		if err := manager.initWithChannel(); err != nil {
+			// 半初始化：init 已经开了文件句柄（非异步分支）或 initWithChannel 开了旋转写入器，
+			// 不关就等于每次初始化失败留一个 fd，且没人再持有它。
+			_ = manager.Close()
+			return nil, err
+		}
+	}
+
+	globalChannelLogger = manager
+	return manager, nil
+}
+
+// shutdownChannelLoggerLocked 刷新并关闭全局管理器，同时清空引用。调用方必须持有 loggerMu。
+// 清空是「Shutdown 之后可再 Initialize」的后半：只关不清会让写日志的分支继续持有
+// 一个已关闭的管理器，之后的调用全都落到已释放的 writer 上。
+func shutdownChannelLoggerLocked() error {
+	manager := globalChannelLogger
+	if manager == nil {
+		return nil
+	}
+	globalChannelLogger = nil
+
+	// 先冲刷在途日志；刷新失败（超时）也要继续 Close，否则文件句柄直接泄漏，
+	// 而 Close 本身会再等一次消费者收敛。
+	_ = manager.Flush()
+	return manager.Close()
+}
+
+// InitializeChannelLogger 初始化全局Channel日志管理器。
+// 与 vars.Initialize 同一条路径（S70）：装配 + 接管默认 slog 记录器，不再有第二份实现。
 func InitializeChannelLogger(cfg LogConfig) error {
-	var initErr error
-	channelOnce.Do(func() {
-		manager, err := NewChannelLoggerManager(cfg)
-		if err != nil {
-			initErr = err
-			return
-		}
+	loggerMu.Lock()
+	defer loggerMu.Unlock()
 
-		// 如果启用异步，使用Channel模式
-		if cfg.Async {
-			initErr = manager.initWithChannel()
-			if initErr != nil {
-				return
-			}
-		}
-
-		globalChannelLogger = manager
-		if globalChannelLogger.IsEnabled() {
-			slog.SetDefault(globalChannelLogger.GetLogger())
-		}
-	})
-
-	return initErr
+	if loggerActive {
+		return nil
+	}
+	manager, err := initializeChannelLoggerLocked(cfg)
+	if err != nil {
+		return err
+	}
+	loggerActive = true
+	if manager.IsEnabled() {
+		adoptSlogDefault(manager)
+	}
+	return nil
 }
 
 // InitializeChannelLoggerWithDefaults 使用默认配置初始化
@@ -356,16 +475,15 @@ func InitializeChannelLoggerWithDefaults() error {
 	return InitializeChannelLogger(cfg)
 }
 
-// ShutdownChannelLogger 关闭全局Channel日志管理器
+// ShutdownChannelLogger 关闭全局Channel日志管理器（不含命令行缓冲，那是 vars.Shutdown 的职责）
 func ShutdownChannelLogger() error {
-	if globalChannelLogger == nil {
-		return nil
-	}
+	loggerMu.Lock()
+	defer loggerMu.Unlock()
 
-	// 刷新
-	_ = globalChannelLogger.Flush()
-
-	return globalChannelLogger.Close()
+	loggerActive = false
+	err := shutdownChannelLoggerLocked()
+	releaseSlogDefault()
+	return err
 }
 
 // GetChannelLogger 获取全局Channel日志管理器

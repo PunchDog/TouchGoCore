@@ -11,10 +11,12 @@ import (
 	"time"
 )
 
-// 全局变量（使用单例模式）
+// 全局日志器状态：Initialize/Shutdown 之间的切换由 loggerMu 串行化，
+// loggerActive 只是「当前这轮是否已装好」的标记（旧实现是 sync.Once，
+// 一旦 Shutdown 就无法再 Initialize，重启日志器只能换进程）。
 var (
-	globalLogger *LoggerManager
-	once         sync.Once
+	loggerMu     sync.Mutex
+	loggerActive bool
 )
 
 // Run 初始化全局日志器（向后兼容入口）
@@ -29,39 +31,59 @@ func Run(path, name, level string) {
 	}
 }
 
-// Initialize 初始化全局日志器（默认使用异步Channel模式）
+// Initialize 初始化全局日志器（默认使用异步Channel模式）。
+//
+// 只有一条路径（S70）：文件句柄从头到尾归 ChannelLoggerManager 独占。过去这里还会
+// 另建一个同步 LoggerManager 当「fallback」，两个管理器各开一个句柄写同一个 .log，
+// 而旁路那个句柄不认识旋转——日志轮转后它继续往被改名的备份文件里追加，主文件从此
+// 看不出后半段现场；需要降级时由管理器自己同步写自己那个句柄。
+//
 // 返回聚合后的初始化错误：任一子路径失败都不再被吞掉，调用方仍可选择忽略。
+// 允许 Shutdown 之后再次 Initialize（旧实现用 sync.Once 焊死，重启日志器只能换进程）。
 func Initialize(cfg LogConfig) error {
-	var initErr error
-	once.Do(func() {
-		// 默认启用异步模式以保证引擎效率
-		if cfg.AsyncBufferSize <= 0 {
-			cfg.AsyncBufferSize = 10000
-		}
+	loggerMu.Lock()
+	defer loggerMu.Unlock()
 
-		var errs []error
+	// 默认启用异步模式以保证引擎效率
+	if cfg.AsyncBufferSize <= 0 {
+		cfg.AsyncBufferSize = 10000
+	}
 
-		// 同步日志器：作为 Channel 模式不可用时的 fallback
-		manager, err := NewLoggerManager(cfg)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("同步日志器初始化失败: %w", err))
-		} else {
-			globalLogger = manager
-		}
+	if loggerActive {
+		return nil
+	}
+	manager, err := initializeChannelLoggerLocked(cfg)
+	if err != nil {
+		return fmt.Errorf("异步日志器初始化失败: %w", err)
+	}
+	loggerActive = true
 
-		// 将Channel管理器设为全局（异步主路径）
-		if err := InitializeChannelLogger(cfg); err != nil {
-			errs = append(errs, fmt.Errorf("异步日志器初始化失败: %w", err))
-		}
+	if manager.IsEnabled() {
+		adoptSlogDefault(manager)
+	}
+	return nil
+}
 
-		if ch := GetChannelLogger(); ch != nil && ch.IsEnabled() {
-			slog.SetDefault(ch.GetLogger())
-		}
+// slogPrevDefault 被接管前的默认 slog 记录器。Shutdown 之后必须换回去：
+// 默认器还指着已关闭管理器的 handler，进程收尾阶段（退出日志、panic 打印）的
+// slog.Info 会静默消失，而这类日志恰恰是最不能丢的。
+var slogPrevDefault *slog.Logger
 
-		initErr = errors.Join(errs...)
-	})
+// adoptSlogDefault 接管默认 slog 记录器。调用方必须持有 loggerMu。
+func adoptSlogDefault(manager *ChannelLoggerManager) {
+	if slogPrevDefault == nil {
+		slogPrevDefault = slog.Default()
+	}
+	slog.SetDefault(manager.GetLogger())
+}
 
-	return initErr
+// releaseSlogDefault 交还默认 slog 记录器。调用方必须持有 loggerMu。
+func releaseSlogDefault() {
+	if slogPrevDefault == nil {
+		return
+	}
+	slog.SetDefault(slogPrevDefault)
+	slogPrevDefault = nil
 }
 
 // InitializeWithDefaults 使用默认配置初始化
@@ -69,20 +91,19 @@ func InitializeWithDefaults() error {
 	return Initialize(DefaultConfig())
 }
 
-// Shutdown 关闭全局日志器
+// Shutdown 关闭全局日志器。关闭后文件写入静默丢弃（命令行仍在），
+// 再次 Initialize 可恢复。
 func Shutdown() error {
-	// 先关闭异步Channel日志（确保所有日志刷出）
-	if err := ShutdownChannelLogger(); err != nil {
-		return err
-	}
+	loggerMu.Lock()
+	defer loggerMu.Unlock()
 
 	var errs []error
 
-	if globalLogger != nil {
-		if err := globalLogger.Close(); err != nil {
-			errs = append(errs, err)
-		}
+	if err := shutdownChannelLoggerLocked(); err != nil {
+		errs = append(errs, err)
 	}
+	loggerActive = false
+	releaseSlogDefault()
 
 	// 命令行缓冲最后落盘，避免退出时丢掉尾部输出
 	if err := CloseConsole(); err != nil {
@@ -355,20 +376,29 @@ func CloseConsole() error {
 	return err
 }
 
-// writeToFile 按配置日志级别将日志异步写入 log 文件；
-// 级别不足、日志器未启用或级别为 off 时跳过（不写文件，但命令行已先行输出）。
+// writeToFile 按配置日志级别把一行日志交给日志管理器落盘。
+//
+// 未初始化（或已 Shutdown）时只丢文件、不再另开句柄补写：命令行那一路已经先跑过了，
+// 消息不会整体消失；而这里过去会退回一个独立的同步 LoggerManager，那第二个文件句柄
+// 就是「轮转之后日志写进备份文件」的来源。
 func writeToFile(level slog.Level, msg string) {
 	ch := GetChannelLogger()
-	if ch == nil || !ch.IsEnabled() {
-		// 回退到旧版日志器（其内部已按等级过滤）
-		logWithLevel(level, "%s", msg)
+	if ch == nil {
+		warnLoggerMissing()
 		return
 	}
-	if ch.IsOff() || !ch.ShouldWriteFile(level) {
-		return
-	}
-	ch.LogAsyncSimple(level, msg)
+	ch.writeLogged(level, msg, nil)
 }
+
+// warnLoggerMissing 未初始化提示只报一次：这条路径本身在日志器上，反复打印会刷屏，
+// 而 Initialize 失败的原因已经由调用方拿到并打在 stderr 上。
+func warnLoggerMissing() {
+	loggerMissingOnce.Do(func() {
+		fmt.Fprint(os.Stderr, "日志管理器未初始化，文件日志被跳过（命令行输出不受影响）\n")
+	})
+}
+
+var loggerMissingOnce sync.Once
 
 // Debug 调试级别日志：优先输出到命令行，其次按等级写入 log 文件
 func Debug(msg string, args ...any) {
@@ -408,52 +438,6 @@ func Error(msg string, args ...any) {
 	formatted := assembleLine(msg, args)
 	printToConsole(slog.LevelError, formatted)
 	writeToFile(slog.LevelError, formatted)
-}
-
-// logWithLevel 统一的日志记录函数
-func logWithLevel(level slog.Level, msg string, args ...any) {
-	var formattedMsg string
-	if len(args) > 0 {
-		// 如果有参数，使用fmt.Sprintf格式化消息
-		formattedMsg = fmt.Sprintf(msg, args...)
-	} else {
-		// 没有参数，直接使用原始消息
-		formattedMsg = msg
-	}
-
-	if globalLogger == nil || !globalLogger.IsEnabled() {
-		// 使用简单的fmt输出作为fallback
-		logSimple(level, formattedMsg)
-		return
-	}
-
-	logger := globalLogger.GetLogger()
-
-	switch level {
-	case slog.LevelDebug:
-		logger.Debug(formattedMsg)
-	case slog.LevelInfo:
-		logger.Info(formattedMsg)
-	case slog.LevelWarn:
-		logger.Warn(formattedMsg)
-	case slog.LevelError:
-		logger.Error(formattedMsg)
-	}
-}
-
-// logSimple 简单的日志输出（用于未初始化时）
-func logSimple(level slog.Level, msg string) {
-	levelStr := "[INFO]"
-	switch level {
-	case slog.LevelDebug:
-		levelStr = "[DEBUG]"
-	case slog.LevelWarn:
-		levelStr = "[WARN]"
-	case slog.LevelError:
-		levelStr = "[ERROR]"
-	}
-
-	fmt.Printf("%s %s\n", levelStr, msg)
 }
 
 // 初始化函数（默认使用默认配置）

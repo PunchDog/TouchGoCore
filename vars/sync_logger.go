@@ -14,9 +14,13 @@ import (
 	"go.uber.org/zap/zapcore"
 )
 
-// ==================== 同步日志管理器（fallback 路径） ====================
+// ==================== 同步日志管理器（独立可用的管理器） ====================
 
-// LoggerManager 日志管理器
+// LoggerManager 日志管理器。
+//
+// 它不再是全局日志器的 fallback（S70）：全局那一路由 ChannelLoggerManager 独占文件句柄，
+// 这里另开一个句柄写同一个 .log 正是「轮转后日志写进备份文件」的成因。
+// 类型本身保留给需要独立实例（临时目录、单独一份文件）的调用方。
 type LoggerManager struct {
 	config    LogConfig
 	logger    *slog.Logger

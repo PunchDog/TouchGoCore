@@ -94,8 +94,27 @@ func expandCaller(pcs []uintptr) (string, int, bool) {
 	}
 }
 
-// 小窗口覆盖 vars 内部帧（Info → writeToFile → LogAsyncSimple → EnqueueSimple →
-// Enqueue → getCaller）加余量；采满仍未命中就退回大窗口重扫。
+// callerFromPC 把 slog.Record 自带的调用点 PC 解析成与 getCaller 同一风格的路径与行号。
+//
+// 走 slog.* 入口的日志不能再用 getCaller 扫栈：栈里第一个非 vars 帧是 log/slog
+// 自己的转发帧，调用点会被错报到 Go 标准库文件上。Record.PC 是 slog 在调用点采好的。
+func callerFromPC(pc uintptr) (string, int) {
+	if pc == 0 {
+		return "", 0
+	}
+	fn := runtime.FuncForPC(pc)
+	if fn == nil {
+		return "", 0
+	}
+	file, line := fn.FileLine(pc)
+	if file == "" {
+		return "", 0
+	}
+	return normalizeCallerFile(file), line
+}
+
+// 小窗口覆盖 vars 内部帧（Info → writeToFile → writeLogged → getCaller）加余量；
+// 采满仍未命中就退回大窗口重扫。
 const (
 	callerFastFrames = 8
 	callerFrameLimit = 64
@@ -224,13 +243,8 @@ func NewAsyncLoggerChannel(writer io.Writer, config AsyncChannelConfig) *AsyncLo
 // Enqueue 入队日志（异步，不会阻塞）
 // 返回是否成功入队
 func (a *AsyncLoggerChannel) Enqueue(level slog.Level, msg string, attrs []slog.Attr, ctx context.Context) bool {
-	if a.closed.Load() {
-		return false
-	}
-
 	file, line := getCaller()
-
-	entry := logEntry{
+	return a.enqueue(logEntry{
 		level:   level,
 		msg:     msg,
 		time:    time.Now(),
@@ -238,6 +252,14 @@ func (a *AsyncLoggerChannel) Enqueue(level slog.Level, msg string, attrs []slog.
 		context: ctx,
 		file:    file,
 		line:    line,
+	})
+}
+
+// enqueue 投递一条已备好的条目。调用点解析与投递分开，是因为走 slog 入口的条目
+// 带的是 Record.PC（见 callerFromPC），不能扫栈。
+func (a *AsyncLoggerChannel) enqueue(entry logEntry) bool {
+	if a.closed.Load() {
+		return false
 	}
 
 	a.queued.Add(1)
@@ -577,7 +599,7 @@ func (a *AsyncLoggerChannel) writeBatch(batch *batchEntries) {
 		buf = make([]byte, 0, est+est/4)
 	}
 	for _, entry := range batch.entries {
-		buf = a.appendEntry(buf, entry)
+		buf = appendEntry(buf, entry)
 	}
 
 	_, err := a.writer.Write(buf)
@@ -605,7 +627,11 @@ func levelString(level slog.Level) string {
 
 // appendEntry 把一条日志按既有格式追加到 buf 尾部并返回扩容后的切片。
 // 输出与旧的 formatEntry 完全一致，只是不再为每条日志单独分配字符串。
-func (a *AsyncLoggerChannel) appendEntry(buf []byte, entry logEntry) []byte {
+//
+// 做成自由函数而不是通道方法：通道不在时（SetLevel 换绑窗口、异步关闭之后仍有
+// 零星日志）管理器要往同一个文件句柄上同步落一条，格式必须逐字相同，否则同一个
+// .log 里会出现两种时间戳样式，按格式解析的工具直接废掉。
+func appendEntry(buf []byte, entry logEntry) []byte {
 	buf = entry.time.AppendFormat(buf, time.DateTime)
 	buf = append(buf, ' ')
 	buf = append(buf, levelString(entry.level)...)

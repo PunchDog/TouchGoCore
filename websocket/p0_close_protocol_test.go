@@ -29,11 +29,11 @@ import (
 func wsTestEnv(t *testing.T) {
 	t.Helper()
 
-	oldMap, oldPool, oldCall := clientMap, clientpool, clientcall
+	oldMap, oldPool, oldCall := loadClientMap(), clientpool, clientcall
 	oldMsgQueue, oldWorkerPool := msgQueue, workerPool.Swap(nil)
 	oldServers := takeServers()
 
-	clientMap = syncmap.NewMap[int64, *Client]()
+	storeClientMap(syncmap.NewMap[int64, *Client]())
 	clientpool = &sync.Pool{New: func() any { return &Client{} }}
 	clientcall = syncmap.NewMap[string, *sync.Pool]()
 	clientcall.Store("wsTestCall", &sync.Pool{New: func() any { return &defaultCall{} }})
@@ -42,7 +42,8 @@ func wsTestEnv(t *testing.T) {
 	useQueueParams(t, wsQueueParams{writeEntries: 16, readEntries: 8, dropOnFull: true})
 
 	t.Cleanup(func() {
-		clientMap, clientpool, clientcall = oldMap, oldPool, oldCall
+		storeClientMap(oldMap)
+		clientpool, clientcall = oldPool, oldCall
 		msgQueue = oldMsgQueue
 		workerPool.Store(oldWorkerPool)
 		for _, srv := range oldServers {
@@ -67,7 +68,7 @@ func newBareClient(t *testing.T) *Client {
 	c.UID = atomicNextTestUID()
 	c.remoteAddr = "bare://test"
 	c.initChannels()
-	clientMap.Store(c.UID, c)
+	loadClientMap().Store(c.UID, c)
 	return c
 }
 
@@ -182,7 +183,7 @@ func TestClient_NotRecycledUntilLoopsExit(t *testing.T) {
 	if pooledClient(c) {
 		t.Fatal("✘ 协程仍在运行时实例已被归还对象池，新连接会复用同一对象造成别名")
 	}
-	if _, ok := clientMap.Load(uid); ok {
+	if _, ok := loadClientMap().Load(uid); ok {
 		t.Fatal("✘ Close 应先把客户端从 clientMap 摘除")
 	}
 

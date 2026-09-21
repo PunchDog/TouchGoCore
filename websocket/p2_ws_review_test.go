@@ -61,16 +61,18 @@ func testMsgBytes(t *testing.T) []byte {
 // useTestClient 在 clientMap 里挂一个可用客户端，测试结束摘除
 func useTestClient(t *testing.T, uid int64, icall ICall) *Client {
 	t.Helper()
-	if clientMap == nil {
-		prev := clientMap
-		clientMap = syncmap.NewMap[int64, *Client]()
-		t.Cleanup(func() { clientMap = prev })
+	table := loadClientMap()
+	if table == nil {
+		table = syncmap.NewMap[int64, *Client]()
+		prev := loadClientMap()
+		storeClientMap(table)
+		t.Cleanup(func() { storeClientMap(prev) })
 	}
 	c := &Client{UID: uid, remoteAddr: "bare://review"}
 	c.ICall = icall
 	c.initChannels()
-	clientMap.Store(uid, c)
-	t.Cleanup(func() { clientMap.Delete(uid) })
+	table.Store(uid, c)
+	t.Cleanup(func() { table.Delete(uid) })
 	return c
 }
 
@@ -126,7 +128,7 @@ func TestSafeProcessCountsPanicAndContinues(t *testing.T) {
 	pool.safeProcess(0, &msgQueueType{uid: 902, data: bad})
 
 	// 换成不崩溃的回调后，同一 Worker 必须照常工作
-	client, _ := clientMap.Load(902)
+	client, _ := loadClientMap().Load(902)
 	client.ICall = &panicCall{}
 	pool.safeProcess(0, &msgQueueType{uid: 902, data: bad})
 

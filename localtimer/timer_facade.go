@@ -3,6 +3,7 @@ package localtimer
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"touchgocore/vars"
@@ -15,6 +16,34 @@ import (
 // 收尾要在无锁状态下补跑每个到期定时器的业务回调，一个卡在下游锁上的 Tick
 // 就能让进程停不下来。5 秒足够正常回调跑完，又不至于拖长停机。
 const DefaultCloseBudget = 5 * time.Second
+
+// liveConsumers 当前仍停在 timeTick 里的协程数（跨生命周期，含宿主自驱的 TimeTick）。
+//
+// 每轮 runtime 自带的 tickWG 只覆盖「本轮起的协程」，而 TimeStop 等待超时后把
+// timerRT 置 nil，下一轮 Run 的 Swap 拿不到 old，于是那条卡在业务 Tick 里的旧协程
+// 谁都不等。这里补的正是这个跨代次口径。
+//
+// 用原子计数而不是 sync.WaitGroup：宿主可以在 Run 的同时自己驱动 TimeTick，那等于
+// 在 Wait 飞行途中从 0 加回正数，是 WaitGroup 明文禁止的用法（会 panic「Add called
+// concurrently with Wait」）。轮询一毫秒的代价落在启动路径上，不值得为它换一次崩溃风险。
+var liveConsumers atomic.Int64
+
+// waitConsumersDrain 等在途消费协程全部退出；预算用尽仍有残留则返回 false。
+func waitConsumersDrain(budget time.Duration) bool {
+	if liveConsumers.Load() == 0 {
+		return true
+	}
+	deadline := time.Now().Add(budget)
+	for {
+		if liveConsumers.Load() == 0 {
+			return true
+		}
+		if !time.Now().Before(deadline) {
+			return false
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
 
 // closeAllManagers 逐个关闭注册表内的管理器，返回是否有管理器收尾超时
 func closeAllManagers(parent context.Context) (timedOut bool) {
@@ -47,10 +76,17 @@ func Run(ctx context.Context) {
 
 	// 先接管上一轮生命周期。等待可能阻塞在业务 Tick 里的旧 TimeTick 退出，
 	// 否则新旧两个消费协程会同时抢同一个调度通道。
+	// 上一轮 TimeStop 等待超时留下的孤儿消费协程（业务 Tick 里出不来）必须在这里
+	// 排干：它醒来后重取通道快照会读到本轮新建的通道数组，同一片于是两个消费者，
+	// 「一片一个消费者」这条片内保序的全部依据就此失效。timerRT 已被那次 TimeStop
+	// 置 nil，上面那次 Swap 拿不到 old，所以这道闸门不能省。
 	if old := timerRT.Swap(rt); old != nil {
 		vars.Warning("定时器系统重复启动，先收尾上一轮生命周期")
 		old.shutdown()
 		old.tickWG.Wait()
+	}
+	if !waitConsumersDrain(DefaultCloseBudget) {
+		vars.Error("等待上一轮消费协程退出超时: 有分片卡在业务 Tick 里未返回，本轮照常启动（该协程醒来后会因生命周期检查自行退出）")
 	}
 
 	// 关闭上一轮全部管理器后重建。只 Clear 不 Close 会泄漏 5 个时间轮协程 + 5 个 ticker。
@@ -174,6 +210,8 @@ const channelSnapshotInterval = 10 * time.Millisecond
 // 分片下标越界（TimeStop 释放通道后数组长度变短）不判错：读到 nil 通道就走
 // 「等生命周期切换」分支，与「尚未 Run」同一条路径。
 func timeTick(rt *timerRuntime, shard int) {
+	liveConsumers.Add(1)
+	defer liveConsumers.Add(-1)
 	defer func() {
 		if err := recover(); err != nil {
 			vars.Error("定时器滴答协程发生panic: 分片=%d 错误=%v", shard, err)
@@ -191,6 +229,20 @@ func timeTick(rt *timerRuntime, shard int) {
 	defer recheck.Stop()
 
 	for {
+		// 生命周期检查必须在重取通道快照之前：本轮一旦结束（closech 关闭或 ctx 取消），
+		// 下一条通道快照读到的可能是新一轮 Run 建好的通道，而下面那个 select 在
+		// 「有新任务」与「本轮已结束」同时就绪时是随机选一个 —— 上一轮的协程于是
+		// 会消费新一轮的调度项，同片两个消费者，片内保序被破坏。
+		select {
+		case <-rt.closech:
+			rt.retire("本轮生命周期已结束")
+			return
+		case <-ctxDone:
+			rt.retire("上下文已取消")
+			return
+		default:
+		}
+
 		ch := scheduleChannelAt(shard)
 		if ch == nil {
 			// 尚无调度通道（未 Run 或已 Stop）：等生命周期切换，不自毁

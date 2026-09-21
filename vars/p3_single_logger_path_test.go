@@ -44,7 +44,7 @@ func withGlobalLogger(t *testing.T, tune func(*LogConfig)) (string, *ChannelLogg
 	t.Cleanup(func() {
 		loggerMu.Lock()
 		_ = shutdownChannelLoggerLocked()
-		globalChannelLogger = prevManager
+		globalChannelLogger.Store(prevManager)
 		loggerActive = prevActive
 		releaseSlogDefault()
 		loggerMu.Unlock()

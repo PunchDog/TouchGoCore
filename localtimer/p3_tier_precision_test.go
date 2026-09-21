@@ -42,6 +42,9 @@ func (p *tierProbeTimer) Tick() {
 // TestSecondTierDispatchStaysPrecise 秒档周期定时器必须按毫秒精度兑现：
 // 1500ms 的定时器本该在到期那一瞬被下沉到毫秒轮，而不是由秒轮攒到下一拍整批发出去。
 func TestSecondTierDispatchStaysPrecise(t *testing.T) {
+	if testing.Short() {
+		t.Skip("需要 8 秒观察窗口累计 5 轮续期样本，-short 跳过")
+	}
 	Run(context.Background())
 	defer TimeStop(context.Background())
 

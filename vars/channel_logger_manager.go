@@ -64,12 +64,16 @@ func (m *ChannelLoggerManager) init() error {
 	return m.initLocked()
 }
 
-// initLocked 真正的初始化流程，调用方必须持有 m.mu 写锁
-func (m *ChannelLoggerManager) initLocked() error {
+// applyLevelLocked 按当前 config.LogLevel 刷新文件写入的过滤位。调用方须持 m.mu。
+func (m *ChannelLoggerManager) applyLevelLocked() {
 	// 解析并记录文件写入级别与 off 状态（供 Info/Warning/Error 等函数按等级过滤文件写入）
 	m.writeLevel.Store(int32(parseLogLevel(m.config.LogLevel)))
 	m.off.Store(strings.EqualFold(m.config.LogLevel, LogLevelOff))
+}
 
+// initLocked 真正的初始化流程，调用方必须持有 m.mu 写锁
+func (m *ChannelLoggerManager) initLocked() error {
+	m.applyLevelLocked()
 	// 检查是否禁用
 	if m.config.Async && m.config.AsyncBufferSize > 0 {
 		// 通道模式：zap 不参与，落盘由 initWithChannelLocked 建的旋转写入器 +
@@ -361,41 +365,45 @@ func (m *ChannelLoggerManager) GetLoadFactor() float64 {
 	return 0
 }
 
-// SetLevel 动态设置日志级别（需要重新初始化）
+// SetLevel 动态设置日志级别。
+//
+// 通道模式（常态）只改过滤位：级别既不参与文件句柄也不参与异步通道的建立，为它重建
+// 整条生产者—消费者链路是纯代价 —— 旧写法先把 writer 置空再换绑，而 Close 最长要等
+// 在途日志落盘数秒，那段窗口里所有 writeEntrySync 都落在 nil writer 上被静默丢弃，
+// 重建失败时更是留着 isEnabled=true 让此后每条日志都无声消失。
+//
+// 非通道模式必须重建：zap 的级别编译在 handler/core 里，改不动。这里先建新再关旧，
+// 任一时刻 writer/slogHandler 都有一个活着，换绑期间日志照常落地；建新失败则原样返回
+// 错误并继续用旧链路写，不会为了一个改不下去的级别把日志能力一起弄丢。
 func (m *ChannelLoggerManager) SetLevel(level string) error {
 	if _, err := zapLevelFor(level); err != nil {
 		return err
 	}
 
-	// 锁内摘走旧资源引用（init 会再次取锁，持锁调用将自死锁；channel.Close 会等在途日志，也必须在锁外）
 	m.mu.Lock()
 	m.config.LogLevel = level
-	oldWriter, oldAsyncWriter := m.writer, m.asyncWriter
-	m.writer, m.asyncWriter = nil, nil
-	m.slogHandler = nil
-	m.mu.Unlock()
-
-	oldChannel := m.channel.Swap(nil)
-
-	if oldChannel != nil {
-		oldChannel.Close()
+	if m.channelMode.Load() {
+		m.applyLevelLocked()
+		m.mu.Unlock()
+		return nil
 	}
-	if oldAsyncWriter != nil {
-		oldAsyncWriter.Close()
-	}
-	if oldWriter != nil {
-		oldWriter.Close()
-	}
-
-	// 重新初始化；异步模式下 initLocked 只置标志位，必须把 Channel 一并重建，
-	// 否则换绑后的 writer 没有生产者，日志会静默全丢。
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	oldWriter, oldAsyncWriter, oldZap := m.writer, m.asyncWriter, m.zapLogger
 	if err := m.initLocked(); err != nil {
+		// createOptimizedZapCore 在赋值前就返回错误，旧链路原封不动
+		m.mu.Unlock()
 		return err
 	}
-	if m.config.Async && m.config.AsyncBufferSize > 0 {
-		return m.initWithChannelLocked()
+	m.mu.Unlock()
+
+	// 新链路已就绪，此后没人再取得旧句柄（writeEntrySync 取的是锁内快照）
+	if oldAsyncWriter != nil {
+		_ = oldAsyncWriter.Close()
+	}
+	if oldWriter != nil {
+		_ = oldWriter.Close()
+	}
+	if oldZap != nil {
+		_ = oldZap.Sync()
 	}
 	return nil
 }
@@ -403,9 +411,12 @@ func (m *ChannelLoggerManager) SetLevel(level string) error {
 // ==================== 全局Channel日志管理器 ====================
 
 // globalChannelLogger 全库唯一的文件日志落地点。
-// 读写由 vars.go 的 loggerMu 保护（S70 起门面 Initialize/Shutdown 与这里的导出入口共用同一把锁），
-// 业务侧读取走 GetChannelLogger，靠 atomic 快照拿到的是完整指针。
-var globalChannelLogger *ChannelLoggerManager
+//
+// 写侧由 vars.go 的 loggerMu 串行（S70 起门面 Initialize/Shutdown 与这里的导出入口
+// 共用同一把锁），但读侧不在锁内：GetChannelLogger 被每条日志调用，加锁等于把
+// 「日志会不会自己排队」绑回一把全局锁。指针用 atomic 存取，Shutdown 与写日志并发时
+// 读到的要么是旧管理器要么是 nil，绝不会是半个。
+var globalChannelLogger atomic.Pointer[ChannelLoggerManager]
 
 // initializeChannelLoggerLocked 建立全局管理器。调用方必须持有 loggerMu。
 //
@@ -428,7 +439,7 @@ func initializeChannelLoggerLocked(cfg LogConfig) (*ChannelLoggerManager, error)
 		}
 	}
 
-	globalChannelLogger = manager
+	globalChannelLogger.Store(manager)
 	return manager, nil
 }
 
@@ -436,11 +447,10 @@ func initializeChannelLoggerLocked(cfg LogConfig) (*ChannelLoggerManager, error)
 // 清空是「Shutdown 之后可再 Initialize」的后半：只关不清会让写日志的分支继续持有
 // 一个已关闭的管理器，之后的调用全都落到已释放的 writer 上。
 func shutdownChannelLoggerLocked() error {
-	manager := globalChannelLogger
+	manager := globalChannelLogger.Swap(nil)
 	if manager == nil {
 		return nil
 	}
-	globalChannelLogger = nil
 
 	// 先冲刷在途日志；刷新失败（超时）也要继续 Close，否则文件句柄直接泄漏，
 	// 而 Close 本身会再等一次消费者收敛。
@@ -486,9 +496,9 @@ func ShutdownChannelLogger() error {
 	return err
 }
 
-// GetChannelLogger 获取全局Channel日志管理器
+// GetChannelLogger 获取全局Channel日志管理器；未初始化（或已 Shutdown）返回 nil。
 func GetChannelLogger() *ChannelLoggerManager {
-	return globalChannelLogger
+	return globalChannelLogger.Load()
 }
 
 // ==================== 全局便捷函数 ====================

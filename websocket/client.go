@@ -41,7 +41,30 @@ type clientTable interface {
 	Range(fn func(uid int64, c *Client) bool)
 }
 
-var clientMap clientTable
+// clientMapHolder 把接口值装在堆上，换表于是是一次原子指针交换。
+//
+// 接口值占两个机器字（itab + 数据指针），`clientMap = m` 这种直接赋值并不原子，
+// 而每条消息派发都要读这张表：并发换表能读出「新 itab 配旧数据指针」的撕裂组合，
+// 调它就是野指针崩溃。S69 之前这里存的是具体类型 *syncmap.Map（单字指针）没有这个
+// 问题，是窄接口化之后新引入的约束。
+type clientTableHolder struct{ table clientTable }
+
+var clientMapHolder atomic.Pointer[clientTableHolder]
+
+// storeClientMap 换绑客户端表（允许置空，测试收尾要恢复注入前的原状）。
+// 生产入口是 UseClientMap/UseShardedClientMap，它们在锁内判过 nil。
+func storeClientMap(m clientTable) {
+	clientMapHolder.Store(&clientTableHolder{table: m})
+}
+
+// loadClientMap 取当前客户端表快照，未注入时返回 nil。
+// 结果要存进局部变量再用：两次调用之间宿主可能已经换表。
+func loadClientMap() clientTable {
+	if h := clientMapHolder.Load(); h != nil {
+		return h.table
+	}
+	return nil
+}
 
 // ============ 改进部分 ============
 
@@ -312,8 +335,8 @@ func (c *Client) Close(reason string) {
 
 	c.closeOnce.Do(func() {
 		// 先从映射中移除，防止新消息到达
-		if clientMap != nil && c.UID != 0 {
-			clientMap.Delete(c.UID)
+		if table := loadClientMap(); table != nil && c.UID != 0 {
+			table.Delete(c.UID)
 		}
 
 		// 调用 OnClose 回调
@@ -522,17 +545,24 @@ func NewClient(connType interface{}, remoteAddr string, className string) (*Clie
 		client.ICall = &defaultCall{}
 	}
 
+	// 没有表就没人能按 uid 找到这条连接，在跑业务回调之前先拒掉
+	table := loadClientMap()
+	if table == nil {
+		client.Close("客户端表未注入")
+		return nil, errors.New("客户端表未注入")
+	}
+
 	// 业务 OnConnect 是外部回调：panic 必须收敛在这里，见 runConnectGate
 	if !client.runConnectGate() {
 		client.Close("连接初始化失败")
 		return nil, errors.New("连接回调验证失败")
 	}
 
-	// 先声明「有两个常驻协程要跑」，再发布到 clientMap，
+	// 先声明「有两个常驻协程要跑」，再发布到客户端表，
 	// 保证任何能看到该客户端的协程都不会提前把它回池。
 	client.liveLoops.Store(2)
 	client.counted.Store(true)
-	clientMap.Store(client.UID, client)
+	table.Store(client.UID, client)
 	// vars.Info("%s 连接建立成功", client.remoteAddr)
 	go client.readLoop()
 	go client.handleLoop()

@@ -13,8 +13,8 @@ import (
 )
 
 func TestClientTableAcceptsShardedMap(t *testing.T) {
-	prev := clientMap
-	t.Cleanup(func() { clientMap = prev })
+	prev := loadClientMap()
+	t.Cleanup(func() { storeClientMap(prev) })
 
 	sharded := syncmap.NewShardedMap[int64, *Client](0)
 	UseShardedClientMap(sharded)
@@ -35,9 +35,10 @@ func TestClientTableAcceptsShardedMap(t *testing.T) {
 	// 关服路径（shutdownWebsocket）就是「Range 里把每个客户端 Close 掉」，
 	// 而 Close 会 Delete 自己这个键：逐片快照必须扛住边遍历边删。
 	seen := 0
-	clientMap.Range(func(uid int64, c *Client) bool {
+	table := loadClientMap()
+	table.Range(func(uid int64, c *Client) bool {
 		seen++
-		clientMap.Delete(uid)
+		table.Delete(uid)
 		return true
 	})
 	if seen != len(uids) {
@@ -53,7 +54,7 @@ func TestClientTableAcceptsShardedMap(t *testing.T) {
 	UseShardedClientMap(nil)
 	keep := &Client{UID: 4210, remoteAddr: "bare://guard"}
 	keep.initChannels()
-	clientMap.Store(keep.UID, keep)
+	loadClientMap().Store(keep.UID, keep)
 	if got := GetClient(keep.UID); got != keep {
 		t.Fatalf("✘ nil 注入后查表失配: %v", got)
 	}
@@ -62,8 +63,8 @@ func TestClientTableAcceptsShardedMap(t *testing.T) {
 // TestClientTableAcceptsZeroValueShardedMap 宿主常把表当结构体字段直接声明
 // （var m syncmap.ShardedMap[...]），零值必须可用，否则注入点等于强制走构造函数。
 func TestClientTableAcceptsZeroValueShardedMap(t *testing.T) {
-	prev := clientMap
-	t.Cleanup(func() { clientMap = prev })
+	prev := loadClientMap()
+	t.Cleanup(func() { storeClientMap(prev) })
 
 	var zero syncmap.ShardedMap[int64, *Client]
 	UseShardedClientMap(&zero)
@@ -74,7 +75,7 @@ func TestClientTableAcceptsZeroValueShardedMap(t *testing.T) {
 	if GetClient(5201) != c {
 		t.Fatal("✘ 零值分片表读写不通")
 	}
-	clientMap.Delete(5201)
+	loadClientMap().Delete(5201)
 	if zero.Length() != 0 {
 		t.Fatalf("✘ 零值分片表删除后计数不符: %d", zero.Length())
 	}

@@ -232,7 +232,7 @@ func RegisterCall(className string, factoryFunc any) {
 // 想换成分片表用 UseShardedClientMap，两者对本包等价（见 clientTable）。
 func UseClientMap(m *syncmap.Map[int64, *Client]) {
 	if m != nil {
-		clientMap = m
+		storeClientMap(m)
 	}
 }
 
@@ -241,16 +241,17 @@ func UseClientMap(m *syncmap.Map[int64, *Client]) {
 // 逐个关连接，因此这一差异不可观察。
 func UseShardedClientMap(m *syncmap.ShardedMap[int64, *Client]) {
 	if m != nil {
-		clientMap = m
+		storeClientMap(m)
 	}
 }
 
 // GetClient 按 UID 获取已连接客户端；不存在返回 nil。
 func GetClient(uid int64) *Client {
-	if clientMap == nil {
+	table := loadClientMap()
+	if table == nil {
 		return nil
 	}
-	c, ok := clientMap.Load(uid)
+	c, ok := table.Load(uid)
 	if !ok {
 		return nil
 	}
@@ -268,10 +269,10 @@ func Run(ctx context.Context) error {
 		return nil
 	}
 
-	if clientMap == nil {
+	if loadClientMap() == nil {
 		// 不经 App 直接跑本模块时的兜底表：用分片实现，因为这张表每次消息派发都要查一遍，
 		// 单锁版在并发连接下会把锁排队算进消息延迟（S69 实测并行读快 2.4~2.8 倍）。
-		clientMap = syncmap.NewShardedMap[int64, *Client](0)
+		storeClientMap(syncmap.NewShardedMap[int64, *Client](0))
 	}
 
 	params := wsQueueParams{
@@ -383,8 +384,8 @@ func shutdownWebsocket() {
 		}
 	}
 	cancel()
-	if clientMap != nil {
-		clientMap.Range(func(key int64, client *Client) bool {
+	if table := loadClientMap(); table != nil {
+		table.Range(func(key int64, client *Client) bool {
 			client.Close("")
 			return true
 		})
@@ -437,7 +438,14 @@ func processMessage(read_msg *msgQueueType) (panicked bool) {
 		}
 	}()
 
-	client, h := clientMap.Load(read_msg.uid)
+	table := loadClientMap()
+	if table == nil {
+		UpdateErrorStats()
+		metrics.WS.IncErrors("no_table")
+		vars.Error("客户端表未注入，消息无法派发: uid=%d", read_msg.uid)
+		return false
+	}
+	client, h := table.Load(read_msg.uid)
 	if !h {
 		UpdateErrorStats()
 		metrics.WS.IncErrors("not_found")

@@ -17,6 +17,9 @@ import (
 )
 
 func TestRPCRoundTripRequestID(t *testing.T) {
+	if testing.Short() {
+		t.Skip("起真实 RPC 服务端与客户端并等待连接建立，耗时约 10 秒，-short 跳过")
+	}
 	cfg := &config.Cfg{
 		Rpc: &config.RpcConfig{
 			Auth: &config.RpcAuthConfig{Mode: "none"},

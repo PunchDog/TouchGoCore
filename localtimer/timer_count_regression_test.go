@@ -182,8 +182,13 @@ func TestRegression_ConcurrentAddRemoveChurn_TimerCountNeverNegative(t *testing.
 		}
 	}()
 
+	// 一轮 100ms，200 轮 ≈ 20s；-short 下压到 20 轮，仍覆盖到入队/摘链竞态窗口，
+	// 只是把「长时间」换成「较短时间」，避免整条用例在快速回归里缺席。
+	rounds := 200 // 轮数（>=200）
+	if testing.Short() {
+		rounds = 20
+	}
 	const (
-		rounds     = 200 // 轮数（>=200）
 		churn      = 100 * time.Millisecond
 		cleanupMax = 3 * time.Second
 	)

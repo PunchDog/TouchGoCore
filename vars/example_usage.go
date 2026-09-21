@@ -7,7 +7,6 @@ import (
 	"strings"
 	"time"
 
-	"go.uber.org/zap"
 )
 
 // ExampleUsage 展示优化后日志系统的使用方法
@@ -65,25 +64,27 @@ func ExampleUsage() {
 		)
 	}
 
-	// 8. 使用LoggerManager进行高级操作
-	manager := GetOptimizedLogger()
+	// 8. 使用全局管理器做高级操作（动态调级别、读积压统计）
+	manager := GetChannelLogger()
 
 	// 动态设置日志级别
-	manager.SetLevel(LogLevelDebug)
+	if manager != nil {
+		if err := manager.SetLevel(LogLevelDebug); err != nil {
+			Error("设置日志级别失败: %v", err)
+		}
+		if manager.IsEnabled() {
+			Info("Logging is enabled")
+		}
 
-	// 检查是否启用
-	if manager.IsEnabled() {
-		Info("Logging is enabled")
+		// 通道统计：入队/落盘/丢弃与队列峰值，丢弃非零说明落地跟不上产出
+		stats := manager.GetStats()
+		if stats.TotalDropped > 0 {
+			Warning("日志通道有丢弃: dropped=%d peak=%d", stats.TotalDropped, stats.QueuePeak)
+		}
 	}
 
-	// 获取统计信息
-	stats := manager.GetStats()
-	if stats.Enabled {
-		Info("Logger is active")
-	}
-
-	// 关闭日志器（优雅关闭）
-	// ShutdownOptimized()
+	// 关闭日志器（优雅关闭，交还默认 slog 记录器）
+	// Shutdown()
 }
 
 // testFunction 测试函数
@@ -122,7 +123,7 @@ func ExampleAdvancedUsage() {
 	Error("This error will appear")
 
 	// 4. 日志分组
-	logger := GetOptimizedLogger().GetLogger()
+	logger := GetChannelLogger().GetLogger()
 	groupLogger := logger.WithGroup("http")
 
 	groupLogger.Info("Request started",
@@ -130,11 +131,12 @@ func ExampleAdvancedUsage() {
 		slog.String("url", "/api/create"),
 	)
 
-	// 5. 性能关键路径使用Zap直接访问
-	zapLogger := GetOptimizedLogger().GetZapLogger()
-	zapLogger.Info("Direct zap access for high performance",
-		zap.String("component", "performance-critical"),
-		zap.Int("iterations", 1000000),
+	// 5. 性能关键路径：slog 的记录器直接复用，避免每次调用都构造一个
+	//    （通道模式下它已接进唯一的落地路径，见 GetLogger 的注释）
+	perfLogger := GetChannelLogger().GetLogger()
+	perfLogger.Info("High frequency path",
+		slog.String("component", "performance-critical"),
+		slog.Int("iterations", 1000000),
 	)
 }
 
@@ -143,7 +145,7 @@ func ExampleContextLogging() {
 	// ctx := context.Background()
 	// ctx = context.WithValue(ctx, "request_id", "req-123")
 
-	_ = GetOptimizedLogger()
+	_ = GetChannelLogger()
 
 	// manager.LogWithContext(ctx, slog.LevelInfo,
 	// 	"Processing request",
@@ -242,7 +244,7 @@ func ExampleFieldUsage() {
 	)
 
 	// 嵌套分组
-	logger := GetOptimizedLogger().GetLogger()
+	logger := GetChannelLogger().GetLogger()
 	apiLogger := logger.WithGroup("api").WithGroup("v2")
 
 	apiLogger.Info("API endpoint called",

@@ -192,7 +192,13 @@ func (app *App) initDatabase() error {
 	// MySQL（可选）
 	if app.Cfg.MySql != nil {
 		vars.Info("开启MySqlDB功能")
-		mysql, err := db.NewMySql(app.Cfg.MySql, db.WithMetricsHook(db.NewMetricsAdapter()))
+		// 组装连接选项：默认沿用框架既有行为（loc=Local）；仅当显式配置了 db_loc 时才追加 DSN 参数覆盖时区。
+		mysqlOpts := []db.Option{db.WithMetricsHook(db.NewMetricsAdapter())}
+		if loc := strings.TrimSpace(app.Cfg.MySql.Loc); loc != "" {
+			mysqlOpts = append(mysqlOpts, db.WithDSNParam("loc", loc))
+			vars.Info("MySql 连接时区(loc)设置为: %s", loc)
+		}
+		mysql, err := db.NewMySql(app.Cfg.MySql, mysqlOpts...)
 		if err != nil {
 			return fmt.Errorf("加载MySql配置出错: %w", err)
 		}

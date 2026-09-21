@@ -95,9 +95,13 @@ func (o *observabilityPlugin) after(db *gorm.DB) {
 		return
 	}
 	dur := time.Since(start)
-	op := db.Statement.Schema.Table
-	if op == "" {
-		op = "raw"
+	// 注意：gorm 的 Count/Row/Raw 等场景下 db.Statement.Schema 可能为 nil，
+	// 直接取 .Table 会触发空指针 panic。此处做空值保护：有 Schema 且有表名时用表名，否则回退 "raw"。
+	op := "raw"
+	if db.Statement != nil && db.Statement.Schema != nil {
+		if table := db.Statement.Schema.Table; table != "" {
+			op = table
+		}
 	}
 	kind := classify(db.Statement.Error)
 	o.hook.OnQuery(op, dur, kind)

@@ -12,6 +12,7 @@ type MySqlDBConfig struct {
 	DBName       string `json:"db_name"`           //数据库名
 	MaxIdleConns int    `json:"db_max_idle_conns"` //连接池最大空闲连接数
 	MaxOpenConns int    `json:"db_max_open_conns"` //连接池最大连接数
+	Loc          string `json:"db_loc"`            //连接时区（如 "UTC"、"Local"、"+08:00"）；为空时沿用默认 loc=Local
 }
 
 type MongoTableIndex struct {

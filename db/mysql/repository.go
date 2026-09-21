@@ -113,9 +113,9 @@ func (r *Repository[T]) TableName() string {
 
 // runWithAutoMigrate 是表不存在自动建表的核心包装器。
 //
-//  - 未启用 autoMigrate 或已迁移 → 直接执行 fn
-//  - 首次执行失败且错误为「表不存在」 → AutoMigrate(T) + 标记 migrated + 重试一次
-//  - 其他错误 / 迁移失败 → 透传
+//   - 未启用 autoMigrate 或已迁移 → 直接执行 fn
+//   - 首次执行失败且错误为「表不存在」 → AutoMigrate(T) + 标记 migrated + 重试一次
+//   - 其他错误 / 迁移失败 → 透传
 func (r *Repository[T]) runWithAutoMigrate(ctx context.Context, op string, fn func() error) error {
 	if err := r.ensureEngine(op); err != nil {
 		return err
@@ -270,6 +270,10 @@ func (r *Repository[T]) FindAll(ctx context.Context, q *Query) ([]*T, error) {
 
 // Page 分页查询
 func (r *Repository[T]) Page(ctx context.Context, q *Query, page, size int) (items []*T, total int64, err error) {
+	// 入口归一化：nil Query 视为空条件。避免后续 q.groupString()/q.whereArgs 在 nil 上解引用 panic（缺陷 D-3b）。
+	if q == nil {
+		q = NewQuery()
+	}
 	if page < 1 {
 		page = 1
 	}
@@ -278,7 +282,9 @@ func (r *Repository[T]) Page(ctx context.Context, q *Query, page, size int) (ite
 	}
 	r2 := r.WithContext(ctx)
 	countErr := r2.runWithAutoMigrate(ctx, "Page.Count", func() error {
-		countTx := r2.gormDB()
+		// 绑定 Model(new(T))：gorm 的 Count 需要语句上已设 Model/Table，
+		// 否则会把 Dest(&total) 当作 Model 解析 → "Table not set"。绑定后 schema（列名/软删/TableName() 覆写）完整生效。
+		countTx := r2.gormDB().Model(new(T))
 		if q != nil && q.whereExpr != "" {
 			countTx = countTx.Where(q.whereExpr, q.whereArgs...)
 		}
@@ -294,9 +300,6 @@ func (r *Repository[T]) Page(ctx context.Context, q *Query, page, size int) (ite
 	if countErr != nil {
 		return nil, 0, countErr
 	}
-	if q == nil {
-		q = NewQuery()
-	}
 	q.Limit(size).Offset((page - 1) * size)
 	items, err = r2.FindAll(ctx, q)
 	return items, total, err
@@ -304,11 +307,16 @@ func (r *Repository[T]) Page(ctx context.Context, q *Query, page, size int) (ite
 
 // Count 统计
 func (r *Repository[T]) Count(ctx context.Context, q *Query) (int64, error) {
+	// 入口归一化：nil Query 视为空条件（缺陷 D-3c：避免错误分支访问 q.whereArgs 时 nil 解引用）。
+	if q == nil {
+		q = NewQuery()
+	}
 	r2 := r.WithContext(ctx)
 	var n int64
 	var callErr error
 	err := r2.runWithAutoMigrate(ctx, "Count", func() error {
-		tx := r2.gormDB()
+		// 绑定 Model(new(T))：见 Page.Count 说明（Count 需要语句上有 Model/Table）。
+		tx := r2.gormDB().Model(new(T))
 		if q != nil && q.whereExpr != "" {
 			tx = tx.Where(q.whereExpr, q.whereArgs...)
 		}
@@ -327,16 +335,24 @@ func (r *Repository[T]) Count(ctx context.Context, q *Query) (int64, error) {
 
 // Exists 是否存在
 func (r *Repository[T]) Exists(ctx context.Context, q *Query) (bool, error) {
+	// 入口归一化：nil Query 视为空条件（缺陷 D-3c：避免错误分支访问 q.whereArgs 时 nil 解引用）。
+	if q == nil {
+		q = NewQuery()
+	}
 	r2 := r.WithContext(ctx)
 	var n int64
 	var callErr error
 	err := r2.runWithAutoMigrate(ctx, "Exists", func() error {
-		tx := r2.gormDB()
+		// 绑定 Model(new(T))：见 Page.Count 说明（Count 需要语句上有 Model/Table）。
+		tx := r2.gormDB().Model(new(T))
 		if q != nil && q.whereExpr != "" {
 			tx = tx.Where(q.whereExpr, q.whereArgs...)
 		}
 		start := time.Now()
-		callErr = tx.Select("1").Limit(1).Count(&n).Error
+		// 注意：原实现为 tx.Select("1").Limit(1).Count(&n)，但 gorm 会把 "1" 当列名加引号
+		// （`` `1` ``）→ MySQL 报 "Unknown column '1'"。去掉 Select 后 Count 生成 count(*)，
+		// LIMIT 对聚合无实际影响但保留原意；n>0 即存在。
+		callErr = tx.Limit(1).Count(&n).Error
 		if callErr != nil {
 			return newError("Exists", callErr, classify(callErr), "", q.whereArgs, time.Since(start))
 		}

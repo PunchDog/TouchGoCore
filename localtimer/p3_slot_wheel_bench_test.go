@@ -22,25 +22,37 @@ import (
 // 毫秒轮协程每 1ms 扫描同一个轮，会与测量抢派发权，把数字变成噪声。
 // ============================================================================
 
-// fillInWheelOnly 往毫秒轮灌 n 个「本轮内滞留、且未到期」的定时器，用于量纯扫描。
+// fillScanLoad 往 wi 轮灌 n 个「整轮滞留、且远未到期」的定时器，用于量纯扫描。
 //
-// nextTime 必须落在 [now, now+1s)：毫秒轮的判定会把 remaining>=1s 的节点下沉到秒轮
-// （dispatchSent 后摘链），压到小时尺度只会让第一个 tick 把整轮搬空，之后测的是空表
-// 遍历；而 remaining<=0 又会派发。只有 500ms 这一档既不动作也不迁移，扫描代价才是
-// O(在链数) 本身。函数末尾的自检 tick 就是为钉住这一点——口径错了必须当场炸，
-// 而不是给出一条看着很平滑的假曲线。
-func fillInWheelOnly(b *testing.B, m *TimerManager, n int) []TimerInterface {
+// 口径要求节点在整个基准期间既不到期也不下沉：
+//   - 会下沉：remaining 小于本档下界时 tick 把它搬去更精确的轮（首版把「远未到期」
+//     压到小时尺度却挂在毫秒轮上，第一个 tick 就搬空整轮，之后测的是空表遍历，
+//     1k/10k 两档给出 0/8µs 的假曲线）；
+//   - 会到期：单档扫描可达数百微秒，基准要跑上十亿纳秒级，压在毫秒轮里的 500ms
+//     余量中途就被消化掉，曲线会随链表缩短而递减。
+//
+// 因此扫描基准用小时轮、偏移自 2 小时起（remaining 始终 >= 1 小时，落在本档区间内）。
+//
+// spread=true 时把节点摊到 23 个不同的小时桶上（真实负载的形状）；false 时全压在
+// 同一时刻（最坏形状：分桶后它们仍在同一个桶里）。两种形状都要量：只看摊开会高估
+// 收益，只看压叠会低估收益。函数末尾的自检 tick 用来钉住口径——错了一个 tick 就炸。
+func fillScanLoad(b *testing.B, m *TimerManager, wi TimerType, n int, spread bool) []TimerInterface {
 	b.Helper()
-	wheel := m.wheels[TimerTypeMillisecond]
+	wheel := m.wheels[wi]
+	const hourMS = int64(util.MILLISECONDS_OF_HOUR)
 	timers := make([]TimerInterface, 0, n)
 	now := util.CurrentMS()
 	for i := 0; i < n; i++ {
-		tm, err := NewTimer[*plainTimer](999, InfiniteCount, nil)
+		tm, err := NewTimer[*plainTimer](2*hourMS, InfiniteCount, nil)
 		if err != nil {
 			b.Fatal(err)
 		}
+		offset := 2 * hourMS
+		if spread {
+			offset = (2 + int64(i%23)) * hourMS
+		}
 		parent := tm.GetParent()
-		parent.nextTime.Store(now + 500)
+		parent.nextTime.Store(now + offset)
 		m.handleTimerAdd(wheel, timerTask{timer: tm, gen: parent.gen.Load(), mgr: m})
 		timers = append(timers, tm)
 	}
@@ -48,18 +60,23 @@ func fillInWheelOnly(b *testing.B, m *TimerManager, n int) []TimerInterface {
 		b.Fatalf("✘ 灌入不完整: count=%d want=%d len=%d", got, n, wheel.tickWheel.Length())
 	}
 
-	m.processWheelTick(wheel, TimerTypeMillisecond)
+	ch := currentTimerChannel()
+	for len(ch) > 0 {
+		<-ch
+	}
+	m.processWheelTick(wheel, wi)
 	if got := wheel.timerCount.Load(); got != int64(n) {
 		b.Fatalf("✘ 自检 tick 后节点被搬走，测的不是纯扫描: count=%d want=%d", got, n)
 	}
-	if ch := currentTimerChannel(); len(ch) != 0 {
-		b.Fatalf("✘ 自检 tick 产生了 %d 条派发，口径已失真", len(ch))
+	if n := len(currentTimerChannel()); n != 0 {
+		b.Fatalf("✘ 自检 tick 产生了 %d 条派发，口径已失真", n)
 	}
 	return timers
 }
 
-// fillFarFuture 往指定轮灌 n 个未到期定时器，interval 摊在 (0, 999]ms 内，
-// 供「既有扫描存量、又有到期增量」的混合场景使用。
+// fillFarFuture 往指定轮灌 n 个「统一在 horizon 毫秒后到期」的定时器，
+// 供「既有扫描存量、又有到期增量」的混合场景使用；调用方随后会按自己的
+// 分布重排 nextTime，这里只负责把节点合法地挂进本轮。
 func fillFarFuture(b *testing.B, m *TimerManager, wi TimerType, n int, horizon int64) []TimerInterface {
 	b.Helper()
 	wheel := m.wheels[wi]
@@ -84,24 +101,29 @@ func fillFarFuture(b *testing.B, m *TimerManager, wi TimerType, n int, horizon i
 // 这是 S67 要消掉的那一项：变更后它应当只随桶数走，而与 n 基本无关。
 func BenchmarkWheelScanScaling(b *testing.B) {
 	for _, n := range []int{1000, 10000, 50000} {
-		b.Run(fmt.Sprintf("%d-timers", n), func(b *testing.B) {
-			m := newRawWheelManager()
-			wheel := m.wheels[TimerTypeMillisecond]
-			fillInWheelOnly(b, m, n)
+		for _, shape := range []struct {
+			name   string
+			spread bool
+		}{{"same-slot", false}, {"spread", true}} {
+			b.Run(fmt.Sprintf("%d-timers/%s", n, shape.name), func(b *testing.B) {
+				m := newRawWheelManager()
+				wheel := m.wheels[TimerTypeHour]
+				fillScanLoad(b, m, TimerTypeHour, n, shape.spread)
 
-			var scanTotal time.Duration
-			b.ReportAllocs()
-			b.ResetTimer()
-			for i := 0; i < b.N; i++ {
-				start := time.Now()
-				m.processWheelTick(wheel, TimerTypeMillisecond)
-				scanTotal += time.Since(start)
-			}
-			b.StopTimer()
-			b.ReportMetric(float64(n), "timers")
-			b.ReportMetric(float64(scanTotal.Nanoseconds())/float64(b.N), "ns-per-tick")
-			b.ReportMetric(float64(scanTotal.Nanoseconds())/float64(b.N)/float64(n), "ns-per-timer")
-		})
+				var scanTotal time.Duration
+				b.ReportAllocs()
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					start := time.Now()
+					m.processWheelTick(wheel, TimerTypeHour)
+					scanTotal += time.Since(start)
+				}
+				b.StopTimer()
+				b.ReportMetric(float64(n), "timers")
+				b.ReportMetric(float64(scanTotal.Nanoseconds())/float64(b.N), "ns-per-tick")
+				b.ReportMetric(float64(scanTotal.Nanoseconds())/float64(b.N)/float64(n), "ns-per-timer")
+			})
+		}
 	}
 }
 

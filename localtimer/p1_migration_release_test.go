@@ -37,7 +37,7 @@ func (f *failAddTimer) GetNode() *list.Node { panic("cannot resolve node") }
 func newStandaloneWheel(config int64) *TimerWheel {
 	return &TimerWheel{
 		wheelConfig:  config,
-		tickWheel:    list.NewUnindexedList(), // 与生产一致：时间轮不维护 ID 索引
+		tickWheel:    newTestRing(config), // 与生产同规格的桶环（S67）
 		addTimerChan: make(chan timerTask, MaxAddTimerChannelNum),
 	}
 }
@@ -359,18 +359,26 @@ func TestWheel_MigrationNeverStrandsTimer(t *testing.T) {
 		timers = append(timers, tm)
 	}
 
-	// 反复把到期时间推到秒档再拉回毫秒档，强制每个周期都发生跨档迁移
+	// 反复把到期时间推到秒档再拉回毫秒档，强制每个周期都发生跨档迁移。
+	//
+	// 改完 nextTime 必须跟着 AddTimer 重挂：桶化（S67）后桶位在入链瞬间按 nextTime
+	// 算定，在链期间偷改时刻会把节点留在一个与它无关的桶里，最长一整圈（秒档 60s）
+	// 才被重访，实测就是 40/40 集体停摆。生产侧不存在这个顺序（Init 与续期都在
+	// 摘链之后写 nextTime），重挂正是「续期」那条真实路径的等价写法：
+	// removeFromManagerLocked 摘干净 → 新调度项按当前时刻归桶 → 跨档迁移照旧发生。
 	migrateChurn := func() {
-		now := time.Now().UnixMilli()
-		for _, tm := range timers {
-			tm.GetParent().nextTime.Store(now + 1500)
+		replan := func(offset int64) {
+			now := time.Now().UnixMilli()
+			for _, tm := range timers {
+				tm.GetParent().nextTime.Store(now + offset)
+				if err := AddTimer(tm); err != nil {
+					t.Fatalf("✘ 跨档重挂失败: %v", err)
+				}
+			}
+			time.Sleep(60 * time.Millisecond)
 		}
-		time.Sleep(60 * time.Millisecond)
-		now = time.Now().UnixMilli()
-		for _, tm := range timers {
-			tm.GetParent().nextTime.Store(now + 20)
-		}
-		time.Sleep(60 * time.Millisecond)
+		replan(1500)
+		replan(20)
 	}
 
 	deadline := time.Now().Add(3 * time.Second)
@@ -448,13 +456,15 @@ func TestWheel_MigrationOrphanProbe(t *testing.T) {
 			t.Fatal(err)
 		}
 		parent := tm.GetParent()
+		// 桶环按入链瞬间的 nextTime 归桶（S67），所以先定好「秒档时刻」再入链，
+		// 再把源轮游标摆到它前一格 —— 等价于墙钟刚走到该格，本拍扫描必定命中它。
+		// 跨档迁移与认领的时序本身与变更前完全一致，仍是本用例要盯的东西。
+		parent.nextTime.Store(time.Now().UnixMilli() + 1500)
 		m.handleTimerAdd(src, timerTask{timer: tm, gen: parent.gen.Load(), mgr: m})
 		if parent.wheel.Load() != src {
 			t.Fatalf("第 %d 轮：未能建立初始归属", round)
 		}
-
-		// 推到秒档，制造一次跨档迁移
-		parent.nextTime.Store(time.Now().UnixMilli() + 1500)
+		src.tickWheel.cursor.Store(parent.nextTime.Load()/src.wheelConfig - 1)
 
 		var wg sync.WaitGroup
 		var claimed atomic.Bool

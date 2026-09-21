@@ -54,6 +54,11 @@ func TestCommitDispatchFullKeepsOwnership(t *testing.T) {
 	if l := int64(wheel.tickWheel.Length()); l != 1 {
 		t.Fatalf("✘ 投递失败不应摘链: len=%d", l)
 	}
+	// 留在原桶还不够：桶化后必须把「这一格里有残留」上报给环，否则游标越过这一格，
+	// 重试要等一整圈（见 slotRing.markResidue 与 TestSlotRingResidueBucketIsRescanned）。
+	if !wheel.tickWheel.residue {
+		t.Fatal("✘ 投递失败未标记残留：该节点要等游标绕完一圈才被重看")
+	}
 	if d := m.stats.timersDropped.Load(); d != countBefore {
 		t.Fatalf("✘ 计数只由 processWheelTick 汇总, commitDispatch 不该改: %d→%d", countBefore, d)
 	}

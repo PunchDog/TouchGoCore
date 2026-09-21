@@ -47,7 +47,7 @@ func (t timerTask) isValid() bool {
 // TimerWheel 表示时间轮结构
 type TimerWheel struct {
 	wheelConfig  int64          // 时间轮精度（毫秒）
-	tickWheel    *list.List     // 定时器链表
+	tickWheel    *slotRing      // 定时器桶环（S67：一 tick 只扫到期桶）
 	wheelLock    sync.RWMutex   // 时间轮锁（读写优化）
 	addTimerChan chan timerTask // 定时器添加通道
 	isRunning    atomic.Bool    // 是否运行
@@ -685,18 +685,38 @@ func currentTimerChannel() chan timerTask {
 	return timerChannel
 }
 
+// defaultWheelConfigs 每档轮的精度（毫秒）：毫秒/秒/分钟/10分钟/小时。
+// 只读约定：桶数、档序断言与测试都按这张表推导，改表即改协议。
+var defaultWheelConfigs = []int64{
+	1, // 毫秒级
+	util.MILLISECONDS_OF_SECOND,
+	util.MILLISECONDS_OF_MINUTE,
+	util.MILLISECONDS_OF_10_MINUTE,
+	util.MILLISECONDS_OF_HOUR,
+}
+
+// slotCountFor 取第 i 档轮的桶数（S67）：等于「本档滞留时长占几格」，即下一档精度
+// 除以本档精度。毫秒轮滞留 [1,1000)ms → 1000 格、秒轮 60、分轮 10、十分轮 6；
+// 最后一档无上界，取 24（一圈一天）。
+//
+// 按滞留时长取格数是为了让同一圈内不出现两个不同时刻挤进同一桶：被提前看到的节点
+// 只是原地再等一圈（判定仍按 nextTime 与墙钟复核，不会错发），多一圈的冗余检查
+// 换来的是「绝不在到期前被吞掉」，但滞留时长内不撞桶能让这份冗余归零。
+// 精度表若被改动，这里会跟着变，不需要另维护一张常量表。
+func slotCountFor(configs []int64, i int) int {
+	if i+1 < len(configs) && configs[i] > 0 {
+		if n := configs[i+1] / configs[i]; n >= 1 && n <= 4096 {
+			return int(n)
+		}
+	}
+	return 24
+}
+
 // NewTimerManager 创建新的定时器管理器
 func NewTimerManager() *TimerManager {
 	ensureTimerChannel()
 
-	// 时间轮配置：毫秒/秒/分钟/10分钟/小时
-	wheelConfigs := []int64{
-		1, // 毫秒级
-		util.MILLISECONDS_OF_SECOND,
-		util.MILLISECONDS_OF_MINUTE,
-		util.MILLISECONDS_OF_10_MINUTE,
-		util.MILLISECONDS_OF_HOUR,
-	}
+	wheelConfigs := defaultWheelConfigs
 
 	mgr := &TimerManager{
 		closeChan: make(chan struct{}),
@@ -707,9 +727,9 @@ func NewTimerManager() *TimerManager {
 	for i, config := range wheelConfigs {
 		wheel := &TimerWheel{
 			wheelConfig: config,
-			// 时间轮只按顺序遍历与摘除节点，从不按 ID 查节点，
-			// 用无索引链表省掉每次入链取号（CAS+时钟）与 map 写删。
-			tickWheel:    list.NewUnindexedList(),
+			// 每档轮内部再按 nextTime 分桶（S67），一次 tick 只扫到期桶。
+			// 桶内仍是无索引链表：时间轮只按顺序遍历与摘除节点，从不按 ID 查节点。
+			tickWheel:    newSlotRing(config, slotCountFor(wheelConfigs, i)),
 			addTimerChan: make(chan timerTask, MaxAddTimerChannelNum),
 			mgr:          mgr,
 		}
@@ -863,10 +883,15 @@ func (m *TimerManager) processWheelTick(wheel *TimerWheel, wheelType TimerType) 
 
 // tickWheelSection 扫描时间轮，派发到期项并下沉到更精确的轮。
 //
+// S67 起只扫「游标到此刻」之间的到期桶（slotRing.RangeWindow），一次 tick 的判定
+// 代价随到期桶大小而非在链总数增长；落后超过一圈时退化为整环扫描，绝不漏派发。
+//
 // 判定全程不持 wheelLock：List.Range 只在链表自己的读锁里取快照，回调在锁外跑，
 // 于是一次长扫描不再把业务侧的 Remove 整段排在后面（detachFromWheelLocked 要
 // 同一把锁）。只有真正命中的节点才回锁，且锁内只剩「复核 → 认领 → 投递 → 摘链」
 // 这几步无阻塞动作（投递用非阻塞 select，满了立刻放手）。
+//
+// 扫描范围由桶环收窄（S67）：RangeWindow 只看游标推进到的那几格，未到期桶整个跳过。
 //
 // 认领必须和摘链在同一把轮锁里做：业务移除是「持锁读归属 → 摘链 → 扣计数」的
 // check-then-act，若 CAS 漂在锁外，两边能各自读到同一个归属并各扣一次计数
@@ -875,7 +900,7 @@ func (m *TimerManager) tickWheelSection(wheel *TimerWheel, wheelType TimerType) 
 	currentTime := util.CurrentMS()
 	ch := currentTimerChannel()
 
-	wheel.tickWheel.Range(func(node list.INode) bool {
+	wheel.tickWheel.RangeWindow(currentTime, func(node list.INode) bool {
 		timer, ok := node.(TimerInterface)
 		if !ok {
 			return true
@@ -958,6 +983,9 @@ func (m *TimerManager) commitDispatch(wheel *TimerWheel, parent *Timer, node lis
 		// 通道满：归属必须原样还给本轮，否则本节点被 ownedWheel 判给「无轮」，
 		// 后续每个 tick 都会跳过它，等价于永久停摆。
 		parent.wheel.Store(wheel)
+		// 节点留在原桶不动，但要告诉桶环「这一格里有东西没送走」：桶化后原地不动
+		// 意味着下一拍不再覆盖这一格，重试会拖到一整圈之后（见 markResidue）。
+		wheel.tickWheel.markResidue()
 		return dispatchFull
 	}
 }

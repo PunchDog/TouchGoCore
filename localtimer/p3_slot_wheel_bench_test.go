@@ -68,33 +68,40 @@ func fillScanLoad(b *testing.B, m *TimerManager, wi TimerType, n int, spread boo
 	if got := wheel.timerCount.Load(); got != int64(n) {
 		b.Fatalf("✘ 自检 tick 后节点被搬走，测的不是纯扫描: count=%d want=%d", got, n)
 	}
-	if n := len(currentTimerChannel()); n != 0 {
-		b.Fatalf("✘ 自检 tick 产生了 %d 条派发，口径已失真", n)
+	if pending := len(currentTimerChannel()); pending != 0 {
+		b.Fatalf("✘ 自检 tick 产生了 %d 条派发，口径已失真", pending)
 	}
 	return timers
 }
 
-// fillFarFuture 往指定轮灌 n 个「统一在 horizon 毫秒后到期」的定时器，
-// 供「既有扫描存量、又有到期增量」的混合场景使用；调用方随后会按自己的
-// 分布重排 nextTime，这里只负责把节点合法地挂进本轮。
-func fillFarFuture(b *testing.B, m *TimerManager, wi TimerType, n int, horizon int64) []TimerInterface {
+// fillSpread 往 wi 轮灌 n 个定时器，第 i 个的时刻是 base+offset(i)；返回 base，
+// 便于调用方按同一基准登记标称到期时间（灌 1 万个本身要几十毫秒，另取时刻会把
+// 「晚到多少」读成负数）。
+//
+// 供「既有扫描存量、又有到期增量」的混合场景使用。S67 起必须「先定时刻再入链」：
+// 归桶按入链瞬间的 nextTime 计算，先挂再改期会把节点留在一个与它无关的桶里，
+// 测出来的就不再是真实负载的形状。
+func fillSpread(b *testing.B, m *TimerManager, wi TimerType, n int,
+	offset func(i int) int64) (timers []TimerInterface, base int64) {
 	b.Helper()
 	wheel := m.wheels[wi]
-	timers := make([]TimerInterface, 0, n)
+	timers = make([]TimerInterface, 0, n)
+	base = util.CurrentMS()
 	for i := 0; i < n; i++ {
+		horizon := offset(i)
 		tm, err := NewTimer[*plainTimer](horizon, InfiniteCount, nil)
 		if err != nil {
 			b.Fatal(err)
 		}
 		parent := tm.GetParent()
-		parent.nextTime.Store(util.CurrentMS() + horizon)
+		parent.nextTime.Store(base + horizon)
 		m.handleTimerAdd(wheel, timerTask{timer: tm, gen: parent.gen.Load(), mgr: m})
 		timers = append(timers, tm)
 	}
 	if got := wheel.timerCount.Load(); got != int64(n) {
 		b.Fatalf("✘ 灌入不完整: count=%d want=%d len=%d", got, n, wheel.tickWheel.Length())
 	}
-	return timers
+	return timers, base
 }
 
 // BenchmarkWheelScanScaling 量「纯扫描、零到期」下单次 tick 随在链数的增长曲线。
@@ -134,13 +141,9 @@ func BenchmarkWheelTickWithSubSecondLoad(b *testing.B) {
 	const n = 10000
 	m := newRawWheelManager()
 	wheel := m.wheels[TimerTypeMillisecond]
-	timers := fillFarFuture(b, m, TimerTypeMillisecond, n, 999)
-
-	// 把间隔摊成 1~999ms：每个 tick 平均有 n/999 ≈ 10 个到期，其余是纯扫描存量。
-	now := util.CurrentMS()
-	for i, tm := range timers {
-		tm.GetParent().nextTime.Store(now + int64(i%999) + 1)
-	}
+	fillSpread(b, m, TimerTypeMillisecond, n, func(i int) int64 {
+		return int64(i%999) + 1 // 摊成 1~999ms：每个 tick 平均 n/999 ≈ 10 个到期
+	})
 
 	ch := currentTimerChannel()
 	var tickTotal time.Duration
@@ -156,6 +159,11 @@ func BenchmarkWheelTickWithSubSecondLoad(b *testing.B) {
 			parent := task.timer.GetParent()
 			parent.nextTime.Store(util.CurrentMS() + int64(len(ch)%999) + 1)
 			m.handleTimerAdd(wheel, timerTask{timer: task.timer, gen: parent.gen.Load(), mgr: m})
+		}
+		// 按 1ms 节拍驱动：不分拍等待的话墙钟几乎不走，「每拍有约 10 个到期」这一
+		// 前提就不成立，量到的只是空转
+		if d := time.Since(start); d < time.Millisecond {
+			time.Sleep(time.Millisecond - d)
 		}
 	}
 	b.StopTimer()
@@ -178,19 +186,21 @@ func BenchmarkSubSecondDeadlineMiss(b *testing.B) {
 	const ticks = 300
 	m := newRawWheelManager()
 	wheel := m.wheels[TimerTypeMillisecond]
-	timers := fillFarFuture(b, m, TimerTypeMillisecond, n, 199)
-
-	now := util.CurrentMS()
 	nominal := make(map[TimerInterface]int64, n)
-	for i, tm := range timers {
-		offset := int64(i%199) + 1
-		tm.GetParent().nextTime.Store(now + offset)
-		nominal[tm] = offset
+	timers, _ := fillSpread(b, m, TimerTypeMillisecond, n, func(i int) int64 {
+		return int64(i%199) + 1
+	})
+	// 标称到期毫秒数按「计时起点」折算：灌 1 万个定时器本身要花几十毫秒，
+	// 用灌入前的时刻作基准会把晚到量整体读小。起点之后就已到期的那些，
+	// 标称值为负、真实派发在 0 附近，计入的是它们确实被推迟了的那部分。
+	ref := util.CurrentMS()
+	wallStart := time.Now() // 与 ref 同一瞬间取，否则登记口径整体偏移
+	for _, tm := range timers {
+		nominal[tm] = tm.GetParent().nextTime.Load() - ref
 	}
 	ch := currentTimerChannel()
 
 	fired := make(map[TimerInterface]int64, n)
-	wallStart := time.Now()
 	b.ReportAllocs()
 	b.ResetTimer()
 	for t := 0; t < ticks; t++ {
@@ -211,8 +221,14 @@ func BenchmarkSubSecondDeadlineMiss(b *testing.B) {
 	}
 	b.StopTimer()
 
-	var lateSum, lateN, never int64
+	var lateSum, lateN, never, skipped int64
 	for tm, want := range nominal {
+		// 起点之前就已到期的不入样：它们的「晚到」全部来自灌链本身的耗时（1 万个要
+		// 几十毫秒），与轮的实现无关，计入只会把 avg-late 变成灌入速度的度量。
+		if want < 1 {
+			skipped++
+			continue
+		}
 		got, ok := fired[tm]
 		if !ok {
 			never++
@@ -226,4 +242,5 @@ func BenchmarkSubSecondDeadlineMiss(b *testing.B) {
 	b.ReportMetric(float64(n), "timers")
 	b.ReportMetric(float64(lateSum)/float64(lateN), "avg-late-ms")
 	b.ReportMetric(float64(never), "never-fired")
+	b.ReportMetric(float64(skipped), "skipped-already-due")
 }

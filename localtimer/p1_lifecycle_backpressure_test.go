@@ -55,7 +55,7 @@ func within(t *testing.T, d time.Duration, what string, fn func()) {
 func newTestWheel(mgr *TimerManager, config int64, chanCap int) *TimerWheel {
 	return &TimerWheel{
 		wheelConfig:  config,
-		tickWheel:    list.NewUnindexedList(), // 与生产一致：时间轮不维护 ID 索引
+		tickWheel:    newTestRing(config), // 与生产同规格的桶环（S67）
 		addTimerChan: make(chan timerTask, chanCap),
 		mgr:          mgr,
 	}
@@ -81,7 +81,10 @@ func newOfflineManager(chanCap int) *TimerManager {
 	return mgr
 }
 
-// chainTimer 把定时器手工挂进轮里，并可选把到期时间提前
+// chainTimer 把定时器手工挂进轮里，并可选把到期时间提前。
+//
+// 改期必须在入链之前：S67 起归桶按入链瞬间的 nextTime 计算，先挂后改会把节点
+// 留在一个与它无关的桶里，扫描再也看不到它（生产路径不存在这个顺序）。
 func chainTimer(t *testing.T, wheel *TimerWheel, tm TimerInterface, expired bool) *Timer {
 	t.Helper()
 	parent := tm.GetParent()
@@ -89,14 +92,14 @@ func chainTimer(t *testing.T, wheel *TimerWheel, tm TimerInterface, expired bool
 	if !ok {
 		t.Fatal("定时器未实现 list.INode")
 	}
+	if expired {
+		parent.nextTime.Store(util.CurrentMS() - 10)
+	}
 	if !wheel.tickWheel.Add(node) {
 		t.Fatal("入链失败")
 	}
 	parent.wheel.Store(wheel)
 	wheel.timerCount.Add(1)
-	if expired {
-		parent.nextTime.Store(util.CurrentMS() - 10)
-	}
 	return parent
 }
 

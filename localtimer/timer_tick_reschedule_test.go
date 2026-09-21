@@ -40,7 +40,7 @@ func newRawWheelManager() *TimerManager {
 	for i, config := range []int64{1, 1000, 60000, 600000, 3600000} {
 		m.wheels[i] = &TimerWheel{
 			wheelConfig:  config,
-			tickWheel:    list.NewUnindexedList(), // 与生产一致：时间轮不维护 ID 索引
+			tickWheel:    newTestRing(config), // 与生产同规格的桶环（S67）
 			addTimerChan: make(chan timerTask, MaxAddTimerChannelNum),
 		}
 	}

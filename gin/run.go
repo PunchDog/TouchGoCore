@@ -93,14 +93,29 @@ func RegisterRouter(class IRouterInterface, timeoutmap map[string]int64) {
 	sname, mnames := util.GetClassName(class)
 	rcvr := reflect.ValueOf(class)
 
+	// + 新增：显式路径表（可选）。未实现 IRouterPath 时 explicit 为 nil，
+	// 后续一律走默认推导，proxywork 等既有调用方行为逐字节不变。
+	var explicit map[string]string
+	if rp, ok := class.(IRouterPath); ok {
+		explicit = rp.RouterPath()
+	}
+
 	for _, mname := range mnames {
 		//这个是类型，不进行router注册
-		if mname == "RouterType" {
+		// + 同时跳过 RouterPath（与 RouterType 一样，是类型方法而非 handler）
+		if mname == "RouterType" || mname == "RouterPath" {
 			continue
 		}
 
 		mnameCopy := mname // 闭包捕获
-		callbackmsg := fmt.Sprintf("/%s/%s", strings.ToLower(sname), strings.ToLower(mnameCopy))
+		// + 优先使用显式路径，缺失则回退默认推导（原逻辑完全保留）
+		callbackmsg := ""
+		if explicit != nil {
+			callbackmsg = explicit[mnameCopy]
+		}
+		if callbackmsg == "" {
+			callbackmsg = fmt.Sprintf("/%s/%s", strings.ToLower(sname), strings.ToLower(mnameCopy))
+		}
 		if s := class.RouterType(); s != nil && len(s) > 0 { //设置了只注册哪些监控
 			callbackmsg += "|" + strings.Join(s, "&&")
 		}

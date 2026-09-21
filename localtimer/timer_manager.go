@@ -160,6 +160,10 @@ func (m *TimerManager) emit(w *addTimerWarning) {
 
 // AddTimer 向管理器添加定时器（业务首次注册与「先 Pause 再 AddTimer」复活都走这里；
 // 已 Remove 作废的实例会被拒绝并返回 ErrTimerReleased）
+//
+// S67 桶化后它还是「改变一个在链定时器到期时刻」的唯一合法入口：先摘干净旧归属，
+// 再按当前 nextTime 归桶入链（跨档迁移照旧发生）。直接改 nextTime 不换桶，
+// 节点会留在一个与它无关的桶里，最坏等游标绕完一整圈才被重看。
 func (m *TimerManager) AddTimer(timer TimerInterface) error {
 	if timer == nil {
 		return ErrTimerNilParent
@@ -716,7 +720,10 @@ func slotCountFor(configs []int64, i int) int {
 func NewTimerManager() *TimerManager {
 	ensureTimerChannel()
 
-	wheelConfigs := defaultWheelConfigs
+	// 拷一份精度表：直接把包级切片交给 mgr 等于让任何一处对 defaultWheelConfigs 的
+	// 改写（测试为造档而临时改表是常见写法）同时改掉此后所有管理器的档位与桶数推导。
+	wheelConfigs := make([]int64, len(defaultWheelConfigs))
+	copy(wheelConfigs, defaultWheelConfigs)
 
 	mgr := &TimerManager{
 		closeChan: make(chan struct{}),
@@ -1075,6 +1082,17 @@ func (m *TimerManager) drainWheelLocked(wheel *TimerWheel) (expired []timerTask)
 
 	currentTime := util.CurrentMS()
 
+	// 清空必须放在 defer 里：下面 Range 的回调会调进业务实现的 GetParent/IsActive，
+	// 一旦 panic 逃出 Range，本函数后半段的 Clear 与归零都不执行，
+	// 「收尾后轮空、计数归零」的口径（阶段12 S66 用例）当场破掉，
+	// 而调用方 cleanupWheel 只 recover 到一次 panic，轮却永久带着节点。
+	removedCount := wheel.timerCount.Load()
+	defer func() {
+		wheel.tickWheel.Clear()
+		wheel.timerCount.Store(0)
+		m.stats.timersRemoved.Add(removedCount)
+	}()
+
 	wheel.tickWheel.Range(func(node list.INode) bool {
 		timer, ok := node.(TimerInterface)
 		if !ok {
@@ -1099,10 +1117,5 @@ func (m *TimerManager) drainWheelLocked(wheel *TimerWheel) (expired []timerTask)
 		return true
 	})
 
-	// 清空时间轮
-	removedCount := wheel.timerCount.Load()
-	wheel.tickWheel.Clear()
-	wheel.timerCount.Store(0)
-	m.stats.timersRemoved.Add(removedCount)
 	return expired
 }

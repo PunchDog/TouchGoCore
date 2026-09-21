@@ -72,11 +72,17 @@ func TestSlotRingPlacesByAbsoluteStep(t *testing.T) {
 }
 
 // TestSlotRingScanSkipsUnexpiredBuckets 是 S67 的收益本身：墙钟往前走一格只付那一格的钱。
+//
+// 窗口形状随档位不同，两条都要钉住：
+//   - 毫秒轮（一格 == 一毫秒）只有「到期格」，没有预扫格 —— 整数毫秒下扫描不可能早于
+//     到期，多扫一格是纯白走；
+//   - 秒轮及以上是「到期格 + lookahead 预扫格」两格，第三格起一律不看（这一格是跨档
+//     下沉的时机，见 RangeWindow 的推导）。
 func TestSlotRingScanSkipsUnexpiredBuckets(t *testing.T) {
-	r := newTestRing(1) // 毫秒轮：1000 桶
 	now := util.CurrentMS()
-	r.cursor.Store(now)
 
+	r := newTestRing(1) // 毫秒轮：1000 桶，一格 1ms
+	r.cursor.Store(now)
 	// 未来 1~900ms 各挂一个：只有 now+1 那一格落在本拍窗口里
 	for offset := int64(1); offset <= 900; offset++ {
 		putAt(t, r, now+offset)
@@ -88,7 +94,10 @@ func TestSlotRingScanSkipsUnexpiredBuckets(t *testing.T) {
 		return true
 	})
 	if len(visited) != 1 || visited[0] != now+1 {
-		t.Fatalf("✘ 只扫到期桶失败，实际访问 %d 个节点: %v", len(visited), visited)
+		t.Fatalf("✘ 毫秒轮多扫了：本档没有跨档下沉可做，窗口只该覆盖到期格: %v", visited)
+	}
+	if got := r.cursor.Load(); got != now+1 {
+		t.Fatalf("✘ 游标越过了本拍那一格: cursor=%d want=%d", got, now+1)
 	}
 	if got := r.Length(); got != 900 {
 		t.Fatalf("✘ 扫描不该改动环内容: len=%d want=900", got)
@@ -104,6 +113,37 @@ func TestSlotRingScanSkipsUnexpiredBuckets(t *testing.T) {
 	})
 	if len(visited) > 2 {
 		t.Fatalf("✘ 重复驱动扫掉了游标之外的桶: %d 个", len(visited))
+	}
+
+	// 秒轮：一格 1s，窗口 = 到期格 + 预扫格
+	s := newTestRing(util.MILLISECONDS_OF_SECOND) // 60 桶
+	sec := util.MILLISECONDS_OF_SECOND
+	base := now / sec
+	s.cursor.Store(base)
+	for i := int64(1); i <= 40; i++ {
+		putAt(t, s, (base+i)*sec+sec/2) // 各占一格，落在 base+1 .. base+40
+	}
+	visited = visited[:0]
+	s.RangeWindow(base*sec+sec/2, func(node list.INode) bool {
+		visited = append(visited, nextTimeOf(node))
+		return true
+	})
+	// target == base == cursor → 走「墙钟没往前走」分支，覆盖 slot(base) 与 slot(base+1)：
+	// 前者空、后者装着 base+1 那一格的那个节点
+	if len(visited) != 1 {
+		t.Fatalf("✘ 秒轮重复驱动时覆盖的桶数不符: %v", visited)
+	}
+	visited = visited[:0]
+	s.RangeWindow((base+1)*sec+sec/2, func(node list.INode) bool {
+		visited = append(visited, nextTimeOf(node))
+		return true
+	})
+	// 这一拍 target = base+1 > cursor = base：窗口 (base, base+2] 两格，各一个节点
+	if len(visited) != 2 {
+		t.Fatalf("✘ 秒轮窗口不是「到期格 + 预扫格」两格: %v", visited)
+	}
+	if got := s.cursor.Load(); got != base+1 {
+		t.Fatalf("✘ 游标应停在到期格而不是预扫格: cursor=%d want=%d", got, base+1)
 	}
 }
 
@@ -270,6 +310,9 @@ func TestSlotRingCallbackAbort(t *testing.T) {
 // 节点在未来 10 天）节点会在自己那一格之前被提前看到若干次（每圈一次）。
 // 分桶不错发的前提就在这里——提前看到只会走「原地留下、等下一圈」，
 // 派发判定仍由回调按 nextTime 与墙钟复核，环本身绝不替节点做决定。
+//
+// S67 补上 lookahead 之后每圈被看到两拍：预扫格那一拍与到期格那一拍，间隔恒为
+// {1, 23} 成对出现（24 格一圈），第 10 圈共 20 次。
 func TestSlotRingNodeVisitedAtOwnStep(t *testing.T) {
 	const hour = util.MILLISECONDS_OF_HOUR
 	r := newSlotRing(hour, 24) // 刻意用小于跨度的桶数，逼出「一圈被复核一次」
@@ -295,9 +338,12 @@ func TestSlotRingNodeVisitedAtOwnStep(t *testing.T) {
 		t.Fatalf("✘ 最后一次复核不在自己那一格: last=%d nodeStep=%d", last, nodeStep)
 	}
 	for i := 1; i < len(visits); i++ {
-		if d := visits[i] - visits[i-1]; d != 24 {
-			t.Fatalf("✘ 复核间隔不是一圈: %d -> %d", visits[i-1], visits[i])
+		if d := visits[i] - visits[i-1]; d != 1 && d != 23 {
+			t.Fatalf("✘ 复核间隔不是「每圈两拍」: %d -> %d（差 %d）", visits[i-1], visits[i], d)
 		}
+	}
+	if want := int((nodeStep-step)/24) * 2; len(visits) != want {
+		t.Fatalf("✘ 每圈两拍合计不符: got=%d want=%d", len(visits), want)
 	}
 	if r.Length() != 1 {
 		t.Fatalf("✘ 节点在等待期间丢失: len=%d", r.Length())

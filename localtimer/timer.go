@@ -547,7 +547,13 @@ func (t *Timer) Pause() {
 	t.RemoveFromManager(false)
 }
 
-// HasNext 检查是否有下一次执行
+// HasNext 检查是否有下一次执行。
+//
+// 注意它有副作用：判定为「有下一次」时顺手把 nextTime 推进到 now+interval。
+// S67 桶化后这条要格外当心 —— 节点在链期间它的桶位是按入链那一刻的 nextTime 算定的，
+// 光改 nextTime 不会换桶，最坏要等游标绕完一整圈才被重看（秒档 60s、分档 10min）。
+// 库内调用点（executeTimer 续期）都发生在「已摘链、尚未重挂」的窗口里，因此安全；
+// 业务若在定时器仍在调度时直接调它改期，必须紧跟一次 AddTimer 重挂。
 func (t *Timer) HasNext() bool {
 	if !t.isActive.Load() {
 		return false
@@ -634,6 +640,10 @@ func (t *Timer) GetInterval() int64 {
 
 // SetInterval 更新执行间隔（毫秒）。interval <= 0 时忽略，避免时间轮收到非正间隔。
 // 供续期路径应用 NextIntervaler 重算出的间隔。
+//
+// 本方法只改 interval、不动 nextTime，因此在链节点不会因它错桶；但新间隔要等到
+// 下一次续期（先摘链再算时刻再重挂）才生效。想让在链的定时器立刻按新间隔走，
+// 必须 Pause/AddTimer 重挂，不能只调这里。
 func (t *Timer) SetInterval(interval int64) {
 	if interval <= 0 {
 		return

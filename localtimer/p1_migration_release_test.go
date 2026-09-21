@@ -359,6 +359,25 @@ func TestWheel_MigrationNeverStrandsTimer(t *testing.T) {
 		timers = append(timers, tm)
 	}
 
+	const numMigrate = 8
+	migrants := make([]*plainTimer, 0, numMigrate)
+	for i := 0; i < numMigrate; i++ {
+		// 间隔 1500ms 落在秒档，而它每次续期后的剩余时间总会退化到 1s 以内，
+		// 于是「源轮 tick 把在链节点迁到更精确的一档」这条分支被自然走一遍。
+		// 上面的 replan 重挂走的是 AddTimer 那条路（先摘链再按当前时刻归桶），
+		// 替代不了这里 —— 桶化（S67）后 replan(1500) 之后只驻留 60ms 就被改期，
+		// 秒档那一格（一格 1s）根本还没被游标扫到，tick 驱动的迁移分支就成了盲区。
+		tm, err := NewTimer[*plainTimer](1500, InfiniteCount, func(p *plainTimer) { p.n.Store(0) })
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := AddTimer(tm); err != nil {
+			t.Fatalf("AddTimer 失败: %v", err)
+		}
+		migrants = append(migrants, tm)
+	}
+	migBase := m.GetStats().WheelMigrations
+
 	// 反复把到期时间推到秒档再拉回毫秒档，强制每个周期都发生跨档迁移。
 	//
 	// 改完 nextTime 必须跟着 AddTimer 重挂：桶化（S67）后桶位在入链瞬间按 nextTime
@@ -392,7 +411,7 @@ func TestWheel_MigrationNeverStrandsTimer(t *testing.T) {
 	graceEnd := time.Now().Add(20 * time.Second)
 	for {
 		stalled := 0
-		for _, tm := range timers {
+		for _, tm := range append(timers, migrants...) {
 			if tm.n.Load() == 0 {
 				stalled++
 			}
@@ -401,13 +420,21 @@ func TestWheel_MigrationNeverStrandsTimer(t *testing.T) {
 			break
 		}
 		if time.Now().After(graceEnd) {
-			t.Fatalf("✘ %d/%d 个定时器在反复跨档迁移后彻底停摆（S11 回归失败）", stalled, num)
+			t.Fatalf("✘ %d/%d 个定时器在反复跨档迁移后彻底停摆（S11 回归失败）", stalled, num+numMigrate)
 		}
 		migrateChurn()
 	}
 
+	// 「确有 tick 驱动的跨档迁移发生」必须被钉住：这条分支只在源轮扫到「在链、但未到期、
+	// 且剩余时间已落入更精确一档」的节点时计数，一旦桶化把扫描窗口收得过窄（比如归桶
+	// 把节点整个圈都错过），上面的「都没停摆」依然能全绿——节点会靠续期重挂绕过去，
+	// 而真实负载里那些只挂一次、指望源轮把它送下去的定时器就会被无声拖死。
+	if mig := m.GetStats().WheelMigrations - migBase; mig <= 0 {
+		t.Fatalf("✘ 全程未发生任何 tick 驱动的跨档迁移（计数增量=%d），本用例退化成只测重挂路径", mig)
+	}
+
 	// 全部停表后各轮必须回到干净状态：迁移若丢过定时器，这里会留下计数残影
-	for _, tm := range timers {
+	for _, tm := range append(timers, migrants...) {
 		tm.Pause()
 	}
 	// 摘链要走过「派发 → 消费 → 移除」整条链路，忙时同样会延迟，
@@ -429,7 +456,7 @@ func TestWheel_MigrationNeverStrandsTimer(t *testing.T) {
 		}
 	}
 
-	for _, tm := range timers {
+	for _, tm := range append(timers, migrants...) {
 		tm.Remove()
 	}
 }

@@ -5,6 +5,7 @@ import (
 
 	"touchgocore/list"
 	"touchgocore/util"
+	"touchgocore/vars"
 )
 
 // ============================================================================
@@ -17,7 +18,8 @@ import (
 // 2.02ms；1 万条亚秒混合负载 315µs/tick —— 5 万在链已经超掉毫秒轮 1ms 的节拍。
 //
 // 现在每档轮内部按 slot = floor(nextTime / wheelConfig) % slotCount 分成多条子链，
-// 一次 tick 只看「墙钟走过的那几个绝对步数」对应的桶，代价降为 O(到期桶内节点数)。
+// 一次 tick 只看「墙钟走过的那几个绝对步数」对应的桶，再加 lookahead 一格用于跨档
+// 下沉（见 RangeWindow），代价降为 O(到期桶 + 预扫桶内的节点数)。
 // 游标以「绝对步数」而非 0..N-1 的下标保存，于是「绕了多少圈」这件事不需要额外计数。
 //
 // 这里只桶化扫描，不动任何协议：timerCount、migratingMarker 认领、commitDispatch、
@@ -45,10 +47,9 @@ type slotRing struct {
 	slots       []*list.List // 长度 = slotCount，构造后不再增删
 	cursor      atomic.Int64 // 已扫描过的最大绝对步数 = floor(now / wheelConfig)
 
-	// scanning / residue 只由本档轮的消费协程读写（runWheel 每档一条），不参与跨协程
-	// 通信，其效果最终通过 cursor 这一个原子量体现，故不必原子。
-	scanning int64 // 正在扫描的桶对应的绝对步数
-	residue  bool  // 本桶扫描中有节点被留在原地（投递通道满）
+	// residue 只由本档轮的消费协程读写（runWheel 每档一条），不参与跨协程通信，
+	// 其效果最终通过 cursor 这一个原子量体现，故不必原子。
+	residue bool // 本桶扫描中有节点被留在原地（投递通道满或回调 panic）
 }
 
 // newSlotRing 建一环。slotCount 必须 > 0。
@@ -139,7 +140,11 @@ func (r *slotRing) Add(node list.INode) (bret bool) {
 // 「背压时下个 tick 重试」悄悄改成了「下圈重试」。于是 RangeWindow 收尾时把游标
 // 退回本段第一个残留桶之前，下一拍重新覆盖这一段。
 //
-// 只由本档轮的消费协程调用（扫描在其线程上进行），不加锁。
+// 调用约束：只允许出现在 slotRing.scanSlot 的调用链里（即 RangeWindow 驱动的那次扫描）。
+// 别处都不该调 —— 收尾路径（drainWheelLocked/cleanupWheel）不投递、业务 Remove 与
+// 测试直调都没有「本拍没送走」这层含义；残留的唯一来源就是扫描中被留下的节点。
+// 不加锁同理：状态只在本档轮消费协程（runWheel 每档一条）上读写，
+// 对外只通过 cursor 这一个原子量生效。
 func (r *slotRing) markResidue() {
 	r.residue = true
 }
@@ -172,18 +177,40 @@ func (r *slotRing) Range(f func(list.INode) bool) {
 	}
 }
 
-// RangeWindow 扫描「游标之后到 currentTime 所属那一格」的桶，并把游标推进到该格。
+// RangeWindow 扫描「游标之后到 currentTime 的下一格」的桶，并把游标推进到 currentTime
+// 所属那一格（提前看过的那一格不计入游标，下一拍会作为到期格正式重访）。
 //
-// 这是 S67 的全部收益来源：一次 tick 只付到期桶的钱。三种边界：
+// 这是 S67 的收益来源：一次 tick 只付「到期桶 + 前一格的预扫」的钱，而不是整轮。
+// 三种边界：
 //   - target <= cursor：墙钟没往前走（同一毫秒内被重复驱动、或时钟回拨）。本格与钳制
 //     落点都要扫，否则新落进这一格的到期项要等墙钟推进才被发现；
 //   - target - cursor >= slotCount：落后超过一圈（比如进程被冻结后恢复）。逐格扫已
 //     无意义，整环扫一遍，代价退回 O(在链数) 但不漏派发；
-//   - 其余：逐格扫 (cursor, target]。
+//   - 其余：逐格扫 (cursor, target+1]。
+//
+// 为什么必须多扫「下一格」（lookahead，实测必需而非锦上添花）：一档轮的 ticker 周期
+// 等于该档精度，于是每个桶一拍只被看一次，落在 W = 格起点 + δ（δ 为该协程的固定节拍
+// 相位）这一刻。节点到期时刻 T 落在格 B 内的偏移 r 与 δ 素不相识：δ >= r 时这一拍看到
+// 它已到期，直接从粗档派发出去，晚点 δ-r 最大接近一整格（秒档 1s、分档 60s、10 分档
+// 600s）。变更前每拍全扫，节点在被划入本档的那一刻起每拍都被复查，remaining 一跌破
+// 本档下界就下沉到更精确的一档，最终由毫秒轮按 1ms 兑现 —— 实测变更后 40 个 1500ms
+// 周期定时器每次派发都稳定晚 500ms 且 wheelMigrations 恒为 0，是纯粹的精度倒退。
+// 多扫一格把每个节点的被访次数恢复成两次：早拍（W' = (B-1)格起点 + δ）与到期拍。
+// 早拍时 remaining = r + cfg - δ，到期拍时 remaining = r - δ；两者恰好在 δ 的两侧互补，
+// 必有其一落在 [0, cfg) 区间内，于是节点总能在到期前下沉到更精确的一档，而不是被粗档
+// 直接派发。早拍绝不会再早：到期判定仍是 nextTime <= currentTime，未到期且仍属本档的
+// 节点原样留下，下一拍作为到期格正式重访。代价是每拍固定多扫一格。
+//
+// 毫秒轮（cfg == 1）不带这个代价：nextTime 与墙钟同为整数毫秒，一格的宽度就是一毫秒，
+// 扫描永远不可能早于到期，预扫那一格只是白走一遍 —— 见下面 last 的推导。
 //
 // 游标在扫完之后才推进：中途 panic 时下一次仍会重扫这一段，宁可重复派发一次
 // （认领协议会把重复派发判给 dispatchSkipped）也不能把整段桶永久留在身后。
 // 扫描中留下残留（通道满）时同样回退游标，见 markResidue。
+//
+// 回退幅度恒不超过一圈：窗口分支退回「本段第一个残留桶之前」，整环分支退回
+// target-slotCount（下一拍仍满足整环条件，保持变更前的全扫节奏）。两条都以本拍的
+// target 为基准，因此时钟回拨后游标只会随墙钟一起往前走，不会退到几十年前反复重扫。
 //
 // 游标只由本档轮的消费协程推进（runWheel 每档一条），handleTimerAdd 只读它做归桶
 // 钳制，因此这里不额外加锁；钳制读到的是「刚刚扫过」而非「正要扫」的游标，
@@ -197,25 +224,30 @@ func (r *slotRing) RangeWindow(currentTime int64, f func(list.INode) bool) {
 	target := currentTime / r.wheelConfig
 	cur := r.cursor.Load()
 	if target <= cur {
-		// 墙钟没往前走：除了本格，还要扫「归桶钳制」的落点 cursor+1。少了这一格，
-		// 入链即到期（nextTime <= 此刻）的节点会被钳到身后那一格，而同一毫秒内被重复
-		// 驱动时 target 始终等于 cursor，它要等墙钟推进才可能被发现。
+		// 墙钟没往前走：除了本格，还要扫「归桶钳制」的落点与 lookahead 的落点，
+		// 即 cur+1 那一格。少了这一格，入链即到期（nextTime <= 此刻）而被钳到身后
+		// 一格的节点要等墙钟推进才可能被发现；而 cur == target 时这一格正是常态
+		// 分支里的那一格预扫，两条分支的口径保持一致。
 		// 本格自己也重扫一遍是有意保留的：上一拍因投递通道满而留在原地的节点，
 		// 不等墙钟推进也该拿到重试机会——这正是变更前「每拍全扫」唯一有价值的部分。
-		// 游标本就不推进，残留会在下一拍的同一段扫描里重试，无需回退。
-		r.scanning = target
-		if !rangeSlot(r.slots[r.slotOfStep(target)], f) {
+		// 这一支不回退游标（游标本拍就没动，下一拍仍覆盖同一对桶），依据的是那条
+		// 未成文不变式：在链节点的应落桶步数恒 > 游标（slotFor 一律钳到 cursor+1），
+		// 所以这里能留下残留的只有 slot(cur+1)，而它正是下一拍要扫的那一格。
+		if !r.scanSlot(r.slots[r.slotOfStep(target)], f) {
 			return
 		}
-		r.scanning = cur + 1
-		rangeSlot(r.slots[r.slotOfStep(cur+1)], f)
+		r.scanSlot(r.slots[r.slotOfStep(cur+1)], f)
 		return
 	}
 	if target-cur >= r.slotCount {
-		// 落后超过一圈：逐格追已无意义，整环扫一遍。此时若有残留，游标退回「再落后
-		// 一圈」的位置，下一拍仍满足整环条件——背压没消化完就保持变更前的全扫节奏，
-		// 绝不把留在身后任意一格里的节点推到一整圈之后。
-		r.Range(f)
+		// 落后超过一圈：逐格追已无意义，整环扫一遍（lookahead 那格也在这一次里覆盖了）。
+		// 此时若有残留，游标退回「再落后一圈」的位置，下一拍仍满足整环条件——背压没
+		// 消化完就保持变更前的全扫节奏，绝不把留在身后任意一格里的节点推到一整圈之后。
+		for _, slot := range r.slots {
+			if !r.scanSlot(slot, f) {
+				return
+			}
+		}
 		if r.residue {
 			r.cursor.Store(target - r.slotCount)
 			return
@@ -223,24 +255,62 @@ func (r *slotRing) RangeWindow(currentTime int64, f func(list.INode) bool) {
 		r.cursor.Store(target)
 		return
 	}
-	rewindTo := int64(0) // 本段第一个留下残留的桶步数；0 表示没有
-	for step := cur + 1; step <= target; step++ {
-		r.scanning = step
-		if !rangeSlot(r.slots[r.slotOfStep(step)], f) {
+	rewindTo, rewound := int64(0), false // 本段第一个留下残留的桶步数（0 不可作哨兵：步数合法值含 0）
+	// 预扫那一格只对「一格宽于一毫秒」的档有意义：nextTime 与墙钟都是整数毫秒，
+	// 毫秒轮里 target == 节点自己的步数，扫描发生的瞬间必有 now >= step == 那一毫秒，
+	// 也就是不可能「早于到期看到」——那半格永远只会白走一遍。粗档（1s/60s/600s）
+	// 才存在「同一格内早于到期被扫到」的窗口，而那正是跨档下沉要抓的时机。
+	last := target
+	if r.wheelConfig > 1 {
+		last = target + 1
+	}
+	for step := cur + 1; step <= last; step++ {
+		if !r.scanSlot(r.slots[r.slotOfStep(step)], f) {
 			return
 		}
 		if r.residue {
 			r.residue = false
-			if rewindTo == 0 {
-				rewindTo = step
+			if !rewound {
+				rewound, rewindTo = true, step
 			}
 		}
 	}
+	// 游标只推进到 target，而不是本段实际扫到的 target+1：预扫过的那一格下一拍要作为
+	// 到期格正式重访（早拍里 remaining 还大于本档下界、原样留下的节点，全靠这一次
+	// 落到更精确的一档）。残留回退同理以本格为上限，保证留下残留的那格必被重扫。
 	next := target
-	if rewindTo > 0 && rewindTo-1 < next {
+	if rewound && rewindTo-1 < next {
 		next = rewindTo - 1
 	}
 	r.cursor.Store(next)
+}
+
+// scanSlot 扫描一个桶，返回「是否继续扫后面的桶」。
+//
+// 比裸 rangeSlot 多做两件事：
+//
+//  1. 空桶快路径。落后超过一圈（进程被 GC/挂起恢复）时要逐个过 slotCount 个桶，
+//     毫秒轮就是 1000 次读锁加一次快照取还，即使全空也要几十到上百微秒；
+//     先比一次长度，空桶直接跳过。非空桶多付一次 Length（一次读锁），可忽略。
+//
+//  2. 回调 panic 隔离。业务实现的 TimerInterface.GetParent 若炸，panic 绝不能抛出
+//     RangeWindow：游标在扫描之后才推进，于是它永远停在原地，这一档轮每个 tick 都在
+//     同一个节点上重炸——整档轮永久停摆（变更前一次 panic 只毁掉当轮扫描）。
+//     这里就地收下并按残留处理：游标退回本桶之前，本桶剩余节点与其余各桶下一拍重试，
+//     其余定时器照常派发。日志只能留在这里——扫描不在任何锁内（commitDispatch
+//     自带 defer 释放），而 vars 异步缓冲满时最长阻塞 5 秒，持锁打日志会拖死整轮。
+func (r *slotRing) scanSlot(slot *list.List, f func(list.INode) bool) (cont bool) {
+	if slot.Length() == 0 {
+		return true
+	}
+	defer func() {
+		if err := recover(); err != nil {
+			r.markResidue()
+			vars.Error("时间轮桶扫描回调发生panic，本桶剩余节点推迟到下一拍重试: %v", err)
+			cont = true
+		}
+	}()
+	return rangeSlot(slot, f)
 }
 
 // rangeSlot 包一层，让回调返回 false 能终止整个窗口/全环扫描。

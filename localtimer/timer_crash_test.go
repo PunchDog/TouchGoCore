@@ -34,13 +34,21 @@ import (
 // 运行方式：
 //   go test ./localtimer -run 'TestRegression_' -v
 //   CGO_ENABLED=1 go test ./localtimer -run TestRace_ -race -v
+//   go test ./localtimer -short     # 快跑：跳过子进程宕机回归，其余照常
 // ============================================================================
 
 const crashChildEnv = "TG_LOCALTIMER_CRASH_CHILD"
 
 // runCrashChild 在子进程中单独运行指定测试函数，返回子进程输出与是否超时（挂死）。
+//
+// 门控集中在这一处：子进程要重跑一遍测试二进制、且各自带 20~25s 的等待预算，
+// 快跑（go test -short）只想要功能结论时不必付这份墙钟；致命场景的验证留给完整 CI。
 func runCrashChild(t *testing.T, testName string, wait time.Duration) (out string, timedOut bool) {
 	t.Helper()
+
+	if testing.Short() {
+		t.Skip("短跑模式跳过子进程宕机回归（需完整 CI 运行）")
+	}
 
 	cmd := exec.Command(os.Args[0], "-test.run=^"+testName+"$", "-test.timeout=30s")
 	cmd.Env = append(os.Environ(), crashChildEnv+"=1")

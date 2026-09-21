@@ -1,16 +1,23 @@
 # bench/run.ps1
 # 一键运行全量 benchmark（带 -benchmem），结果保存到 docs/bench-result.txt
 # 用法：powershell -File bench/run.ps1
+#   快跑：powershell -File bench/run.ps1 -Short   # 先 go test -short ./... 再把 benchtime 收敛到 50ms
 param(
     [int]$Benchtime = 1000,        # 单个 benchmark 最短时间（ms）
     [int]$Count = 1,                # 重复次数
     [string]$Tag = "manual",        # 结果标签
+    [switch]$Short,                 # 快跑：跳过重型用例（子进程宕机回归、真实 HTTP 负载）并压缩基准时长
     [string]$Output = "docs/bench-result-$Tag.txt"
 )
 
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
+
+if ($Short) {
+    # -short 只门控用例，不影响 benchmark 的迭代量，所以快跑必须同时压 benchtime
+    $Benchtime = [Math]::Min($Benchtime, 50)
+}
 
 # 包列表
 $packages = @(
@@ -30,7 +37,7 @@ $packages = @(
 )
 
 Write-Host "=== TouchGoCore 全量 Benchmark ===" -ForegroundColor Cyan
-Write-Host "Benchtime: ${Benchtime}ms  Count: $Count  Tag: $Tag"
+Write-Host "Benchtime: ${Benchtime}ms  Count: $Count  Tag: $Tag  Short: $Short"
 Write-Host "Output:    $Output"
 Write-Host ""
 
@@ -47,8 +54,19 @@ Go:      $(go version)
 Tag:     $Tag
 Benchtime: ${Benchtime}ms
 Count:    $Count
+Short:    $Short
 
 "@ | Set-Content -Path $outputPath -Encoding UTF8
+
+# 快跑先给一遍功能结论：-short 下被门控的用例（子进程宕机回归、真实 HTTP 负载）直接跳过
+if ($Short) {
+    Write-Host "[Short] go test -short -count=1 ./..." -ForegroundColor Yellow
+    go test -short -count=1 -timeout=300s ./... 2>&1 | Tee-Object -Append -FilePath $outputPath
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "[Short] 用例未全绿（退出码 $LASTEXITCODE），继续跑基准以便一次看完" -ForegroundColor Red
+    }
+    Write-Host ""
+}
 
 foreach ($pkg in $packages) {
     Write-Host "[Running] $pkg" -ForegroundColor Yellow

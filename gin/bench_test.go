@@ -133,7 +133,14 @@ func freePort(t testing.TB) int {
 }
 
 // TestHttpConcurrencyLoad 启动真实 HTTP 服务并施压，输出 QPS 与延迟分布
+//
+// 300 并发 × 10 万请求的真实压测，跑一轮按机器性能从数秒到数十秒，且结果只用于
+// 观察吞吐趋势、不作断言，因此归到完整 CI；快跑（go test -short）跳过。
 func TestHttpConcurrencyLoad(t *testing.T) {
+	if testing.Short() {
+		t.Skip("短跑模式跳过真实 HTTP 并发负载用例")
+	}
+
 	gin.SetMode(gin.ReleaseMode)
 	// 将 vars 初始化为 off 模式，使桥接后的 gin 访问日志（vars.Debug）完全静默：
 	// 既真实执行桥接链路，又不产生任何 I/O，避免访问日志写出干扰吞吐测量。

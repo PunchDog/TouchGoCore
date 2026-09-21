@@ -86,6 +86,12 @@ func (o *observabilityPlugin) before(db *gorm.DB) {
 }
 
 func (o *observabilityPlugin) after(db *gorm.DB) {
+	// 判空必须放在取起点之前：gorm 的 DB.Get 实现就是
+	// db.Statement.Settings.Load(...)，Statement 为 nil 时先在 gorm 内部炸掉，
+	// 判在下游等于没判。
+	if db == nil || db.Statement == nil {
+		return
+	}
 	v, ok := db.Get(ctxStartKey)
 	if !ok {
 		return
@@ -98,7 +104,7 @@ func (o *observabilityPlugin) after(db *gorm.DB) {
 	// 注意：gorm 的 Count/Row/Raw 等场景下 db.Statement.Schema 可能为 nil，
 	// 直接取 .Table 会触发空指针 panic。此处做空值保护：有 Schema 且有表名时用表名，否则回退 "raw"。
 	op := "raw"
-	if db.Statement != nil && db.Statement.Schema != nil {
+	if db.Statement.Schema != nil {
 		if table := db.Statement.Schema.Table; table != "" {
 			op = table
 		}

@@ -7,7 +7,6 @@ import (
 	"sync/atomic"
 	"time"
 	"touchgocore/metrics"
-	"touchgocore/syncmap"
 	"touchgocore/util"
 	"touchgocore/vars"
 
@@ -33,7 +32,16 @@ func nextUID() int64 {
 	return uidSeed.Add(1)
 }
 
-var clientMap *syncmap.Map[int64, *Client]
+// clientTable 是客户端表用到的最小方法集（消费方自己声明窄接口）。
+// *syncmap.Map 与 *syncmap.ShardedMap 都满足它，所以注入点可以换实现而不动任何调用方。
+type clientTable interface {
+	Store(uid int64, c *Client)
+	Delete(uid int64)
+	Load(uid int64) (*Client, bool)
+	Range(fn func(uid int64, c *Client) bool)
+}
+
+var clientMap clientTable
 
 // ============ 改进部分 ============
 

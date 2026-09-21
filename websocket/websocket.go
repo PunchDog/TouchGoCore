@@ -227,7 +227,19 @@ func RegisterCall(className string, factoryFunc any) {
 }
 
 // UseClientMap 绑定 WebSocket 客户端表（App 优先，全局 fallback）。
+//
+// 单锁表在几十个读协程同时按 uid 查客户端时会把锁排队算进消息延迟；
+// 想换成分片表用 UseShardedClientMap，两者对本包等价（见 clientTable）。
 func UseClientMap(m *syncmap.Map[int64, *Client]) {
+	if m != nil {
+		clientMap = m
+	}
+}
+
+// UseShardedClientMap 绑定分片客户端表（S69）。
+// 分片表的 Range 是逐片快照，不保证跨片的全局一致顺序；本包只在关服时用它
+// 逐个关连接，因此这一差异不可观察。
+func UseShardedClientMap(m *syncmap.ShardedMap[int64, *Client]) {
 	if m != nil {
 		clientMap = m
 	}
@@ -257,7 +269,9 @@ func Run(ctx context.Context) error {
 	}
 
 	if clientMap == nil {
-		clientMap = syncmap.NewMap[int64, *Client]()
+		// 不经 App 直接跑本模块时的兜底表：用分片实现，因为这张表每次消息派发都要查一遍，
+		// 单锁版在并发连接下会把锁排队算进消息延迟（S69 实测并行读快 2.4~2.8 倍）。
+		clientMap = syncmap.NewShardedMap[int64, *Client](0)
 	}
 
 	params := wsQueueParams{

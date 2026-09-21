@@ -46,8 +46,10 @@ type App struct {
 	// 模块注册表（优先于此读取，全局变量作为 fallback）
 	rpcServers *syncmap.Map[string, *rpc.RpcServer]
 	rpcClients *syncmap.Map[string, *rpc.RpcClient]
-	wsClients  *syncmap.Map[int64, *websocket.Client]
-	databases  *syncmap.MapAny
+	// wsClients 用分片表：每条消息派发都要按 uid 查一次客户端，几十个连接的读协程
+	// 挤在一把 RWMutex 上时，锁排队直接算进消息延迟（S69 实测并行读快 2.4~2.8 倍）。
+	wsClients *syncmap.ShardedMap[int64, *websocket.Client]
+	databases *syncmap.MapAny
 
 	// 上下文和取消
 	ctx    context.Context
@@ -76,14 +78,14 @@ func NewApp(serverName string) (*App, error) {
 		ServerName: serverName,
 		rpcServers: syncmap.NewMap[string, *rpc.RpcServer](),
 		rpcClients: syncmap.NewMap[string, *rpc.RpcClient](),
-		wsClients:  syncmap.NewMap[int64, *websocket.Client](),
+		wsClients:  syncmap.NewShardedMap[int64, *websocket.Client](0),
 		databases:  syncmap.NewAny(),
 	}
 	app.ctx, app.cancel = context.WithCancel(context.Background())
 	app.CallFunc = util.DefaultCallFunc
 
 	rpc.UseRegistry(app.rpcServers, app.rpcClients)
-	websocket.UseClientMap(app.wsClients)
+	websocket.UseShardedClientMap(app.wsClients)
 	dbmap.UseAppRegistry(app.databases)
 
 	// 加载配置

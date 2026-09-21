@@ -40,7 +40,7 @@ func TestAppRegistryFallback(t *testing.T) {
 	app := &App{
 		rpcClients: syncmap.NewMap[string, *rpc.RpcClient](),
 		rpcServers: syncmap.NewMap[string, *rpc.RpcServer](),
-		wsClients:  syncmap.NewMap[int64, *websocket.Client](),
+		wsClients:  syncmap.NewShardedMap[int64, *websocket.Client](0),
 	}
 	if app.GetRpcClient("missing") != nil {
 		t.Fatal("expected nil rpc client")

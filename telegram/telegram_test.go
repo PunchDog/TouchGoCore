@@ -18,7 +18,7 @@ func signWebApp(botToken, query string) string {
 		}
 		pairs = append(pairs, p)
 	}
-	// caller passes already-sorted check string via query without hash
+	// 调用方传入的 query 已是排好序、且不含 hash 字段的待校验串
 	h := hmac.New(sha256.New, []byte(WebAppDataKey))
 	h.Write([]byte(botToken))
 	key := h.Sum(nil)
@@ -43,7 +43,7 @@ func splitAmp(s string) []string {
 }
 
 func queryToCheckString(query string) string {
-	// validateWebAppData sorts keys and unescapes
+	// 与 validateWebAppData 一致：按 key 排序并反转义
 	type kv struct{ k, v string }
 	var list []kv
 	for _, p := range splitAmp(query) {

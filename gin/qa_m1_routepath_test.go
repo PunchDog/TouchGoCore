@@ -30,8 +30,8 @@ func (*qaDerivedRecv) AddUrlList(_ *gin.Context) string { return "derived-ok" }
 // TestQAMixedExplicitAndDerivedPaths 显式与推导混用：两条路由都在、路径互不污染、handler 各自正确。
 func TestQAMixedExplicitAndDerivedPaths(t *testing.T) {
 	isolateRegistry(t)
-	RegisterRouter(&qaExplicitRecv{}, nil)
-	RegisterRouter(&qaDerivedRecv{}, nil)
+	RegisterRouter(&qaExplicitRecv{})
+	RegisterRouter(&qaDerivedRecv{})
 
 	keys := routerKeys()
 	if len(keys) != 2 {
@@ -60,7 +60,7 @@ func TestQAMixedExplicitAndDerivedPaths(t *testing.T) {
 // TestQANoPathInterfaceStillTwoSegment 反证：不实现 IRouterPath 时，路径严格是「/小写类型/小写方法」两段。
 func TestQANoPathInterfaceStillTwoSegment(t *testing.T) {
 	isolateRegistry(t)
-	RegisterRouter(&qaDerivedRecv{}, nil)
+	RegisterRouter(&qaDerivedRecv{})
 
 	keys := routerKeys()
 	if len(keys) != 1 || keys[0] != "/qaderivedrecv/addurllist|POST" {

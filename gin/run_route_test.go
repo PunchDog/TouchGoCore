@@ -93,8 +93,8 @@ func TestMethodCacheIsPerReceiver(t *testing.T) {
 
 	a := &singleRecv{tag: "A"}
 	b := &singleRecv{tag: "B"}
-	RegisterRouter(a, nil)
-	RegisterRouter(b, nil)
+	RegisterRouter(a)
+	RegisterRouter(b)
 
 	if got := invokeRoute(t, "/singlerecv/hello"); got != "hello:B" {
 		t.Fatalf("✘ 后注册实例 B 的路由执行了 %q（应为 hello:B，修复前会串到 A）", got)
@@ -104,7 +104,7 @@ func TestMethodCacheIsPerReceiver(t *testing.T) {
 // TestSingleInstanceStillWorks 只有一个实例时行为不变。
 func TestSingleInstanceStillWorks(t *testing.T) {
 	isolateRegistry(t)
-	RegisterRouter(&singleRecv{tag: "C"}, nil)
+	RegisterRouter(&singleRecv{tag: "C"})
 	if got := invokeRoute(t, "/singlerecv/hello"); got != "hello:C" {
 		t.Fatalf("✘ 响应 %q != hello:C", got)
 	}
@@ -113,7 +113,7 @@ func TestSingleInstanceStillWorks(t *testing.T) {
 // TestRouterTypeSuffixKeepsPathFilter 带 RouterType 的实例仍按方法名注册到可解析的 key。
 func TestRouterTypeSuffixKeepsPathFilter(t *testing.T) {
 	isolateRegistry(t)
-	RegisterRouter(&getRecv{tag: "D"}, nil)
+	RegisterRouter(&getRecv{tag: "D"})
 	keys := routerKeys()
 	if len(keys) != 1 {
 		t.Fatalf("注册 key %v", keys)
@@ -136,7 +136,7 @@ func TestRegisterRouterConcurrentWithRun(t *testing.T) {
 		go func(n int) {
 			defer wg.Done()
 			for j := 0; j < 200; j++ {
-				RegisterRouter(&singleRecv{tag: strconv.Itoa(n)}, nil)
+				RegisterRouter(&singleRecv{tag: strconv.Itoa(n)})
 			}
 		}(i)
 	}

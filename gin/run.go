@@ -85,11 +85,27 @@ type IRouterInterface interface {
 	RouterType() []string
 }
 
+// IRouterTimeout 可选接口：实现它即可为具体路由自定义 ctx 超时。
+//
+//	key   = 最终注册的路由路径，与 gin 的 ctx.FullPath() 一致（不含 "|METHOD" 方法后缀；
+//	        该方法若由 IRouterPath 指定了显式路径，这里也用显式路径）
+//	value = 超时秒数
+//
+// 未实现该接口、或某路径未出现在 map 中时，一律使用 RegisterRouter 内的默认 15s。
+//
+// 注意：RouterTimeout 与 RouterType、RouterPath 一样属于「类型方法」，
+// RegisterRouter 会跳过它，不会被注册成路由 handler。
+type IRouterTimeout interface {
+	RouterTimeout() map[string]int64
+}
+
 // RegisterRouter 将一个struct中所有的函数注册到gin中
-// 支持两种函数签名：
+// 支持的 handler 函数签名：
 //   - func (this *class) MethodName(ctx *gin.Context) any  (推荐，可获取更多上下文)
-//   - timeout map[string]int64 自定义ctx超时时间
-func RegisterRouter(class IRouterInterface, timeoutmap map[string]int64) {
+//
+// 路由的 HTTP 方法、显式路径与 ctx 超时分别由 IRouterInterface、IRouterPath、
+// IRouterTimeout 三个可选能力提供，未实现即走默认推导与默认超时。
+func RegisterRouter(class IRouterInterface) {
 	sname, mnames := util.GetClassName(class)
 	rcvr := reflect.ValueOf(class)
 
@@ -100,10 +116,17 @@ func RegisterRouter(class IRouterInterface, timeoutmap map[string]int64) {
 		explicit = rp.RouterPath()
 	}
 
+	// + 超时表（可选）：注册期读一次并快照进闭包，避免每个请求都做类型断言。
+	// 未实现 IRouterTimeout 时 timeouts 为 nil，查表恒不命中，走默认 15s。
+	var timeouts map[string]int64
+	if rt, ok := class.(IRouterTimeout); ok {
+		timeouts = rt.RouterTimeout()
+	}
+
 	for _, mname := range mnames {
 		//这个是类型，不进行router注册
-		// + 同时跳过 RouterPath（与 RouterType 一样，是类型方法而非 handler）
-		if mname == "RouterType" || mname == "RouterPath" {
+		// + 同时跳过 RouterPath、RouterTimeout（与 RouterType 一样，是类型方法而非 handler）
+		if mname == "RouterType" || mname == "RouterPath" || mname == "RouterTimeout" {
 			continue
 		}
 
@@ -127,9 +150,9 @@ func RegisterRouter(class IRouterInterface, timeoutmap map[string]int64) {
 		}
 
 		handler := func(ctx *gin.Context) {
-			// 默认 15s，避免慢接口拖死 worker；CheckUrlNow 批量探测外网，单独放宽到 60s
+			// 默认 15s，避免慢接口拖死 worker；RouterTimeout 按路径覆盖（如 CheckUrlNow 批量探测外网放宽到 60s）
 			reqTimeout := 15 * time.Second
-			if sec, h := timeoutmap[ctx.FullPath()]; h {
+			if sec, h := timeouts[ctx.FullPath()]; h {
 				reqTimeout = time.Duration(sec) * time.Second
 			}
 

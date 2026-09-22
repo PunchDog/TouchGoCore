@@ -58,7 +58,7 @@ var benchOnce sync.Once
 // registerBench 注册基准路由，幂等
 func registerBench() {
 	benchOnce.Do(func() {
-		RegisterRouter(&benchRouter{}, map[string]int64{})
+		RegisterRouter(&benchRouter{})
 	})
 }
 

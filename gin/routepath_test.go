@@ -31,7 +31,7 @@ func (*plainRecv) Hello(_ *gin.Context) string { return "hi" }
 // TestIRouterPathExplicitPath 显式路径生效，且 RouterPath/RouterType 不注册为路由。
 func TestIRouterPathExplicitPath(t *testing.T) {
 	isolateRegistry(t)
-	RegisterRouter(&pathRecv{}, nil)
+	RegisterRouter(&pathRecv{})
 
 	keys := routerKeys()
 	if len(keys) != 1 {
@@ -53,7 +53,7 @@ func TestIRouterPathExplicitPath(t *testing.T) {
 // TestDefaultDerivationUnchanged 未实现 IRouterPath 的类仍走默认推导。
 func TestDefaultDerivationUnchanged(t *testing.T) {
 	isolateRegistry(t)
-	RegisterRouter(&plainRecv{}, nil)
+	RegisterRouter(&plainRecv{})
 
 	keys := routerKeys()
 	if len(keys) != 1 || keys[0] != "/plainrecv/hello|GET" {
@@ -67,7 +67,7 @@ func TestDefaultDerivationUnchanged(t *testing.T) {
 // TestPartialRouterPathFallsBack 实现了 IRouterPath 但方法未列出时回退默认推导。
 func TestPartialRouterPathFallsBack(t *testing.T) {
 	isolateRegistry(t)
-	RegisterRouter(&partialRecv{}, nil)
+	RegisterRouter(&partialRecv{})
 
 	keys := routerKeys()
 	if len(keys) != 2 {

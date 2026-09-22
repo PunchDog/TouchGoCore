@@ -352,7 +352,7 @@ func (s *RpcServer) forward(msg *MessageInfo) {
 	if msg == nil {
 		return
 	}
-	req := util.PasreFSMessage(msg.Req)
+	req := util.ParseFSMessage(msg.Req)
 	if req == nil {
 		// 协议未注册/Body 解码失败：客户端在等这一条的回包，明确拒绝比静默丢弃友好
 		vars.Error("RPC服务端解析请求失败[%s] 协议号:%d:%d, 客户端:%s",

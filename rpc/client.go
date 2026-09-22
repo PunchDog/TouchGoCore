@@ -353,7 +353,7 @@ func (c *RpcClient) failAllPending() {
 }
 
 func (c *RpcClient) dispatchRecv(protocol1, protocol2 int32, recv *message.FSMessage, callfunc func(pb1 proto.Message)) {
-	res := util.PasreFSMessage(recv)
+	res := util.ParseFSMessage(recv)
 	if res == nil {
 		vars.Error("RPC客户端响应解析失败[%s] 协议:%d:%d", c.fullAddr, protocol1, protocol2)
 		return

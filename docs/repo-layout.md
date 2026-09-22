@@ -5,8 +5,8 @@
 
 ## 规模
 
-- 主模块 39 个包 / 133 个非测试 .go 文件 / 28998 行；另有 3 个 `example/` 演示包。
-- 全仓 259 个 .go 文件，其中测试 118 个。
+- 主模块 39 个包 / 133 个非测试 .go 文件 / 29203 行；另有 3 个 `example/` 演示包。
+- 全仓 263 个 .go 文件，其中测试 122 个。
 - module 名 `touchgocore`，被外部业务工程直接 import，因此导出面即 API：
   见 [dead-exports.md](dead-exports.md) 的「零引用不等于可删」。
 
@@ -15,9 +15,9 @@
 同层之间无依赖，只允许下层被上层引用。括号内是包数。
 
 ```
-L0  无内部依赖      vars · syncmap · ini · network/message · swd/common
+L0  无内部依赖      vars · syncmap · random · ini · network/message · swd/common
                     swd/types/category · swd/config/mappingdata
-L1  配置与指标      config · metrics · random · db/dbmap · swd/config · swd/core
+L1  配置与指标      config · metrics · db/dbmap · swd/config · swd/core
 L2                  corectx · util · db/mysql · ranking · swd/algorithm
                     swd/types/{homophone,pinyin,similar}
 L3  业务组件        ai · db · gin · list · websocket
@@ -33,6 +33,12 @@ L8  演示           example/gatewayserver · example/loginserver
 
 - `vars` 在 L0，日志器不依赖任何业务包；它同时被 21 个包引用，是全仓最底层的共用件。
   给 `vars` 加依赖等于给全仓加依赖，基本不可接受。
+- `random` 到 2026-09-22 为止还依赖 `vars`（只为一句被 `defer/recover` 吞掉的日志），
+  现在依赖清空，落到 L0 叶子层。它是继 `vars` 之后第二个「被上层引用但不引用任何人」的
+  共用件：`util` 与 `ranking` 都引用它，所以给它加依赖等于把它的锁纪律传染给 L2。
+  同日 `util.RandInt`/`RandRange` 也从 `math/rand/v2` 改走这里，于是
+  `mapmanager/npc.go:386` 的对话文本随机变成「经 L2 的 util 去抢 L0 全局实例的一把互斥锁」——
+  引用它就是在共享它的锁，热点上要么自己 `random.New(seed)` 持一份。
 - `util` 在 L2，依赖 `network/message`、`random`、`syncmap`、`vars`。它不是叶子层，
   L0/L1 的包不能反向引用它。
 - 根包只做装配：`app.go` / `services.go` 把 17 个内部包接进一个生命周期容器，
@@ -51,7 +57,7 @@ L8  演示           example/gatewayserver · example/loginserver
 | `localtimer` | 11 | 2803 | list, syncmap, util, vars |
 | `golua` | 11 | 2619 | config, corectx, localtimer, metrics, syncmap, util, vars |
 | `rpc` | 6 | 2242 | config, corectx, localtimer, metrics, network/message, syncmap, util, vars |
-| `util` | 13 | 1883 | network/message, random, syncmap, vars |
+| `util` | 13 | 1899 | network/message, random, syncmap, vars |
 | `websocket` | 4 | 1768 | config, corectx, metrics, syncmap, util, vars |
 | `db/mysql` | 10 | 1511 | config, db/dbmap, vars |
 | `ai` | 6 | 1262 | config, corectx, vars |
@@ -63,6 +69,7 @@ L8  演示           example/gatewayserver · example/loginserver
 | `mapmanager` | 2 | 688 | corectx, golua, syncmap, util, vars |
 | `swd/algorithm` | 2 | 620 | swd/common, swd/core, swd/types/category |
 | `swd/dictionary` | 2 | 613 | swd/config, swd/config/mappingdata, swd/core, swd/types/category, util |
+| `random` | 3 | 566 | — |
 | `swd/swd` | 4 | 555 | swd/config, swd/core, swd/detector, swd/dictionary, swd/filter, swd/types/category |
 | `list` | 3 | 552 | util, vars |
 | `syncmap` | 2 | 516 | — |
@@ -70,7 +77,6 @@ L8  演示           example/gatewayserver · example/loginserver
 | `swd/filter` | 2 | 458 | swd/core, swd/detector, swd/types/category, util |
 | `network/message` | 3 | 434 | — |
 | `gin` | 2 | 387 | corectx, util, vars |
-| `random` | 3 | 377 | vars |
 | `swd/detector/preprocessor` | 1 | 302 | swd/common, swd/config, swd/core, swd/types/homophone, swd/types/pinyin, swd/types/similar |
 | `metrics` | 1 | 256 | vars |
 | `swd/config/mappingdata` | 1 | 255 | — |
@@ -94,7 +100,7 @@ L8  演示           example/gatewayserver · example/loginserver
 - `swd/`（40 文件 / 8896 行）与 `ranking/`（5 文件 / 848 行）在主模块内零 importer，
   但两者都是对外能力包，原地保留。`swd` 曾叫 `go-swd`（目录名与包名不一致），
   2026-09-11 已用 `git mv` 对齐。
-- `swd/**/*.txt`（15 个）与 `docs/bench-*.txt`（11 个）是**要进版本库的数据**：
+- `swd/**/*.txt`（15 个）与 `docs/bench-*.txt`（12 个）是**要进版本库的数据**：
   前者经 `go:embed` 打进二进制，后者是 `perf-baseline.md` 引用的基线证据。
   `.gitignore` 里的一次性输出规则因此限定在仓库根（`/*.txt`），不用裸 `*.txt`。
 - `golua/` 目录声明 `package lua`，所有引用方写 `lua "touchgocore/golua"`。

@@ -30,7 +30,7 @@
 | 符号 | 位置 | 附带事实 |
 |---|---|---|
 | `FormatDuration` | `util/time.go` | 无 |
-| `RandomStr` | `util/string.go` | 取模选择字符，分布可能偏斜 |
+| `RandomStr` | `util/string.go` | 逐位取模选字符；残余均匀性已过卡方检验（偏斜量级 ≤2n/2^63），问题在按字节截断长度与非密码学安全 |
 | `ParseDbData` | `util/string.go` | 转换异常被 recover 吞掉，不返回错误 |
 | `HTTPGet` | `util/http.go` | 无超时、无 context |
 | `PostFile` | `util/http.go` | 依赖已废弃的 `ioutil` 语义 |
@@ -63,9 +63,14 @@
 - `util.RandInt`、`GetClassName`、`IsIntranetIP`、`GetPathFile`、`ConvertToKind`：
   仓内有生产调用方（分别见 `mapmanager/npc.go:386`、`gin/run.go:93`、
   `rpc/client.go:424`、`mapmanager/map.go:130`、`golua/convert.go:152`），
-  本就不是死导出。
+  本就不是死导出。`RandInt` 的随机源于 2026-09-22 起由 `math/rand/v2` 改为 `touchgocore/random`
+  的包级默认实例（每次取值一把全局互斥锁，同窗实测中位数 19→53 ns/op，见 `perf-baseline.md`），
+  取值语义 `[0,max)` 与 `max<=0` 返回 0 均未变。
 - `util.RandRange`：零生产调用，但与 `RandInt` 是一对配套 API、语义清晰、
   被 `util/p0_regress_test.go` 钉住。标 Deprecated 等于要求自己的测试使用废弃符号。
+  换源顺带收掉一个宕机面：区间宽度大到 int64 溢出时，旧实现把负数宽度交给
+  `randv2.Int64N` 会 panic，现已按 `RandInt` 的约定退化成返回 `min`
+  （`util/random_dist_test.go` 的 `TestRandRange_HugeWidth` 钉住）。
 - `util.Numeric`：被上面两个 Sort 类型引用，是它们的类型约束。
 - `util.IPData`：`IPInfo` 的字段类型。两个都标会让仓内出现「已废弃符号引用已废弃符号」，
   告警打在框架自身头上，故只在 `IPInfo` 上标。
@@ -104,7 +109,16 @@
 - `localtimer/internal/dupname/plaintimer.go`（14 行）：唯一引用方是
   `localtimer/p3_pool_key_test.go:7`。它存在的意义就是「与主包内某类型同名、但不同包」，
   用来复现对象池按类型短名分组的回归（S62）。按「只被测试引用」删除会直接失效该回归。
-- `docs/bench-*.txt`（11 个，全部已跟踪）：`docs/perf-baseline.md` 引用的性能基线证据。
+- `random.isPrime` / `gcd` / `areCoprime`：2026-09-22 起在包内零引用——`MonteCarlo` 换成
+  xoshiro256\*\* 后不再需要现搜乘数（原 `findNextPrime` 已删，它对任何 2 的幂模数恒在第一次
+  尝试命中，等于常量函数）。三者仍被 `random_test.go` 的 TestIsPrime/TestGcd 与
+  `random_bench_test.go` 的 BenchmarkIsPrime 引用，且是非导出符号（`go doc` 快照看不见），
+  删它们等于删两个测试与一行基线，故原地保留，函数注释已写明「现仅由本包测试引用」。
+- `MonteCarlo.M`（导出字段，在快照成员行里）：原语义是同余模数 `1<<k`，换 64 位发生器后模数为
+  2^64、无法用正的 int64 表示，故改记为输出值域上界 `math.MaxInt64`。字段名与类型必须留着，
+  注释改动的写法也有讲究：只有**独占一行**的字段注释会被快照的 `grep -vP '^\t//'` 滤掉，
+  写在行尾的 `M int64 // ...` 会改掉成员行本身，破逐字节门。
+- `docs/bench-*.txt`（12 个，全部已跟踪）：`docs/perf-baseline.md` 引用的性能基线证据。
 - `swd/**/*.txt`（15 个，全部已跟踪）：`go:embed` 的词典与映射数据。
   `go:embed` 不读 `.gitignore`，所以历史上裸 `*.txt` 规则的风险是前瞻性的——
   将来新增词典会被静默忽略，本地与 CI 全过而下游 `go:embed` 编译失败。

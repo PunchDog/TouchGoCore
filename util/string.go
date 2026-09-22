@@ -11,17 +11,20 @@ import (
 	"touchgocore/vars"
 )
 
-// RandomStr 生成指定长度的随机字符串
+// RandomStr 生成指定长度的随机字符串，每一位独立取值；非正长度返回空串。
 //
-// Deprecated: 仓内零调用，仅为兼容既有外部用法保留。长度按字节截取，
-// 非线程安全的取模分布也可能偏斜；需要随机串请自行选型。
+// Deprecated: 仓内零调用，仅为兼容既有外部用法保留。长度按字节截取，取模分布
+// 也可能偏斜；需要随机串请自行选型。历史上它只抽一次索引便把整串填成同一个字符，
+// 负长度还会 panic，现已改为逐位取值与空串兜底。
 func RandomStr(length int) string {
+	if length <= 0 {
+		return ""
+	}
 	const charset = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
 	result := make([]byte, length)
 
-	idx := random.NextInt64() % int64(len(charset))
 	for i := range result {
-		result[i] = charset[idx]
+		result[i] = charset[random.NextInt64()%int64(len(charset))]
 	}
 	return string(result)
 }

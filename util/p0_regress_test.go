@@ -86,3 +86,21 @@ func TestPostMultipartForm_OK(t *testing.T) {
 		t.Fatalf("200 响应应成功: body=%q err=%v", body, err)
 	}
 }
+
+// TestRandomStr_PerCharacterRandom 钉住历史缺陷：索引只抽一次，整串被填成同一个字符。
+func TestRandomStr_PerCharacterRandom(t *testing.T) {
+	s := RandomStr(32)
+	if len(s) != 32 {
+		t.Fatalf("长度 = %d，应为 32", len(s))
+	}
+	distinct := make(map[byte]bool, 32)
+	for i := 0; i < len(s); i++ {
+		distinct[s[i]] = true
+	}
+	if len(distinct) < 2 {
+		t.Fatalf("32 位全为同一个字符: %q", s)
+	}
+	if RandomStr(0) != "" || RandomStr(-1) != "" {
+		t.Error("非正长度应返回空串，而不是 make 负长度 panic")
+	}
+}

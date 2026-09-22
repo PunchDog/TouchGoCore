@@ -27,7 +27,11 @@ const (
 // MersenneTwister 是梅森旋转（Mersenne Twister）MT19937-64 伪随机数发生器，
 // 周期为 2^19937-1。
 //
+// 零值可直接使用：首次取值会自行以一个固定种子完成播种，不会 panic。
 // 靠互斥锁保护，可并发使用。
+//
+// 注意 MT19937-64 是统计型发生器，不具备密码学强度，需要不可预测的取值请改用
+// crypto/rand。
 //
 // 示例：
 //
@@ -39,6 +43,7 @@ type MersenneTwister struct {
 	mt    [N]uint64
 	index int
 	seed  *int64
+	ready bool
 }
 
 // NewMersenneTwister 以给定指针的值作种子创建发生器。
@@ -66,57 +71,93 @@ func (mt *MersenneTwister) init(seed int64) {
 	mt.mu.Lock()
 	defer mt.mu.Unlock()
 
+	mt.reseedLocked(seed)
+}
+
+// reseedLocked 按 MT19937-64 的初始化递推式重播状态数组。调用前必须已持有 mt.mu。
+//
+// seed 为 0 时改用 1，以避开全零的退化状态；mt.seed 为空时给本实例配一个只属于自己的
+// 种子盒子，绝不指向包级共享变量，否则又把竞态引回来。
+func (mt *MersenneTwister) reseedLocked(seed int64) {
+	if seed == 0 {
+		seed = 1
+	}
+	if mt.seed == nil {
+		mt.seed = new(int64)
+	}
+	*mt.seed = seed
+
 	mt.mt[0] = uint64(seed)
 	for i := 1; i < N; i++ {
 		// 初始化递推式：mt[i] = (MASK * (mt[i-1] ^ (mt[i-1] >> (W-2))) + i)
 		mt.mt[i] = MASK*(mt.mt[i-1]^(mt.mt[i-1]>>(W-2))) + uint64(i)
 	}
 	mt.index = N // 置成 N，首次取值即触发生成
+	mt.ready = true
 }
 
 // Seed 用新种子重新初始化发生器。
 // 可并发调用；若需要频繁换种子，更建议直接新建一个发生器而不是反复重播。
 //
+// seed 为空指针时等价于零种子：重播到一个私有种子上，不解引用调用方给的空指针。
 // seed 指向的值为 0 时改用非零值，以避开全零的退化状态。
 func (mt *MersenneTwister) Seed(seed *int64) {
 	mt.mu.Lock()
 	defer mt.mu.Unlock()
 
+	if seed == nil {
+		mt.reseedLocked(0)
+		return
+	}
 	if *seed == 0 {
 		*seed = 1
 	}
-	if mt.seed != nil {
-		mt.seed = seed
-	}
+	mt.seed = seed
 
-	mt.mt[0] = uint64(*seed)
-	for i := 1; i < N; i++ {
-		mt.mt[i] = MASK*(mt.mt[i-1]^(mt.mt[i-1]>>(W-2))) + uint64(i)
-	}
-	mt.index = N
+	mt.reseedLocked(*seed)
 }
 
 // twist 执行梅森旋转的核心变换，一次性把状态数组里的 N 个数全部刷新。
 // 调用前必须已持有写锁。
+//
+// 用两条自增游标替代 (i+1)%N 与 (i+M)%N，省掉每次迭代里两回按常量取模的乘法；
+// 两游标各自每次只加 1 且只在等于 N 时归零，故恒有 i1 == (i+1)%N、im == (i+M)%N。
+// 原地的 mt[i] 覆写与索引顺序同改前一致，因此输出序列逐位不变。
 func (mt *MersenneTwister) twist() {
+	i1, im := 1, M
 	for i := 0; i < N; i++ {
 		// 用高/低位掩码把相邻两字拼成 x
-		x := (mt.mt[i] & UPPER_MASK) | (mt.mt[(i+1)%N] & LOWER_MASK)
+		x := (mt.mt[i] & UPPER_MASK) | (mt.mt[i1] & LOWER_MASK)
 
-		// 计算 xA
+		// xA 即 x>>1，并在 x 为奇数时异或常量矩阵 a；
+		// -(x&1) 在全 1 与全 0 之间切换，省掉一个约五五开的分支
 		xA := x >> 1
-		if x&1 != 0 {
-			xA ^= MATRIX_A
-		}
+		xA ^= -(x & 1) & MATRIX_A
 
 		// 生成新的状态值
-		mt.mt[i] = mt.mt[(i+M)%N] ^ xA
+		mt.mt[i] = mt.mt[im] ^ xA
+
+		if i1++; i1 == N {
+			i1 = 0
+		}
+		if im++; im == N {
+			im = 0
+		}
 	}
 	mt.index = 0
 }
 
+// temper 升温变换，改善输出在各比特位上的等均匀性。纯算术，可内联。
+func temper(y uint64) uint64 {
+	y ^= y >> U
+	y ^= (y << S) & B
+	y ^= (y << T) & C
+	y ^= y >> L
+	return y
+}
+
 // nextUint64 产出下一个 uint64 随机数，返回未再做位掩码的原始值。
-// 调用前必须已持有锁。
+// 调用前必须已持有锁。不触碰 mt.seed，因此对零值实例同样安全。
 func (mt *MersenneTwister) nextUint64() uint64 {
 	// 状态数组取空则补一轮
 	if mt.index >= N {
@@ -126,13 +167,12 @@ func (mt *MersenneTwister) nextUint64() uint64 {
 	y := mt.mt[mt.index]
 	mt.index++
 
-	// 升温变换，改善分布的等均匀性
-	y ^= y >> U
-	y ^= (y << S) & B
-	y ^= (y << T) & C
-	y ^= y >> L
+	return temper(y)
+}
 
-	return y
+// int63Locked 返回 [0, 1<<63-1] 区间内的非负取值。调用前必须已持有 mt.mu。
+func (mt *MersenneTwister) int63Locked() int64 {
+	return int64(mt.nextUint64() >> 1)
 }
 
 // Uint64 返回一个伪随机的 uint64，是其余取值方法的公共核心。
@@ -140,6 +180,9 @@ func (mt *MersenneTwister) Uint64() uint64 {
 	mt.mu.Lock()
 	defer mt.mu.Unlock()
 
+	if !mt.ready {
+		mt.reseedLocked(0)
+	}
 	result := mt.nextUint64()
 
 	// 把出值累加进种子，沿用原实现的种子跟踪语义
@@ -160,10 +203,11 @@ func (mt *MersenneTwister) Uint32() uint32 {
 
 // Int31 返回 [0, 1<<31-1] 区间内的非负伪随机 int32。
 func (mt *MersenneTwister) Int31() int32 {
-	return int32(mt.Uint64() >> 33)
+	return int32((mt.Uint64() >> 33) & 0x7FFFFFFF)
 }
 
 // Intn 返回 [0,n) 区间内的非负伪随机 int；n <= 0 时 panic。
+// 取模分布，n 不是 2 的幂时存在偏斜（n 远小于 2^32 时可忽略）。
 func (mt *MersenneTwister) Intn(n int) int {
 	if n <= 0 {
 		panic("Intn: n must be positive")
@@ -172,6 +216,7 @@ func (mt *MersenneTwister) Intn(n int) int {
 }
 
 // Int63n 返回 [0,n) 区间内的非负伪随机 int64；n <= 0 时 panic。
+// 取模分布，n 不是 2 的幂时存在偏斜。
 func (mt *MersenneTwister) Int63n(n int64) int64 {
 	if n <= 0 {
 		panic("Int63n: n must be positive")
@@ -216,10 +261,17 @@ func (mt *MersenneTwister) Float64Range(min, max float64) float64 {
 
 // resetMersenneTwister 用当前种子重置发生器，仅为向后兼容保留。
 func (mt *MersenneTwister) resetMersenneTwister() {
-	mt.init(*mt.seed)
+	seed := int64(0)
+	mt.mu.Lock()
+	if mt.seed != nil {
+		seed = *mt.seed
+	}
+	mt.mu.Unlock()
+
+	mt.init(seed)
 }
 
-// nextInt64 供 IRandom 接口向后兼容使用：返回非负 63 位整数，并推进内部种子。
+// nextInt64 供 IRandom 接口向后兼容使用：返回非负 63 位整数。
 func (mt *MersenneTwister) nextInt64() int64 {
 	return mt.Int63()
 }

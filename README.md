@@ -32,14 +32,14 @@ go test ./config ./corectx ./db ./rpc ./util ./websocket ./telegram .
 
 `go build ./...` 会连带编译 `example/` 的 3 个包（同属主模块），那里的编译错误是真错误。
 
-- 包该依赖谁、新代码该落在哪个包：[docs/repo-layout.md](docs/repo-layout.md)。
-- 测试文件命名前缀的含义、`-short` 门控、本机跑不了 `-race` 的原因：[docs/testing-conventions.md](docs/testing-conventions.md)。
-- 哪些导出在仓内零引用但不许删：[docs/dead-exports.md](docs/dead-exports.md)。
+本仓的开发过程资产不进版本库，clone 里看不到、也不必找：`docs/` 下的重构与评审报告、
+文件名带 `p0_`~`p3_` 评审轮次前缀的测试、只含 `Benchmark` 的 `*_bench_test.go`。
+判定口径写在 `.gitignore` 里，新写的测试若取这些命名会被静默忽略。
 
 两个目录级陷阱：
 
-- 包目录下的 `.txt` 是要进版本库的数据（`swd/` 的词典与映射经 `go:embed` 打进二进制，
-  `docs/bench-*.txt` 是性能基线证据）。`.gitignore` 的一次性输出规则因此限定在仓库根
+- 包目录下的 `.txt` 是要进版本库的数据（`swd/` 的词典与映射经 `go:embed` 打进二进制）。
+  `.gitignore` 的一次性输出规则因此限定在仓库根
   （`/*.txt`），不要改回裸 `*.txt`——那会让新增词典被静默忽略，本地与 CI 全过，
   下游拉取后 `go:embed` 直接编译失败。
 - 全仓检索要排除工具存档目录：`grep -rn --include='*.go' --exclude-dir=.workbuddy-ai 模式 .`。

@@ -12,14 +12,10 @@
 *.out
 
 # 一次性问答/压测输出。刻意限定在仓库根：包目录下的 .txt 是要进版本库的数据
-# （swd 词典与映射经 go:embed 打进二进制、docs/bench-*.txt 是 perf-baseline.md 引用的基线），
-# 用裸 *.txt 会让新增的词典文件被静默忽略，本地与 CI 全过而下游 go:embed 编译失败。
+# （swd 词典与映射经 go:embed 打进二进制）。用裸 *.txt 会让新增的词典文件被静默
+# 忽略，本地与 CI 全过而下游 go:embed 编译失败。
 /*.txt
 /*.err
-# bench/race.ps1 与 bench/run.ps1 的运行输出。入库的基线是手工挑出来的
-# docs/bench-baseline*.txt，命名不在下面两条之内，因此不会被误伤。
-/docs/race-result.txt
-/docs/bench-result-*.txt
 # Dependency directories (remove the comment below to include it)
 # vendor/
 vendor
@@ -34,3 +30,28 @@ vars/logs/*.log
 .cursor/plans/*.md
 .codebuddy/plans/*.md
 .workbuddy-ai/*
+
+# 开发过程文档不发布：docs/ 是本仓重构与评审的工作记录（报告、基线数据、
+# 死导出登记），对下游使用者无价值。整个目录只留在本地。
+# bench/run.ps1 与 bench/race.ps1 的输出（bench-result-*.txt、race-result.txt）
+# 同样落在这里，不再单列规则。
+docs/
+
+# 评审轮次测试与本机基准不发布。文件名前缀 p0_/p1_/p2_/p3_ 是历次代码评审的
+# 轮次标记，钉的是评审时发现的回归；*_bench_test.go 只含 Benchmark，用于本机
+# 调参。两者都在本地全量跑，只是不再进入 clone。
+# 约定即过滤依据，因此新写的轮次测试会自动保持本地；反过来说，把要发布的测试
+# 命名成这两个形态会被静默忽略，命名前先想清楚它该不该进版本库。
+# 以下三个文件不符合上面两条 glob，只能逐个点名：
+# metrics_p2_review_test.go 的轮次标记在文件名中间而非开头；
+# random_perf_test.go 只含基准却不以 _bench_test.go 结尾；
+# websocket/example_test.go 只含编译期校验的文档示例。
+**/p[0-3]_*_test.go
+**/*_bench_test.go
+metrics_p2_review_test.go
+random/random_perf_test.go
+websocket/example_test.go
+# 夹具包：唯一引用方（localtimer/p3_pool_key_test.go、vars/p3_caller_location_test.go）
+# 属于上面的本地测试，包本身因此不再被远程任何代码引用。
+localtimer/internal/
+testdata/

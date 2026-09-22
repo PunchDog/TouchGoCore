@@ -216,6 +216,8 @@ func GetConfDir() string {
 	return _confDir
 }
 
+// Deprecated: 拼写错误（Fie 应为 File），请使用 GetDefaultFile。
+// 正确拼写的版本已存在且被使用，本函数仅为兼容既有外部调用保留。
 func GetDefaultFie() string {
 	return GetDefaultFile()
 }

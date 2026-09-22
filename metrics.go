@@ -26,14 +26,30 @@ var (
 // metricsReadHeaderTimeout 防止慢客户端只发半截请求头就把监控端口占住。
 const metricsReadHeaderTimeout = 5 * time.Second
 
+// 以下七个是 metrics 包单例的历史别名。
+//
+// 本文件与 metrics/ 包不是重复代码，只是名字撞车：根包 metrics.go 负责「把
+// /metrics 端点服务起来」（HTTP 服务、pprof、token 鉴权、时间轮积压采集器），
+// metrics/ 包负责「Prometheus 指标本身的定义与注册」。别名把两者串在了同一个
+// 名字空间里，读代码时容易误判成本包又实现了一遍指标。
+//
+// 别名刻意保留：外部业务仓库可能正通过根包引用它们，仓内零引用不构成删除依据。
+// 新代码请直接使用 touchgocore/metrics 下的对应单例。
 var (
-	WSMetrics    = metrics.WS
-	RPCMetrics   = metrics.RPC
-	HTTPMetrics  = metrics.HTTP
+	// Deprecated: 请直接使用 touchgocore/metrics 包的 metrics.WS。
+	WSMetrics = metrics.WS
+	// Deprecated: 请直接使用 touchgocore/metrics 包的 metrics.RPC。
+	RPCMetrics = metrics.RPC
+	// Deprecated: 请直接使用 touchgocore/metrics 包的 metrics.HTTP。
+	HTTPMetrics = metrics.HTTP
+	// Deprecated: 请直接使用 touchgocore/metrics 包的 metrics.Timer。
 	TimerMetrics = metrics.Timer
-	LuaMetrics   = metrics.Lua
-	DBMetrics    = metrics.DB
-	LogMetrics   = metrics.Log
+	// Deprecated: 请直接使用 touchgocore/metrics 包的 metrics.Lua。
+	LuaMetrics = metrics.Lua
+	// Deprecated: 请直接使用 touchgocore/metrics 包的 metrics.DB。
+	DBMetrics = metrics.DB
+	// Deprecated: 请直接使用 touchgocore/metrics 包的 metrics.Log。
+	LogMetrics = metrics.Log
 )
 
 func InitMetrics() {

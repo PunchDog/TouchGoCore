@@ -16,6 +16,10 @@
 # 用裸 *.txt 会让新增的词典文件被静默忽略，本地与 CI 全过而下游 go:embed 编译失败。
 /*.txt
 /*.err
+# bench/race.ps1 与 bench/run.ps1 的运行输出。入库的基线是手工挑出来的
+# docs/bench-baseline*.txt，命名不在下面两条之内，因此不会被误伤。
+/docs/race-result.txt
+/docs/bench-result-*.txt
 # Dependency directories (remove the comment below to include it)
 # vendor/
 vendor

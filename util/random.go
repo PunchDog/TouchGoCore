@@ -14,6 +14,9 @@ func RandInt(max int64) int64 {
 }
 
 // 随机范围 [min, max)；max<min 时自动交换，相等时返回 min
+//
+// 仓内无生产调用方（只有 p0_regress_test.go 覆盖），但它与 RandInt 是一对配套 API，
+// 语义清晰、有测试钉住，因此按公开能力保留，不标 Deprecated。
 func RandRange(max int64, min int64) (ret int64) {
 	if min > max {
 		min, max = max, min

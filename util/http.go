@@ -14,6 +14,9 @@ import (
 )
 
 // HTTPGet get 请求
+//
+// Deprecated: 仓内零调用，仅为兼容既有外部用法保留。无超时与上下文控制，
+// 新代码请自建 http.Client 并设置 Timeout。
 func HTTPGet(uri string) ([]byte, error) {
 	response, err := http.Get(uri)
 	if err != nil {
@@ -116,6 +119,8 @@ func PostJSON(uri string, obj interface{}) ([]byte, error) {
 }
 
 // PostFile 上传文件
+//
+// Deprecated: 仓内零调用，仅为兼容既有外部用法保留。
 func PostFile(fieldname, filename, uri string) ([]byte, error) {
 	fields := []MultipartFormField{
 		{

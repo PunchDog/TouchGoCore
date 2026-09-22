@@ -13,6 +13,9 @@ type Numeric interface {
 }
 
 // 数字类排序，从小到大
+//
+// Deprecated: 仓内零调用，仅为兼容既有外部用法保留。排序请用 stdlib 的
+// sort.Slice / slices.SortFunc。
 type NumberSortLess[T Numeric] []T
 
 func (this NumberSortLess[T]) Len() int {
@@ -26,6 +29,9 @@ func (this NumberSortLess[T]) Swap(i, j int) {
 }
 
 // 数字类排序，从大到小
+//
+// Deprecated: 仓内零调用，仅为兼容既有外部用法保留。排序请用 stdlib 的
+// sort.Slice / slices.SortFunc。
 type NumberSortDesc[T Numeric] []T
 
 func (this NumberSortDesc[T]) Len() int {
@@ -83,6 +89,8 @@ func getNumber[T any](v string) T {
 }
 
 // 字符串转数字数组
+//
+// Deprecated: 仓内零调用，仅为兼容既有外部用法保留。解析失败静默返回零值。
 func String2NumberArray[T any](str string, sep string) []T {
 	strs := strings.Split(str, sep)
 	ret := make([]T, 0)

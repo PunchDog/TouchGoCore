@@ -5,10 +5,15 @@ import (
 	"time"
 )
 
+// Deprecated: 仓内零调用，仅为兼容既有外部用法保留。它只是 IP 归属地查询结果的
+// 反序列化载体，本框架内没有任何函数产出或消费它。
 type IPInfo struct {
 	Code int    `json:"code"`
 	Data IPData `json:"data"`
 }
+
+// IPData 是 IPInfo 的字段类型。刻意不再单独标 Deprecated：两个都标会让仓内出现
+// 「已废弃符号引用已废弃符号」，下游 staticcheck 会把告警打在框架自身头上。
 type IPData struct {
 	Country   string `json:"country"`
 	CountryId string `json:"country_id"`
@@ -22,6 +27,9 @@ type IPData struct {
 }
 
 // 检查端口占用
+//
+// Deprecated: 仓内零调用，仅为兼容既有外部用法保留。它始终返回 nil：探测失败
+// 不报错，调用方无法据此判断端口是否真的空闲。
 func CheckPort(port string) (err error) {
 	tcpAddress, err := net.ResolveTCPAddr("tcp4", ":"+port)
 	if err != nil {

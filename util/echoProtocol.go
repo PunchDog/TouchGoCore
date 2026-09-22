@@ -78,6 +78,8 @@ func (this *EchoPacket) GetBody() []byte {
 	return this.buff[12 : 12+this.GetLength()]
 }
 
+// Deprecated: 仓内零调用，仅为兼容既有外部用法保留。协议帧的构造与解析目前
+// 由 ParseFSMessage 一侧承担。
 func NewEchoPacket(protocol1 int32, protocol2 int32, buff []byte, bufflen int) *EchoPacket {
 	p := new(EchoPacket)
 	p.buff = make([]byte, 12+bufflen)

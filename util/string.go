@@ -12,6 +12,9 @@ import (
 )
 
 // RandomStr 生成指定长度的随机字符串
+//
+// Deprecated: 仓内零调用，仅为兼容既有外部用法保留。长度按字节截取，
+// 非线程安全的取模分布也可能偏斜；需要随机串请自行选型。
 func RandomStr(length int) string {
 	const charset = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
 	result := make([]byte, length)
@@ -205,6 +208,9 @@ func toTime(src interface{}) time.Time {
 // ParseDbData 将不同类型的数据源转换为目标类型并赋值给目标变量
 // des: 必须是指针类型，用于接收转换后的值
 // src: 可以是多种类型，函数会尝试将其转换为des对应的类型
+//
+// Deprecated: 仓内零调用，仅为兼容既有外部用法保留。异常靠 recover 吞掉且不
+// 返回错误，调用方无法感知转换失败。
 func ParseDbData(des, src interface{}) {
 	defer func() {
 		if r := recover(); r != nil {

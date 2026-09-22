@@ -423,6 +423,8 @@ func GetWeekDay(ms int64) int {
 }
 
 // FormatDuration 将持续时间格式化为人类可读的字符串
+//
+// Deprecated: 仓内零调用，仅为兼容既有外部用法保留。
 func FormatDuration(d time.Duration) string {
 	if d < time.Minute {
 		return fmt.Sprintf("%.1fs", d.Seconds())

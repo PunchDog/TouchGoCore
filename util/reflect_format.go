@@ -107,6 +107,8 @@ func formatStruct(s reflect.Value, deep int16) string {
 	return report
 }
 
+// Deprecated: 仓内零调用，仅为兼容既有外部用法保留。反射逐字段拼接，开销远高于
+// %v / 结构化日志。
 func FormatStruct(obj interface{}) string {
 	return formatStruct(reflect.ValueOf(obj), 0)
 }

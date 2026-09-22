@@ -6,9 +6,6 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"runtime"
-	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -36,121 +33,6 @@ func DefaultAsyncChannelConfig() AsyncChannelConfig {
 		BatchSize:      100,
 		BatchTimeout:   50 * time.Millisecond,
 	}
-}
-
-// logEntry 日志条目
-type logEntry struct {
-	level   slog.Level
-	msg     string
-	time    time.Time
-	attrs   []slog.Attr
-	context context.Context
-	file    string // 调用者文件路径（新增）
-	line    int    // 调用者行号（新增）
-}
-
-// getCaller 获取业务调用者的文件路径与行号。
-// 一次 runtime.Callers 采集整条栈、一次 CallersFrames 展开，跳过本包（vars）内部
-// 帧，返回第一个不属于 vars 的调用者——即真正发起日志的业务代码位置。
-//
-// 旧实现对 depth=1..15 逐个调用 runtime.Caller：每次都要从栈顶重新走一遍（合计
-// O(深度²)），且每次 Callers/FuncForPC 各分配一次，本机实测单条日志 4.3µs / 15 次
-// 分配。同时判定用的是 Contains("/vars.")，任何路径里带 /vars. 的第三方包
-// （example.com/vars.Foo）都会被误当成本包帧而跳过，定位到更外层。
-func getCaller() (string, int) {
-	// 采集代价与窗口大小成正比（从栈顶逐帧走到窗口上限）：常规链只有个位数 vars
-	// 内部帧，先用小窗口；小窗口采满仍未见业务帧才说明链异常深，再用大窗口重来。
-	// 两个窗口各自定长，小窗口不参与大窗口的逃逸分析，常态路径不会把 64 帧的数组
-	// 顶上堆。
-	var fast [callerFastFrames]uintptr
-	if file, line, ok := expandCaller(fast[:]); ok {
-		return file, line
-	}
-
-	var full [callerFrameLimit]uintptr
-	if file, line, ok := expandCaller(full[:]); ok {
-		return file, line
-	}
-	return "", 0
-}
-
-// expandCaller 展开 pcs 采到的帧，返回第一个不属于 vars 包的调用者位置。
-// ok=false 表示窗口内全是本包帧（或整条栈都不属于业务），调用方应换更大的窗口重试。
-func expandCaller(pcs []uintptr) (string, int, bool) {
-	n := runtime.Callers(2, pcs)
-	if n == 0 {
-		return "", 0, false
-	}
-
-	frames := runtime.CallersFrames(pcs[:n])
-	for {
-		frame, more := frames.Next()
-		if frame.File != "" && !strings.HasPrefix(frame.Function, varsFuncPrefix) {
-			return normalizeCallerFile(frame.File), frame.Line, true
-		}
-		if !more {
-			return "", 0, false
-		}
-	}
-}
-
-// callerFromPC 把 slog.Record 自带的调用点 PC 解析成与 getCaller 同一风格的路径与行号。
-//
-// 走 slog.* 入口的日志不能再用 getCaller 扫栈：栈里第一个非 vars 帧是 log/slog
-// 自己的转发帧，调用点会被错报到 Go 标准库文件上。Record.PC 是 slog 在调用点采好的。
-func callerFromPC(pc uintptr) (string, int) {
-	if pc == 0 {
-		return "", 0
-	}
-	fn := runtime.FuncForPC(pc)
-	if fn == nil {
-		return "", 0
-	}
-	file, line := fn.FileLine(pc)
-	if file == "" {
-		return "", 0
-	}
-	return normalizeCallerFile(file), line
-}
-
-// 小窗口覆盖 vars 内部帧（Info → writeToFile → writeLogged → getCaller）加余量；
-// 采满仍未命中就退回大窗口重扫。
-const (
-	callerFastFrames = 8
-	callerFrameLimit = 64
-)
-
-// normalizeCallerFile 统一路径分隔符：Windows 下与系统文件路径风格一致。
-// 只有真的含正斜杠时才重建字符串，同一调用点反复打日志时不再每次分配。
-func normalizeCallerFile(file string) string {
-	if isWindows && strings.Contains(file, "/") {
-		return strings.ReplaceAll(file, "/", "\\")
-	}
-	return file
-}
-
-const isWindows = runtime.GOOS == "windows"
-
-// varsFuncPrefix 本包函数名的公共前缀（形如 "touchgocore/vars."），用于精确判定
-// 「这一帧是不是 vars 内部帧」。前缀在包初始化时从自身函数名反推，换模块路径或
-// 被 vendor 后依然成立。
-var varsFuncPrefix = computeVarsFuncPrefix()
-
-func computeVarsFuncPrefix() string {
-	pc, _, _, ok := runtime.Caller(0)
-	if !ok {
-		return ""
-	}
-	fn := runtime.FuncForPC(pc)
-	if fn == nil {
-		return ""
-	}
-	name := fn.Name() // 形如 touchgocore/vars.computeVarsFuncPrefix
-	tail := name[strings.LastIndexByte(name, '/')+1:]
-	if i := strings.IndexByte(tail, '.'); i >= 0 {
-		return name[:len(name)-len(tail)+i+1]
-	}
-	return name
 }
 
 // AsyncChannelStats 异步日志统计
@@ -546,34 +428,6 @@ func (a *AsyncLoggerChannel) run() {
 	}
 }
 
-// batchEntries 批处理条目容器。
-//
-// bytes 随 append 增量维护：旧实现每收到一条日志就调用 size() 重算整批字节数，
-// 一批 n 条累计 O(n²) 次遍历，默认阈值（4KB ≈ 100 条）下每批白走近 5000 圈。
-type batchEntries struct {
-	entries []logEntry
-	bytes   int
-}
-
-// entryHeaderBytes 时间、级别、括号、路径与行号的估算头部
-const entryHeaderBytes = 64
-
-func (b *batchEntries) add(entry logEntry) {
-	b.entries = append(b.entries, entry)
-	b.bytes += len(entry.msg) + entryHeaderBytes
-}
-
-// reset 清空批次。
-//
-// clear 逐槽置零是必须的：entries[:0] 只把长度归零，底层数组依旧攥着这一批的
-// msg / attrs / context，而容器来自 sync.Pool，被钉住的整批字符串最长要拖到下一
-// 批填满才可能释放。
-func (b *batchEntries) reset() {
-	clear(b.entries)
-	b.entries = b.entries[:0]
-	b.bytes = 0
-}
-
 // recordQueuePeak 单调记录队列深度峰值
 func (a *AsyncLoggerChannel) recordQueuePeak(queueLen int) {
 	for {
@@ -609,48 +463,4 @@ func (a *AsyncLoggerChannel) writeBatch(batch *batchEntries) {
 		return
 	}
 	a.written.Add(int64(len(batch.entries)))
-}
-
-// levelString 日志级别的展示文本，与历史输出逐字一致。
-func levelString(level slog.Level) string {
-	switch level {
-	case slog.LevelDebug:
-		return "DEBUG"
-	case slog.LevelWarn:
-		return "WARN"
-	case slog.LevelError:
-		return "ERROR"
-	default:
-		return "INFO"
-	}
-}
-
-// appendEntry 把一条日志按既有格式追加到 buf 尾部并返回扩容后的切片。
-// 输出与旧的 formatEntry 完全一致，只是不再为每条日志单独分配字符串。
-//
-// 做成自由函数而不是通道方法：通道不在时（SetLevel 换绑窗口、异步关闭之后仍有
-// 零星日志）管理器要往同一个文件句柄上同步落一条，格式必须逐字相同，否则同一个
-// .log 里会出现两种时间戳样式，按格式解析的工具直接废掉。
-func appendEntry(buf []byte, entry logEntry) []byte {
-	buf = entry.time.AppendFormat(buf, time.DateTime)
-	buf = append(buf, ' ')
-	buf = append(buf, levelString(entry.level)...)
-	buf = append(buf, " ["...)
-	if entry.file != "" {
-		buf = append(buf, entry.file...)
-		buf = append(buf, ':')
-		buf = strconv.AppendInt(buf, int64(entry.line), 10)
-		buf = append(buf, ' ')
-	}
-	buf = append(buf, entry.msg...)
-	buf = append(buf, ']')
-
-	for _, attr := range entry.attrs {
-		buf = append(buf, ' ')
-		buf = append(buf, attr.Key...)
-		buf = append(buf, '=')
-		buf = fmt.Appendf(buf, "%v", attr.Value.Any())
-	}
-
-	return append(buf, '\n')
 }

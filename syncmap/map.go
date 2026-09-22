@@ -6,9 +6,8 @@ import (
 	"sync/atomic"
 )
 
-// Map is a concurrent-safe map implementation with atomic counter.
-// It provides thread-safe operations for storing, retrieving, and iterating
-// over key-value pairs.
+// Map 是带原子计数的并发安全 map，读写均需持锁。
+// 提供键值对的存取、删除与遍历。
 //
 // Deprecated: 写多读多的热点表请用 [ShardedMap]（键分片、各片独立加锁，实测并行读
 // 与读写混合快 2.1~2.8 倍）；只读为主的场景用 Go 内置的 sync.Map。
@@ -20,14 +19,13 @@ type Map[K comparable, V any] struct {
 	mu  sync.RWMutex
 }
 
-// Length returns the current number of elements in the map.
-// This operation is atomic and lock-free.
+// Length 返回当前元素数。计数由原子变量维护，取数不加锁，
+// 因此可能与增删动作并行发生偏移（读到的可能是瞬时值）。
 func (m *Map[K, V]) Length() int {
 	return int(m.num.Load())
 }
 
-// Store adds or updates a key-value pair.
-// If the key already exists, its value is updated without changing the count.
+// Store 写入键值对。键已存在时只覆盖值，计数不变。
 func (m *Map[K, V]) Store(k K, v V) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -40,8 +38,7 @@ func (m *Map[K, V]) Store(k K, v V) {
 	m.mp[k] = v
 }
 
-// Delete removes a key-value pair by key.
-// The counter is decremented only if the key existed.
+// Delete 按键删除。仅当键确实存在时计数才减一。
 func (m *Map[K, V]) Delete(k K) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -59,12 +56,11 @@ func (m *Map[K, V]) Clear() {
 	m.num.Store(0)
 }
 
-// ClearAll removes all entries from the map after invoking the callback for each.
-// The callback function 'fn' returns true to continue iteration, false to stop.
-// A nil fn clears the map without callbacks.
+// ClearAll 先对每个元素回调、再整体清空。fn 返回 true 继续，false 提前停止；
+// fn 为 nil 时只清空不回调。
 //
-// ClearAll is designed for cleanup scenarios where elements need to be
-// processed before removal, such as closing resources or releasing references.
+// 面向的是「删除前必须先处理每个元素」的清理场景，例如关闭连接、释放引用。
+// 注意它全程持写锁跑回调，回调里不得再触碰本 Map。
 func (m *Map[K, V]) ClearAll(fn func(k K, v V) bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -82,10 +78,8 @@ func (m *Map[K, V]) ClearAll(fn func(k K, v V) bool) {
 	m.num.Store(0)
 }
 
-// LoadOrStore returns the existing value for key if present.
-// Otherwise, it stores and returns the given value.
-// The loaded result reports whether the value was loaded from the map.
-// This operation is atomic.
+// LoadOrStore 键已存在则返回现值（loaded=true），否则写入并返回给定值
+// （loaded=false）。整个判断与写入在同一次持锁里完成。
 func (m *Map[K, V]) LoadOrStore(key K, value V) (actual V, loaded bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -101,8 +95,7 @@ func (m *Map[K, V]) LoadOrStore(key K, value V) (actual V, loaded bool) {
 	return value, false
 }
 
-// Load returns the value associated with the key and a boolean indicating
-// whether the key was found.
+// Load 返回键对应的值，以及键是否存在。
 func (m *Map[K, V]) Load(k K) (v V, ok bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -110,8 +103,7 @@ func (m *Map[K, V]) Load(k K) (v V, ok bool) {
 	return
 }
 
-// Range calls fn for each key-value pair in the map.
-// If fn returns false, Range stops the iteration.
+// Range 对每个键值对调用 fn；fn 返回 false 时停止遍历。
 //
 // 迭代基于锁内快照、锁外回调：回调中可以安全调用 Delete/Store/Range，
 // 不会再因持有读锁而自死锁。代价是回调看到的是一致性快照，
@@ -153,9 +145,8 @@ func (m *Map[K, V]) List(sortFunc func(d1, d2 V) bool) []V {
 	return pairs
 }
 
-// RangeBySort iterates over key-value pairs in sorted order.
-// If sortFunc is nil, behaves like Range.
-// sortFunc should compare values: return true if d1 should come before d2.
+// RangeBySort 按序遍历：sortFunc 比较的是值，d1 应排在 d2 之前时返回 true；
+// sortFunc 为 nil 时等价于 Range。
 // 与 Range 一致：快照与排序在锁内完成，回调在锁外执行，避免回调内改表死锁。
 func (m *Map[K, V]) RangeBySort(fn func(k K, v V) bool, sortFunc func(d1, d2 V) bool) {
 	if fn == nil {

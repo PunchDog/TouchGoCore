@@ -1,6 +1,14 @@
 # TouchGoCore 重构执行结果报告
 
 > 完成日期：2026-09-11　|　对应方案：[refactor-plan.md](./refactor-plan.md)
+>
+> **2026-09-22 更正两处过期结论**（本文其余内容按当时状态保留，不改写历史）：
+>
+> 1. 第五节遗留项 #1「swd 子包测试大量失败」**已不复现**：
+>    `go test -count=1 ./swd/...` 现 15 个包全 ok（含 `swd/detector` 5.0s、`swd/swd` 6.8s）。
+> 2. `refactor-plan.md` 的依赖图**缺 `ai/` 包**（6 文件 / 1262 行，位于 L3，
+>    被根包 `services.go` 与 `mapmanager` 引用），系 2026-09-11 之后新增。
+>    现行、含 `ai/` 的依赖分层与逐包清单见 [repo-layout.md](./repo-layout.md)。
 
 ## 一、最终验证结果
 

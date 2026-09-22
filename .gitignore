@@ -11,6 +11,11 @@
 # Output of the go coverage tool, specifically when used with LiteIDE
 *.out
 
+# 一次性问答/压测输出。刻意限定在仓库根：包目录下的 .txt 是要进版本库的数据
+# （swd 词典与映射经 go:embed 打进二进制、docs/bench-*.txt 是 perf-baseline.md 引用的基线），
+# 用裸 *.txt 会让新增的词典文件被静默忽略，本地与 CI 全过而下游 go:embed 编译失败。
+/*.txt
+/*.err
 # Dependency directories (remove the comment below to include it)
 # vendor/
 vendor
@@ -24,5 +29,4 @@ vars/logs/*.log
 .trae/documents/*
 .cursor/plans/*.md
 .codebuddy/plans/*.md
-*.txt
 .workbuddy-ai/*

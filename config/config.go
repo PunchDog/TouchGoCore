@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"touchgocore/ini"
 )
@@ -148,6 +149,25 @@ func (this *Cfg) LoadWithError(cfgname string) error {
 		return fmt.Errorf("解析配置出错[%s]: %w", path1, err)
 	}
 
+	// 解析功能配置文件夹
+	_confDirField = strings.TrimSpace(p.GetString(cfgname, "conf_dir", ""))
+	if _confDirField != "" {
+		resolveFeatureDir()
+		// 先收集所有已注册的 key，避免在迭代中做 I/O
+		var registered []string
+		_featureReg.Range(func(key, value any) bool {
+			registered = append(registered, key.(string))
+			return true
+		})
+		// 逐个加载
+		for _, name := range registered {
+			target, _ := _featureReg.Load(name)
+			if loadErr := loadFeatureConfig(name, target); loadErr != nil {
+				return loadErr
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -210,6 +230,14 @@ var (
 	_confDir       string
 	_defaultFile   string
 	_defServerId   = flag.String("s", "default", "server flag") //默认服务器ID
+
+	// 功能配置注册系统
+	_confDirField   string    // INI 中 conf_dir 字段值
+	_featureDir     string    // 功能配置文件夹绝对路径
+	_featureDirSet  bool      // 功能配置文件夹是否已解析
+	_featureReg     sync.Map  // key=jsonname, value=注册的目标 struct 指针或 *map[string]any
+	_featureData    sync.Map  // key=jsonname, value=已加载的数据（struct 指针或 map[string]any）
+	_featureLoaded  sync.Map  // key=jsonname, value=bool
 )
 
 func GetBasePath() string {
@@ -245,4 +273,118 @@ func PathExists(path string) bool {
 		return false
 	}
 	return false
+}
+
+// resolveFeatureDir 解析功能配置文件夹路径
+// 相对路径基于 _confDir，绝对路径直接使用
+func resolveFeatureDir() {
+	if _featureDirSet {
+		return
+	}
+	if _confDirField == "" {
+		return
+	}
+	if filepath.IsAbs(_confDirField) {
+		_featureDir = _confDirField
+	} else {
+		_featureDir = filepath.Join(_confDir, _confDirField)
+	}
+	_featureDirSet = true
+}
+
+// normalizeJSONName 统一 JSON 文件名格式，确保带 .json 后缀
+func normalizeJSONName(name string) string {
+	name = strings.TrimSpace(name)
+	if !strings.HasSuffix(strings.ToLower(name), ".json") {
+		name += ".json"
+	}
+	return name
+}
+
+// RegisterFunc 注册功能配置。
+// jsonname: JSON 文件名（不含路径，如 "game_rules.json" 或 "game_rules"）
+// target: 目标 struct 指针；传 nil 时按 map[string]any 读取
+//
+// 调用时机：LoadWithError 之前或之后均可。
+//   - 之前注册：LoadWithError 加载主配置后自动加载所有已注册的 JSON
+//   - 之后注册：立即加载对应 JSON 文件
+func RegisterFunc(jsonname string, target any) error {
+	name := normalizeJSONName(jsonname)
+
+	// 检查是否已注册
+	if _, loaded := _featureReg.LoadOrStore(name, target); loaded {
+		return fmt.Errorf("功能配置已注册: %s", name)
+	}
+
+	// 如果功能配置文件夹已解析，立即加载
+	if _featureDirSet {
+		return loadFeatureConfig(name, target)
+	}
+
+	return nil
+}
+
+// loadFeatureConfig 加载单个功能配置文件
+func loadFeatureConfig(jsonname string, target any) error {
+	name := normalizeJSONName(jsonname)
+	if _featureDir == "" {
+		return fmt.Errorf("功能配置文件夹未配置")
+	}
+
+	path := filepath.Join(_featureDir, name)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("读取功能配置出错 [%s]: %w", path, err)
+	}
+
+	if target == nil {
+		// 按 map[string]any 读取
+		var m map[string]any
+		if err := json.Unmarshal(data, &m); err != nil {
+			return fmt.Errorf("解析功能配置出错 [%s]: %w", path, err)
+		}
+		_featureData.Store(name, m)
+	} else {
+		// 按 struct 读取
+		if err := json.Unmarshal(data, target); err != nil {
+			return fmt.Errorf("解析功能配置出错 [%s]: %w", path, err)
+		}
+		_featureData.Store(name, target)
+	}
+
+	_featureLoaded.Store(name, true)
+	return nil
+}
+
+// GetFeatureConfig 获取已加载的功能配置
+// jsonname 与 RegisterFunc 中一致
+func GetFeatureConfig(jsonname string) (any, bool) {
+	name := normalizeJSONName(jsonname)
+	return _featureData.Load(name)
+}
+
+// GetFeatureConfigMap 获取未注册 struct 的通用 map 配置
+func GetFeatureConfigMap(jsonname string) (map[string]any, bool) {
+	name := normalizeJSONName(jsonname)
+	v, ok := _featureData.Load(name)
+	if !ok {
+		return nil, false
+	}
+	m, ok := v.(map[string]any)
+	return m, ok
+}
+
+// GetFeatureDir 返回功能配置文件夹路径
+func GetFeatureDir() string {
+	return _featureDir
+}
+
+// IsFeatureLoaded 检查功能配置是否已加载
+func IsFeatureLoaded(jsonname string) bool {
+	name := normalizeJSONName(jsonname)
+	v, ok := _featureLoaded.Load(name)
+	if !ok {
+		return false
+	}
+	return v.(bool)
 }

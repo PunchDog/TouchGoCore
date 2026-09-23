@@ -129,7 +129,10 @@ func TestChannelOperationsSignAndSerialize(t *testing.T) {
 	if strings.Contains(body, ".") {
 		t.Fatalf("金额出现浮点形态: %s", body)
 	}
-	want := SignMD5("TOPSECRET", "app1", "MCH-1", "O1", "1000", CurrencyUSDT, "", "", "TR7")
+	// 签名域：十个定长标量（此单只有币种有值）+ 按登记顺序追加的通道特有字段。
+	want := SignMD5("TOPSECRET",
+		"app1", "MCH-1", "O1", "1000", CurrencyUSDT, "", "", "", "", "",
+		"TR7")
 	if got := r.signs.Load().(string); got != want {
 		t.Fatalf("签名=%s，期望 %s（签名域=通用字段+Extras 登记顺序）", got, want)
 	}
@@ -252,10 +255,24 @@ func TestMerchantIDPrecisionKept(t *testing.T) {
 }
 
 // TestMarshalPayloadSkipsEmptyExtras 值为空的特有字段既不进报文也不进签名域，
-// 否则供应商会把 null 当成显式清空指令。
+// 否则供应商会把 null 当成显式清空指令；非空的两侧必须同时出现——
+// 报文与签名域由 mergeExtras 一次遍历产出，这里同时钉住它两。
 func TestMarshalPayloadSkipsEmptyExtras(t *testing.T) {
 	base := OrderRequest{AppID: "a", OrderNo: "O1", Amount: 1}
-	body, err := marshalPayload(base, []ExtraField{{Name: "remark", Value: ""}, {Name: "memo", Value: "m"}})
+	fields, signs, err := mergeExtras(
+		[]ExtraField{{Name: "contract", Value: "c"}, {Name: "remark", Value: ""}},
+		map[string]string{"operator": "op", "ticket": ""},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(signs) != 2 || signs[0] != "c" || signs[1] != "op" {
+		t.Fatalf("签名域追加值不符: %#v", signs)
+	}
+	if _, ok := fields["remark"]; ok {
+		t.Fatalf("空值字段进了报文: %#v", fields)
+	}
+	body, err := marshalPayload(base, fields)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -263,7 +280,7 @@ func TestMarshalPayloadSkipsEmptyExtras(t *testing.T) {
 	if strings.Contains(got, "remark") {
 		t.Fatalf("空值字段仍进报文: %s", got)
 	}
-	if !strings.Contains(got, `"memo":"m"`) || !strings.Contains(got, `"amount":1`) {
+	if !strings.Contains(got, `"contract":"c"`) || !strings.Contains(got, `"amount":1`) {
 		t.Fatalf("报文不符: %s", got)
 	}
 }

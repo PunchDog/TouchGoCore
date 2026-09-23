@@ -322,10 +322,13 @@ type WhatsappConfig struct {
 // UstdConfig 是 USDT（TRC20）通道配置。目录名沿用 ustd，代码内币种常量用 USDT。
 type UstdConfig struct {
 	Provider *PaySDKRef `json:"provider"`
-	// Network 是公链网络标识（mainnet/shasta 等），留空按供应商默认。
+	// Network 是公链网络标识（mainnet/shasta/nile），留空按供应商默认。
+	// 这里要填的是「在哪条链上发」，不是代币标准：trc20 是标准名，填进来会在
+	// 装配时被拒——网络决定单号能否跨链复用，标准名只是合约的属性。
 	Network string `json:"network"`
-	// Contract 是 TRC20 合约地址；原生 TRX 留空。同一 trc20 通道下
-	// USDT 与原生币靠这一列区分，不能靠通道名区分。
+	// Contract 是 TRC20 合约地址（Base58Check，过不了校验和则通道不启动）；
+	// 原生 TRX 留空。网络与合约是两个正交维度：同一网络下 USDT 与原生币
+	// 靠合约区分，同一合约在不同网络下又是两个不同的币，都不能靠通道名区分。
 	Contract string `json:"contract"`
 }
 

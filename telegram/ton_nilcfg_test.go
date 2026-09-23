@@ -27,7 +27,7 @@ func TestTonStartNilCfgDoesNotPanic(t *testing.T) {
 	if _, err := TonRecharge(nil, &pay.PayOrder{OrderNo: "O1", Amount: 1}); err == nil {
 		t.Fatal("未启动时充值应当被拒")
 	}
-	if _, err := TonWithdraw(nil, &pay.PayOrder{OrderNo: "O1", Amount: 1, Address: "EQ1"}); err == nil {
+	if _, err := TonWithdraw(nil, &pay.PayOrder{OrderNo: "O1", Amount: 1, Address: tonAcctBounceable}); err == nil {
 		t.Fatal("未启动时提现应当被拒")
 	}
 	if _, err := TonAccount(nil, nil); err == nil {

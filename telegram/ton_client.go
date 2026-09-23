@@ -31,6 +31,13 @@ func newTonClient(cfg *config.Cfg) (*tonClient, bool) {
 	}
 	tg := cfg.Telegram
 	jetton := strings.TrimSpace(tg.Jetton)
+	// jetton 合约地址同样在启动时就判：它是广播时真正的收端之一，写错要等到
+	// 第一笔出款才暴露，而那时钱已经在一个谁也解不出私钥的地址上了。
+	// 留空是合法取值，表示这一通道走原生 TON。
+	if jetton != "" && !IsValidTONAddress(jetton) {
+		vars.Info("TON 通道不启动: 配置的 jetton 合约地址 %s 不合法（既不是 48 位用户友好地址或 CRC16 不过，也不是 0: 开头的原始形态）", jetton)
+		return nil, false
+	}
 	var extras []pay.ExtraField
 	if jetton != "" {
 		extras = append(extras, pay.ExtraField{Name: "jetton", Value: jetton})

@@ -140,6 +140,7 @@
             "timeout_sec说明": "单次请求超时（秒），<=0 用 pay.DefaultTimeout；max_retries <0 用 pay.DefaultMaxRetry",
             "max_retries": 2,
             "notify_url": "https://example.com/callback/pay",
+            "notify_url说明": "回调接收地址，随下单报文交给供应商并参与签名域（不签它就可能被改成别人的接收端）。留空则按供应商为该 AppID 登记的默认值",
             "endpoints说明": "逻辑名 -> 供应商实际路径。逻辑名固定为 account/recharge/query/withdraw/login/send_code 六个，缺某个键则该操作就地拒绝、不发请求",
             "endpoints": {
                 "account": "/pay/account",
@@ -195,9 +196,9 @@
             "account": "default",
             "account说明": "该 SDK 段 accounts 里的键名。只有一个账户时留空即取那一个；多于一个必须点名，否则「这一单从哪个商户号出」就成了初始化顺序的函数"
         },
-        "ton_network说明": "TON 网络标识（mainnet/testnet），留空按供应商为该 AppID 登记的默认值",
+        "ton_network说明": "TON 网络标识（mainnet/testnet），随下单报文交给供应商并参与签名，留空按主网口径处理。它还要与收款地址自带的那个标记位对齐：用户友好地址的第 1 字节有 0x80 就是测试网地址，填 mainnet 会被 telegram 包在下单前拒掉（反过来同理，宁可拒单不可错投）",
         "ton_network": "mainnet",
-        "jetton说明": "TON 侧代币合约地址；原生 TON 留空。同一通道下原生币与代币靠这一列区分",
+        "jetton说明": "TON 侧代币合约地址；原生 TON 留空。同一通道下原生币与代币靠这一列区分。启动时验格式：48 位 base64url 用户友好地址（末尾 2 字节是 CRC-16/CCITT-FALSE 校验和，EQ 与 UQ 两种写法都收）或 0:/-1: 开头的原始十六进制形态，不过则通道不启动。jetton 的小数位数取自该代币自己的元数据（TEP-64），不是固定 9 位——Amount 按最小单位整数上送，位数搞错就是 10^n 倍的不可逆多付",
         "jetton": ""
     },
     "whatsapp说明": "WhatsApp 通道（登录/充值/提现），代码在 whatsapp 包。登录与资金各引用一个 SDK 段：验证码走消息网关、充值提现走支付网关是常见形态，两段独立开关",
@@ -218,12 +219,12 @@
             "bind_notice": "tpl_bind_notice"
         }
     },
-    "ustd说明": "USDT(TRC20) 通道（充值/提现），代码在 ustd 包。目录名沿用 ustd，代码内币种常量是 USDT；金额一律整数最小单位（USDT 为 6 位小数），手续费走万分比整数，配置与报文都不出现浮点",
+    "ustd说明": "USDT(TRC20) 通道（充值/提现），代码在 ustd 包。目录名沿用 ustd，代码内币种常量是 USDT；金额一律整数最小单位（USDT 这张合约是 6 位小数，位数取自合约自身的元数据），配置与报文都不出现浮点。注意链上手续费不是万分比：TRON 的 gas 以 TRX 计、由发送方付、与转账金额无关，单笔实际成本看回执的 fee 与 fee_currency",
     "ustd": {
-        "network说明": "公链网络标识，随下单报文交给供应商；留空则按供应商为该 AppID 登记的默认值",
-        "network": "trc20",
-        "contract说明": "TRC20 合约地址；原生 TRX 留空。同一 trc20 通道下 USDT 与原生币靠这一列区分。它会并进报文并追加到签名域末尾，顺序由 ustd 包登记",
-        "contract": "TR7NharAcTPb3DHchqPguF36bXqWRRCbqR",
+        "network说明": "公链网络标识（mainnet / shasta / nile），随下单报文交给供应商并参与签名；留空则按供应商为该 AppID 登记的默认值。别把 trc20 填到这里——那是代币标准不是网络，网络和合约是两个正交维度，填了本包会在启动时拒掉这一段配置",
+        "network": "mainnet",
+        "contract说明": "TRC20 合约地址；原生 TRX 留空。同一 TRON 通道下 USDT 与原生币靠这一列区分。启动时按 Base58Check 验格式（长度 34、版本字节 0x41、末尾 4 字节双 SHA256 校验和），不通过则该通道不启动。它会并进报文并追加到签名域末尾，顺序由 ustd 包登记",
+        "contract": "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t",
         "provider说明": "资金链路的 SDK 引用",
         "provider": {
             "sdk": "supplier_a",

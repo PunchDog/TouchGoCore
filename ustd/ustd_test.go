@@ -17,10 +17,13 @@ const testSecret = "TEST_SECRET_KEY"
 
 // testSection / testAccount 是测试里 SDK 段与商户账户的名字。
 const (
-	testSection  = "test_a"
-	testAccount  = "default"
-	merchantID   = "MCH-TEST"
-	testContract = "TR7NharAcTPb3DHchqPguF36bXqWRRCbqR"
+	testSection = "test_a"
+	testAccount = "default"
+	merchantID  = "MCH-TEST"
+	// testContract 用官方 USDT-TRC20 合约：它是广播时真正的收端之一，
+	// 编一个「看着像」的字符串会让本包的启动校验与全部出款用例都失去意义。
+	testContract = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
+	testNetwork  = pay.NetworkMainnet
 )
 
 // recorder 收集 publish 广播出去的回执。
@@ -66,7 +69,7 @@ func payCfg(baseURL string, endpoints map[string]string) *config.Cfg {
 		},
 		Ustd: &config.UstdConfig{
 			Provider: &config.PaySDKRef{SDK: testSection, Account: testAccount},
-			Network:  pay.NetworkTRC20,
+			Network:  testNetwork,
 			Contract: testContract,
 		},
 	}
@@ -142,7 +145,7 @@ func TestOrderDefaultsFromChainConfig(t *testing.T) {
 	}
 	o := &pay.PayOrder{OrderNo: "O1", Amount: 1000000, Address: "TAddr1"}
 	got := c.order(o)
-	if got.Currency != pay.CurrencyUSDT || got.Network != pay.NetworkTRC20 {
+	if got.Currency != pay.CurrencyUSDT || got.Network != testNetwork {
 		t.Fatalf("缺省补齐不符: %+v", got)
 	}
 	if o.Currency != "" || o.Network != "" {

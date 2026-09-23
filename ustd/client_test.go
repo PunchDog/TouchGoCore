@@ -92,7 +92,7 @@ func TestRechargeSignsAndSerializes(t *testing.T) {
 	if body["merchant_id"] != merchantID {
 		t.Fatalf("商户号未进报文: %s", req.body)
 	}
-	if body["network"] != pay.NetworkTRC20 || body["contract"] != testContract {
+	if body["network"] != testNetwork || body["contract"] != testContract {
 		t.Fatalf("链上字段未进报文: %s", req.body)
 	}
 	if amt, ok := body["amount"].(float64); !ok || int64(amt) != 1000000 {
@@ -101,7 +101,12 @@ func TestRechargeSignsAndSerializes(t *testing.T) {
 	if strings.Contains(req.body, testSecret) {
 		t.Fatalf("密钥进了报文: %s", req.body)
 	}
-	want := pay.SignMD5(testSecret, "app1", merchantID, "O1", "1000000", pay.CurrencyUSDT, "", "", testContract)
+	// 签名域十个定长标量 + 按登记顺序追加的通道特有字段。此单没填 network 之外的
+	// 收款侧字段，所以 address / phone / memo / notify_url 四位是空串占位——
+	// 空串也要占位，否则后面每一位的落点都会整体偏移。
+	want := pay.SignMD5(testSecret,
+		"app1", merchantID, "O1", "1000000", pay.CurrencyUSDT, testNetwork, "", "", "", "",
+		testContract)
 	if req.sign != want {
 		t.Fatalf("签名=%s，期望 %s", req.sign, want)
 	}
@@ -118,7 +123,7 @@ func TestWithdrawRequiresAddressOnWire(t *testing.T) {
 	startWith(t, payCfg(url, allEndpoints()))
 	recorded()
 
-	res, err := UstdWithdraw(nil, &pay.PayOrder{OrderNo: "O2", Amount: 500, Address: "TAddr2"})
+	res, err := UstdWithdraw(nil, &pay.PayOrder{OrderNo: "O2", Amount: 500, Address: tronFFAcct})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,8 +131,16 @@ func TestWithdrawRequiresAddressOnWire(t *testing.T) {
 		t.Fatalf("处理中不应是终态: %+v", res)
 	}
 	req := f.seen()[0]
-	if !strings.Contains(req.body, `"address":"TAddr2"`) {
+	if !strings.Contains(req.body, `"address":"`+tronFFAcct+`"`) {
 		t.Fatalf("提现报文缺地址: %s", req.body)
+	}
+	// 收款地址与网络标识都必须在签名域里：报文改一个字节而签名跟着不变，
+	// 就等于谁都能把钱转到别的地址上。
+	wantSign := pay.SignMD5(testSecret,
+		"app1", merchantID, "O2", "500", pay.CurrencyUSDT, testNetwork, tronFFAcct, "", "", "",
+		testContract)
+	if req.sign != wantSign {
+		t.Fatalf("签名=%s，期望 %s", req.sign, wantSign)
 	}
 	if got := recorded(); len(got) != 1 || got[0].Status != pay.StatusPending {
 		t.Fatalf("未广播处理中回执: %+v", got)
@@ -184,7 +197,7 @@ func TestGatewayRetryIsTransparent(t *testing.T) {
 	cfg.PaySDks[testSection].MaxRetries = 1
 	startWith(t, cfg)
 
-	_, err := UstdWithdraw(nil, &pay.PayOrder{OrderNo: "O1", Amount: 100, Address: "TAddr1"})
+	_, err := UstdWithdraw(nil, &pay.PayOrder{OrderNo: "O1", Amount: 100, Address: tronRangeAcct})
 	if err == nil {
 		t.Fatal("持续 5xx 应当报错")
 	}

@@ -11,17 +11,46 @@ import (
 	"strings"
 )
 
-// 币种与网络标识。代码内统一用这两个大写币种名，目录名 ustd 只是历史命名。
+// 币种标识。代码内统一用这几个大写名字，目录名 ustd 只是历史命名。
+//
+// CurrencyTRX 不是本仓的充值/提现币种，它是手续费侧的事实：TRON 上转 USDT，
+// gas 是以 TRX 收的，与转账币种不同一种。
 const (
 	CurrencyUSDT = "USDT"
 	CurrencyTON  = "TON"
+	CurrencyTRX  = "TRX"
 )
 
-// 网络标识：USDT 走 TRC20，TON 走主网；测试网取值由各通道自行解释。
+// 公链网络标识。主网与测试网的区别必须是配置里看得出来的一个字段值，
+// 不能靠基址猜：同一家供应商的测试网网关往往连着同一套报文格式，
+// 把主网单发进测试网关会「调用成功、钱没动」，比报错更难查。
 const (
-	NetworkTRC20   = "trc20"
 	NetworkMainnet = "mainnet"
+	// NetworkTestnet 是通用测试网名，TON 测试网用它。
+	NetworkTestnet = "testnet"
+	// NetworkShasta 与 NetworkNile 是 TRON 的两条测试网。
+	NetworkShasta = "shasta"
+	NetworkNile   = "nile"
 )
+
+// Deprecated: NetworkTRC20 把代币标准当成了网络。TRC20 是「USDT 这张合约跑在
+// TRON 主网上」的意思，网络取值应该是 mainnet；测试网则是 shasta 或 nile。
+// 合约地址另有 ustd.contract 一列承载。网络和合约是两个正交维度，混进一个字段
+// 就等于「换测试网」和「换代币」没法分别表达。
+const NetworkTRC20 = "trc20"
+
+// IsTestnet 该网络标识是否算测试网。
+//
+// 认不出的值按主网处理，这个方向是安全的：主网口径会把带测试网标记的地址判成
+// 「与网络不符」而拒单，反之把没看懂的值当成测试网，才会让测试网地址混进主网报文。
+func IsTestnet(network string) bool {
+	switch strings.ToLower(strings.TrimSpace(network)) {
+	case NetworkTestnet, NetworkShasta, NetworkNile:
+		return true
+	default:
+		return false
+	}
+}
 
 // 资金单状态。
 //
@@ -86,8 +115,12 @@ func IsActive(status string) bool { return status == AcctActive }
 
 // PayOrder 是一次充值或提现请求的全部输入。
 //
-// Amount 是币种最小单位的整数值（USDT 6 位小数、TON 9 位 nanoton），
-// 全链路禁用浮点：一旦中途出现 float64，大额出款就会在元/分转换上丢精度。
+// Amount 是币种最小单位的整数值，全链路禁用浮点：一旦中途出现 float64，大额出款
+// 就会在元/分转换上丢精度。最小单位是几位**由那一单实际走的合约决定**，不由包名决定：
+// USDT-TRC20 是 6 位，原生 TON 是 9 位 nanoton，而 jetton 的小数位数写在该代币自己的
+// 元数据里（TEP-64）——它可以是 6、8，也可以是别的。位数取错的后果是 10^n 倍的
+// 不可逆多付，所以本包只按 int64 最小单位原样透传，指数的解释权留给填
+// contract / jetton 的那一方（以及它对着的那份代币文档）。
 type PayOrder struct {
 	// OrderNo 是业务侧订单号，同时是透传给供应商的幂等键：
 	// 同一单二次提交不得产生第二笔资金动作。一旦生成不得变更。
@@ -95,16 +128,26 @@ type PayOrder struct {
 	Amount   int64  `json:"amount"`
 	Currency string `json:"currency,omitempty"`
 	Network  string `json:"network,omitempty"`
-	// AccountID 是「用哪个商户账户做这一单」的本地标识：它对应配置里
-	// pay_sdks.<sdk>.accounts 的键名，由通道包在读取配置时换取商户号。
-	// 它本身不进报文，也不能让供应商侧看到我们内部的账户命名。
-	AccountID string `json:"-"`
 	// Address 是收款地址（提现）；充值侧留空或由供应商返回。
 	Address string `json:"address,omitempty"`
 	Phone   string `json:"phone,omitempty"`
+	// Memo 是附在转账上的备注（TON 侧的 comment / message）。
+	//
+	// 它不是可选的装饰：往交易所归集账户打钱时，收款方是所有人共用的一个热钱包，
+	// 认款全靠这一串——漏填的后果是链上确认成功、对方账上却认不出是谁的，
+	// 只能走人工找回。反过来说，TRC20 根本没有这个概念，给 USDT 单填 Memo
+	// 会被 ustd 登记的规则直接拒掉（见 ChainRule.CheckMemo）。
+	// 明文可以进报文，但不得进日志与 RawNote。
+	Memo string `json:"memo,omitempty"`
 	// Code 是登录验证码明文。它不得进入日志、错误文案或 PayResult.RawNote。
 	Code string `json:"code,omitempty"`
-	// Extra 放通道特有字段（如 remark、notify_url 键名）。值同样不得含凭证。
+	// Extra 放通道特有字段（如 remark、供应商自定义的回调键名）。值同样不得含凭证。
+	// 这些键值会并进报文同一层，并按 key 字典序追加到签名域末尾——报文与签名域
+	// 由同一次遍历产出，不会出现「带出去了却没签」的情况。
+	//
+	// 键名不得与那些已签名量同字（app_id / merchant_id / order_no / amount /
+	// currency / network / address / phone / memo / notify_url），命中即拒单：
+	// 能覆盖已签名字段的逃生口，等于给签名域开了个后门。
 	// 无特有字段时不出现在报文里，避免供应商把 null 当成显式清空指令。
 	Extra map[string]string `json:"extra,omitempty"`
 }
@@ -117,6 +160,23 @@ type PayResult struct {
 	// Status 取值见上方四个状态常量。
 	Status string `json:"status"`
 	Amount int64  `json:"amount"`
+	// TxHash 是链上交易哈希。供应商代我们广播时它才是「钱真的动了」的那条证据；
+	// 账本划转类通道（whatsapp）留空。空哈希不表示失败，表示这家供应商没回。
+	TxHash string `json:"tx_hash,omitempty"`
+	// Fee 是本单实际扣的手续费，币种最小单位整数。
+	//
+	// 它与 AccountInfo.FeeRateBps 是两件不同的事，不能互相换算：费率是万分比、
+	// 按金额比例收，而链上 gas 是**固定一笔、以那条链的原生币收**——
+	// 转 USDT 收的是 TRX，转 jetton 收的是 TON，且与转账金额无关
+	// （同一个 TRC20 transfer，收款地址是否活跃能让 gas 差一倍）。
+	Fee int64 `json:"fee,omitempty"`
+	// FeeCurrency 是 Fee 的计价币种，可能不同于本单币种（见上）。
+	// 供应商给了 Fee 却没给币种时按本单币种兜底，兜底理由见 Provider.Result。
+	FeeCurrency string `json:"fee_currency,omitempty"`
+	// Confirmations 是链上确认数。nil 表示供应商没回这个字段，
+	// 与「回了一个 0」必须区分开：0 是「交易已进块但还没确认」，
+	// 上游据此该继续查；没回则是「这家供应商不提供」，据此查也查不出东西。
+	Confirmations *int64 `json:"confirmations,omitempty"`
 	// RawNote 是可公开给日志的响应摘要。凭证、验证码、私钥一律不得出现。
 	RawNote string `json:"raw_note,omitempty"`
 }
@@ -150,6 +210,10 @@ type AccountInfo struct {
 	// Credit 是供应商给的我方授信额度；没有授信概念的供应商返回 0。
 	Credit int64 `json:"credit"`
 	// FeeRateBps 手续费率，万分比整数（30 = 0.30%）。
+	//
+	// 它只对「按比例抽佣」的账本划转有意义。链上那一类通道别拿它预估成本：
+	// gas 是固定一笔、以链原生币收的（TRC20 收 TRX、jetton 收 TON），
+	// 单笔实际扣多少只有回执里的 PayResult.Fee 知道。
 	FeeRateBps int64 `json:"fee_rate_bps"`
 	// Status 取值见 Acct* 常量；读不懂一律 UNKNOWN，不当成正常。
 	Status string `json:"status"`
@@ -162,6 +226,10 @@ type AccountInfo struct {
 // 只作为「发出去之前少挨一次拒」的前置判断，不作为额度账本：真正的额度
 // 与幂等在下游业务侧落库。账户状态非 ACTIVE 时直接否，UNKNOWN 也否——
 // 没看清的账户不该往外送钱。
+//
+// 它看的是「这一单的币种够不够」，看不到链上 gas：TRON 与 TON 的 gas 收在原生币
+// （TRX / TON）上，是另一个账户。USDT 余额充足而 TRX 为 0 时本方法照样点头，
+// 供应商会在广播那一步报 OUT_OF_ENERGY——而且 TRX 已经烧掉了。
 func (a *AccountInfo) CanWithdraw(amount int64) bool {
 	if a == nil || amount <= 0 || !IsActive(a.Status) {
 		return false

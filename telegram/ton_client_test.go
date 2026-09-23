@@ -24,7 +24,10 @@ const (
 	tonSection  = "test_ton"
 	tonAccount  = "default"
 	tonMerchant = "MCH-TON"
-	tonJetton   = "EQDtFpEwcR-fm552Nv6h3FDFdv3TbHx8w9Wm7FqYqU8dBB1q"
+	// tonJetton 用真实形态的 TON 地址（含 CRC16 校验和）。原先这个值是手编的：
+	// 48 位、EQ 开头、看着完全正常，校验和却对不上——本包现在会在启动时拒掉它，
+	// 而测试夹具要是也继续编一个，等于把「示例地址是假的」这个错一直留在仓里。
+	tonJetton = "EQAgISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0-P-P7"
 )
 
 // tonRecorder 收集 tonPublish 广播出去的回执。
@@ -197,7 +200,7 @@ func TestTonOrderDefaultsFromChainConfig(t *testing.T) {
 	if !ok {
 		t.Fatal("装配失败")
 	}
-	o := &pay.PayOrder{OrderNo: "O1", Amount: 1000000000, Address: "EQAddress"}
+	o := &pay.PayOrder{OrderNo: "O1", Amount: 1000000000, Address: tonAcctBounceable}
 	got := c.order(o)
 	if got.Currency != pay.CurrencyTON || got.Network != "mainnet" {
 		t.Fatalf("缺省补齐不符: %+v", got)
@@ -250,7 +253,11 @@ func TestTonRechargeSignsAndSerializes(t *testing.T) {
 	if strings.Contains(body, tonSecret) {
 		t.Fatalf("密钥进了报文: %s", body)
 	}
-	want := pay.SignMD5(tonSecret, "app1", tonMerchant, "O1", "1000000000", pay.CurrencyTON, "", "", tonJetton)
+	// 十个定长标量之后才是通道特有字段（jetton）。此单没填收款侧字段，
+	// 所以 address / phone / memo / notify_url 四位以空串占位。
+	want := pay.SignMD5(tonSecret,
+		"app1", tonMerchant, "O1", "1000000000", pay.CurrencyTON, "mainnet", "", "", "", "",
+		tonJetton)
 	if sign != want {
 		t.Fatalf("签名=%s，期望 %s", sign, want)
 	}
@@ -263,7 +270,7 @@ func TestTonRechargeSignsAndSerializes(t *testing.T) {
 func TestTonUnregisteredEndpointSendsNothing(t *testing.T) {
 	f, url := newTonFakeSupplier(t)
 	startTon(t, payTonCfg(url, map[string]string{pay.EndpointQuery: "/api/query"}))
-	if _, err := TonWithdraw(nil, &pay.PayOrder{OrderNo: "O1", Amount: 1, Address: "EQ1"}); err == nil {
+	if _, err := TonWithdraw(nil, &pay.PayOrder{OrderNo: "O1", Amount: 1, Address: tonAcctBounceable}); err == nil {
 		t.Fatal("未登记端点应当报错")
 	} else if !strings.Contains(err.Error(), "endpoints."+pay.EndpointWithdraw) {
 		t.Fatalf("错误未指明缺哪个端点: %v", err)
@@ -282,7 +289,7 @@ func TestTonGatewayRetryIsTransparent(t *testing.T) {
 	cfg.PaySDks[tonSection].TimeoutSec = 5
 	startTon(t, cfg)
 
-	if _, err := TonWithdraw(nil, &pay.PayOrder{OrderNo: "O1", Amount: 100, Address: "EQ1"}); err == nil {
+	if _, err := TonWithdraw(nil, &pay.PayOrder{OrderNo: "O1", Amount: 100, Address: tonAcctBounceable}); err == nil {
 		t.Fatal("持续 5xx 应当报错")
 	}
 	if n := f.seen(); n != 2 {
@@ -375,7 +382,7 @@ func TestTonAccountQueryReadsMerchantSnapshot(t *testing.T) {
 
 // TestTonSdkSectionKeyHookInjectsSecret 配置文件里不留密钥：下游按 SDK 段名注册钩子，
 // 在启动前注入。
-func TestTonProviderKeyHookInjectsSecret(t *testing.T) {
+func TestTonSdkSectionKeyHookInjectsSecret(t *testing.T) {
 	f, url := newTonFakeSupplier(t)
 	cfg := payTonCfg(url, tonEndpoints())
 	cfg.PaySDks[tonSection].SecretKey = ""

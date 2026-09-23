@@ -293,7 +293,7 @@ func TestUnrecognizedStatusBecomesUnknown(t *testing.T) {
 	}
 }
 
-// TestProviderKeyHookInjectsSecret 配置文件里不留密钥：下游按 SDK 段名注册一个钩子，
+// TestSdkSectionKeyHookInjectsSecret 配置文件里不留密钥：下游按 SDK 段名注册一个钩子，
 // 两条链路装配时各自注入同一份凭证。与 telegram 包的 BotKey 钩子同源，
 // 差别在于键名跟着 SDK 段走——一家供应商的密钥登记一次，而不是每条通道抄一遍。
 func TestSdkSectionKeyHookInjectsSecret(t *testing.T) {

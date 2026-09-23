@@ -1,7 +1,8 @@
 // Package ustd 是 USDT（TRC20）通道的充值与提现接入点。
 //
-// 目录名沿用需求里的 ustd，代码内一律用 pay.CurrencyUSDT / pay.NetworkTRC20，
-// 避免出现第三个「拼错方向的 USDT」。
+// 目录名沿用需求里的 ustd，代码内一律用 pay.CurrencyUSDT，避免出现第三个「拼错方向的 USDT」。
+// 网络取值走 pay.NetworkMainnet 这类公链名，合约地址走 ustd.contract 一列——
+// 把 trc20 当网络填进配置会被本包在启动时拒掉（见 newClient）。
 //
 // 本包只负责把请求送到供应商、把回执读成 pay.PayResult，不碰 SQL、不碰积分与额度；
 // 下游业务按 util.CallUstdMsg+"Xxx" 注册回调接手结果。

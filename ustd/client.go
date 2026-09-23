@@ -27,6 +27,19 @@ func newClient(cfg *config.Cfg) (*client, bool) {
 		return nil, false
 	}
 	contract := strings.TrimSpace(cfg.Ustd.Contract)
+	// 合约地址在这里就要过一遍格式：它是供应商广播时的收端之一，写错等于把这一通道
+	// 的每一单都送进黑洞，而报错要等到第一笔出款之后。
+	if contract != "" && !IsValidTRONAddress(contract) {
+		vars.Info("USDT 通道不启动: 配置的 TRC20 合约地址 %s 不合法（长度、版本字节或末尾 4 字节校验和对不上）", contract)
+		return nil, false
+	}
+	network := strings.TrimSpace(cfg.Ustd.Network)
+	if isTokenStandard(network) {
+		// trc20 是「这张合约跑在 TRON 上」的标准名，不是网络名。混填进 network 的
+		// 后果是换测试网时无从表达，而且供应商侧多半按主网口径处理。
+		vars.Info("USDT 通道不启动: ustd.network=%s 是代币标准而不是公链网络，网络取值用 mainnet / shasta / nile，合约在 ustd.contract", network)
+		return nil, false
+	}
 	var extras []pay.ExtraField
 	if contract != "" {
 		extras = append(extras, pay.ExtraField{Name: "contract", Value: contract})
@@ -36,8 +49,20 @@ func newClient(cfg *config.Cfg) (*client, bool) {
 		vars.Info("USDT 通道不启动: %v", err)
 		return nil, false
 	}
-	vars.Info("USDT 通道已就绪: sdk=%s 商户号=%s 合约=%s", res.Section, res.MerchantID, contract)
-	return &client{ch: res.Channel, network: strings.TrimSpace(cfg.Ustd.Network)}, true
+	vars.Info("USDT 通道已就绪: sdk=%s 商户号=%s 合约=%s 网络=%s", res.Section, res.MerchantID, contract, network)
+	return &client{ch: res.Channel, network: network}, true
+}
+
+// isTokenStandard 判断 network 里填的是不是代币标准名。
+//
+// 只列这几个已被误用过的写法，不做「不在已知网络表里就拒」：供应商自己的网络叫法
+// 我们没资格断言，硬拦会把能用的配置拦死。
+func isTokenStandard(network string) bool {
+	switch strings.ToLower(strings.TrimSpace(network)) {
+	case "trc20", "trc-20", "trc10", "erc20", "bep20", "bep-20":
+		return true
+	}
+	return false
 }
 
 // order 把链路配置补进订单里未指定的字段。

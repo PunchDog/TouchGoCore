@@ -11,7 +11,9 @@ import (
 	"touchgocore/mapmanager"
 	"touchgocore/rpc"
 	"touchgocore/telegram"
+	"touchgocore/ustd"
 	"touchgocore/websocket"
+	"touchgocore/whatsapp"
 )
 
 // ==================== 服务适配器 ====================
@@ -75,6 +77,49 @@ func (s *telegramService) Start(ctx context.Context) error {
 }
 func (s *telegramService) Stop(ctx context.Context) error {
 	telegram.TelegramStop(ctx)
+	return nil
+}
+
+// 三条资金通道各一个适配器：配置独立开关、故障彼此无关，合并成一个 Service
+// 会让「钱包没配好」连带停掉另外两条能用的通道。
+// Start 一律返回 nil：通道故障不阻断整机启动，不启动的判断与原因由包内留日志。
+
+// whatsappService WhatsApp 登录与充值/提现服务适配器
+type whatsappService struct{}
+
+func (s *whatsappService) Name() string { return "whatsapp" }
+func (s *whatsappService) Start(ctx context.Context) error {
+	whatsapp.WhatsappStart(ctx)
+	return nil
+}
+func (s *whatsappService) Stop(ctx context.Context) error {
+	whatsapp.WhatsappStop(ctx)
+	return nil
+}
+
+// ustdService USDT(TRC20) 充值/提现服务适配器
+type ustdService struct{}
+
+func (s *ustdService) Name() string { return "ustd" }
+func (s *ustdService) Start(ctx context.Context) error {
+	ustd.UstdStart(ctx)
+	return nil
+}
+func (s *ustdService) Stop(ctx context.Context) error {
+	ustd.UstdStop(ctx)
+	return nil
+}
+
+// tonService TON 充值/提现服务适配器（代码在 telegram 包，配置在 telegram.ton 段）
+type tonService struct{}
+
+func (s *tonService) Name() string { return "ton" }
+func (s *tonService) Start(ctx context.Context) error {
+	telegram.TonStart(ctx)
+	return nil
+}
+func (s *tonService) Stop(ctx context.Context) error {
+	telegram.TonStop(ctx)
 	return nil
 }
 

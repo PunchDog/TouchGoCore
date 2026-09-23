@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -140,6 +141,11 @@ func (c *Cfg) Validate() error {
 		}
 	}
 
+	err := validatePayChannels(c)
+	if err != nil {
+		return err
+	}
+
 	rpc := c.RpcOf()
 	if rpc != nil {
 		for i, s := range rpc.Server {
@@ -161,6 +167,89 @@ func (c *Cfg) Validate() error {
 	}
 
 	return nil
+}
+
+// validatePayChannels 校验资金通道的 SDK 引用是否指得通。
+//
+// 这里拦的是「配置写错」而不是「供应商挂了」：sdk 名字打错一个字母、引用了
+// 不存在的商户账户、SDK 段没标驱动，都是部署期就能确定的错，让它启动只会在
+// 第一笔出款时暴露。至于驱动名有没有登记，由通道包在 Start 时用 pay.Open 判定
+// （本包不引 pay，避免配置层依赖资金契约层）。
+//
+// 判定范围只有「已经开启的部分」：enable 不为 on 的段整体跳过——把一条通道关掉
+// 不该同时要求它的每一项配置都仍然完整。唯一的例外是段名本身指不到：那是纯粹的
+// 拼写错，跟开没开无关，趁启动报出来比留到某天打开时炸掉省事。
+func validatePayChannels(c *Cfg) error {
+	refs := map[string]*PaySDKRef{}
+	// service 标记这条引用只做验证码下发/登录换会话，不动资金：
+	// 这样的 SDK 本就没有商户账户，按资金链路口径要求它等于逼配置里填个假商户号。
+	service := map[string]bool{"whatsapp.login": true}
+	if c.Telegram != nil {
+		refs["telegram.ton"] = c.Telegram.Ton
+	}
+	if c.Ustd != nil {
+		refs["ustd.provider"] = c.Ustd.Provider
+	}
+	if c.Whatsapp != nil {
+		refs["whatsapp.login"] = c.Whatsapp.Login
+		refs["whatsapp.provider"] = c.Whatsapp.Provider
+	}
+	for _, name := range sortedMapKeys(refs) {
+		ref := refs[name]
+		if ref.Empty() {
+			continue // 没引用即不启用，属正常缺省
+		}
+		section := c.PaySDks[strings.TrimSpace(ref.SDK)]
+		if section == nil {
+			// 段名打错一个字母是纯配置错，无论开没开都要当场报出来：
+			// 它不会因为「这条通道还没启用」就变正确，只会在某天真打开时炸成启动失败。
+			return fmt.Errorf("%s: pay_sdks 里没有名为 %s 的 SDK 段", name, strings.TrimSpace(ref.SDK))
+		}
+		if !section.Enabled() {
+			continue // 段没开＝这条引用当前不参与判定，属合法的「写好待开」
+		}
+		_, _, err := ref.Resolve(c.PaySDks)
+		if service[name] {
+			_, _, err = ref.ResolveService(c.PaySDks)
+		}
+		if err != nil {
+			return fmt.Errorf("%s: %w", name, err)
+		}
+	}
+	for _, name := range sortedMapKeys(c.PaySDks) {
+		sdk := c.PaySDks[name]
+		if !sdk.Enabled() {
+			// enable 不为 on 的段整体不参与判定：关掉一条通道不该同时要求
+			// 它的每一项配置都仍然完整。
+			continue
+		}
+		if strings.TrimSpace(sdk.Driver) == "" {
+			return fmt.Errorf("pay_sdks.%s 缺 sdk 驱动标记（应为 pay 包登记过的驱动名）", name)
+		}
+		if strings.TrimSpace(sdk.BaseURL) == "" {
+			return fmt.Errorf("pay_sdks.%s 已登记但 base_url 为空", name)
+		}
+		// accounts 是否为空不在这里查：只做验证码下发的 SDK 本就没有商户账户，
+		// 真正需要出账主体的引用在 Resolve 里会报「未配置 accounts」。
+		for _, alias := range sortedMapKeys(sdk.Accounts) {
+			acc := sdk.Accounts[alias]
+			if acc == nil || strings.TrimSpace(acc.MerchantID) == "" {
+				return fmt.Errorf("pay_sdks.%s.accounts.%s 缺 merchant_id", name, alias)
+			}
+		}
+	}
+	return nil
+}
+
+// sortedMapKeys 只为报错顺序稳定：同一份错配置两次启动报同一个首条错误，
+// 便于比对与自动化断言。
+func sortedMapKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func validateTLS(prefix string, tls *TLSConfig) error {

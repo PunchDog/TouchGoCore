@@ -97,7 +97,20 @@ const (
 	CallWebSocketMsg = "WebSocketMsg"
 	CallRpcMsg       = "RpcMsg"
 	CallTelegramMsg  = "TelegramMsg"
-	CallLoadIni      = "loadini"
+	// CallWhatsappMsg / CallUstdMsg / CallTonMsg 是三条资金通道的回调前缀。
+	// 下游按 <前缀>+<动作> 注册，例如 WhatsappMsg+"Recharge"（载荷 *pay.PayResult）；
+	// 通道包本身不落库，结果只经这里交出去。
+	CallWhatsappMsg = "WhatsappMsg"
+	CallUstdMsg     = "UstdMsg"
+	CallTonMsg      = "TonMsg"
+	// CallPaySDKMsg + pay_sdks 的段名 = 该段签名密钥的注入钩子，载荷是 *string
+	// （指向该段的 secret_key 字段本身）。
+	//
+	// 钩子按 SDK 段而不是按通道命名：同一供应商的凭证只有一份，常被两三条通道共用。
+	// 若让下游为 whatsapp/ustd/ton 各注册一次同一个密钥，迟早出现「只注入了两家、
+	// 第三家用空密钥出款」这种只有供应商会发现的错。
+	CallPaySDKMsg = "PaySDK"
+	CallLoadIni   = "loadini"
 )
 
 var DefaultCallFunc = &CallFunction{

@@ -123,6 +123,61 @@
             "token": ""
         }
     },
+    "pay_sdks说明": "资金 SDK 集中登记表：一段=一套供应商接入（驱动、基址、凭证、端点表、我方商户账户）。同一供应商常同时供着充值、提现、验证码下发三条链路，凭证抄三份必然改漏一处，所以只在这里写一次；telegram.ton / ustd.provider / whatsapp.provider / whatsapp.login 四段各自用 {sdk, account} 引用这里的一段",
+    "pay_sdks": {
+        "supplier_a": {
+            "enable": "off",
+            "enable说明": "必须显式为 on。开关只有一处真相：SDK 段决定这套凭证能不能用，通道段决定这条通道用不用它，两处都到位才是开",
+            "driver": "generic_md5",
+            "driver说明": "驱动标记，取值是 pay 包登记过的驱动名（启动时 pay.Open 按这个名字取实现，写错会报出可用驱动清单）。内置通用驱动 generic_md5 = HTTP + 字段顺序拼接 MD5 签名 + code/msg/data 包络；供应商若是别的签名形态，由对应 SDK 包登记新驱动名，这里换个名字即可，通道代码不动",
+            "base_url": "https://supplier.example/api",
+            "app_id": "CHANGE-ME",
+            "secret_key": "",
+            "secret_key说明": "签名密钥。留空则由下游在启动前经 util.CallPaySDKMsg+\"supplier_a\" 钩子注入，避免明文进版本库；它不得进入日志、error 文案与任何摘要字段",
+            "auth_header": "X-Sign",
+            "token_header": "Authorization",
+            "timeout_sec": 30,
+            "timeout_sec说明": "单次请求超时（秒），<=0 用 pay.DefaultTimeout；max_retries <0 用 pay.DefaultMaxRetry",
+            "max_retries": 2,
+            "notify_url": "https://example.com/callback/pay",
+            "endpoints说明": "逻辑名 -> 供应商实际路径。逻辑名固定为 account/recharge/query/withdraw/login/send_code 六个，缺某个键则该操作就地拒绝、不发请求",
+            "endpoints": {
+                "account": "/pay/account",
+                "recharge": "/pay/recharge",
+                "query": "/pay/query",
+                "withdraw": "/pay/withdraw"
+            },
+            "accounts说明": "我方在该供应商名下的商户账户表，键是本地别名（default/reserve…），通道段用 account 点名。余额/可用/授信/费率是供应商侧事实，用 pay 的 QueryAccount 读回来，不抄进配置（抄进来就是一份会过期的假账）。备用商户号的用法：主账户冻结或怀疑泄露时把通道段的 account 改成 reserve，不必动凭证；enable 不为 on 的账户一律拒绝被引用",
+            "accounts": {
+                "default": {
+                    "enable": "on",
+                    "merchant_id": "MCH-0001"
+                },
+                "reserve": {
+                    "enable": "off",
+                    "merchant_id": "MCH-0002"
+                }
+            }
+        },
+        "supplier_wa": {
+            "enable": "off",
+            "driver": "generic_md5",
+            "driver说明": "验证码下发链路的驱动标记。只发消息不出钱，所以 accounts 留空也不会报错；真有通道段引用它做资金操作时，会在 Resolve 里报「未配置 accounts」",
+            "base_url": "https://supplier.example/api",
+            "app_id": "CHANGE-ME",
+            "secret_key": "",
+            "auth_header": "X-Sign",
+            "token_header": "Authorization",
+            "token_header说明": "登录成功后供应商给的会话凭证写在这个头里；只进请求头，不进日志与错误文案",
+            "timeout_sec": 30,
+            "max_retries": 2,
+            "notify_url": "",
+            "endpoints": {
+                "send_code": "/wa/send_code",
+                "login": "/wa/login"
+            }
+        }
+    },
     "telegram": {
         "telegram说明": "Telegram 机器人配置（可选，不填 Cfg.Telegram 为 nil 则不启用）",
         "bot_token": "000000:CHANGE-ME",
@@ -132,6 +187,47 @@
         "game_to_short": {
             "game_1": "g1",
             "game_2": "g2"
+        },
+        "ton说明": "TON 充值/提现的 SDK 引用（代码在 telegram 包、配置跟 telegram 段）。这里只留两个名字，凭证在 pay_sdks；sdk 留空即该通道不启用，与 bot_token 互不影响",
+        "ton": {
+            "sdk": "supplier_a",
+            "sdk说明": "pay_sdks 的键名。填了名字还要那一段 enable 为 on 才算启用；指向不存在段名会在启动校验直接报错",
+            "account": "default",
+            "account说明": "该 SDK 段 accounts 里的键名。只有一个账户时留空即取那一个；多于一个必须点名，否则「这一单从哪个商户号出」就成了初始化顺序的函数"
+        },
+        "ton_network说明": "TON 网络标识（mainnet/testnet），留空按供应商为该 AppID 登记的默认值",
+        "ton_network": "mainnet",
+        "jetton说明": "TON 侧代币合约地址；原生 TON 留空。同一通道下原生币与代币靠这一列区分",
+        "jetton": ""
+    },
+    "whatsapp说明": "WhatsApp 通道（登录/充值/提现），代码在 whatsapp 包。登录与资金各引用一个 SDK 段：验证码走消息网关、充值提现走支付网关是常见形态，两段独立开关",
+    "whatsapp": {
+        "login说明": "登录与验证码下发链路的 SDK 引用。这类链路只发消息、不出钱，被引用的 SDK 段没有 accounts 也能启动；account 留空即可",
+        "login": {
+            "sdk": "supplier_wa",
+            "account": ""
+        },
+        "provider说明": "充值/提现链路的 SDK 引用；漏一个开关的代价是少一条通道，多开一条的代价是真金出款，所以默认不启用",
+        "provider": {
+            "sdk": "supplier_a",
+            "account": "default"
+        },
+        "templates说明": "消息模板名表，键是逻辑名；auth_verify 是下发验证码用的模板",
+        "templates": {
+            "auth_verify": "tpl_auth_verify",
+            "bind_notice": "tpl_bind_notice"
+        }
+    },
+    "ustd说明": "USDT(TRC20) 通道（充值/提现），代码在 ustd 包。目录名沿用 ustd，代码内币种常量是 USDT；金额一律整数最小单位（USDT 为 6 位小数），手续费走万分比整数，配置与报文都不出现浮点",
+    "ustd": {
+        "network说明": "公链网络标识，随下单报文交给供应商；留空则按供应商为该 AppID 登记的默认值",
+        "network": "trc20",
+        "contract说明": "TRC20 合约地址；原生 TRX 留空。同一 trc20 通道下 USDT 与原生币靠这一列区分。它会并进报文并追加到签名域末尾，顺序由 ustd 包登记",
+        "contract": "TR7NharAcTPb3DHchqPguF36bXqWRRCbqR",
+        "provider说明": "资金链路的 SDK 引用",
+        "provider": {
+            "sdk": "supplier_a",
+            "account": "default"
         }
     },
     "lua_config": {

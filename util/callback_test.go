@@ -61,7 +61,12 @@ func TestCallback_UnregisterConcurrentWithDo(t *testing.T) {
 
 	for i := 0; i < 20; i++ {
 		wg.Add(1)
-		go func() { defer wg.Done(); for j := 0; j < 200; j++ { c.Do("k") } }()
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 200; j++ {
+				c.Do("k")
+			}
+		}()
 	}
 	wg.Add(1)
 	go func() {

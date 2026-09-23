@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"path"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -316,7 +316,7 @@ func createZapCore(cfg LogConfig) (zapcore.Core, *os.File, error) {
 	}
 
 	// 配置文件路径
-	filePath := path.Join(cfg.LogPath, cfg.LogName+".log")
+	filePath := filepath.Join(cfg.LogPath, cfg.LogName+".log")
 
 	// 打开日志文件
 	file, err := os.OpenFile(filePath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -77,12 +76,24 @@ func NewRotatingFileWriter(filePath, fileName string, maxSize int64, maxAge, max
 
 // currentLogPath 当前活动日志文件路径
 func (w *RotatingFileWriter) currentLogPath() string {
-	return path.Join(w.filePath, w.fileName+".log")
+	return filepath.Join(w.filePath, w.fileName+".log")
 }
 
-// openLogFile 打开当前日志文件（追加模式）并返回句柄与实际大小
+// openLogFile 打开当前日志文件（追加模式）并返回句柄与实际大小。
+// 失败时最多重试 3 次（间隔 50ms），应对 Windows 下防病毒/索引服务短暂锁定
+// 以及 Linux 下磁盘临时 I/O 错误等边缘场景。
 func (w *RotatingFileWriter) openLogFile() (*os.File, int64, error) {
-	file, err := os.OpenFile(w.currentLogPath(), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	var file *os.File
+	var err error
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			time.Sleep(50 * time.Millisecond)
+		}
+		file, err = os.OpenFile(w.currentLogPath(), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+		if err == nil {
+			break
+		}
+	}
 	if err != nil {
 		return nil, 0, fmt.Errorf("%w: %v", ErrFileCreateFailed, err)
 	}
@@ -122,6 +133,16 @@ func (w *RotatingFileWriter) Write(p []byte) (n int, err error) {
 
 	// 检查是否需要轮转
 	w.checkRotate()
+
+	// 轮转后句柄可能为空（rename 成功但新建失败），此处重建避免 panic
+	if w.file == nil {
+		file, size, openErr := w.openLogFile()
+		if openErr != nil {
+			return 0, openErr
+		}
+		w.file = file
+		w.currentSize = size
+	}
 
 	n, err = w.file.Write(p)
 	if err != nil {
@@ -202,12 +223,12 @@ func (w *RotatingFileWriter) rotatedPath() string {
 		if i > 0 {
 			name = fmt.Sprintf("%s_%s_%d.log", w.fileName, timestamp, i)
 		}
-		candidate := path.Join(w.filePath, name)
+		candidate := filepath.Join(w.filePath, name)
 		if _, err := os.Stat(candidate); err != nil {
 			return candidate
 		}
 	}
-	return path.Join(w.filePath, fmt.Sprintf("%s_%d.log", w.fileName, w.nowFunc().UnixNano()))
+	return filepath.Join(w.filePath, fmt.Sprintf("%s_%d.log", w.fileName, w.nowFunc().UnixNano()))
 }
 
 // rotate 执行日志轮转（调用方必须持有 w.mu）
@@ -227,10 +248,23 @@ func (w *RotatingFileWriter) rotate() {
 	w.currentSize = 0
 
 	rotatedPath := w.rotatedPath()
-	if err := w.renameFunc(w.currentLogPath(), rotatedPath); err != nil {
+
+	// rename 最多重试 3 次（间隔 50ms），应对 Windows 下文件锁延迟释放
+	// （防病毒/索引服务）以及 Linux 下 NFS 同步等边缘场景
+	var renameErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			time.Sleep(50 * time.Millisecond)
+		}
+		renameErr = w.renameFunc(w.currentLogPath(), rotatedPath)
+		if renameErr == nil {
+			break
+		}
+	}
+	if renameErr != nil {
 		// 重命名失败：旧文件仍在原位，按真实大小重新接管，
 		// 不能把 currentSize 归零（否则体积永久失真），下次检查时自动重试轮转
-		fmt.Fprintf(os.Stderr, "failed to rotate log file: %v\n", err)
+		fmt.Fprintf(os.Stderr, "failed to rotate log file: %v\n", renameErr)
 		file, size, openErr := w.openLogFile()
 		if openErr != nil {
 			fmt.Fprintf(os.Stderr, "failed to reopen log file: %v\n", openErr)
@@ -336,7 +370,7 @@ func (w *RotatingFileWriter) cleanupOldBackups() {
 	}
 
 	// 列出所有备份文件
-	pattern := path.Join(w.filePath, w.fileName+"_*.log*")
+	pattern := filepath.Join(w.filePath, w.fileName+"_*.log*")
 	matches, err := filepath.Glob(pattern)
 	if err != nil {
 		return

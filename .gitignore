@@ -55,3 +55,4 @@ websocket/example_test.go
 # 属于上面的本地测试，包本身因此不再被远程任何代码引用。
 localtimer/internal/
 testdata/
+.qoder/repowiki/

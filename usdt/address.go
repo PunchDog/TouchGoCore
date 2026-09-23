@@ -1,4 +1,4 @@
-package ustd
+package usdt
 
 import (
 	"bytes"

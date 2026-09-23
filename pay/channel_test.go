@@ -102,7 +102,7 @@ func TestChannelOperationsSignAndSerialize(t *testing.T) {
 	r := newSDKServer(t)
 	r.resp.Store(`{"code":"0","data":{"order_no":"O1","trade_no":"T9","status":"success","amount":1000}}`)
 	ch, err := Open(DriverGeneric, ProviderOptions{
-		Name: "ustd", BaseURL: r.srv.URL, SecretKey: "TOPSECRET",
+		Name: "usdt", BaseURL: r.srv.URL, SecretKey: "TOPSECRET",
 		AppID: "app1", MerchantID: "MCH-1", Timeout: 2 * time.Second,
 		Endpoint: endpoints(),
 		Extras:   []ExtraField{{Name: "contract", Value: "TR7"}},
@@ -202,7 +202,7 @@ func TestQueryAccountNormalizes(t *testing.T) {
 		r := newSDKServer(t)
 		r.resp.Store(`{"code":"0","data":` + cs.data + `}`)
 		ch, err := Open(DriverGeneric, ProviderOptions{
-			Name: "ustd", BaseURL: r.srv.URL, SecretKey: "s", AppID: "app1", MerchantID: "MCH-1",
+			Name: "usdt", BaseURL: r.srv.URL, SecretKey: "s", AppID: "app1", MerchantID: "MCH-1",
 			Endpoint: endpoints(),
 		})
 		if err != nil {
@@ -230,7 +230,7 @@ func TestQueryAccountNormalizes(t *testing.T) {
 func TestMerchantIDPrecisionKept(t *testing.T) {
 	r := newSDKServer(t)
 	ch, err := Open(DriverGeneric, ProviderOptions{
-		Name: "ustd", BaseURL: r.srv.URL, SecretKey: "s",
+		Name: "usdt", BaseURL: r.srv.URL, SecretKey: "s",
 		Endpoint: endpoints(),
 		Extras:   []ExtraField{{Name: "remark", Value: "x"}},
 	})

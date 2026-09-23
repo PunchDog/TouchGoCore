@@ -121,7 +121,7 @@ func TestValidatePayChannels(t *testing.T) {
 				"a": {Enable: "on", Driver: "generic_md5", BaseURL: "https://a.example",
 					Accounts: map[string]*PayMerchantAccount{"default": {Enable: "on", MerchantID: "M1"}}},
 			},
-			Ustd:     &UstdConfig{Provider: &PaySDKRef{SDK: "a"}},
+			Usdt:     &UsdtConfig{Provider: &PaySDKRef{SDK: "a"}},
 			Whatsapp: &WhatsappConfig{Login: &PaySDKRef{}, Provider: nil},
 			Telegram: &TelegramConfig{TonNetwork: "mainnet"},
 		}
@@ -131,7 +131,7 @@ func TestValidatePayChannels(t *testing.T) {
 	}
 
 	cases := map[string]func(*Cfg){
-		"通道引用了不存在的段": func(c *Cfg) { c.Ustd.Provider = &PaySDKRef{SDK: "ghost"} },
+		"通道引用了不存在的段": func(c *Cfg) { c.Usdt.Provider = &PaySDKRef{SDK: "ghost"} },
 		"段缺驱动标记":     func(c *Cfg) { c.PaySDks["a"].Driver = "" },
 		"段缺基址":       func(c *Cfg) { c.PaySDks["a"].BaseURL = " " },
 		"账户缺商户号":     func(c *Cfg) { c.PaySDks["a"].Accounts["default"].MerchantID = "" },
@@ -166,7 +166,7 @@ func TestValidatePayChannels(t *testing.T) {
 	// 但段名写错，哪怕那条通道还没开，也当场就该报——它是拼写错，与开关无关。
 	ghostClosed := base()
 	ghostClosed.PaySDks["a"].Enable = "off"
-	ghostClosed.Ustd.Provider = &PaySDKRef{SDK: "ghost"}
+	ghostClosed.Usdt.Provider = &PaySDKRef{SDK: "ghost"}
 	if err := ghostClosed.Validate(); err == nil {
 		t.Error("引用了不存在的段时，即使该通道未开启也应当拦下")
 	}

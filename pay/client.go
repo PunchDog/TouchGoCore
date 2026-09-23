@@ -29,7 +29,7 @@ const (
 // Options 是客户端构造参数。通道配置结构体到这里的逐字段转换留在各通道包，
 // pay 不认识 config，避免成环。
 type Options struct {
-	// Name 是通道名（whatsapp/ustd/ton），进错误文案，不进凭证。
+	// Name 是通道名（whatsapp/usdt/ton），进错误文案，不进凭证。
 	Name        string
 	BaseURL     string
 	Timeout     time.Duration

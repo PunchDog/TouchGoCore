@@ -1,4 +1,4 @@
-package ustd
+package usdt
 
 import (
 	"strings"
@@ -23,28 +23,28 @@ type client struct {
 // 合约地址作为通道特有字段交给 paysdk：它会并进报文并追加到签名域末尾，
 // 所以登记顺序由这里（唯一知道报文形态的一方）决定。
 func newClient(cfg *config.Cfg) (*client, bool) {
-	if cfg == nil || cfg.Ustd == nil {
+	if cfg == nil || cfg.Usdt == nil {
 		return nil, false
 	}
-	contract := strings.TrimSpace(cfg.Ustd.Contract)
+	contract := strings.TrimSpace(cfg.Usdt.Contract)
 	// 合约地址在这里就要过一遍格式：它是供应商广播时的收端之一，写错等于把这一通道
 	// 的每一单都送进黑洞，而报错要等到第一笔出款之后。
 	if contract != "" && !IsValidTRONAddress(contract) {
 		vars.Info("USDT 通道不启动: 配置的 TRC20 合约地址 %s 不合法（长度、版本字节或末尾 4 字节校验和对不上）", contract)
 		return nil, false
 	}
-	network := strings.TrimSpace(cfg.Ustd.Network)
+	network := strings.TrimSpace(cfg.Usdt.Network)
 	if isTokenStandard(network) {
 		// trc20 是「这张合约跑在 TRON 上」的标准名，不是网络名。混填进 network 的
 		// 后果是换测试网时无从表达，而且供应商侧多半按主网口径处理。
-		vars.Info("USDT 通道不启动: ustd.network=%s 是代币标准而不是公链网络，网络取值用 mainnet / shasta / nile，合约在 ustd.contract", network)
+		vars.Info("USDT 通道不启动: usdt.network=%s 是代币标准而不是公链网络，网络取值用 mainnet / shasta / nile，合约在 usdt.contract", network)
 		return nil, false
 	}
 	var extras []pay.ExtraField
 	if contract != "" {
 		extras = append(extras, pay.ExtraField{Name: "contract", Value: contract})
 	}
-	res, err := paysdk.Open(cfg, "ustd", cfg.Ustd.Provider, extras)
+	res, err := paysdk.Open(cfg, "usdt", cfg.Usdt.Provider, extras)
 	if err != nil {
 		vars.Info("USDT 通道不启动: %v", err)
 		return nil, false

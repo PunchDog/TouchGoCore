@@ -123,7 +123,7 @@
             "token": ""
         }
     },
-    "pay_sdks说明": "资金 SDK 集中登记表：一段=一套供应商接入（驱动、基址、凭证、端点表、我方商户账户）。同一供应商常同时供着充值、提现、验证码下发三条链路，凭证抄三份必然改漏一处，所以只在这里写一次；telegram.ton / ustd.provider / whatsapp.provider / whatsapp.login 四段各自用 {sdk, account} 引用这里的一段",
+    "pay_sdks说明": "资金 SDK 集中登记表：一段=一套供应商接入（驱动、基址、凭证、端点表、我方商户账户）。同一供应商常同时供着充值、提现、验证码下发三条链路，凭证抄三份必然改漏一处，所以只在这里写一次；telegram.ton / usdt.provider / whatsapp.provider / whatsapp.login 四段各自用 {sdk, account} 引用这里的一段",
     "pay_sdks": {
         "supplier_a": {
             "enable": "off",
@@ -219,11 +219,11 @@
             "bind_notice": "tpl_bind_notice"
         }
     },
-    "ustd说明": "USDT(TRC20) 通道（充值/提现），代码在 ustd 包。目录名沿用 ustd，代码内币种常量是 USDT；金额一律整数最小单位（USDT 这张合约是 6 位小数，位数取自合约自身的元数据），配置与报文都不出现浮点。注意链上手续费不是万分比：TRON 的 gas 以 TRX 计、由发送方付、与转账金额无关，单笔实际成本看回执的 fee 与 fee_currency",
-    "ustd": {
+    "usdt说明": "USDT(TRC20) 通道（充值/提现），代码在 usdt 包。金额一律整数最小单位（USDT 这张合约是 6 位小数，位数取自合约自身的元数据），配置与报文都不出现浮点。注意链上手续费不是万分比：TRON 的 gas 以 TRX 计、由发送方付、与转账金额无关，单笔实际成本看回执的 fee 与 fee_currency",
+    "usdt": {
         "network说明": "公链网络标识（mainnet / shasta / nile），随下单报文交给供应商并参与签名；留空则按供应商为该 AppID 登记的默认值。别把 trc20 填到这里——那是代币标准不是网络，网络和合约是两个正交维度，填了本包会在启动时拒掉这一段配置",
         "network": "mainnet",
-        "contract说明": "TRC20 合约地址；原生 TRX 留空。同一 TRON 通道下 USDT 与原生币靠这一列区分。启动时按 Base58Check 验格式（长度 34、版本字节 0x41、末尾 4 字节双 SHA256 校验和），不通过则该通道不启动。它会并进报文并追加到签名域末尾，顺序由 ustd 包登记",
+        "contract说明": "TRC20 合约地址；原生 TRX 留空。同一 TRON 通道下 USDT 与原生币靠这一列区分。启动时按 Base58Check 验格式（长度 34、版本字节 0x41、末尾 4 字节双 SHA256 校验和），不通过则该通道不启动。它会并进报文并追加到签名域末尾，顺序由 usdt 包登记",
         "contract": "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t",
         "provider说明": "资金链路的 SDK 引用",
         "provider": {

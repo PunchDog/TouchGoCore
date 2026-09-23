@@ -11,7 +11,7 @@ import (
 	"strings"
 )
 
-// 币种标识。代码内统一用这几个大写名字，目录名 ustd 只是历史命名。
+// 币种标识。代码内统一用这几个大写名字，与目录名 usdt 一致。
 //
 // CurrencyTRX 不是本仓的充值/提现币种，它是手续费侧的事实：TRON 上转 USDT，
 // gas 是以 TRX 收的，与转账币种不同一种。
@@ -35,7 +35,7 @@ const (
 
 // Deprecated: NetworkTRC20 把代币标准当成了网络。TRC20 是「USDT 这张合约跑在
 // TRON 主网上」的意思，网络取值应该是 mainnet；测试网则是 shasta 或 nile。
-// 合约地址另有 ustd.contract 一列承载。网络和合约是两个正交维度，混进一个字段
+// 合约地址另有 usdt.contract 一列承载。网络和合约是两个正交维度，混进一个字段
 // 就等于「换测试网」和「换代币」没法分别表达。
 const NetworkTRC20 = "trc20"
 
@@ -136,7 +136,7 @@ type PayOrder struct {
 	// 它不是可选的装饰：往交易所归集账户打钱时，收款方是所有人共用的一个热钱包，
 	// 认款全靠这一串——漏填的后果是链上确认成功、对方账上却认不出是谁的，
 	// 只能走人工找回。反过来说，TRC20 根本没有这个概念，给 USDT 单填 Memo
-	// 会被 ustd 登记的规则直接拒掉（见 ChainRule.CheckMemo）。
+	// 会被 usdt 登记的规则直接拒掉（见 ChainRule.CheckMemo）。
 	// 明文可以进报文，但不得进日志与 RawNote。
 	Memo string `json:"memo,omitempty"`
 	// Code 是登录验证码明文。它不得进入日志、错误文案或 PayResult.RawNote。
@@ -242,7 +242,7 @@ func (a *AccountInfo) CanWithdraw(amount int64) bool {
 // Error() 的文案只含通道名、错误码与供应商消息，绝不含 AppID/SecretKey/token；
 // 这三项一旦进 error 就会顺着日志和上层包装扩散到不可控的出口。
 type ProviderError struct {
-	// Channel 是通道名（whatsapp/ustd/ton），只用于定位，不参与判定。
+	// Channel 是通道名（whatsapp/usdt/ton），只用于定位，不参与判定。
 	Channel string
 	// Code 是供应商错误码，逐字保留，不做映射。
 	Code string

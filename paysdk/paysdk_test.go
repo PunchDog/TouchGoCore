@@ -81,7 +81,7 @@ func ref() *config.PaySDKRef { return &config.PaySDKRef{SDK: section, Account: a
 func TestOpenRoutesByDriver(t *testing.T) {
 	driver, spy := registerSpy(t)
 	cfg := sdkCfg(driver, oneAccount())
-	res, err := Open(cfg, "ustd", ref(), []pay.ExtraField{{Name: "contract", Value: "TR7"}})
+	res, err := Open(cfg, "usdt", ref(), []pay.ExtraField{{Name: "contract", Value: "TR7"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,7 +89,7 @@ func TestOpenRoutesByDriver(t *testing.T) {
 		t.Fatalf("装配结果不符: %+v", res)
 	}
 	opt := spy.opt
-	if opt.Name != "ustd" || opt.BaseURL != "https://supplier.example" || opt.AppID != "app1" ||
+	if opt.Name != "usdt" || opt.BaseURL != "https://supplier.example" || opt.AppID != "app1" ||
 		opt.SecretKey != secret || opt.NotifyURL != "https://example.com/cb" ||
 		opt.MaxRetry != 2 || opt.Timeout != 30*time.Second {
 		// 只列缺项，不整体打印选项：里面就有密钥。
@@ -113,7 +113,7 @@ func TestOpenInjectsSecretBeforeConstruct(t *testing.T) {
 	id := util.DefaultCallFunc.Register(util.CallPaySDKMsg+section, func(sk *string) { *sk = secret })
 	defer util.DefaultCallFunc.Unregister(util.CallPaySDKMsg+section, id)
 
-	if _, err := Open(cfg, "ustd", ref(), nil); err != nil {
+	if _, err := Open(cfg, "usdt", ref(), nil); err != nil {
 		t.Fatalf("钩子注入密钥后应当装配成功: %v", err)
 	}
 	if spy.opt.SecretKey != secret {
@@ -126,7 +126,7 @@ func TestOpenInjectsSecretBeforeConstruct(t *testing.T) {
 func TestOpenNeedsAccountButServiceDoesNot(t *testing.T) {
 	driver, spy := registerSpy(t)
 	noAccounts := sdkCfg(driver, nil)
-	if _, err := Open(noAccounts, "ustd", ref(), nil); err == nil {
+	if _, err := Open(noAccounts, "usdt", ref(), nil); err == nil {
 		t.Fatal("没有商户账户的出款链路应当拒绝装配")
 	}
 	res, err := OpenService(noAccounts, "whatsapp.login", &config.PaySDKRef{SDK: section})
@@ -186,7 +186,7 @@ func TestOpenFailClosedAndQuiet(t *testing.T) {
 		}(), ref()},
 	}
 	for _, cs := range cases {
-		res, err := Open(cs.cfg, "ustd", cs.ref, nil)
+		res, err := Open(cs.cfg, "usdt", cs.ref, nil)
 		if err == nil || res != nil {
 			t.Errorf("%s 应当拒绝装配，实得 res=%v err=%v", cs.name, res, err)
 			continue
@@ -194,7 +194,7 @@ func TestOpenFailClosedAndQuiet(t *testing.T) {
 		if strings.Contains(err.Error(), secret) {
 			t.Errorf("%s 的报错泄漏了密钥: %v", cs.name, err)
 		}
-		if !strings.Contains(err.Error(), "ustd") {
+		if !strings.Contains(err.Error(), "usdt") {
 			t.Errorf("%s 的报错没指出是哪条通道: %v", cs.name, err)
 		}
 	}
@@ -206,7 +206,7 @@ func TestSecondsLeavesDefaultsToPay(t *testing.T) {
 	driver, spy := registerSpy(t)
 	cfg := sdkCfg(driver, oneAccount())
 	cfg.PaySDks[section].TimeoutSec = 0
-	if _, err := Open(cfg, "ustd", ref(), nil); err != nil {
+	if _, err := Open(cfg, "usdt", ref(), nil); err != nil {
 		t.Fatal(err)
 	}
 	if spy.opt.Timeout != 0 {

@@ -24,7 +24,7 @@ Go 游戏服务框架：WebSocket、gRPC、定时器、Lua、Telegram、Gin、Re
 - Prometheus：`metrics.enabled`，可选 `metrics.token` 保护 `/metrics`。
 - 资金通道：供应商接入集中在顶层 `pay_sdks` 表，一段=一套供应商（`driver` 驱动标记、`base_url`、
   凭证、`endpoints` 端点表、`accounts` 我方商户账户）。通道段 `telegram.ton`（TON）、
-  `ustd.provider`（USDT/TRC20）、`whatsapp.provider`（充值/提现）、`whatsapp.login`（登录/验证码）
+  `usdt.provider`（USDT/TRC20）、`whatsapp.provider`（充值/提现）、`whatsapp.login`（登录/验证码）
   只写 `{sdk, account}` 两个名字引用它，同一供应商的几条链路因此共用一份凭证，不必抄三份。
   「开不开」有两处真相：SDK 段的 `enable` 决定这套凭证能不能用，通道段的 `sdk` 决定这条通道用不用它，
   两处都到位才是开；缺段或写 `off` 都不阻断整机。出款引用必须点到一个 `enable: "on"` 的商户账户
@@ -33,7 +33,7 @@ Go 游戏服务框架：WebSocket、gRPC、定时器、Lua、Telegram、Gin、Re
   不写进版本库；金额一律整数最小单位、手续费走万分比整数，全链路禁浮点。
 - 资金动作的调用面：`pay.Channel` 四件事——查商户账户 `QueryAccount`、充值 `Recharge`、
   提现 `Withdraw`、查单 `QueryOrder`。上游按包名调用门面函数即可（`WhatsappRecharge` /
-  `UstdWithdraw` / `TonAccount` 等），不必先知道配置里写的是哪家 SDK；`driver` 标记由
+  `UsdtWithdraw` / `TonAccount` 等），不必先知道配置里写的是哪家 SDK；`driver` 标记由
   `paysdk` 读表后交给 `pay.Open` 解析成实现。接一家新供应商 = 在它自己的包里
   `pay.Register("驱动名", 构造函数)` + 配置里改 `driver`，通道包与上游都不动。
 

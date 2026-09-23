@@ -15,7 +15,7 @@ import (
 	// 只为把两个通道包的 init 链进来：不导入则注册表是空的，
 	// 下面的地址断言会全部走「未登记即放行」那条路，测不出任何东西。
 	_ "touchgocore/telegram"
-	_ "touchgocore/ustd"
+	_ "touchgocore/usdt"
 )
 
 // loadExample 读示例配置。示例是给下游抄的起点，抄一份跑不通的地址比不写示例更糟。
@@ -29,8 +29,8 @@ func loadExample(t *testing.T) *config.Cfg {
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		t.Fatalf("example.json 反序列化失败: %v", err)
 	}
-	if cfg.Ustd == nil || cfg.Telegram == nil {
-		t.Fatalf("示例缺 ustd / telegram 段: %p %p", cfg.Ustd, cfg.Telegram)
+	if cfg.Usdt == nil || cfg.Telegram == nil {
+		t.Fatalf("示例缺 usdt / telegram 段: %p %p", cfg.Usdt, cfg.Telegram)
 	}
 	return &cfg
 }
@@ -49,12 +49,12 @@ func TestChainRulesLinked(t *testing.T) {
 // 地址是给人抄的，长度和版本字节都对、校验和却不过的字符串最容易蒙过肉眼。
 func TestExampleChainAddressesAreReal(t *testing.T) {
 	cfg := loadExample(t)
-	contract, jetton := cfg.Ustd.Contract, cfg.Telegram.Jetton
-	t.Logf("ustd.network=%s contract=%q | telegram.ton_network=%s jetton=%q",
-		cfg.Ustd.Network, contract, cfg.Telegram.TonNetwork, jetton)
+	contract, jetton := cfg.Usdt.Contract, cfg.Telegram.Jetton
+	t.Logf("usdt.network=%s contract=%q | telegram.ton_network=%s jetton=%q",
+		cfg.Usdt.Network, contract, cfg.Telegram.TonNetwork, jetton)
 
 	nets := map[string]string{
-		"ustd.network":         cfg.Ustd.Network,
+		"usdt.network":         cfg.Usdt.Network,
 		"telegram.ton_network": cfg.Telegram.TonNetwork,
 	}
 	for name, v := range nets {
@@ -70,7 +70,7 @@ func TestExampleChainAddressesAreReal(t *testing.T) {
 		name, currency, addr, network string
 		optional                      bool
 	}{
-		{"ustd.contract", pay.CurrencyUSDT, contract, cfg.Ustd.Network, false},
+		{"usdt.contract", pay.CurrencyUSDT, contract, cfg.Usdt.Network, false},
 		{"telegram.jetton", pay.CurrencyTON, jetton, cfg.Telegram.TonNetwork, true},
 	}
 	for _, a := range addrs {
@@ -107,7 +107,7 @@ func TestExampleAddressRejectionsStillHold(t *testing.T) {
 		name, currency, addr, network string
 		rule                          pay.ChainRule
 	}{
-		{"旧 ustd.contract", pay.CurrencyUSDT, "TR7NharAcTPb3DHchqPguF36bXqWRRCbqR", pay.NetworkMainnet, usdt},
+		{"旧 usdt.contract", pay.CurrencyUSDT, "TR7NharAcTPb3DHchqPguF36bXqWRRCbqR", pay.NetworkMainnet, usdt},
 		{"旧 jetton 夹具", pay.CurrencyTON, "EQDtFpEwcR-fm552Nv6h3FDFdv3TbHx8w9Wm7FqYqU8dBB1q", pay.NetworkMainnet, ton},
 	}
 	for _, c := range cases {

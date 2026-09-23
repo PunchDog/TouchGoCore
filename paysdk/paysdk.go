@@ -3,7 +3,7 @@
 // 它站在 config 与 pay 的交界上：config 只描述配置（不引 pay，免得将来两头引用成环），
 // pay 只认与配置无关的 ProviderOptions（不引 config），于是「读配置表 + 按驱动标记取
 // 实现 + 注入密钥钩子」这一小段装配逻辑需要一个两边都能引的地方。三条通道包
-// （whatsapp/ustd/telegram）共用它，密钥钩子的键名口径在全仓就只有一份。
+// （whatsapp/usdt/telegram）共用它，密钥钩子的键名口径在全仓就只有一份。
 package paysdk
 
 import (
@@ -32,7 +32,7 @@ type Resolved struct {
 
 // Open 按通道段的引用装配一条会动资金的通道：取 SDK 段 → 取商户账户 → 交密钥注入钩子 → 按驱动标记开。
 //
-// channel 是通道名（whatsapp/ustd/ton），只用于错误定位；extras 是该通道特有的报文字段
+// channel 是通道名（whatsapp/usdt/ton），只用于错误定位；extras 是该通道特有的报文字段
 // （如 USDT 的 contract、TON 的 jetton），由通道包给出——它们追加在签名域末尾，
 // 所以只有知道报文形态的一方才能定。
 //

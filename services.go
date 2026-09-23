@@ -11,7 +11,7 @@ import (
 	"touchgocore/mapmanager"
 	"touchgocore/rpc"
 	"touchgocore/telegram"
-	"touchgocore/ustd"
+	"touchgocore/usdt"
 	"touchgocore/websocket"
 	"touchgocore/whatsapp"
 )
@@ -97,16 +97,16 @@ func (s *whatsappService) Stop(ctx context.Context) error {
 	return nil
 }
 
-// ustdService USDT(TRC20) 充值/提现服务适配器
-type ustdService struct{}
+// usdtService USDT(TRC20) 充值/提现服务适配器
+type usdtService struct{}
 
-func (s *ustdService) Name() string { return "ustd" }
-func (s *ustdService) Start(ctx context.Context) error {
-	ustd.UstdStart(ctx)
+func (s *usdtService) Name() string { return "usdt" }
+func (s *usdtService) Start(ctx context.Context) error {
+	usdt.UsdtStart(ctx)
 	return nil
 }
-func (s *ustdService) Stop(ctx context.Context) error {
-	ustd.UstdStop(ctx)
+func (s *usdtService) Stop(ctx context.Context) error {
+	usdt.UsdtStop(ctx)
 	return nil
 }
 

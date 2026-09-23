@@ -266,6 +266,51 @@ func TestTonRechargeSignsAndSerializes(t *testing.T) {
 	}
 }
 
+// TestTonWithdrawCarriesMerchantAndTarget 商户转出：商户号、目标地址、网络与 jetton
+// 四项必须既进报文又进签名域——前两项定「从谁到哪去」，后两项定「哪条链哪个币」，
+// 任一缺失或被篡改就是错账或跨链误投。
+func TestTonWithdrawCarriesMerchantAndTarget(t *testing.T) {
+	f, url := newTonFakeSupplier(t)
+	f.response["/api/withdraw"] = `{"code":"0","data":{"order_no":"O2","trade_no":"T2","status":"success","amount":1000000000}}`
+	startTon(t, payTonCfg(url, tonEndpoints()))
+	tonRecorded()
+
+	res, err := TonWithdraw(nil, &pay.PayOrder{OrderNo: "O2", Amount: 1000000000, Address: tonAcctBounceable})
+	if err != nil {
+		t.Fatalf("提现失败: %v", err)
+	}
+	if res.Status != pay.StatusSuccess || res.TradeNo != "T2" || res.Amount != 1000000000 {
+		t.Fatalf("回执不符: %+v", res)
+	}
+	path, sign, body := f.request(0)
+	if path != "/api/withdraw" {
+		t.Fatalf("请求路径=%s", path)
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(body), &parsed); err != nil {
+		t.Fatal(err)
+	}
+	if parsed["merchant_id"] != tonMerchant || parsed["address"] != tonAcctBounceable {
+		t.Fatalf("商户号或目标地址未进报文: %s", body)
+	}
+	if parsed["jetton"] != tonJetton || parsed["network"] != "mainnet" {
+		t.Fatalf("链上字段未进报文: %s", body)
+	}
+	if strings.Contains(body, tonSecret) {
+		t.Fatalf("密钥进了报文: %s", body)
+	}
+	// 十个定长标量（地址在第七位）之后才是通道特有字段（jetton）。
+	want := pay.SignMD5(tonSecret,
+		"app1", tonMerchant, "O2", "1000000000", pay.CurrencyTON, "mainnet", tonAcctBounceable, "", "", "",
+		tonJetton)
+	if sign != want {
+		t.Fatalf("签名=%s，期望 %s", sign, want)
+	}
+	if pub := tonRecorded(); len(pub) != 1 || pub[0].OrderNo != "O2" || pub[0].Status != pay.StatusSuccess {
+		t.Fatalf("回执广播=%+v", pub)
+	}
+}
+
 // TestTonUnregisteredEndpointSendsNothing 端点没登记的操作必须就地拒绝。
 func TestTonUnregisteredEndpointSendsNothing(t *testing.T) {
 	f, url := newTonFakeSupplier(t)

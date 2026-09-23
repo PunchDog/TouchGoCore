@@ -160,7 +160,7 @@ type TelegramConfig struct {
 // 配置结构体刻意留在 config 包而不是 pay 包：本包的 Cfg 要引用它，而 pay 只认
 // 与配置无关的 ProviderOptions（端点表也是以取值函数的形式交进去）。若把结构体
 // 挪到 pay，config→pay 与 pay→config 两头引用就成环了。
-// 各通道包（whatsapp/ustd/telegram）负责把本结构逐字段转成 pay.ProviderOptions。
+// 各通道包（whatsapp/usdt/telegram）负责把本结构逐字段转成 pay.ProviderOptions。
 //
 // Enable 必须显式为 "on" 才启动。出款接口的新配置段默认不启动，
 // 比「写了 base_url 就以为开了」更安全：漏一个开关的代价是少一条通道，
@@ -208,7 +208,7 @@ func (a *PayMerchantAccount) Enabled() bool {
 
 // PaySDKRef 是通道段对 pay_sdks 表的引用：只留两个名字，不留任何凭证。
 //
-// 通道段（whatsapp.login / whatsapp.provider / ustd.provider / telegram.ton）
+// 通道段（whatsapp.login / whatsapp.provider / usdt.provider / telegram.ton）
 // 各自的开关就是这里填不填名字：留空即该通道不启用。之所以不再单独放一个
 // enable，是为了让「开不开」只有一处真相——SDK 段的 enable 决定凭证能不能用，
 // 这里的 sdk 决定这条通道用不用它；两处都开才是开。
@@ -319,8 +319,8 @@ type WhatsappConfig struct {
 	Templates map[string]string `json:"templates"`
 }
 
-// UstdConfig 是 USDT（TRC20）通道配置。目录名沿用 ustd，代码内币种常量用 USDT。
-type UstdConfig struct {
+// UsdtConfig 是 USDT（TRC20）通道配置。
+type UsdtConfig struct {
 	Provider *PaySDKRef `json:"provider"`
 	// Network 是公链网络标识（mainnet/shasta/nile），留空按供应商默认。
 	// 这里要填的是「在哪条链上发」，不是代币标准：trc20 是标准名，填进来会在

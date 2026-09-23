@@ -140,6 +140,45 @@ func TestLoginThenRechargeCarriesToken(t *testing.T) {
 	}
 }
 
+// TestWithdrawCarriesMerchantAndTarget 商户转出：商户号与目标地址必须既进报文又进签名域。
+// 商户号定「钱从谁的账上出」，地址定「钱到哪去」——任一缺失或被篡改都是错账；
+// 回执成功后还要广播给下游对账。
+func TestWithdrawCarriesMerchantAndTarget(t *testing.T) {
+	f, url := newFakeSupplier(t)
+	f.response["/api/withdraw"] = `{"code":"0","data":{"order_no":"O2","trade_no":"T2","status":"success","amount":500}}`
+	startWith(t, payCfg(url, allEndpoints()))
+	recorded()
+
+	res, err := WhatsappWithdraw(nil, &pay.PayOrder{OrderNo: "O2", Amount: 500, Currency: pay.CurrencyUSDT, Address: "TTargetAddr"})
+	if err != nil {
+		t.Fatalf("提现失败: %v", err)
+	}
+	if res.Status != pay.StatusSuccess || res.TradeNo != "T2" || res.Amount != 500 {
+		t.Fatalf("提现回执=%+v", res)
+	}
+	req := f.seen()[0]
+	if req.path != "/api/withdraw" {
+		t.Fatalf("请求路径=%s", req.path)
+	}
+	for _, want := range []string{`"merchant_id":"` + merchantID + `"`, `"address":"TTargetAddr"`, `"amount":500`} {
+		if !strings.Contains(req.body, want) {
+			t.Fatalf("提现报文缺 %s: %s", want, req.body)
+		}
+	}
+	if strings.Contains(req.body, testSecret) {
+		t.Fatalf("凭证进了报文: %s", req.body)
+	}
+	// 签名域十个定长位：地址在第七位，网络未填以空串占位。
+	wantSign := pay.SignMD5(testSecret, "app1", merchantID, "O2", "500", pay.CurrencyUSDT, "", "TTargetAddr")
+	if req.sign != wantSign {
+		t.Fatalf("签名=%s，期望 %s", req.sign, wantSign)
+	}
+	pub := recorded()
+	if len(pub) != 1 || pub[0].OrderNo != "O2" || pub[0].Status != pay.StatusSuccess {
+		t.Fatalf("回执广播=%+v", pub)
+	}
+}
+
 // TestSendCodeUsesConfiguredTemplate 模板名来自配置，供文档到位后按供应商模板改。
 func TestSendCodeUsesConfiguredTemplate(t *testing.T) {
 	f, url := newFakeSupplier(t)

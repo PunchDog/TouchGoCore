@@ -1,4 +1,4 @@
-package ustd
+package usdt
 
 import (
 	"encoding/json"
@@ -77,7 +77,7 @@ func TestRechargeSignsAndSerializes(t *testing.T) {
 	startWith(t, payCfg(url, allEndpoints()))
 	recorded()
 
-	res, err := UstdRecharge(nil, &pay.PayOrder{OrderNo: "O1", Amount: 1000000})
+	res, err := UsdtRecharge(nil, &pay.PayOrder{OrderNo: "O1", Amount: 1000000})
 	if err != nil {
 		t.Fatalf("充值失败: %v", err)
 	}
@@ -123,7 +123,7 @@ func TestWithdrawRequiresAddressOnWire(t *testing.T) {
 	startWith(t, payCfg(url, allEndpoints()))
 	recorded()
 
-	res, err := UstdWithdraw(nil, &pay.PayOrder{OrderNo: "O2", Amount: 500, Address: tronFFAcct})
+	res, err := UsdtWithdraw(nil, &pay.PayOrder{OrderNo: "O2", Amount: 500, Address: tronFFAcct})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,7 +153,7 @@ func TestUnregisteredEndpointSendsNothing(t *testing.T) {
 	f, url := newFakeSupplier(t)
 	startWith(t, payCfg(url, map[string]string{pay.EndpointQuery: "/api/query"}))
 
-	if _, err := UstdRecharge(nil, &pay.PayOrder{OrderNo: "O1", Amount: 1}); err == nil {
+	if _, err := UsdtRecharge(nil, &pay.PayOrder{OrderNo: "O1", Amount: 1}); err == nil {
 		t.Fatal("未登记端点应当报错")
 	} else if !strings.Contains(err.Error(), "endpoints."+pay.EndpointRecharge) {
 		t.Fatalf("错误未指明缺哪个端点: %v", err)
@@ -170,7 +170,7 @@ func TestBusinessFailureIsNotRetried(t *testing.T) {
 	startWith(t, payCfg(url, allEndpoints()))
 	recorded()
 
-	_, err := UstdRecharge(nil, &pay.PayOrder{OrderNo: "O1", Amount: 1000})
+	_, err := UsdtRecharge(nil, &pay.PayOrder{OrderNo: "O1", Amount: 1000})
 	if err == nil {
 		t.Fatal("业务失败应当报错")
 	}
@@ -197,7 +197,7 @@ func TestGatewayRetryIsTransparent(t *testing.T) {
 	cfg.PaySDks[testSection].MaxRetries = 1
 	startWith(t, cfg)
 
-	_, err := UstdWithdraw(nil, &pay.PayOrder{OrderNo: "O1", Amount: 100, Address: tronRangeAcct})
+	_, err := UsdtWithdraw(nil, &pay.PayOrder{OrderNo: "O1", Amount: 100, Address: tronRangeAcct})
 	if err == nil {
 		t.Fatal("持续 5xx 应当报错")
 	}
@@ -216,7 +216,7 @@ func TestUnrecognizedStatusBecomesUnknown(t *testing.T) {
 	_, url := newFakeSupplier(t)
 	startWith(t, payCfg(url, allEndpoints()))
 	recorded()
-	res, err := UstdRecharge(nil, &pay.PayOrder{OrderNo: "O1", Amount: 1000})
+	res, err := UsdtRecharge(nil, &pay.PayOrder{OrderNo: "O1", Amount: 1000})
 	if err != nil {
 		t.Fatalf("供应商已受理就不该报错: %v", err)
 	}
@@ -238,7 +238,7 @@ func TestSdkSectionKeyHookInjectsSecret(t *testing.T) {
 	defer util.DefaultCallFunc.Unregister(util.CallPaySDKMsg+testSection, id)
 
 	startWith(t, cfg)
-	if _, err := UstdQuery(nil, "O1"); err != nil {
+	if _, err := UsdtQuery(nil, "O1"); err != nil {
 		t.Fatalf("钩子注入密钥后应当可用: %v", err)
 	}
 	reqs := f.seen()
@@ -258,7 +258,7 @@ func TestAccountQueryReadsMerchantSnapshot(t *testing.T) {
 	startWith(t, payCfg(url, allEndpoints()))
 	recorded()
 
-	info, err := UstdAccount(nil, nil)
+	info, err := UsdtAccount(nil, nil)
 	if err != nil {
 		t.Fatalf("账户查询失败: %v", err)
 	}
@@ -294,7 +294,7 @@ func TestAccountQueryFailureNotReportedAsZero(t *testing.T) {
 	f, url := newFakeSupplier(t)
 	f.response["/api/account"] = `{"code":"401002","msg":"签名失败"}`
 	startWith(t, payCfg(url, allEndpoints()))
-	if _, err := UstdAccount(nil, &pay.AccountQuery{Currency: pay.CurrencyUSDT}); err == nil {
+	if _, err := UsdtAccount(nil, &pay.AccountQuery{Currency: pay.CurrencyUSDT}); err == nil {
 		t.Fatal("业务失败应当报错")
 	}
 	if n := len(f.seen()); n != 1 {

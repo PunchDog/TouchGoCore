@@ -187,8 +187,8 @@ func validatePayChannels(c *Cfg) error {
 	if c.Telegram != nil {
 		refs["telegram.ton"] = c.Telegram.Ton
 	}
-	if c.Ustd != nil {
-		refs["ustd.provider"] = c.Ustd.Provider
+	if c.Usdt != nil {
+		refs["usdt.provider"] = c.Usdt.Provider
 	}
 	if c.Whatsapp != nil {
 		refs["whatsapp.login"] = c.Whatsapp.Login

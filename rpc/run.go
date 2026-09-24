@@ -87,9 +87,8 @@ func Run(ctx context.Context) error {
 		vars.Info("RPC配置为空，跳过RPC服务启动")
 		return nil
 	}
-	root.Normalize()
 	channelSize = root.QueueCapacity(defaultChannelSize)
-	rpcCfg := root.RpcOf()
+	rpcCfg := root.Rpc
 	if rpcCfg == nil {
 		vars.Info("RPC配置为空，跳过RPC服务启动")
 		return nil

@@ -34,7 +34,7 @@
             }
         ]
     },
-    "cache说明": "两级缓存（Redis 一级 + MySQL/Mongo 回源落库），代码在 db/cache；不填本段则缓存服务不启用。读线全程 Redis 优先：值必须经 Redis 读回；写线同步写 Redis 后定时器批量落库。所有 *_ms 为毫秒；留空/零值项由 Normalize 补下方注释里的默认值",
+    "cache说明": "两级缓存（Redis 一级 + MySQL/Mongo 回源落库），代码在 db/cache；不填本段则缓存服务不启用。读线全程 Redis 优先：值必须经 Redis 读回；写线同步写 Redis 后定时器批量落库。所有 *_ms 为毫秒；留空/零值项取下方注释里的默认值（校验规则见 config.Validate）",
     "cache": {
         "enabled": true,
         "key_prefix说明": "Redis 键前缀，最终键形如 {prefix}:{游戏组}:{类型名}:{键}",
@@ -131,7 +131,7 @@
         }
     },
     "rpc": {
-        "rpc说明": "rpc是服务间通信配置,如果不填,则不开rpc服务；旧键名 rpc_port 仍可用，但以本键为准",
+        "rpc说明": "rpc是服务间通信配置,如果不填,则不开rpc服务",
         "server说明": "作为服务器监听端口",
         "server": [
             {

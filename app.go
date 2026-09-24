@@ -124,7 +124,6 @@ func (app *App) loadConfig() error {
 	}
 	config.ServerName_ = app.ServerName
 	app.Cfg = config.Cfg_
-	app.Cfg.Normalize()
 	if err := app.Cfg.Validate(); err != nil {
 		return fmt.Errorf("配置校验失败: %w", err)
 	}

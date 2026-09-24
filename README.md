@@ -18,7 +18,7 @@ Go 游戏服务框架：WebSocket、gRPC、定时器、Lua、Telegram、Gin、Re
 ## 配置要点
 
 - 启动配置：`-c` / `--config` 指定 `conf/` 目录；或 `CONFIG_PATH`；或可执行文件旁自动查找 `conf/config.ini`。
-- gRPC 使用 `rpc` 字段；历史 `rpc_port` 仍兼容，启动时会归并到 `rpc`。
+- gRPC 使用 `rpc` 字段（历史 `rpc_port` 键已移除，不再兼容）。
 - WebSocket 路径取自 `ws.url` / `ws.inurl`（可为 `/ws` 或完整 `wss://host/path`），缺省 `/ws`。
 - 队列容量与背压：`server.read_buffer` / `write_buffer` / `backpressure`。
 - Prometheus：`metrics.enabled`，可选 `metrics.token` 保护 `/metrics`。

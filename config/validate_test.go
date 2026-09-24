@@ -176,17 +176,6 @@ func TestValidatePriceSource(t *testing.T) {
 	}
 }
 
-func TestNormalizeRpcPortAlias(t *testing.T) {
-	c := &Cfg{RpcPort: &RpcConfig{Server: []*RpcAddr{{Name: "s", Port: 7000}}}}
-	c.Normalize()
-	if c.Rpc == nil || c.Rpc != c.RpcPort {
-		t.Fatal("expected RpcPort aliased to Rpc")
-	}
-	if c.RpcOf() != c.Rpc {
-		t.Fatal("RpcOf")
-	}
-}
-
 func TestQueueCapacity(t *testing.T) {
 	var c *Cfg
 	if c.QueueCapacity(4096) != 4096 {

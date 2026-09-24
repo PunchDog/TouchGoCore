@@ -52,7 +52,7 @@ func activeRpcCfg() *config.RpcConfig {
 	if cfg == nil {
 		return nil
 	}
-	return cfg.RpcOf()
+	return cfg.Rpc
 }
 
 func rpcAuthCfg() *config.RpcAuthConfig {

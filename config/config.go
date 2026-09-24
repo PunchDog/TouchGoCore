@@ -22,14 +22,10 @@ type Cfg struct {
 	LogLevel  string           `json:"log_level"`  //日志等级，off为不开,其次为INFO,DEBUG,WARN,ERROR
 	MapPath   string           `json:"map_path"`   //地图配置位置
 	Web       *WebConfig       `json:"web"`        //web配置
-	// RpcPort 历史字段，与 Rpc 二选一；Validate/Normalize 会将其归并到 Rpc。
-	//
-	// Deprecated: 请使用 json:"rpc"。
-	RpcPort  *RpcConfig      `json:"rpc_port"`
-	Rpc      *RpcConfig      `json:"rpc"`      // gRPC 配置
-	Telegram *TelegramConfig `json:"telegram"` //telegram配置
-	Whatsapp *WhatsappConfig `json:"whatsapp"` //WhatsApp 通道（登录/充值/提现）配置
-	Usdt     *UsdtConfig     `json:"usdt"`     //USDT(TRC20) 通道（充值/提现）配置
+	Rpc       *RpcConfig       `json:"rpc"`        // gRPC 配置
+	Telegram  *TelegramConfig  `json:"telegram"`   //telegram配置
+	Whatsapp  *WhatsappConfig  `json:"whatsapp"`   //WhatsApp 通道（登录/充值/提现）配置
+	Usdt      *UsdtConfig      `json:"usdt"`       //USDT(TRC20) 通道（充值/提现）配置
 	// PaySDks 是资金 SDK 集中登记表，键是 SDK 段名；whatsapp/usdt/telegram.ton
 	// 三段各自用 {sdk, account} 引用这里的一段。凭证只在这里出现一次。
 	PaySDks  map[string]*PaySDKConfig `json:"pay_sdks"`
@@ -45,7 +41,6 @@ func init() {
 		Ws:       nil,
 		LogLevel: "info",
 		MapPath:  "off",
-		RpcPort:  nil,
 		Other:    nil,
 		Telegram: nil,
 	}
@@ -170,27 +165,6 @@ func (this *Cfg) LoadWithError(cfgname string) error {
 	}
 
 	return nil
-}
-
-// Normalize 将 rpc_port 别名归并到 Rpc，供启动与校验统一读取。
-func (c *Cfg) Normalize() {
-	if c == nil {
-		return
-	}
-	if c.Rpc == nil && c.RpcPort != nil {
-		c.Rpc = c.RpcPort
-	}
-}
-
-// RpcOf 返回生效的 RPC 配置（优先 Rpc，其次 RpcPort）。
-func (c *Cfg) RpcOf() *RpcConfig {
-	if c == nil {
-		return nil
-	}
-	if c.Rpc != nil {
-		return c.Rpc
-	}
-	return c.RpcPort
 }
 
 // QueueCapacity 消息队列容量；未配置时用 defaultSize。

@@ -12,7 +12,6 @@ func (c *Cfg) Validate() error {
 	if c == nil {
 		return fmt.Errorf("config is nil")
 	}
-	c.Normalize()
 
 	ports := map[int]string{}
 	addPort := func(port int, name string) error {
@@ -150,7 +149,7 @@ func (c *Cfg) Validate() error {
 		return err
 	}
 
-	rpc := c.RpcOf()
+	rpc := c.Rpc
 	if rpc != nil {
 		for i, s := range rpc.Server {
 			if s == nil {

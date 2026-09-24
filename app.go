@@ -40,6 +40,7 @@ type App struct {
 	Redis    *db.Redis
 	MySQL    *db.Client
 	MongoDB  *db.DbOperate
+	Cache    *db.CacheLayer // 两级缓存层（Redis+DB 回源）；cache 段未配置/未启用时为 nil
 	TimerMgr *localtimer.TimerManager
 	CallFunc *util.CallFunction
 
@@ -217,6 +218,22 @@ func (app *App) initDatabase() error {
 		vars.Info("加载Mongo数据成功")
 	}
 
+	// 两级缓存层（可选）：Redis 就绪后装配；业务在启动期用 app.Cache + db.OpenCache 注册类型。
+	// 注意 app.Redis 是具体类型断言进 KV 门面（db.NewRedisKV），Layer 不感知连接来源。
+	if app.Cfg.Cache != nil && app.Cfg.Cache.Enabled {
+		if app.Redis == nil {
+			vars.Warning("cache 段已启用但无 Redis 连接，缓存层不启动（读写线降级为直连数据库）")
+		} else {
+			kv := db.NewRedisKV(app.Redis)
+			if kv == nil {
+				return fmt.Errorf("初始化缓存层失败: Redis 句柄为空")
+			}
+			app.Cache = db.NewCacheLayer(kv, db.WithLayerConfig(db.CacheConfigFrom(app.Cfg.Cache)))
+			vars.Info("加载两级缓存层成功（ttl_ms=%d flush_interval_ms=%d）",
+				app.Cfg.Cache.TTLMS, app.Cfg.Cache.FlushIntervalMS)
+		}
+	}
+
 	return nil
 }
 
@@ -239,6 +256,9 @@ func (app *App) registerServices() {
 		&tonService{},
 		&ginService{},
 		&modelAPIService{},
+		// 缓存层放最后：Shutdown 反序停止 ⇒ 它最先停，
+		// final flush（残余脏数据落库）必然发生在 closeDatabase 关连接之前。
+		&cacheService{app},
 	}
 }
 

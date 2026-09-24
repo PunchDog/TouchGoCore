@@ -416,6 +416,29 @@ func (r *Repository[T]) Upsert(ctx context.Context, entity *T, conflictColumns [
 	})
 }
 
+// UpsertBatch 批量插入或更新（ON DUPLICATE KEY UPDATE ALL）。
+// conflictColumns 为空时退化为 CreateBatch。缓存写线（db/cache）定时批量落库使用。
+func (r *Repository[T]) UpsertBatch(ctx context.Context, entities []*T, conflictColumns []string) error {
+	if len(entities) == 0 {
+		return nil
+	}
+	if len(conflictColumns) == 0 {
+		return r.CreateBatch(ctx, entities)
+	}
+	r2 := r.WithContext(ctx)
+	return r2.runWithAutoMigrate(ctx, "UpsertBatch", func() error {
+		start := time.Now()
+		tx := r2.gormDB().Clauses(clause.OnConflict{
+			Columns:   makeColumns(conflictColumns),
+			UpdateAll: true,
+		})
+		if err := tx.Create(entities).Error; err != nil {
+			return newError("UpsertBatch", err, classify(err), "", nil, time.Since(start))
+		}
+		return nil
+	})
+}
+
 // Delete 软删
 func (r *Repository[T]) Delete(ctx context.Context, id any) error {
 	r2 := r.WithContext(ctx)

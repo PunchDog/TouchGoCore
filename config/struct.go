@@ -41,6 +41,42 @@ type RedisConfig struct {
 	PoolSize int    `json:"redis_pool_size"` // 连接池大小；<=0 时用默认 512
 }
 
+// CacheConfig 两级缓存（Redis 一级 + MySQL/Mongo 回源）框架级配置。
+// nil = 不启用缓存层。时长统一 _ms 整数约定（JSON 不反序列化时长串）；
+// <=0 的字段在装配时回落 db/cache 框架默认值。
+type CacheConfig struct {
+	Enabled   bool   `json:"enabled"`    // 总开关；false 时 Write 降级 write-through
+	KeyPrefix string `json:"key_prefix"` // Redis 键前缀，默认 "tg"
+
+	TTLMS         int `json:"ttl_ms"`          // 物理 TTL 毫秒，默认 300000（5min）
+	LogicalPct    int `json:"logical_pct"`     // 逻辑过期占物理 TTL 百分比（1..99），默认 80
+	JitterPct     int `json:"jitter_pct"`      // TTL 抖动百分比（0..50），默认 10
+	NegativeTTLMS int `json:"negative_ttl_ms"` // 空值缓存毫秒，默认 30000；负值显式关闭空值缓存
+
+	ReadTimeoutMS  int `json:"read_timeout_ms"`  // 回源超时，默认 300
+	WriteTimeoutMS int `json:"write_timeout_ms"` // 写 Redis 超时，默认 300
+	FailBackoffMS  int `json:"fail_backoff_ms"`  // 回源失败退避，默认 2000
+
+	FlushIntervalMS int `json:"flush_interval_ms"` // 写线定时器间隔，默认 2000
+	BatchSize       int `json:"batch_size"`        // 批量落库上限，默认 200
+	MaxDirtyKeys    int `json:"max_dirty_keys"`    // 写缓冲脏键上限，默认 100000
+	MaxDirtyAgeMS   int `json:"max_dirty_age_ms"`  // 脏键超龄告警阈值，默认 300000
+	Shards          int `json:"shards"`            // 写缓冲分片数（2 的幂），默认 16
+	MaxRetry        int `json:"max_retry"`         // 落库最大重试轮数，默认 3
+	SaveConcurrency int `json:"save_concurrency"`  // 单条落库并发度，默认 4
+
+	// StalePolicy "async"(默认，逻辑过期先返旧值+异步预热) / "wait"(同步回源)
+	StalePolicy string `json:"stale_policy"`
+	// Overflow "block"(默认，缓冲超限内联 flush 背压) / "drop"(仅告警)
+	Overflow string `json:"overflow"`
+	// RequireRedis 指针区分「未配置(默认 true)」与「显式 false 降级直返源值」
+	RequireRedis *bool `json:"require_redis"`
+	// Journal 脏账本开关：同步写 Redis 时把「待落库」记入 Redis ZSET，
+	// 重启扫账恢复，防非优雅退出丢写缓冲。指针区分未配置(默认 true)与显式 false。
+	// 仅当一级缓存支持账本（内置 Redis store）才生效。
+	Journal *bool `json:"journal"`
+}
+
 // TLSConfig 通用服务端 TLS（Gin / WebSocket 直连场景；前置反代可保持 enable=false）
 type TLSConfig struct {
 	Enable   bool   `json:"enable"`

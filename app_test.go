@@ -426,6 +426,23 @@ func TestServiceStartOrderPutsMapBeforeLua(t *testing.T) {
 	}
 }
 
+// TestCacheServiceRegisteredLast 缓存服务必须排在服务列表末尾：Shutdown 按注册
+// 反序停止，排最后＝最先停——cache 的 final flush（把写缓冲残余落库）由 Stop
+// 同步完成，必须早于 Shutdown 尾部 closeDatabase 关掉 MySQL/Mongo，否则退出时
+// 丢最后一批脏数据。
+func TestCacheServiceRegisteredLast(t *testing.T) {
+	app := &App{}
+	app.registerServices()
+
+	if len(app.services) == 0 {
+		t.Fatal("未注册任何服务")
+	}
+	last := app.services[len(app.services)-1]
+	if last.Name() != "cache" {
+		t.Fatalf("cache 服务必须在列表末尾，实际末尾是 %s", last.Name())
+	}
+}
+
 // TestStartRunsNpcValidationWithoutBlocking 启动流程必须真的跑一遍 NPC 配置校验
 // （ValidateNpcs 导出后一度没有任何生产调用方），但校验只出告警：
 // 一处配置写错不该让整个进程起不来。

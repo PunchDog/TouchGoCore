@@ -434,6 +434,81 @@ require (
 - [GORM_GUIDE.md](./GORM_GUIDE.md) - 详细使用指南
 - [models_example.go](./models_example.go) - 模型示例
 
+## 两级缓存（Redis + MySQL/Mongo）
+
+在原有独立接口之上**纯追加**一层集成封装：Redis 作一级缓存，MySQL/Mongo 作回源与落库后端。子包 `db/cache` 不 import `db` 根包；Mongo 适配器（依赖 `DbOperate`）在 `db` 包的 `cache_mongo_adapter.go`，MySQL 适配器在 `db/cache/mysql_source.go`。门面类型别名与构造函数在 `db/cache_api.go`。
+
+### 读线（Redis 优先）
+
+client 拿到的值**一定是经过 Redis 的值**，不允许透传数据库值：
+
+```
+GetOrLoad(ctx, key)
+  1. Redis GET → 命中且未逻辑过期 → 直接返回（空标记 → ErrCacheNotFound，防穿透）
+  2. 命中但逻辑过期（默认 async）→ 返回 Redis 旧值 + 后台单飞预热（stale-while-revalidate）
+  3. miss / decode 失败 / Redis 读错误：
+       失败退避期内 → ErrSourceUnavailable（防打穿 DB）
+       否则 singleflight 同步回源：Loader.Load
+         ├ 成功      → SET 回 Redis → 再从 Redis GET 读回 → 返回读回值
+         ├ 未找到    → SET 空标记(NegativeTTL) → 读回 → ErrCacheNotFound
+         └ 失败      → 记录退避 → 返回错误
+```
+
+- `RequireRedis=true`（默认）：回填写不进/读不回 Redis 即本次报错；置 false 才允许直返源值。
+- 写缓冲中的脏 key 会被读线回填跳过（写线持有 Redis 新鲜度优先权，避免旧库值覆盖新缓存值）。
+- 批量：`MGetOrLoad` 优先 `BatchLoader` 一次批量回源 → 逐 key 回填 → MGet 读回。
+
+### 写线（同步写 Redis，异步通知数据库）
+
+```
+Write(key, val)
+  1. 同步 SET Redis（带逻辑过期 envelope + 物理 TTL 抖动）——写不进即本次 Write 报错、不入缓冲
+  2. 入分片写缓冲（map 去重 + 原子 seq + dirty 计数），随后定时器批量落库
+Remove/WriteDelete：同步 DEL → 缓冲 tombstone，等落库删除
+```
+
+- `flushLoop`：ctx / ticker(FlushInterval) / 容量信号三选一驱动 `flushOnce`；按 `BatchSize` 切批走 `BatchSaver.SaveBatch`（MySQL 为 `UpsertBatch` 单条 SQL），无批量接口时按 `SaveConcurrency` 并发单条。
+- 落库失败回插重试，超过 `MaxRetry` 丢弃 + DEL 该 key 缓存 + `vars.Error`（防止 Redis 长期展示未落库值）；`MaxDirtyAge` 超龄只告警。
+- 容量水位 `MaxDirtyKeys`：默认 `block` 内联 flush 背压，可 `drop` 告警丢弃。
+- `Stop/Close`：cancel → 用独立 ctx 做 final flush 把残余脏数据全部落库。
+- 降级（`Enabled=false`）：Write 退化为同步直写 Saver（write-through 不丢数据），读线直连回源。
+
+### 崩溃不丢数据：脏账本 + 启动恢复（journal.go）
+
+进程内写缓冲扛不住 kill -9 / OOM / Stop 超时。对策是把「待落库清单」也放进 Redis（写线本来就必须同步写 Redis 成功才返回）：
+
+- `Write`/`Remove` 在同步写 Redis 的**同一次 pipeline** 里记/销账：ZSET `键 = {prefix}:{group}:{name}:dirty#zset`，member=`u|键`/`d|键`（一键至多一条，重复写自动去重），score=seq；
+- 落库成功、或超过 MaxRetry 被丢弃时销账（ZREM）——已宣告放弃的数据不会被重启复活；
+- 进程重启（`Layer.Start` → `Cache.Run` 开头）扫账重放：envelope 值还活着就重新落库；已物理过期的记 `RecoverMiss` 并 Error 告销账（这是唯一真正不可恢复的窗口）；
+- 恢复重放要求 keyStr→K 可反解：string/整数族键框架自动处理，其它类型用 `WithKeyDecoder`；解不开记 `RecoverMiss` 销账止损；
+- 配置 `cache.journal=false` 或一级缓存不支持时账本自动关闭（行为退回无账本版本）；
+- 生产建议 Redis 开 AOF（appendfsync everysec），账本与 envelope 值本体都抗 Redis 重启。
+
+丢失窗口由此从「整个写缓冲」压缩为「崩溃 + envelope 恰好在重启前 TTL 过期」双重小概率。资金等强一致路径用 **`WriteSync(ctx,key,val)`**：同步写 Redis + 同步落库、绕过缓冲与账本，任一失败即报错且回滚 Redis 展示值——真零丢失，代价是一次 DB RTT。
+
+### 生命周期接线
+
+配置 `cache` 段（`config.CacheConfig`，时长一律 `XxxMS int`）启用后，`initDatabase` 在 Redis 就绪后构造 `App.Cache *db.CacheLayer`；`cacheService` 注册在 `registerServices()` **列表末尾**——借 Shutdown 反序停止保证 final flush 早于 `closeDatabase`。未配置或未启用时该服务空转。
+
+### 用法示例
+
+```go
+// 从配置构造（App 内），或独立 NewCache[K,V](name, app.Redis, opts...)
+c, err := db.OpenCache[string, User](app.Cache, "user",
+    db.WithLoader[string, User](db.NewMysqlCacheSource[User, string](userRepo, func(k string) any { return k })),
+    db.WithSaver[string, User](db.NewMysqlCacheBatchSink[User, string](userRepo, func(k string) any { return k }, "id")),
+)
+u, err := c.GetOrLoad(ctx, "u:1001") // 拿到的是 Redis 读回的值
+err = c.Write(ctx, "u:1001", &u)     // 同步写 Redis 成功即返回，稍后批量落库
+```
+
+### 关键限制
+
+- **Redis 集群**：跨槽不能 MGET/pipeline，`KV.MGet` 自动退化为并发单 key GET（并发度 `MGetConcurrency`，默认 16）。
+- **Mongo 后端**：`db` 包 CRUD 回调固定 5s 超时且不可 ctx 取消，闭包适配器无法提前中断——建议配大 `MaxRetry`、拉长 `FlushInterval`。
+- **key 规则**：`{KeyPrefix}:{gameGroup}:{name}:{key}`，段内 `:`→`_`，超 128 字符截断后拼 SHA1 短哈希。
+- 物理 TTL 带按 key 稳定的确定性抖动（防同刻集中过期雪崩），逻辑过期 = 物理 TTL × `LogicalPct%`。
+
 ## License
 
 Same as TouchGoCore project.

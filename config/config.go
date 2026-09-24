@@ -16,6 +16,7 @@ type Cfg struct {
 	Redis     *RedisConfig     `json:"redis"`
 	MySql     *MySqlDBConfig   `json:"mysql"`
 	Mongo     *MongoDBConfig   `json:"mongo"`
+	Cache     *CacheConfig     `json:"cache"`      // 两级缓存（Redis+DB 回源）；nil=不启用
 	Ws        *WebsocketConfig `json:"ws"`         //websocket启动模式:off不启动;:1234启动监听详细配置
 	LuaConfig *LuaConfig       `json:"lua_config"` // Lua 详细配置,如果没有就不启动lua
 	LogLevel  string           `json:"log_level"`  //日志等级，off为不开,其次为INFO,DEBUG,WARN,ERROR
@@ -232,12 +233,12 @@ var (
 	_defServerId   = flag.String("s", "default", "server flag") //默认服务器ID
 
 	// 功能配置注册系统
-	_confDirField   string    // INI 中 conf_dir 字段值
-	_featureDir     string    // 功能配置文件夹绝对路径
-	_featureDirSet  bool      // 功能配置文件夹是否已解析
-	_featureReg     sync.Map  // key=jsonname, value=注册的目标 struct 指针或 *map[string]any
-	_featureData    sync.Map  // key=jsonname, value=已加载的数据（struct 指针或 map[string]any）
-	_featureLoaded  sync.Map  // key=jsonname, value=bool
+	_confDirField  string   // INI 中 conf_dir 字段值
+	_featureDir    string   // 功能配置文件夹绝对路径
+	_featureDirSet bool     // 功能配置文件夹是否已解析
+	_featureReg    sync.Map // key=jsonname, value=注册的目标 struct 指针或 *map[string]any
+	_featureData   sync.Map // key=jsonname, value=已加载的数据（struct 指针或 map[string]any）
+	_featureLoaded sync.Map // key=jsonname, value=bool
 )
 
 func GetBasePath() string {

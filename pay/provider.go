@@ -90,6 +90,7 @@ type ProviderOptions struct {
 	// Extras 是通道特有字段（如 USDT 的 contract、TON 的 jetton）。
 	// 登记顺序就是签名域追加顺序：这些字段由配置给出、在报文里追加在通用字段之后，
 	// 若签名域不跟着追加，供应商按「报文有、签名没有」会全量拒签。
+	// 同名字段不得重复登记，也不得与单内 Extra 撞名——map 只留一值、签名却会双 append。
 	Extras []ExtraField
 }
 
@@ -260,12 +261,19 @@ func (p *Provider) send(ctx context.Context, endpoint string, body []byte, signV
 // 单内 Extra 的键不许撞上已签名量（见 payloadKeyNames）：允许撞名的话
 // Extra{"amount":"1"} 就能覆盖报文里的金额，而签名域里签的还是原来那个数，
 // 校验和看着完全正确。
+//
+// Options.Extras 内部重名、以及单内 Extra 与配置 Extras 撞名，一律拒绝：
+// fields 是 map 只会留一个 JSON 值，signs 却会 append 两次——报文一值、签名域两值，
+// 验签失败或异常受理，比本地就地报错更难查。
 func mergeExtras(extras []ExtraField, orderExtra map[string]string) (map[string]string, []string, error) {
 	fields := make(map[string]string, len(extras)+len(orderExtra))
 	signs := make([]string, 0, len(extras)+len(orderExtra))
 	for _, e := range extras {
 		if e.Name == "" || e.Value == "" {
 			continue
+		}
+		if _, dup := fields[e.Name]; dup {
+			return nil, nil, fmt.Errorf("通道特有字段 %s 重复登记，报文一值却会双签", e.Name)
 		}
 		fields[e.Name] = e.Value
 		signs = append(signs, e.Value)
@@ -285,6 +293,9 @@ func mergeExtras(extras []ExtraField, orderExtra map[string]string) (map[string]
 		}
 		if _, reserved := payloadKeyNames[k]; reserved {
 			return nil, nil, fmt.Errorf("特有字段键 %s 与报文已签名量同名，会覆盖签名域", k)
+		}
+		if _, dup := fields[k]; dup {
+			return nil, nil, fmt.Errorf("单内特有字段 %s 与通道配置 Extras 同名，报文一值却会双签", k)
 		}
 		fields[k] = v
 		signs = append(signs, v)
@@ -562,7 +573,16 @@ func (p *Provider) placeOrder(ctx context.Context, endpoint string, o *PayOrder,
 	if err != nil {
 		return nil, err
 	}
-	res := p.Result(data, o.OrderNo)
+	res := p.Result(data, req.OrderNo)
+	// 回执必须与请求对账：供应商回 success 但金额偏小/偏大/为 0，或回了另一张
+	// 单号时，上游按回执记账就是凭空改账。pending/unknown 常省略金额，那种
+	// 情况不在这里卡——只有终态成功才强制对金额；单号非空且对不上则不论状态都拒。
+	if res.OrderNo != "" && res.OrderNo != req.OrderNo {
+		return nil, fmt.Errorf("通道[%s]回执订单号 %s 与请求 %s 不一致", p.name, res.OrderNo, req.OrderNo)
+	}
+	if res.Status == StatusSuccess && (res.Amount == 0 || res.Amount != o.Amount) {
+		return nil, fmt.Errorf("通道[%s]回执金额 %d 与请求 %d 不一致", p.name, res.Amount, o.Amount)
+	}
 	// 回执给了手续费却没给计价币种时，按本单币种兜底：账本划转类通道的佣金
 	// 就是同一种币种，这是最常见的形态。链上 gas 那种「转 USDT 收 TRX」的情况，
 	// 供应商必须自己回 fee_currency——本包无从知道那条链的 gas 用什么币。

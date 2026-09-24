@@ -46,6 +46,16 @@ func (c *Cache[K, V]) GetOrLoad(ctx context.Context, key K) (*V, error) {
 
 // GetOrLoadWith 同 GetOrLoad，但本次用显式传入的 Loader（nil 则报错）。
 func (c *Cache[K, V]) GetOrLoadWith(ctx context.Context, key K, ld Loader[K, V]) (*V, error) {
+	// Enabled=false：必须走 loader，不得返回 Redis 命中（缓存可能是陈旧展示值）
+	if !c.cfg.Enabled {
+		if ld == nil {
+			return nil, errNoLoader
+		}
+		return ld.Load(ctx, key)
+	}
+	if ld == nil {
+		return nil, errNoLoader
+	}
 	ks := c.KeyOf(key)
 
 	// 1) 查 Redis
@@ -77,17 +87,6 @@ func (c *Cache[K, V]) GetOrLoadWith(ctx context.Context, key K, ld Loader[K, V])
 	default:
 		c.st.KVErr.Add(1)
 		c.st.Miss.Add(1) // Redis 读错误当 miss；RequireRedis 时后续写回/读回会如实报错
-	}
-
-	if !c.cfg.Enabled {
-		// 降级：直连回源，不碰缓存
-		if ld == nil {
-			return nil, errNoLoader
-		}
-		return ld.Load(ctx, key)
-	}
-	if ld == nil {
-		return nil, errNoLoader
 	}
 
 	// 2) 失败退避：回源正在挂 → 不重复打 DB
@@ -135,10 +134,18 @@ func (c *Cache[K, V]) reload(ks string, key K, ld Loader[K, V]) (any, error) {
 	sctx, scancel := context.WithTimeout(bg, c.cfg.WriteTimeout)
 	defer scancel()
 
-	// 脏 key（写缓冲在途、Redis 里已是 Write 同步写的新值）→ 不覆盖
+	// 脏 key（写缓冲在途、Redis 里应是 Write 同步写的新值）→ 绝不 Set 源值
 	dirty := c.buf != nil && c.buf.has(ks)
 	if !dirty {
-		if err := c.kv.Set(sctx, ks, c.mustEncode(val, seq), c.jitteredTTL(ks)); err != nil {
+		if val == nil && c.cfg.NegativeTTL <= 0 {
+			// 空值缓存关闭：不写 null marker
+			return nil, ErrNotFound
+		}
+		ttl := c.jitteredTTL(ks)
+		if val == nil {
+			ttl = c.jitteredNegativeTTL(ks)
+		}
+		if err := c.kv.Set(sctx, ks, c.mustEncode(val, seq), ttl); err != nil {
 			c.st.KVErr.Add(1)
 			if c.cfg.RequireRedis {
 				vars.Error("cache[%s] 回填Redis失败 key=%s: %v", c.name, ks, err)
@@ -154,8 +161,18 @@ func (c *Cache[K, V]) reload(ks string, key K, ld Loader[K, V]) (any, error) {
 		raw, gerr := c.kv.Get(gctx, ks)
 		if gerr != nil {
 			if errors.Is(gerr, ErrNoEntry) && dirty {
-				// 脏 key 的 Redis 值恰好过期消失 → 用本次源值补写一次
-				if err := c.kv.Set(gctx, ks, c.mustEncode(val, seq), c.jitteredTTL(ks)); err != nil {
+				// Redis TTL 恰好过期：把缓冲里的写线值重新写回，禁止用源行盖掉
+				be := c.buf.get(ks)
+				if be == nil {
+					return nil, errors.New("cache: 脏 key Redis 已过期且缓冲条目不可读")
+				}
+				if be.op == OpDelete {
+					return nil, ErrNotFound
+				}
+				if be.val == nil {
+					return nil, errors.New("cache: 脏 key Redis 已过期且缓冲无有效值")
+				}
+				if err := c.kv.Set(gctx, ks, c.mustEncode(be.val, be.seq), c.jitteredTTL(ks)); err != nil {
 					c.st.KVErr.Add(1)
 					return nil, err
 				}
@@ -233,9 +250,25 @@ func (c *Cache[K, V]) MGet(ctx context.Context, keys []K) (map[string]*V, []K, e
 // MGetOrLoad 批量读：Redis 批量 → miss 集合优先 BatchLoader 一次回源
 // （逐个写 Redis）→ 再批量从 Redis 读回；无 BatchLoader 则并发单键 GetOrLoad。
 func (c *Cache[K, V]) MGetOrLoad(ctx context.Context, keys []K) (map[string]*V, error) {
-	if !c.cfg.Enabled || c.ld == nil {
+	if c.ld == nil {
 		hits, _, err := c.MGet(ctx, keys)
 		return hits, err
+	}
+	// Enabled=false：全部走源，不返回仅 Redis 命中（与 GetOrLoadWith 一致）
+	if !c.cfg.Enabled {
+		out := make(map[string]*V, len(keys))
+		for _, k := range keys {
+			v, err := c.ld.Load(ctx, k)
+			switch {
+			case err == nil:
+				out[c.KeyOf(k)] = v
+			case errors.Is(err, ErrNotFound):
+				// 不进结果
+			default:
+				return nil, err
+			}
+		}
+		return out, nil
 	}
 	hits, misses, err := c.MGet(ctx, keys)
 	if err != nil {
@@ -253,15 +286,22 @@ func (c *Cache[K, V]) MGetOrLoad(ctx context.Context, keys []K) (map[string]*V, 
 			return nil, lerr
 		}
 		c.st.Loads.Add(1)
-		// 回填：miss 且源也没有的写空标记
+		// 回填：miss 且源也没有的写空标记（NegativeTTL<=0 则跳过）
 		for _, k := range misses {
 			ks := c.KeyOf(k)
 			v := got[ks]
 			if c.buf != nil && c.buf.has(ks) {
 				continue
 			}
+			if v == nil && c.cfg.NegativeTTL <= 0 {
+				continue
+			}
+			ttl := c.jitteredTTL(ks)
+			if v == nil {
+				ttl = c.jitteredNegativeTTL(ks)
+			}
 			sctx, scancel := context.WithTimeout(ctx, c.cfg.WriteTimeout)
-			err := c.setEnvelope(sctx, ks, v, c.jitteredTTL(ks), c.seq.Add(1), v == nil)
+			err := c.setEnvelope(sctx, ks, v, ttl, c.seq.Add(1), v == nil)
 			scancel()
 			if err != nil {
 				c.st.KVErr.Add(1)

@@ -224,12 +224,11 @@ func TestRead_GetOnlyCache(t *testing.T) {
 	}
 }
 
-// 脏 key 保护：缓冲未落库期间，读线回源不得覆盖 Write 同步写入的新值
+// 脏 key 保护：缓冲未落库且 Redis TTL 过期时，读线必须回填缓冲值，不得用源行覆盖。
 func TestRead_DirtyKeyNotOverwritten(t *testing.T) {
 	sn := newRecSaver()
 	h := newHarness(t, WithSaver[string, testVal](sn))
 	h.ld.data["k1"] = &testVal{N: 1}
-	// 先让 Redis 过期消失，制造 miss
 	if _, err := h.c.GetOrLoad(context.Background(), "k1"); err != nil {
 		t.Fatal(err)
 	}
@@ -237,9 +236,9 @@ func TestRead_DirtyKeyNotOverwritten(t *testing.T) {
 	if err := h.c.Write(context.Background(), "k1", &testVal{N: 100}); err != nil {
 		t.Fatal(err)
 	}
-	// 源里还是旧值；读线 miss 时（此处直接调 reload 路径：清缓存再读）
+	// 模拟 TTL 恰好到期：Redis 空、源仍是旧值、缓冲有 Write 值
 	h.kv.mu.Lock()
-	delete(h.kv.m, h.c.KeyOf("k1")) // 模拟 TTL 恰好到期
+	delete(h.kv.m, h.c.KeyOf("k1"))
 	h.kv.mu.Unlock()
 	h.clk.Add(10 * time.Millisecond)
 	h.c.fails.Delete(h.c.KeyOf("k1"))
@@ -248,14 +247,46 @@ func TestRead_DirtyKeyNotOverwritten(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 脏 key：跳过覆盖后读回应是补写的源值还是 Write 值？缓冲 has → 读回 miss →
-	// 补写一次源值。此处断言不 panic 且有值即通过链路验证；核心断言在落库后：
-	_ = v
+	if v == nil || v.N != 100 {
+		t.Fatalf("脏 key Redis 过期应回填缓冲值 100，得 %v", v)
+	}
 	if err := h.c.Flush(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if got := sn.get("k1"); got == nil || got.N != 100 {
 		t.Fatalf("落库值应为 Write 的 100，得 %v", got)
+	}
+}
+
+// NegativeTTL<=0：源不存在时不写 null marker，每次 miss 都回源。
+func TestRead_NegativeTTLDisabledNoNullCache(t *testing.T) {
+	cfg := testConfig()
+	cfg.NegativeTTL = 0
+	h := newHarness(t, WithConfig[string, testVal](cfg))
+	h.ld.notFound["ghost"] = true
+	for i := 0; i < 3; i++ {
+		_, err := h.c.GetOrLoad(context.Background(), "ghost")
+		if !errors.Is(err, ErrNotFound) {
+			t.Fatalf("期望 ErrNotFound，得 %v", err)
+		}
+	}
+	if got := h.ld.callCount(); got != 3 {
+		t.Fatalf("关闭空值缓存应每次回源，calls=%d", got)
+	}
+	if h.kv.setCall != 0 {
+		t.Fatalf("NegativeTTL<=0 不应写 Redis null，setCall=%d", h.kv.setCall)
+	}
+}
+
+// Enabled=false：即便 Redis 有值也必须走 loader。
+func TestRead_DisabledIgnoresRedisHit(t *testing.T) {
+	h := newHarness(t, WithEnabled[string, testVal](false))
+	h.ld.data["k1"] = &testVal{N: 7}
+	// 先手工塞一条 Redis 陈旧值
+	_ = h.kv.Set(context.Background(), h.c.KeyOf("k1"), h.c.mustEncode(&testVal{N: 1}, 1), time.Minute)
+	v, err := h.c.GetOrLoad(context.Background(), "k1")
+	if err != nil || v == nil || v.N != 7 {
+		t.Fatalf("关闭模式应走 loader 得 7: v=%v err=%v", v, err)
 	}
 }
 

@@ -185,6 +185,25 @@ func (f *fakeKV) JClear(_ context.Context, zkey string, members ...string) error
 	return nil
 }
 
+func (f *fakeKV) JClearIfSeq(_ context.Context, zkey, member string, seq int64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.jErr != nil {
+		return f.jErr
+	}
+	zs := f.z[zkey]
+	if zs == nil {
+		return nil
+	}
+	sc, ok := zs[member]
+	if !ok || int64(sc) != seq {
+		return nil // score 已变：新 Write 拥有该键，旧 flush 不得销账
+	}
+	f.record("zrem", member)
+	delete(zs, member)
+	return nil
+}
+
 func (f *fakeKV) JScan(_ context.Context, zkey string) ([]JournalEntry, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

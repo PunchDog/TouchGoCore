@@ -1,11 +1,13 @@
 package pay
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestSignMD5KnownVector 钉住签名算法形态：值直连拼接 + 末尾密钥，取 32 位小写 MD5。
@@ -236,5 +238,99 @@ func TestTokenRoundTrip(t *testing.T) {
 	p.SetToken("")
 	if p.Token() != "" {
 		t.Fatal("空串应当清除会话凭证")
+	}
+}
+
+// TestPlaceOrderReconcilesReceipt 下单回执必须与请求对账：success 却金额不对、
+// 或回了另一张单号时不得当成功——上游会按回执记账。pending 省略金额仍可过。
+func TestPlaceOrderReconcilesReceipt(t *testing.T) {
+	order := &PayOrder{OrderNo: "O1", Amount: 1000, Currency: CurrencyUSDT}
+	cases := []struct {
+		name    string
+		resp    string
+		wantErr string
+		wantOK  bool
+	}{
+		{
+			name:   "金额与订单号都对",
+			resp:   `{"code":"0","data":{"order_no":"O1","status":"success","amount":1000}}`,
+			wantOK: true,
+		},
+		{
+			name:    "成功但金额偏小",
+			resp:    `{"code":"0","data":{"order_no":"O1","status":"success","amount":999}}`,
+			wantErr: "金额",
+		},
+		{
+			name:    "成功但金额为 0",
+			resp:    `{"code":"0","data":{"order_no":"O1","status":"success","amount":0}}`,
+			wantErr: "金额",
+		},
+		{
+			name:    "成功但订单号对不上",
+			resp:    `{"code":"0","data":{"order_no":"O-OTHER","status":"success","amount":1000}}`,
+			wantErr: "订单号",
+		},
+		{
+			// pending 常省略金额：对账只卡终态成功，否则合法「已受理」会被误杀。
+			name:   "pending 省略金额仍可过",
+			resp:   `{"code":"0","data":{"order_no":"O1","status":"pending"}}`,
+			wantOK: true,
+		},
+	}
+	for _, cs := range cases {
+		t.Run(cs.name, func(t *testing.T) {
+			r := newSDKServer(t)
+			r.resp.Store(cs.resp)
+			ch, err := Open(DriverGeneric, ProviderOptions{
+				Name: "usdt", BaseURL: r.srv.URL, SecretKey: "s",
+				Timeout: 2 * time.Second, Endpoint: endpoints(),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			res, err := ch.Recharge(context.Background(), order)
+			if cs.wantOK {
+				if err != nil {
+					t.Fatalf("期望成功，实得 %v", err)
+				}
+				if res == nil || (res.Status != StatusSuccess && res.Status != StatusPending) {
+					t.Fatalf("回执不符: %+v", res)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("期望报错，实得 %+v", res)
+			}
+			if !strings.Contains(err.Error(), cs.wantErr) {
+				t.Fatalf("错误文案应含 %q，实得 %v", cs.wantErr, err)
+			}
+		})
+	}
+}
+
+// TestMergeExtrasRejectsDuplicateNames 配置 Extras 重名、或与单内 Extra 撞名，
+// 都必须拒：fields 只留一值、signs 却会双 append，验签失败比本地报错更难查。
+func TestMergeExtrasRejectsDuplicateNames(t *testing.T) {
+	if _, _, err := mergeExtras(
+		[]ExtraField{{Name: "contract", Value: "a"}, {Name: "contract", Value: "b"}},
+		nil,
+	); err == nil || !strings.Contains(err.Error(), "contract") {
+		t.Fatalf("Extras 内部重名应当被拒，实得 %v", err)
+	}
+	if _, _, err := mergeExtras(
+		[]ExtraField{{Name: "contract", Value: "c"}},
+		map[string]string{"contract": "x"},
+	); err == nil || !strings.Contains(err.Error(), "contract") {
+		t.Fatalf("Extra 与 Extras 撞名应当被拒，实得 %v", err)
+	}
+	// 空值仍跳过：跳过后不占坑，不等于撞名。
+	if _, signs, err := mergeExtras(
+		[]ExtraField{{Name: "contract", Value: ""}, {Name: "contract", Value: "c"}},
+		map[string]string{"remark": "r"},
+	); err != nil {
+		t.Fatal(err)
+	} else if len(signs) != 2 || signs[0] != "c" || signs[1] != "r" {
+		t.Fatalf("空值跳过后签名域不符: %#v", signs)
 	}
 }

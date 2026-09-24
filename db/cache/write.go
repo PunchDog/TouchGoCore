@@ -3,6 +3,7 @@ package cache
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -72,6 +73,38 @@ func (b *buffer[K, V]) has(ks string) bool {
 	return ok
 }
 
+// get 读缓冲条目（reload 脏 key 回填 Redis 用）；调用方勿修改返回指针。
+func (b *buffer[K, V]) get(ks string) *opEntry[K, V] {
+	sh := b.shard(ks)
+	sh.mu.Lock()
+	defer sh.mu.Unlock()
+	return sh.m[ks]
+}
+
+// hasNewer 缓冲里是否已有同 key 且 seq 更新的条目（drain 后并发 Write 场景）。
+func (b *buffer[K, V]) hasNewer(ks string, seq int64) bool {
+	sh := b.shard(ks)
+	sh.mu.Lock()
+	defer sh.mu.Unlock()
+	cur, ok := sh.m[ks]
+	return ok && cur.seq > seq
+}
+
+// dropIfOlder WriteSync 落库成功后踢掉同 key 的旧缓冲条目，
+// 避免后续 flush 用过期缓冲值盖掉 WriteSync 已写入的 DB 行。
+// 仅当缓冲 seq < 本次 WriteSync seq 时删除；更新的并发 Write 保留。
+func (b *buffer[K, V]) dropIfOlder(ks string, seq int64) bool {
+	sh := b.shard(ks)
+	sh.mu.Lock()
+	defer sh.mu.Unlock()
+	cur, ok := sh.m[ks]
+	if !ok || cur.seq >= seq {
+		return false
+	}
+	delete(sh.m, ks)
+	return true
+}
+
 // drain 换出整个分片的条目（锁外干活）
 func (b *buffer[K, V]) drain() []*opEntry[K, V] {
 	var out []*opEntry[K, V]
@@ -88,11 +121,22 @@ func (b *buffer[K, V]) drain() []*opEntry[K, V] {
 	return out
 }
 
-// reinsert 落库失败回插（同 key 已被更新的写入覆盖时，缓冲里的新值胜出）
-func (b *buffer[K, V]) reinsert(entries []*opEntry[K, V]) {
+// reinsert 落库失败回插。若同 key 已有更高 seq（drain 后并发 Write），
+// 保留新值并返回丢弃条数——调用方 Dirty.Add(-n)，因新 Write 已自计 dirty。
+func (b *buffer[K, V]) reinsert(entries []*opEntry[K, V]) (discarded int) {
 	for _, e := range entries {
-		b.put(e.ks, e)
+		sh := b.shard(e.ks)
+		sh.mu.Lock()
+		cur, exists := sh.m[e.ks]
+		if exists && cur.seq > e.seq {
+			discarded++
+			sh.mu.Unlock()
+			continue
+		}
+		sh.m[e.ks] = e
+		sh.mu.Unlock()
 	}
+	return discarded
 }
 
 func (b *buffer[K, V]) notifySignal() {
@@ -163,6 +207,7 @@ func (c *Cache[K, V]) WriteBatch(ctx context.Context, keys []K, vals []*V) error
 // 资金等「绝不允许只活在 Redis 里」的路径用；任一环节失败即报错，
 // 且落库失败会把刚写的缓存失效掉——不留「Redis 有、库里没有」的展示态。
 // 与普通 Write 的取舍：多一次 DB RTT 的延迟换零丢失窗口。
+// 成功后踢掉同 key 更旧的缓冲条目并销账——否则后续 flush 会把旧缓冲值盖回 DB。
 func (c *Cache[K, V]) WriteSync(ctx context.Context, key K, val *V) error {
 	if val == nil {
 		return errors.New("cache: WriteSync 值不能为 nil（删除请用 Remove）")
@@ -171,8 +216,9 @@ func (c *Cache[K, V]) WriteSync(ctx context.Context, key K, val *V) error {
 		return errNoSaver
 	}
 	ks := c.KeyOf(key)
+	var seq int64
 	if c.cfg.Enabled {
-		seq := c.seq.Add(1)
+		seq = c.seq.Add(1)
 		wctx, cancel := context.WithTimeout(ctx, c.cfg.WriteTimeout)
 		err := c.setEnvelope(wctx, ks, val, c.jitteredTTL(ks), seq, false)
 		cancel()
@@ -184,6 +230,7 @@ func (c *Cache[K, V]) WriteSync(ctx context.Context, key K, val *V) error {
 	sctx, cancel := context.WithTimeout(ctx, c.cfg.ReadTimeout*10)
 	defer cancel()
 	if err := c.sn.Save(sctx, key, val); err != nil {
+		// 落库失败：Del 刚写的 Redis；不复活此前已踢掉的旧缓冲（此处尚未踢）
 		if c.cfg.Enabled {
 			dctx, dcancel := context.WithTimeout(context.WithoutCancel(ctx), c.cfg.WriteTimeout)
 			_ = c.kv.Del(dctx, ks)
@@ -192,29 +239,40 @@ func (c *Cache[K, V]) WriteSync(ctx context.Context, key K, val *V) error {
 		vars.Error("cache[%s] WriteSync 落库失败 key=%s: %v", c.name, ks, err)
 		return err
 	}
+	if c.cfg.Enabled && c.buf != nil && seq > 0 {
+		if c.buf.dropIfOlder(ks, seq) {
+			c.st.Dirty.Add(-1)
+		}
+		// DB 已有新值：无条件销掉该键账本（WriteSync 本身不记账，清的是先前 Write 的账）
+		c.jClearKey(ctx, key)
+	}
 	return nil
 }
 
 // Remove 删除：同步 DEL Redis + 缓冲 tombstone，等定时器落库删除。
+// Enabled=false 时与 Write 对称：同步走 Saver.Delete，不留永不 flush 的 tombstone。
 func (c *Cache[K, V]) Remove(ctx context.Context, key K) error {
 	if c.sn == nil {
 		return errNoSaver
 	}
+	if !c.cfg.Enabled {
+		sctx, cancel := context.WithTimeout(ctx, c.cfg.ReadTimeout*10)
+		defer cancel()
+		return c.sn.Delete(sctx, key)
+	}
 	ks := c.KeyOf(key)
 	seq := c.seq.Add(1)
-	if c.cfg.Enabled {
-		wctx, cancel := context.WithTimeout(ctx, c.cfg.WriteTimeout)
-		var err error
-		if c.jr != nil {
-			err = c.jr.JAddDelete(wctx, ks, c.jz, c.keyFn(key), seq)
-		} else {
-			err = c.kv.Del(wctx, ks)
-		}
-		cancel()
-		if err != nil {
-			c.st.KVErr.Add(1)
-			return err
-		}
+	wctx, cancel := context.WithTimeout(ctx, c.cfg.WriteTimeout)
+	var err error
+	if c.jr != nil {
+		err = c.jr.JAddDelete(wctx, ks, c.jz, c.keyFn(key), seq)
+	} else {
+		err = c.kv.Del(wctx, ks)
+	}
+	cancel()
+	if err != nil {
+		c.st.KVErr.Add(1)
+		return err
 	}
 	e := &opEntry[K, V]{key: key, op: OpDelete, seq: seq, ts: c.clock()}
 	e.ks = ks
@@ -295,6 +353,8 @@ func (c *Cache[K, V]) Close(ctx context.Context) error {
 
 // flushOnce drain 全缓冲 → 分批落库 → 成功清脏、失败回插/超限丢弃。
 // flushMu 串行化：定时器、信号、内联背压、Close 共用一条落库线（天然保序）。
+// final=true（停服）：落库仍失败时保留账本与 Redis，返回错误——下次启动走 recoverJournal，
+// 与宕机恢复同一路径；不可清账（清账留 Redis 会使值不可恢复）。
 func (c *Cache[K, V]) flushOnce(ctx context.Context, final bool) error {
 	if c.buf == nil {
 		return nil
@@ -308,6 +368,9 @@ func (c *Cache[K, V]) flushOnce(ctx context.Context, final bool) error {
 	}
 	now := c.clock()
 	var retry []*opEntry[K, V]
+
+	// drain 后并发 Write 可能已放入更高 seq：跳过 Save/销账，Dirty 减 1（新 Write 已自计）
+	entries = c.filterSuperseded(entries)
 
 	// 老化告警：长时间未落库
 	for _, e := range entries {
@@ -326,13 +389,13 @@ func (c *Cache[K, V]) flushOnce(ctx context.Context, final bool) error {
 		c.jClearEntries(ctx, ok)
 		for _, e := range failed {
 			e.try++
-			if e.try > c.cfg.MaxRetry {
+			if !final && e.try > c.cfg.MaxRetry {
 				c.st.Dropped.Add(1)
 				c.st.Dirty.Add(-1)
 				dctx, dcancel := context.WithTimeout(context.WithoutCancel(ctx), c.cfg.WriteTimeout)
 				_ = c.kv.Del(dctx, e.ks)
 				dcancel()
-				// 丢弃即销账：重启不该把框架已宣告放弃的数据复活
+				// 正常 flush「放弃」：Del Redis + 销账（与停服失败保留相对）
 				c.jClearEntries(ctx, []*opEntry[K, V]{e})
 				vars.Error("cache[%s] 脏数据超过最大重试(%d)丢弃 key=%s seq=%d", c.name, c.cfg.MaxRetry, e.ks, e.seq)
 			} else {
@@ -342,42 +405,104 @@ func (c *Cache[K, V]) flushOnce(ctx context.Context, final bool) error {
 	}
 	if len(retry) > 0 {
 		if final {
-			// final 路径尽力再试一轮，不再无限循环
-			_, stillFailed := c.saveBatch(ctx, retry)
-			for _, e := range stillFailed {
-				c.st.Dropped.Add(1)
-				c.st.Dirty.Add(-1)
-				c.jClearEntries(ctx, []*opEntry[K, V]{e})
-				vars.Error("cache[%s] final flush 仍落库失败，丢弃 key=%s seq=%d", c.name, e.ks, e.seq)
+			// 停服再试一轮；仍失败则回插并报错，账本/Redis 不动
+			retry = c.filterSuperseded(retry)
+			ok2, stillFailed := c.saveBatch(ctx, retry)
+			c.st.Dirty.Add(-int64(len(ok2)))
+			for _, e := range ok2 {
+				c.renewIfAged(ctx, e)
+			}
+			c.jClearEntries(ctx, ok2)
+			if len(stillFailed) > 0 {
+				n := c.buf.reinsert(stillFailed)
+				if n > 0 {
+					c.st.Dirty.Add(-int64(n))
+				}
+				kept := len(stillFailed) - n
+				for _, e := range stillFailed {
+					vars.Error("cache[%s] final flush 落库失败，保留账本与 Redis key=%s seq=%d", c.name, e.ks, e.seq)
+				}
+				if kept > 0 {
+					return fmt.Errorf("cache[%s]: final flush 仍有 %d 条未落库", c.name, kept)
+				}
 			}
 		} else {
-			c.buf.reinsert(retry)
+			n := c.buf.reinsert(retry)
+			if n > 0 {
+				c.st.Dirty.Add(-int64(n))
+			}
 		}
 	}
 	return nil
 }
 
-// jClearEntries 落库成功/丢弃后销账（尽力而为：失败只计数告警，
-// 残留账目重启后会重放，upsert/delete 落库幂等无害）。
+// filterSuperseded 丢掉已被缓冲内更新 Write 覆盖的 drain 条目。
+func (c *Cache[K, V]) filterSuperseded(entries []*opEntry[K, V]) []*opEntry[K, V] {
+	if len(entries) == 0 {
+		return entries
+	}
+	out := entries[:0]
+	for _, e := range entries {
+		if c.buf.hasNewer(e.ks, e.seq) {
+			c.st.Dirty.Add(-1)
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
+// jClearEntries 落库成功/丢弃后销账。账本 member 无 seq，必须按 score==本条 seq
+// 条件删除——否则旧 flush 会 ZREM 掉更新 Write 刚记上的账。
 func (c *Cache[K, V]) jClearEntries(ctx context.Context, entries []*opEntry[K, V]) {
 	if c.jr == nil || len(entries) == 0 {
 		return
 	}
-	members := make([]string, 0, len(entries))
-	for _, e := range entries {
-		members = append(members, jMember(e.op, c.keyFn(e.key)))
-	}
 	jctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), c.cfg.WriteTimeout)
 	defer cancel()
-	if err := c.jr.JClear(jctx, c.jz, members...); err != nil {
+	for _, e := range entries {
+		if c.buf != nil && c.buf.hasNewer(e.ks, e.seq) {
+			continue
+		}
+		member := jMember(e.op, c.keyFn(e.key))
+		if err := c.jr.JClearIfSeq(jctx, c.jz, member, e.seq); err != nil {
+			c.st.JournalErr.Add(1)
+			vars.Warning("cache[%s] 条件销账失败 key=%s seq=%d: %v", c.name, e.ks, e.seq, err)
+		}
+	}
+}
+
+// jClearKey WriteSync 成功后无条件清掉该键 upsert/tombstone 账（DB 已追上）。
+func (c *Cache[K, V]) jClearKey(ctx context.Context, key K) {
+	if c.jr == nil {
+		return
+	}
+	ks := c.keyFn(key)
+	jctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), c.cfg.WriteTimeout)
+	defer cancel()
+	if err := c.jr.JClear(jctx, c.jz, jMember(OpUpsert, ks), jMember(OpDelete, ks)); err != nil {
 		c.st.JournalErr.Add(1)
-		vars.Warning("cache[%s] 销账失败(%d条): %v", c.name, len(members), err)
+		vars.Warning("cache[%s] WriteSync 销账失败 key=%s: %v", c.name, ks, err)
 	}
 }
 
 // saveBatch 落库一批：优先 BatchSaver 一条 SQL；否则 SaveConcurrency 并发单条。
 // 返回成功集合与失败集合（不回滚部分成功）。
+// Save 前再查一次缓冲：若已有更高 seq，跳过（不算失败，也不销账）。
 func (c *Cache[K, V]) saveBatch(ctx context.Context, entries []*opEntry[K, V]) (ok, failed []*opEntry[K, V]) {
+	if len(entries) == 0 {
+		return nil, nil
+	}
+	// 入口再滤一次：batch 组装到 Save 之间可能又有更新 Write
+	live := make([]*opEntry[K, V], 0, len(entries))
+	for _, e := range entries {
+		if c.buf.hasNewer(e.ks, e.seq) {
+			c.st.Dirty.Add(-1)
+			continue
+		}
+		live = append(live, e)
+	}
+	entries = live
 	if len(entries) == 0 {
 		return nil, nil
 	}
@@ -406,6 +531,12 @@ func (c *Cache[K, V]) saveBatch(ctx context.Context, entries []*opEntry[K, V]) (
 		wg.Add(1)
 		go func(e *opEntry[K, V]) {
 			defer wg.Done()
+			if c.buf.hasNewer(e.ks, e.seq) {
+				mu.Lock()
+				c.st.Dirty.Add(-1)
+				mu.Unlock()
+				return
+			}
 			sem <- struct{}{}
 			defer func() { <-sem }()
 			var err error

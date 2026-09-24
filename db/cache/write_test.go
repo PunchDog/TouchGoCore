@@ -210,18 +210,132 @@ func TestWrite_RunFinalFlush(t *testing.T) {
 	}
 }
 
-// Enabled=false 降级：Write 直接同步落库（write-through 不丢数据）
-func TestWrite_DisabledWriteThrough(t *testing.T) {
+// Write 然后 WriteSync：Flush 不得用旧缓冲值盖掉 WriteSync 已落库的行。
+func TestWrite_WriteThenWriteSyncFlushKeepsSyncValue(t *testing.T) {
 	sn := newRecSaver()
-	h := newHarness(t, WithSaver[string, testVal](sn), WithEnabled[string, testVal](false))
-	if err := h.c.Write(context.Background(), "k1", &testVal{N: 3}); err != nil {
+	h := newHarness(t, WithSaver[string, testVal](sn))
+	ctx := context.Background()
+	if err := h.c.Write(ctx, "k", &testVal{N: 1}); err != nil {
 		t.Fatal(err)
 	}
-	if got := sn.get("k1"); got == nil || got.N != 3 {
-		t.Fatalf("关闭时应 write-through 直接落库: %v", got)
+	if err := h.c.WriteSync(ctx, "k", &testVal{N: 99}); err != nil {
+		t.Fatal(err)
 	}
-	if h.kv.setCall != 0 {
-		t.Fatal("关闭模式不应写 Redis")
+	if v := sn.get("k"); v == nil || v.N != 99 {
+		t.Fatalf("WriteSync 后库值应为 99: %v", v)
+	}
+	if snap := h.c.Stats().Snapshot(); snap.Dirty != 0 {
+		t.Fatalf("WriteSync 应踢掉旧缓冲，Dirty=%d", snap.Dirty)
+	}
+	if jm := h.kv.journalOf(h.c.jz); len(jm) != 0 {
+		t.Fatalf("WriteSync 应销掉该键账本: %v", jm)
+	}
+	if err := h.c.Flush(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if v := sn.get("k"); v == nil || v.N != 99 {
+		t.Fatalf("Flush 后仍应为 WriteSync 的 99，得 %v", v)
+	}
+	if s, _ := sn.counts(); s != 1 {
+		t.Fatalf("Flush 不应再 Save 旧缓冲，saves=%d", s)
+	}
+}
+
+// drain 后并发更高 seq 的 Write：失败回插不得覆盖新值；Dirty 正确收敛。
+func TestWrite_ReinsertKeepsNewerSeq(t *testing.T) {
+	sn := newRecSaver()
+	h := newHarness(t, WithSaver[string, testVal](sn))
+	ctx := context.Background()
+	if err := h.c.Write(ctx, "k", &testVal{N: 1}); err != nil {
+		t.Fatal(err)
+	}
+	// 手工 drain 出旧条目，再 Write 更新值，模拟 flush 中途并发写
+	old := h.c.buf.drain()
+	if len(old) != 1 {
+		t.Fatalf("期望 drain 1 条，得 %d", len(old))
+	}
+	if err := h.c.Write(ctx, "k", &testVal{N: 2}); err != nil {
+		t.Fatal(err)
+	}
+	n := h.c.buf.reinsert(old)
+	if n != 1 {
+		t.Fatalf("旧条目应被丢弃，discarded=%d", n)
+	}
+	h.c.st.Dirty.Add(-int64(n))
+	be := h.c.buf.get(h.c.KeyOf("k"))
+	if be == nil || be.val == nil || be.val.N != 2 {
+		t.Fatalf("缓冲应保留新值 2: %+v", be)
+	}
+	if err := h.c.Flush(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if v := sn.get("k"); v == nil || v.N != 2 {
+		t.Fatalf("落库应为新值 2: %v", v)
+	}
+}
+
+// 停服 final flush DB 失败：保留账本与 Redis，返回错误；新 Run 可恢复落库。
+func TestWrite_FinalFlushFailKeepsJournalForRecover(t *testing.T) {
+	clk := newFakeClock()
+	kv := newFakeKV(clk)
+	sn := newRecSaver()
+	sn.saveErr = errors.New("db down")
+	cfg := testConfig()
+	cfg.FlushInterval = time.Hour
+	cfg.MaxRetry = 0 // 正常路径会丢弃；final 不得走丢弃
+	ld := &mapLoader{data: map[string]*testVal{}, notFound: map[string]bool{}}
+	c1, err := New[string, testVal]("t", kv,
+		WithConfig[string, testVal](cfg), WithClock[string, testVal](clk.Now),
+		WithLoader[string, testVal](ld), WithSaver[string, testVal](sn),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := c1.Write(ctx, "k", &testVal{N: 42}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c1.flushOnce(ctx, true); err == nil {
+		t.Fatal("final flush DB 失败应返回错误")
+	}
+	if jm := kv.journalOf(c1.jz); len(jm) == 0 {
+		t.Fatal("停服失败不得清账")
+	}
+	if _, err := c1.Get(ctx, "k"); err != nil {
+		t.Fatalf("停服失败不得 Del Redis: %v", err)
+	}
+	if snap := c1.Stats().Snapshot(); snap.Dropped != 0 {
+		t.Fatalf("停服失败不是放弃，Dropped=%d", snap.Dropped)
+	}
+
+	// 新进程：DB 恢复 → Run 扫账重放
+	sn2 := newRecSaver()
+	c2 := journalHarness(t, kv, clk, sn2)
+	rctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() { _ = c2.Run(rctx); close(done) }()
+	waitFor(t, 2*time.Second, func() bool {
+		return sn2.get("k") != nil && sn2.get("k").N == 42
+	}, "新 Run 应恢复落库")
+	cancel()
+	<-done
+	if jm := kv.journalOf(c2.jz); len(jm) != 0 {
+		t.Fatalf("恢复成功应销账: %v", jm)
+	}
+}
+
+// Enabled=false 时 Remove 同步 Delete，不留永不 flush 的 tombstone。
+func TestWrite_DisabledRemoveDeletes(t *testing.T) {
+	sn := newRecSaver()
+	h := newHarness(t, WithSaver[string, testVal](sn), WithEnabled[string, testVal](false))
+	if err := h.c.Remove(context.Background(), "k1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, d := sn.counts(); d != 1 {
+		t.Fatalf("关闭模式 Remove 应同步 Delete，deletes=%d", d)
+	}
+	if snap := h.c.Stats().Snapshot(); snap.Dirty != 0 {
+		t.Fatalf("关闭模式不应入缓冲，Dirty=%d", snap.Dirty)
 	}
 }
 

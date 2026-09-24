@@ -219,11 +219,22 @@ func defaultKeyFunc[K comparable]() func(K) string {
 
 // jitteredTTL 物理 TTL + 按 key 确定性抖动（同 key 稳定，免随机注入且防惊群）
 func (c *Cache[K, V]) jitteredTTL(ks string) time.Duration {
-	base := c.cfg.TTL
-	if c.cfg.JitterPct <= 0 {
+	return jitterDuration(c.cfg.TTL, c.cfg.JitterPct, ks)
+}
+
+// jitteredNegativeTTL 空值标记 TTL（同样带确定性抖动）；NegativeTTL<=0 时返回 0。
+func (c *Cache[K, V]) jitteredNegativeTTL(ks string) time.Duration {
+	if c.cfg.NegativeTTL <= 0 {
+		return 0
+	}
+	return jitterDuration(c.cfg.NegativeTTL, c.cfg.JitterPct, ks)
+}
+
+func jitterDuration(base time.Duration, jitterPct int, ks string) time.Duration {
+	if jitterPct <= 0 {
 		return base
 	}
-	span := uint64(base) * uint64(c.cfg.JitterPct) / 100
+	span := uint64(base) * uint64(jitterPct) / 100
 	if span == 0 {
 		return base
 	}

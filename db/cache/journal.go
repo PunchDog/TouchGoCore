@@ -26,8 +26,12 @@ import (
 // 扫账本，把还活得着的 envelope 值重新落库——把丢失窗口从「整个缓冲」
 // 压缩到「envelope 已 TTL 过期」这一小段（该段以 RecoverMiss 告警兜底）。
 //
+// 停服（ctx cancel / Close）final flush 若落库仍失败：不得清账、不得 Del Redis，
+// 返回错误；下次启动与宕机同一 recoverJournal 路径。清账留 Redis 会使值不可恢复。
+//
 // 账本成员按 keyStr 去重：同一键重复写只留最新一条（ZADD 覆盖 score），
 // op 翻转时（先写后删）同时 ZREM 旧 op 成员，保证一键至多一条账。
+// 销账用 JClearIfSeq（score==本条 seq）——旧 flush 不得清掉更新 Write 的账。
 
 // JournalEntry 账本的一条待落库记录（JScan 返回，按 Seq 升序）。
 type JournalEntry struct {
@@ -44,8 +48,10 @@ type Journaler interface {
 	JAddUpsert(ctx context.Context, key, value string, ttl time.Duration, zkey, keyStr string, seq int64) error
 	// JAddDelete 原子完成：DEL 缓存值 + 销 upsert 账 + 记 tombstone 账
 	JAddDelete(ctx context.Context, key, zkey, keyStr string, seq int64) error
-	// JClear 销账（落库成功/丢弃后调用；members 为完整 member）
+	// JClear 无条件销账（WriteSync 成功 / 恢复止损等；members 为完整 member）
 	JClear(ctx context.Context, zkey string, members ...string) error
+	// JClearIfSeq 仅当 member 的 score 仍等于 seq 时 ZREM——防旧 flush 误清新 Write 的账
+	JClearIfSeq(ctx context.Context, zkey, member string, seq int64) error
 	// JScan 全量读账本，按 Seq 升序
 	JScan(ctx context.Context, zkey string) ([]JournalEntry, error)
 }
@@ -114,6 +120,19 @@ func (s *redisStore) JClear(ctx context.Context, zkey string, members ...string)
 		anyMembers[i] = m
 	}
 	return s.cmd.ZRem(ctx, zkey, anyMembers...).Err()
+}
+
+// jClearIfSeqScript：score 仍为本条 seq 才 ZREM，避免旧 flush 清掉更新 Write 的账。
+const jClearIfSeqScript = `
+local score = redis.call('ZSCORE', KEYS[1], ARGV[1])
+if score and tonumber(score) == tonumber(ARGV[2]) then
+  return redis.call('ZREM', KEYS[1], ARGV[1])
+end
+return 0
+`
+
+func (s *redisStore) JClearIfSeq(ctx context.Context, zkey, member string, seq int64) error {
+	return s.cmd.Eval(ctx, jClearIfSeqScript, []string{zkey}, member, seq).Err()
 }
 
 func (s *redisStore) JScan(ctx context.Context, zkey string) ([]JournalEntry, error) {

@@ -87,8 +87,8 @@ type Config struct {
 	// 默认 true；KV 不实现 Journaler 时自动失效。
 	Journal bool
 
-	// Enabled 总开关；false 时 Write 退化为直接同步落库（write-through），
-	// GetOrLoad 直连回源且不写缓存。默认 true
+	// Enabled 总开关；false 时 Write/Remove 退化为直接同步落库（write-through），
+	// GetOrLoad/MGetOrLoad 直连回源且不信任 Redis 命中。默认 true
 	Enabled bool
 }
 

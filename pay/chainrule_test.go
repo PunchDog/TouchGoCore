@@ -136,7 +136,7 @@ func TestChainRuleRejectsBeforeSending(t *testing.T) {
 // 中间改一个字节而签名照旧，等于把钱送给改出来的人。
 func TestSignDomainCoversChainAndCallbackFields(t *testing.T) {
 	r := newSDKServer(t)
-	r.resp.Store(`{"code":"0","data":{"order_no":"O1","status":"success"}}`)
+	r.resp.Store(`{"code":"0","data":{"order_no":"O1","status":"success","amount":1000}}`)
 	const callback = "https://cb.example/notify"
 	cases := []struct {
 		name    string

@@ -223,7 +223,7 @@ func TestSessionNotSharedAcrossHosts(t *testing.T) {
 	loginF, loginURL := newFakeSupplier(t)
 	loginF.response["/api/login"] = `{"code":"0","data":{"token":"TK-1","user_id":"U9"}}`
 	fundF, fundURL := newFakeSupplier(t)
-	fundF.response["/api/recharge"] = `{"code":"0","data":{"order_no":"O1","status":"success"}}`
+	fundF.response["/api/recharge"] = `{"code":"0","data":{"order_no":"O1","status":"success","amount":1000}}`
 
 	cfg := payCfg(fundURL, allEndpoints())
 	// 登录链路换成另一家：独立 SDK 段、独立基址，只做下发所以没有商户账户。

@@ -342,6 +342,80 @@ func (c *Cache[K, V]) Flush(ctx context.Context) error {
 	return c.flushOnce(ctx, false)
 }
 
+// Pending 报告这些键当前是否还有未落库的脏条目（写缓冲里有账）。
+// 只读观测，不改变状态；FlushNow 的断言与单测都用它。
+func (c *Cache[K, V]) Pending(keys ...K) bool {
+	if c == nil || c.buf == nil {
+		return false
+	}
+	for _, k := range keys {
+		if c.buf.has(c.KeyOf(k)) {
+			return true
+		}
+	}
+	return false
+}
+
+// ErrFlushNotDurable 表示 FlushNow 已尽力落库但这批键里仍有未落库的脏条目。
+// 单独成码：调用方要区分「缓存层没这条路径」（nil）与「异步残留未清」（本错误）。
+var ErrFlushNotDurable = errors.New("cache: FlushNow 后仍有未落库脏数据")
+
+// FlushNow 资金级「立即落库」入口：把指定键的异步残留同步清掉，并对结果做诚实断言。
+//
+// 与 Flush 的区别是语义而非粒度：Flush 是尽力而为（失败回插等定时器重试，返回 nil），
+// 本函数返回 nil 的**承诺**是「调用方关心的一些键，库里已经追上」。为此它必须自己断言：
+//
+//	c == nil 或无写缓冲（未配 Saver / Enabled=false 的降级路径）→ nil
+//	    结构上不存在异步残留；持久化真源是调用方那个已经 COMMIT 的业务事务。
+//	    这是资金表的常态：它们只挂 Loader 不挂 Saver，Write/WriteSync 一律 errNoSaver。
+//	键当前不脏 → nil（零成本快路，不触发整表 flush）
+//	有脏 → 同步 flush（final 语义：失败保留账本与 Redis 并报错，不静默丢弃），
+//	        然后逐个断言「我登记的那个 seq 已不在缓冲」。仍脏 → ErrFlushNotDurable。
+//	        若缓冲里换成了更大 seq 的条目，那是并发的新 Write（不是我欠的账），放行。
+//	顺带看护 Dropped 计数：flush 期间发生「超重试丢弃」（库里从未拿到值、Redis 已 Del）
+//	一律报错——那种路径绝不能被一句「flush 完成」糊过去。
+//
+// 当前实现是整 Cache 粒度（一次 flush 全部脏键，可能顺带落别人的账——多写不少库，
+// 不会写错）；per-key drain（摘单键 → 单条 save → dropIfOlder → 销账）在后续版本
+// 于同签名内替换，调用点零改动。
+func (c *Cache[K, V]) FlushNow(ctx context.Context, keys ...K) error {
+	if c == nil || c.buf == nil {
+		return nil
+	}
+	want := make(map[string]int64, len(keys))
+	for _, k := range keys {
+		ks := c.KeyOf(k)
+		if e := c.buf.get(ks); e != nil {
+			want[ks] = e.seq
+		}
+	}
+	if len(want) == 0 {
+		return nil
+	}
+
+	droppedBefore := c.st.Dropped.Load()
+	if err := c.flushOnce(ctx, true); err != nil {
+		vars.Error("cache[%s] FlushNow 落库报错: %v", c.name, err)
+	}
+
+	var left []string
+	for ks, seq := range want {
+		e := c.buf.get(ks)
+		if e != nil && e.seq <= seq {
+			left = append(left, ks) // 我登记的那一条仍未落库
+		}
+	}
+	if len(left) > 0 {
+		vars.Error("cache[%s] FlushNow 仍有 %d 个键未落库: %v", c.name, len(left), left)
+		return fmt.Errorf("%w: cache=%s keys=%v", ErrFlushNotDurable, c.name, left)
+	}
+	if dropped := c.st.Dropped.Load(); dropped > droppedBefore {
+		return fmt.Errorf("%w: cache=%s FlushNow 期间丢弃 %d 条脏数据（未落库）",
+			ErrFlushNotDurable, c.name, dropped-droppedBefore)
+	}
+	return nil
+}
+
 // Close 停止后的收尾：把残余脏数据全部落库。等待预热协程结束。
 func (c *Cache[K, V]) Close(ctx context.Context) error {
 	c.runWg.Wait()

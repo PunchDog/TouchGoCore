@@ -36,6 +36,9 @@ type (
 	Saver[K comparable, V any]       = cachepkg.Saver[K, V]
 	BatchSaver[K comparable, V any]  = cachepkg.BatchSaver[K, V]
 	Item[K comparable]               = cachepkg.Item[K]
+
+	// PostCommitAction 业务事务 COMMIT 成功后才允许执行的缓存动作（见下 WithPostCommit）。
+	PostCommitAction = cachepkg.PostCommitAction
 )
 
 const (
@@ -53,6 +56,11 @@ var (
 	ErrCacheNotFound     = cachepkg.ErrNotFound          // 源确认不存在
 	ErrCacheMiss         = cachepkg.ErrMiss              // 只查缓存未命中
 	ErrSourceUnavailable = cachepkg.ErrSourceUnavailable // 回源失败退避中
+
+	ErrNoPostCommitSink = cachepkg.ErrNoPostCommitSink // ctx 未挂 post-commit 队列
+	ErrPostCommitNested = cachepkg.ErrPostCommitNested // 重复挂载（嵌套事务失效归属不明）
+	ErrPostCommitRan    = cachepkg.ErrPostCommitRan    // 队列已执行，再排动作永不被运行
+	ErrFlushNotDurable  = cachepkg.ErrFlushNotDurable  // FlushNow 后仍有未落库脏数据
 )
 
 // DefaultCacheConfig 返回框架默认缓存配置
@@ -118,6 +126,19 @@ func NewMysqlCacheSource[T any, K comparable](r *Repository[T], keyToID func(K) 
 	return cachepkg.MysqlSource[T, K](r, keyToID)
 }
 
+// NewMysqlCacheBatchSource MySQL 多主键一次回源（FindAll + IN）。
+// keyFn 必须与该 Cache 的 WithKeyFunc 逐字一致，idOf 从实体取回业务键——
+// 三者错位会让批量结果对不上键，退化成「命中即 miss」的静默低效。
+func NewMysqlCacheBatchSource[T any, K comparable](
+	r *Repository[T],
+	keyToID func(K) any,
+	idCol string,
+	keyFn func(K) string,
+	idOf func(*T) K,
+) BatchLoader[K, T] {
+	return cachepkg.MysqlBatchSource[T, K](r, keyToID, idCol, keyFn, idOf)
+}
+
 // NewMysqlCacheSink MySQL 单条落库（Save→Upsert，Delete→软删）
 func NewMysqlCacheSink[T any, K comparable](r *Repository[T], keyToID func(K) any, idCols ...string) Saver[K, T] {
 	return cachepkg.MysqlSink[T, K](r, keyToID, idCols...)
@@ -126,6 +147,58 @@ func NewMysqlCacheSink[T any, K comparable](r *Repository[T], keyToID func(K) an
 // NewMysqlCacheBatchSink MySQL 批量落库（UpsertBatch 一条 SQL 搞定 upsert 集）
 func NewMysqlCacheBatchSink[T any, K comparable](r *Repository[T], keyToID func(K) any, idCols ...string) BatchSaver[K, T] {
 	return cachepkg.MysqlBatchSink[T, K](r, keyToID, idCols...)
+}
+
+// ==================== 强一致写 / 事务边界（资金级路径用这组） ====================
+//
+// 写线 Write 是「同步写 Redis + 缓冲异步落库」，对资金表不可接受（丢失窗口 = flush 间隔，
+// 且整行 Upsert 会盖掉并发的增量更新）。资金表的正确形态是：持久化真源仍在业务事务里，
+// 缓存只做失效（DEL），且必须等 COMMIT 成功之后才动 Redis。
+//
+// 典型接线（数据访问层的事务包装）：
+//
+//	cctx, err := db.WithPostCommit(ctx)   // 挂失效动作队列
+//	tx := ...Begin...
+//	if err := fn(tx); err != nil { tx.Rollback(); return err }  // 回滚 → 队列一条不执行
+//	if err := tx.Commit(); err != nil { return err }
+//	if err := db.RunPostCommit(cctx); err != nil {
+//	    vars.Error("缓存失效失败（库已提交，至多陈旧一个 TTL）: %v", err) // 只告警，不翻转业务结果
+//	}
+// 业务函数内部则写 db.InvalidateOnCommit(cctx, infra.UserCache(), uid)。
+
+// WithPostCommit 给 ctx 挂 post-commit 动作队列（见 cachepkg.postcommit.go）。
+func WithPostCommit(ctx context.Context) (context.Context, error) {
+	return cachepkg.WithPostCommit(ctx)
+}
+
+// AppendPostCommit 追加动作；ctx 未挂队列返回 ErrNoPostCommitSink（不静默丢弃）。
+func AppendPostCommit(ctx context.Context, acts ...PostCommitAction) error {
+	return cachepkg.AppendPostCommit(ctx, acts...)
+}
+
+// RunPostCommit 执行并清空队列（COMMIT 成功后由事务包装器调用），返回聚合错误。
+func RunPostCommit(ctx context.Context) error { return cachepkg.RunPostCommit(ctx) }
+
+// Invalidate 生成「只失效 Redis」的动作；c 为 nil（本进程未启用缓存）时是空动作。
+func Invalidate[K comparable, V any](ctx context.Context, c *Cache[K, V], key K) PostCommitAction {
+	return cachepkg.Invalidate(ctx, c, key)
+}
+
+// InvalidateOnCommit 事务内标准失效：有队列则等 COMMIT，无队列则立即失效并告警。
+func InvalidateOnCommit[K comparable, V any](ctx context.Context, c *Cache[K, V], key K) error {
+	return cachepkg.InvalidateOnCommit(ctx, c, key)
+}
+
+// FlushNow 资金级「立即落库」：清掉指定键的异步残留，并对结果做诚实断言（详见
+// cachepkg.Cache.FlushNow 的注释）。nil 的含义是「这些键库里已追上，或结构上不存在
+// 异步路径」；未落库时返回包装了 ErrFlushNotDurable 的错误，绝不做静默 no-op。
+func FlushNow[K comparable, V any](ctx context.Context, c *Cache[K, V], keys ...K) error {
+	return c.FlushNow(ctx, keys...)
+}
+
+// Pending 报告指定键是否仍有未落库脏条目（观测/断言用）。
+func Pending[K comparable, V any](c *Cache[K, V], keys ...K) bool {
+	return c.Pending(keys...)
 }
 
 // ==================== 配置转换 ====================

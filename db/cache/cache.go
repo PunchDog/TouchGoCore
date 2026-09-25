@@ -94,6 +94,13 @@ func WithGroup[K comparable, V any](g string) Option[K, V] {
 func WithTTL[K comparable, V any](d time.Duration) Option[K, V] {
 	return func(cc *Cache[K, V]) { cc.cfg.TTL = d }
 }
+
+// WithNegativeTTL 只覆盖空值标记 TTL，不动命名空间与 Enabled —— 与 WithTTL 同一条理由：
+// 单个 Cache 想改的是「存多久」，把整份 Config 换掉会连带改写 Layer 给的 group/prefix，
+// 于是两个不同 Layer 的注册会互相覆盖键空间（表现成「关了缓存却仍读到 Redis 命中」）。
+func WithNegativeTTL[K comparable, V any](d time.Duration) Option[K, V] {
+	return func(cc *Cache[K, V]) { cc.cfg.NegativeTTL = d }
+}
 func WithCodec[K comparable, V any](c Codec) Option[K, V] {
 	return func(cc *Cache[K, V]) { cc.codec = c }
 }

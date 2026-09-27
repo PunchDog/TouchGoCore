@@ -128,6 +128,9 @@ type runState struct {
 	tickDone chan struct{}
 	// stopOnce 保证 closeCh 只 close 一次（重复 close 会 panic）
 	stopOnce sync.Once
+	// pool 本代际的 Worker Pool 引用（串行模式恒为 nil）。tickLoop 只读这里，
+	// 不回读包级 workerPool——否则旧代 Tick 退出前可能把消息投进新一代的池。
+	pool atomic.Pointer[workerPoolState]
 }
 
 // currentRunState 持有当前代际的状态；未 Run 或已 Stop 后为 nil。
@@ -388,7 +391,7 @@ func Run(ctx context.Context) error {
 	}
 
 	if size := cfg.Ws.WorkerPoolSize; size > 0 {
-		initWorkerPool(size, cfg.Ws.ShardByKey)
+		initWorkerPool(size, cfg.Ws.ShardByKey, state)
 		if cfg.Ws.ShardByKey {
 			vars.Info("WebSocket Worker Pool 启用: %d workers, 按UID分片", size)
 		} else {
@@ -511,7 +514,7 @@ func tickLoop(state *runState) {
 			shutdownWebsocket()
 			return
 		case read_msg := <-state.msgQueue:
-			if pool := workerPool.Load(); pool != nil {
+			if pool := state.pool.Load(); pool != nil {
 				pool.dispatch(read_msg)
 				continue
 			}
@@ -572,7 +575,7 @@ func processMessage(read_msg *msgQueueType) (panicked bool) {
 //   - shardByKey=false：轮询派发，跨消息不保证任何顺序；
 //   - 无论哪种，业务 OnMessage 都会被多个 Worker 协程并发调用，
 //     回调实现必须自己保证对共享状态的并发安全。
-func initWorkerPool(size int, shard bool) {
+func initWorkerPool(size int, shard bool, state *runState) {
 	if size <= 0 {
 		return
 	}
@@ -592,6 +595,9 @@ func initWorkerPool(size int, shard bool) {
 		go pool.workerLoop(i)
 	}
 	workerPool.Store(pool)
+	if state != nil {
+		state.pool.Store(pool)
+	}
 }
 
 // stopWorkerPool 停止本轮 Worker Pool 并取回实例；未启用时直接返回。

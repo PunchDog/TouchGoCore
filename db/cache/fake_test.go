@@ -160,6 +160,14 @@ func (f *fakeKV) rawOf(key string) (string, bool) {
 	return e.val, true
 }
 
+// hardDel 无视 TTL 与 ops 记录直接摘掉物理键：确定性制造「键恰好过期/不存在，
+// 于是 CAS 放行了一个本该输的旧写」的交错（生产上等价的形状是物理 TTL 到期）。
+func (f *fakeKV) hardDel(key string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.m, key)
+}
+
 // ---------- fakeKV 的 Journaler 实现（内存 ZSET） ----------
 
 // jPut 账本核心：SET/DEL 值 + 销反向旧账 + 记新账（一键至多一条）。

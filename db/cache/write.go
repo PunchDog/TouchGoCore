@@ -208,12 +208,35 @@ func (c *Cache[K, V]) Write(ctx context.Context, key K, val *V) error {
 	}
 	if !stored {
 		// 缓冲里已有更大 seq 的条目（典型成因：Redis 物理 TTL 恰好过期让 CAS 放行了
-		// 这个旧写）。保留新值，本次丢弃；Dirty 本来就没加，无需回退。
+		// 这个旧写）。本次值不落缓冲是正确处置，但刚被 CAS 写进 Redis 的旧值必须
+		// 当场纠正回来——否则「Redis 旧值 / DB 新值」的展示窗口会一直挂到逻辑过期。
+		c.repairRedisToBuffered(ctx, ks, c.buf.get(ks))
 		c.st.Superseded.Add(1)
 		return nil
 	}
 	c.enforceCapacity(ctx)
 	return nil
+}
+
+// repairRedisToBuffered 用缓冲里更新条目 cur 的值按 CAS 重写 Redis，
+// 修复「CAS 因键过期放行旧写」留下的残影。尽力而为：失败只计 KVErr——
+// 缓冲条目照常 flush 落库，Redis 靠逻辑过期/TTL 自愈兜底。
+func (c *Cache[K, V]) repairRedisToBuffered(ctx context.Context, ks string, cur *opEntry[K, V]) {
+	if cur == nil {
+		return
+	}
+	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), c.cfg.WriteTimeout)
+	defer cancel()
+	var err error
+	if cur.op == OpDelete {
+		_, err = c.delSeq(rctx, ks, cur.seq)
+	} else {
+		_, err = c.setEnvelopeSeq(rctx, ks, cur.val, c.jitteredTTL(ks), cur.seq, false)
+	}
+	if err != nil {
+		c.st.KVErr.Add(1)
+		vars.Warning("cache[%s] 旧写残影修复失败 key=%s seq=%d: %v", c.name, ks, cur.seq, err)
+	}
 }
 
 // writeRedis 写线的 Redis 那一步，按 KV 能力依次退阶：
@@ -331,6 +354,9 @@ func (c *Cache[K, V]) Remove(ctx context.Context, key K) error {
 		c.st.Dirty.Add(1)
 	}
 	if !stored {
+		// 与 Write 对称：缓冲已有更新条目，本次 tombstone 不落缓冲；
+		// 但刚被 CAS 放行的 DEL 可能把更新条目的缓存值删没了（键曾过期），当场补回。
+		c.repairRedisToBuffered(ctx, ks, c.buf.get(ks))
 		c.st.Superseded.Add(1)
 		return nil
 	}

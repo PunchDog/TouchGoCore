@@ -81,6 +81,10 @@ func (sw *ScriptWatcher) AddCallbackWithContext(callback ScriptReloadCallback) {
 }
 
 // Start 开始监控脚本变化。支持 Stop 后重新 Start：会重建已取消的 ctx 和已关闭的 stopChan。
+//
+// 并发约束：ctx/cancel/stopChan/fileModTime 全部只在 mu 临界区内读写；
+// watch 协程只使用 Start 捕获并传入的本代 ctx/stopChan 快照，不回读字段——
+// 这样 Stop→Start 换代时旧协程仍握着已关闭的旧通道，必定退出，新协程不受影响。
 func (sw *ScriptWatcher) Start() {
 	sw.mu.Lock()
 	if sw.running {
@@ -100,7 +104,7 @@ func (sw *ScriptWatcher) Start() {
 	sw.ctx, sw.cancel = context.WithCancel(parent)
 	sw.stopChan = make(chan struct{})
 	sw.running = true
-	sw.mu.Unlock()
+	ctx, stopCh := sw.ctx, sw.stopChan
 
 	// 初始化修改时间
 	if info, err := os.Stat(sw.scriptPath); err == nil {
@@ -108,20 +112,17 @@ func (sw *ScriptWatcher) Start() {
 	}
 
 	// 初始化依赖文件的修改时间
-	sw.mu.Lock()
 	for depPath := range sw.dependencies {
 		if info, err := os.Stat(depPath); err == nil {
 			sw.dependencies[depPath] = info.ModTime()
 		}
 	}
+	depCount := len(sw.dependencies)
 	sw.mu.Unlock()
 
-	// 启动监控 goroutine
-	go sw.watch()
+	// 启动监控 goroutine（只持有本代快照）
+	go sw.watch(ctx, stopCh)
 	vars.Info("started watching Lua script: %s", sw.scriptPath)
-	sw.mu.RLock()
-	depCount := len(sw.dependencies)
-	sw.mu.RUnlock()
 	if depCount > 0 {
 		vars.Info("watching %d dependency files", depCount)
 	}
@@ -135,17 +136,21 @@ func (sw *ScriptWatcher) Stop() {
 		return
 	}
 	sw.running = false
+	// 捕获本代的 cancel/stopChan：锁外若与 Start 交错，sw.cancel 已指向新一代，
+	// 直接读字段会把新一代误 cancel 掉
+	cancel, stopCh := sw.cancel, sw.stopChan
 	sw.mu.Unlock()
 
-	if sw.cancel != nil {
-		sw.cancel()
+	if cancel != nil {
+		cancel()
 	}
-	close(sw.stopChan)
+	close(stopCh)
 	vars.Info("stopped watching Lua script")
 }
 
-// watch 监控文件变化
-func (sw *ScriptWatcher) watch() {
+// watch 监控文件变化。ctx/stopCh 为启动本协程那一代的快照，全程不回读
+// sw.ctx/sw.stopChan——换代后本协程靠旧通道退出，天然与新一代隔离。
+func (sw *ScriptWatcher) watch(ctx context.Context, stopCh chan struct{}) {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
@@ -153,11 +158,11 @@ func (sw *ScriptWatcher) watch() {
 		select {
 		case <-ticker.C:
 			if sw.checkFileChange() {
-				sw.reloadScript()
+				sw.reloadScript(ctx)
 			}
-		case <-sw.stopChan:
+		case <-stopCh:
 			return
-		case <-sw.ctx.Done():
+		case <-ctx.Done():
 			return
 		}
 	}
@@ -171,7 +176,10 @@ func (sw *ScriptWatcher) checkFileChange() bool {
 		return false
 	}
 
-	if info.ModTime().After(sw.fileModTime) {
+	sw.mu.RLock()
+	modTime := sw.fileModTime
+	sw.mu.RUnlock()
+	if info.ModTime().After(modTime) {
 		return true
 	}
 
@@ -191,8 +199,8 @@ func (sw *ScriptWatcher) checkFileChange() bool {
 	return false
 }
 
-// reloadScript 重新加载脚本
-func (sw *ScriptWatcher) reloadScript() {
+// reloadScript 重新加载脚本。ctx 为本代 watch 的快照，不回读 sw.ctx（换代隔离）。
+func (sw *ScriptWatcher) reloadScript(ctx context.Context) {
 	vars.Info("detected Lua script modification, reloading...")
 
 	sw.mu.Lock()
@@ -206,7 +214,7 @@ func (sw *ScriptWatcher) reloadScript() {
 	oldScript.closeKeepingObjects()
 
 	// 创建新脚本
-	newScript, err := NewLuaScriptWithContext(sw.ctx, sw.scriptPath)
+	newScript, err := NewLuaScriptWithContext(ctx, sw.scriptPath)
 	if err != nil {
 		vars.Error("reload Lua script failed: %v", err)
 		// 恢复旧脚本
@@ -214,7 +222,7 @@ func (sw *ScriptWatcher) reloadScript() {
 		sw.script = oldScript
 		sw.mu.Unlock()
 
-		oldScript.ctx = sw.ctx
+		oldScript.ctx = ctx
 		// Close 已把旧脚本的 update 定时器作废归还，不重建就再没人驱动它；
 		// Init 失败时不能起表——那时 runtime 可能是 nil，update 会直接踩空。
 		if err := oldScript.Init(); err != nil {
@@ -230,7 +238,7 @@ func (sw *ScriptWatcher) reloadScript() {
 		sw.mu.RUnlock()
 
 		for _, callback := range callbacks {
-			callback(sw.ctx, oldScript, false, err)
+			callback(ctx, oldScript, false, err)
 		}
 		for _, callback := range callbacksOld {
 			callback(oldScript, false, err)
@@ -248,7 +256,9 @@ func (sw *ScriptWatcher) reloadScript() {
 
 	// 更新修改时间
 	if info, err := os.Stat(sw.scriptPath); err == nil {
+		sw.mu.Lock()
 		sw.fileModTime = info.ModTime()
+		sw.mu.Unlock()
 	}
 
 	// 更新依赖文件的修改时间
@@ -269,7 +279,7 @@ func (sw *ScriptWatcher) reloadScript() {
 	sw.mu.RUnlock()
 
 	for _, callback := range callbacks {
-		callback(sw.ctx, newScript, true, nil)
+		callback(ctx, newScript, true, nil)
 	}
 	for _, callback := range callbacksOld {
 		callback(newScript, true, nil)
@@ -444,6 +454,7 @@ func NewMultiFileWatcherWithContext(ctx context.Context) *MultiFileWatcher {
 // AddScript 添加要监控的脚本。
 // 每个子 watcher 持有独立的 cancel（派生自父 ctx），单个 watcher 的 Stop
 // 不会影响其他兄弟 watcher。
+// mfw 已在运行时会立即启动新 watcher，不必等下一次整体 Start。
 func (mfw *MultiFileWatcher) AddScript(script *LuaScript) {
 	mfw.mu.Lock()
 	defer mfw.mu.Unlock()
@@ -451,6 +462,13 @@ func (mfw *MultiFileWatcher) AddScript(script *LuaScript) {
 	// 不再覆盖为父级的 cancel，避免单个 Stop 全局取消。
 	watcher := NewScriptWatcherWithContext(mfw.ctx, script)
 	mfw.watchers[script.initScriptPath] = watcher
+	if mfw.running {
+		// 锁序保持 mfw.mu → watcher.mu 单向（与 Start 一致），不会死锁
+		watcher.mu.Lock()
+		watcher.parentCtx = mfw.ctx
+		watcher.mu.Unlock()
+		watcher.Start()
+	}
 }
 
 // Start 开始监控。支持 Stop 后重新 Start：会重建已取消的 ctx 和已关闭的 stopChan。

@@ -29,6 +29,7 @@ type ScriptWatcher struct {
 	dependencies map[string]time.Time
 	callbacks    []ScriptReloadCallback
 	callbacksOld []ScriptReloadCallbackOld // 旧版本回调列表
+	parentCtx    context.Context          // 原始父上下文，用于 Stop 后 Start 重建 ctx
 	ctx          context.Context
 	cancel       context.CancelFunc
 }
@@ -48,6 +49,7 @@ func NewScriptWatcherWithContext(ctx context.Context, script *LuaScript) *Script
 		dependencies: make(map[string]time.Time),
 		callbacks:    make([]ScriptReloadCallback, 0),
 		callbacksOld: make([]ScriptReloadCallbackOld, 0),
+		parentCtx:    ctx,
 		ctx:          watcherCtx,
 		cancel:       cancel,
 	}
@@ -78,13 +80,25 @@ func (sw *ScriptWatcher) AddCallbackWithContext(callback ScriptReloadCallback) {
 	sw.callbacks = append(sw.callbacks, callback)
 }
 
-// Start 开始监控脚本变化
+// Start 开始监控脚本变化。支持 Stop 后重新 Start：会重建已取消的 ctx 和已关闭的 stopChan。
 func (sw *ScriptWatcher) Start() {
 	sw.mu.Lock()
 	if sw.running {
 		sw.mu.Unlock()
 		return
 	}
+	// 重启支持：Stop 会 cancel ctx 并 close stopChan，再次 Start 时必须重建，
+	// 否则 watch 协程会立即退出（running=true 但无人监控）。
+	parent := sw.parentCtx
+	if parent == nil {
+		parent = context.Background()
+	}
+	// 释放构造期派生的子 ctx，避免 context 泄漏（重复调用 cancel 是安全的 no-op）
+	if sw.cancel != nil {
+		sw.cancel()
+	}
+	sw.ctx, sw.cancel = context.WithCancel(parent)
+	sw.stopChan = make(chan struct{})
 	sw.running = true
 	sw.mu.Unlock()
 
@@ -328,7 +342,11 @@ func (ls *LuaScript) ReloadScript() error {
 	return ls.ReloadScriptWithContext(context.Background())
 }
 
-// ReloadScriptWithContext 使用上下文手动重新加载脚本
+// ReloadScriptWithContext 使用上下文手动重新加载脚本。
+//
+// 重载与调用互斥：整个重载过程持有 rtMu 写锁，期间所有 CallWithContext 调用方阻塞
+// 等待重载完成。选择阻塞而非失败返回，因为重载是短暂事件（仅文件变更时触发），
+// 调用方无需实现重试逻辑。
 func (ls *LuaScript) ReloadScriptWithContext(ctx context.Context) error {
 	vars.Info("manually reloading Lua script: %s", ls.initScriptPath)
 
@@ -336,12 +354,16 @@ func (ls *LuaScript) ReloadScriptWithContext(ctx context.Context) error {
 	// 同时给 restoreRegisteredObjects 一个「重载前就存在」的判据
 	objectsCopy := copyRegisteredObjects(ls.registeredObjects)
 
-	// 关闭旧状态：只拆运行时，对象要跨这次重载存活
-	ls.closeKeepingObjects()
+	// 取写锁保护整个重载过程：阻止并发调用访问半初始化的 runtime
+	ls.rtMu.Lock()
+	defer ls.rtMu.Unlock()
+
+	// 关闭旧运行时
+	ls.closeRuntimeLocked()
 
 	// 重新初始化
 	ls.ctx = ctx
-	if err := ls.Init(); err != nil {
+	if err := ls.initLocked(); err != nil {
 		return err
 	}
 
@@ -393,12 +415,13 @@ func (ls *LuaScript) ReloadScriptWithContext(ctx context.Context) error {
 
 // WatchMultipleFiles 监控多个 Lua 文件
 type MultiFileWatcher struct {
-	watchers map[string]*ScriptWatcher
-	running  bool
-	mu       sync.RWMutex
-	stopChan chan struct{}
-	ctx      context.Context
-	cancel   context.CancelFunc
+	watchers  map[string]*ScriptWatcher
+	running   bool
+	mu        sync.RWMutex
+	stopChan  chan struct{}
+	parentCtx context.Context // 原始父上下文，用于 Stop 后 Start 重建
+	ctx       context.Context
+	cancel    context.CancelFunc
 }
 
 // NewMultiFileWatcher 创建多文件监视器（向后兼容）
@@ -410,24 +433,27 @@ func NewMultiFileWatcher() *MultiFileWatcher {
 func NewMultiFileWatcherWithContext(ctx context.Context) *MultiFileWatcher {
 	watcherCtx, cancel := context.WithCancel(ctx)
 	return &MultiFileWatcher{
-		watchers: make(map[string]*ScriptWatcher),
-		stopChan: make(chan struct{}),
-		ctx:      watcherCtx,
-		cancel:   cancel,
+		watchers:  make(map[string]*ScriptWatcher),
+		stopChan:  make(chan struct{}),
+		parentCtx: ctx,
+		ctx:       watcherCtx,
+		cancel:    cancel,
 	}
 }
 
-// AddScript 添加要监控的脚本
+// AddScript 添加要监控的脚本。
+// 每个子 watcher 持有独立的 cancel（派生自父 ctx），单个 watcher 的 Stop
+// 不会影响其他兄弟 watcher。
 func (mfw *MultiFileWatcher) AddScript(script *LuaScript) {
 	mfw.mu.Lock()
 	defer mfw.mu.Unlock()
-	watcher := NewScriptWatcher(script)
-	watcher.ctx = mfw.ctx
-	watcher.cancel = mfw.cancel
+	// NewScriptWatcherWithContext 已从 mfw.ctx 派生独立的子 ctx + cancel，
+	// 不再覆盖为父级的 cancel，避免单个 Stop 全局取消。
+	watcher := NewScriptWatcherWithContext(mfw.ctx, script)
 	mfw.watchers[script.initScriptPath] = watcher
 }
 
-// Start 开始监控
+// Start 开始监控。支持 Stop 后重新 Start：会重建已取消的 ctx 和已关闭的 stopChan。
 func (mfw *MultiFileWatcher) Start() {
 	mfw.mu.Lock()
 	defer mfw.mu.Unlock()
@@ -435,9 +461,26 @@ func (mfw *MultiFileWatcher) Start() {
 	if mfw.running {
 		return
 	}
+
+	// 重启支持：Stop 会 cancel ctx 并 close stopChan，再次 Start 时必须重建。
+	parent := mfw.parentCtx
+	if parent == nil {
+		parent = context.Background()
+	}
+	// 释放构造期/上一代派生的子 ctx，避免 context 泄漏
+	if mfw.cancel != nil {
+		mfw.cancel()
+	}
+	mfw.ctx, mfw.cancel = context.WithCancel(parent)
+	mfw.stopChan = make(chan struct{})
 	mfw.running = true
 
+	// 子 watcher 需要更新 parentCtx 为新的 mfw.ctx，否则它们派生的 ctx 仍来自已取消的旧父级。
+	// 锁序单向：mfw.mu → watcher.mu，不会死锁。
 	for _, watcher := range mfw.watchers {
+		watcher.mu.Lock()
+		watcher.parentCtx = mfw.ctx
+		watcher.mu.Unlock()
 		watcher.Start()
 	}
 	vars.Info("started watching %d Lua script files", len(mfw.watchers))

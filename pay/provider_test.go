@@ -262,9 +262,10 @@ func TestPlaceOrderReconcilesReceipt(t *testing.T) {
 			wantErr: "金额",
 		},
 		{
-			name:    "成功但金额为 0",
-			resp:    `{"code":"0","data":{"order_no":"O1","status":"success","amount":0}}`,
-			wantErr: "金额",
+			// 供应商省略金额（0/缺省）是合法的「未给出」语义，不作为不一致处理。
+			name:   "成功但金额为 0（供应商省略）",
+			resp:   `{"code":"0","data":{"order_no":"O1","status":"success","amount":0}}`,
+			wantOK: true,
 		},
 		{
 			name:    "成功但订单号对不上",

@@ -25,6 +25,23 @@ type KV interface {
 	Del(ctx context.Context, keys ...string) error
 }
 
+// SeqKV 是 KV 可选实现的「按 seq 条件写」窄接口（Redis 侧 Lua CAS）。
+//
+// 动机：写线的三步「seq 自增 → Redis 写 → 入写缓冲」并非原子，同键并发写时
+// 先取到较小 seq 的一方可能后落地——Redis 会被旧值倒灌，随后写缓冲把旧值落库。
+// 本接口把 Redis 那一步条件化：仅当现有 envelope 的 seq 小于本次 seq 才写，
+// 与 buffer.put 的 max-seq 覆盖一起构成写线保序防线。
+//
+// Cache 构造时类型断言探测；KV 不实现则写线退回无条件 Set/Del（旧行为）。
+type SeqKV interface {
+	// SetSeq 仅当键不存在、值不可解析、或现有 envelope.Seq 不大于 seq 时写入 value。
+	// 返回 true=本次写入生效；false=Redis 已有更大 seq 的值，本次过期写被丢弃。
+	// （容许同 seq 重写：renewIfAged 靠它刷新超龄条目的新鲜度）
+	SetSeq(ctx context.Context, key, value string, ttl time.Duration, seq int64) (bool, error)
+	// DelSeq 同 SetSeq 语义的删除（Remove 用）。
+	DelSeq(ctx context.Context, key string, seq int64) (bool, error)
+}
+
 // redisStore 基于 redis.Cmdable 的 KV 实现，单机/集群共用一段代码。
 type redisStore struct {
 	cmd       redis.Cmdable
@@ -112,4 +129,62 @@ func (s *redisStore) Del(ctx context.Context, keys ...string) error {
 		return nil
 	}
 	return s.cmd.Del(ctx, keys...).Err()
+}
+
+// ---------- SeqKV：按 seq 条件写（Lua CAS） ----------
+//
+// 脚本均只用一个 KEY，集群模式下不会踩 CROSSSLOT。
+// envelope 的 seq 字段名固定为 "s"（见 envelope.go），且位于 JSON 顶层；
+// 业务值嵌在 "v" 里，所以只看顶层 t.s 不会与业务字段同名混淆。
+// cjson 为 Redis 内建；值不可解析（旧版本/脏值）时当作「无 seq」放行本次写，
+// 让新值自愈覆盖。
+//
+// 守卫用「现有 seq 严格大于本次才拒」而非「大于等于」：seq 由 Cache 内部原子自增，
+// 不同写操作永不重号；同 seq 重写只来自 renewIfAged（超龄条目用同一个值刷新
+// 逻辑新鲜期），必须放行，否则那个功能会变成永远空转。
+
+const seqGuardLua = `
+local cur = redis.call('GET', KEYS[1])
+if cur then
+  local ok, t = pcall(cjson.decode, cur)
+  if ok and type(t) == 'table' and t.s ~= nil and tonumber(t.s) > tonumber(ARGV[1]) then
+    return 0
+  end
+end
+`
+
+// seqSetScript ARGV[1]=seq ARGV[2]=value ARGV[3]=ttl(ms)
+const seqSetScript = seqGuardLua + `
+redis.call('SET', KEYS[1], ARGV[2], 'PX', ARGV[3])
+return 1
+`
+
+// seqDelScript ARGV[1]=seq
+const seqDelScript = seqGuardLua + `
+redis.call('DEL', KEYS[1])
+return 1
+`
+
+func ttlMS(ttl time.Duration) int64 {
+	if ttl <= 0 {
+		// 缓存层绝不允许写入永不过期的键：物理 TTL 是唯一失效权威
+		ttl = 5 * time.Minute
+	}
+	return ttl.Milliseconds()
+}
+
+func (s *redisStore) SetSeq(ctx context.Context, key, value string, ttl time.Duration, seq int64) (bool, error) {
+	n, err := s.cmd.Eval(ctx, seqSetScript, []string{key}, seq, value, ttlMS(ttl)).Int64()
+	if err != nil {
+		return false, err
+	}
+	return n == 1, nil
+}
+
+func (s *redisStore) DelSeq(ctx context.Context, key string, seq int64) (bool, error) {
+	n, err := s.cmd.Eval(ctx, seqDelScript, []string{key}, seq).Int64()
+	if err != nil {
+		return false, err
+	}
+	return n == 1, nil
 }

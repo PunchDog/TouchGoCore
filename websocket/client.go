@@ -112,6 +112,12 @@ type Client struct {
 	// counted：是否已计入服务器连接统计，决定回池时是否做 -1
 	counted atomic.Bool
 
+	// runState 是连接绑定的代际状态（M4 修复）：NewClient 时快照，整生命周期不变。
+	// readLoop 通过它向自己代的 msgQueue 投递，避免 Run 换代后旧连接的消息
+	// 跑到新一代的队列里被新 Tick 消费。裸构造的测试 Client 该字段为 nil，
+	// 走 dispatchQueue 里的 currentMsgQueue() 回退分支。
+	runState *runState
+
 	// ============ 改进：添加统计字段 ============
 	stats struct {
 		connectTime      time.Time
@@ -129,6 +135,39 @@ type Client struct {
 func (c *Client) initChannels() {
 	c.closeCh = make(chan bool, 1)
 	c.msgChan = make(chan []byte, writeQueueCap())
+}
+
+// resetStats 把连接期统计计数器整体归零（M2 修复）。
+//
+// 池化实例带着上一条连接的计数回来：recycle 只清 wsConnect/UID/ICall，
+// 五个原子计数器原封不动留在实例上（回收时它们仍可能被在跑的协程写入，
+// 那里不是清零的安全点），于是 NewClient 复用该实例后 GetStats 会把两段
+// 连接的流量叠在一起上报，跨连接失真。
+//
+// 必须在任何常驻协程启动之前调用：此刻实例被本次 NewClient 独占，
+// 清零与新连接的计数之间不存在并发写入。
+func (c *Client) resetStats() {
+	now := util.CurrentTime()
+	c.stats.connectTime = now
+	c.stats.messagesSent.Store(0)
+	c.stats.messagesReceived.Store(0)
+	c.stats.bytesSent.Store(0)
+	c.stats.bytesReceived.Store(0)
+	c.stats.errors.Store(0)
+	c.stats.lastActivity.Store(now)
+}
+
+// dispatchQueue 返回本连接该代际的接收队列（M4 修复）。
+//
+// NewClient 会把当时的 currentRunState 快照进 c.runState，整生命周期不变；
+// 这样 Run 换代后旧连接的消息仍只会走旧 msgQueue（其消费者是旧 Tick，
+// 会在 stopRunState 后退出），不会混进新一代。
+// 裸构造的测试 Client 没走过 NewClient，c.runState 为 nil，这里回退到当前代。
+func (c *Client) dispatchQueue() chan *msgQueueType {
+	if c.runState != nil {
+		return c.runState.msgQueue
+	}
+	return currentMsgQueue()
 }
 
 // writeQueueCap 发送队列容量（单位：条）
@@ -259,6 +298,14 @@ func (c *Client) readLoop() {
 		return
 	}
 
+	// M4 修复：在循环外一次锁定本连接代际的队列。Run 换代不会走到这里来，
+	// 本连接的消息也绝不会混进新一代。
+	queue := c.dispatchQueue()
+	if queue == nil {
+		vars.Error("客户端 readLoop 启动时代际队列为空，客户端地址: %s", c.remoteAddr)
+		return
+	}
+
 	// 读超时 + pong 续期：修复前 ReadMessage 完全没有 deadline，对端拔网线或
 	// 留下半开连接时本协程永久阻塞，Client 实例与底层 socket 一起泄漏到进程退出。
 	conn.SetPongHandler(func(string) error {
@@ -275,7 +322,7 @@ func (c *Client) readLoop() {
 				item := &msgQueueType{uid: c.UID, data: data}
 				if queueParams().dropOnFull {
 					select {
-					case msgQueue <- item:
+					case queue <- item:
 						c.stats.messagesReceived.Add(1)
 						c.stats.bytesReceived.Add(int64(len(data)))
 						c.stats.lastActivity.Store(util.CurrentTime())
@@ -288,7 +335,7 @@ func (c *Client) readLoop() {
 					}
 				} else {
 					select {
-					case msgQueue <- item:
+					case queue <- item:
 						c.stats.messagesReceived.Add(1)
 						c.stats.bytesReceived.Add(int64(len(data)))
 						c.stats.lastActivity.Store(util.CurrentTime())
@@ -389,14 +436,23 @@ func (c *Client) recycle() {
 			c.ICall = nil
 		}
 
-		// 归还 Client 到对象池
-		if clientpool != nil {
-			clientpool.Put(c)
-		}
-
-		// 与 NewClient 的 +1 配对，未计入统计的失败连接不做 -1
+		// 与 NewClient 的 +1 配对，未计入统计的失败连接不做 -1。
+		//
+		// M3 修复：必须排在回池之前。实例一旦 Put 进池，另一条 NewClient 立刻
+		// 就能 Get 到它并重置 counted（先 Store(false)，连接建立成功后再
+		// Store(true)），此时本处的 CAS 有两种坏交错：
+		//   - 新主人已 Store(false) → CAS 失败 → 本次 -1 永久丢失；
+		//   - 新主人已 Store(true) → CAS 成功 → 摘走的是新主人的 +1，
+		//     而新主人回收时 CAS 失败同样不减。
+		// 两种都让 currentConnections 单调漂移（只增不减），跑久了统计与
+		// Prometheus gauge 一起失真。先摘计数再交接所有权即闭合该窗口。
 		if c.counted.CompareAndSwap(true, false) {
 			UpdateConnectionStats(false)
+		}
+
+		// 归还 Client 到对象池：这一步是所有权交接，此后不得再写 c 的任何字段
+		if clientpool != nil {
+			clientpool.Put(c)
 		}
 	})
 }
@@ -503,11 +559,13 @@ func NewClient(connType interface{}, remoteAddr string, className string) (*Clie
 
 	client.UID = uid
 	client.remoteAddr = remoteAddr
+	// M4 修复：快照当前代际。连接生命周期内不变，readLoop 只会向本代 msgQueue 投递。
+	client.runState = loadRunState()
 	client.initChannels()
 
 	// ============ 改进：初始化统计 ============
-	client.stats.connectTime = util.CurrentTime()
-	client.stats.lastActivity.Store(util.CurrentTime())
+	// 走 resetStats 而不是只刷时间戳：池化实例上残留的计数必须一并归零（M2）
+	client.resetStats()
 
 	switch v := connType.(type) {
 	case string: // 客户端主动连接模式

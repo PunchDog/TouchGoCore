@@ -112,7 +112,13 @@ func (c *Cache[K, V]) GetOrLoadWith(ctx context.Context, key K, ld Loader[K, V])
 // 回源 → 写 Redis（脏 key 跳过，写线优先）→ 从 Redis 读回。
 // 返回 *V；确认不存在返回 (nil, ErrNotFound)。
 func (c *Cache[K, V]) reload(ks string, key K, ld Loader[K, V]) (any, error) {
-	bg := context.WithoutCancel(context.Background())
+	// 后台回填刻意脱离调用方的取消语义：reload 是 singleflight 的 leader 执行体，
+	// 其结果被所有并发 waiter 共享——若沿用触发本次回源的那个请求 ctx，请求一旦
+	// 被取消（客户端断开/上游超时）就会连带中断回填，让同批 waiter 一起拿不到值。
+	// 因此这里直接用 context.Background() 起一个不受调用方取消影响的根 ctx。
+	// 它并非无界：下面每一步都各自套 cfg 超时——回源与读回受 cfg.ReadTimeout 约束、
+	// 写 Redis 受 cfg.WriteTimeout 约束，超时即释放，不会泄漏成永久挂起的协程。
+	bg := context.Background()
 	lctx, cancel := context.WithTimeout(bg, c.cfg.ReadTimeout)
 	defer cancel()
 
@@ -282,13 +288,44 @@ func (c *Cache[K, V]) MGetOrLoad(ctx context.Context, keys []K) (map[string]*V, 
 		defer cancel()
 		got, lerr := bl.LoadBatch(lctx, misses)
 		if lerr != nil {
-			c.fails.Store(c.KeyOf(misses[0]), c.clock())
+			// 批量回源整体失败 = 源不可用，本次所有 miss 键都在同一次失败里：
+			// 必须逐个登记退避。只记 misses[0] 会让其余键在退避窗口内
+			// 继续打一个已经挂掉的 DB（单键路径查的就是这张表）。
+			now := c.clock()
+			for _, k := range misses {
+				c.fails.Store(c.KeyOf(k), now)
+			}
+			c.st.LoadErr.Add(1)
+			vars.Error("cache[%s] 批量回源失败（%d 个键进入退避 %s）: %v", c.name, len(misses), c.cfg.FailBackoff, lerr)
 			return nil, lerr
 		}
+		// 成功则清退避：源已恢复，不得让旧失败把后面的请求继续挡在门外。
+		// 预计算所有 miss 键的 KeyOf 结果，避免三次循环重复调用（长键含 SHA1 开销）。
+		missKeys := make([]string, len(misses))
+		for i, k := range misses {
+			missKeys[i] = c.KeyOf(k)
+		}
+		for _, ks := range missKeys {
+			c.fails.Delete(ks)
+		}
 		c.st.Loads.Add(1)
+		// 键对齐自检：LoadBatch 的结果 map 必须以 KeyOf(key) 为键。第三方实现若没走
+		// KeyBinder（或自己拼键，比如只用 keyFn 的裸键串），回填会一条都对不上，
+		// 表现成「每次 MGetOrLoad 都打一次 DB 但一个也用不上、还顺手写了一堆空标记」
+		// 的静默退化。这里把它变响亮：只告警不改行为，避免影响正常路径。
+		if len(got) > 0 {
+			aligned := 0
+			for _, ks := range missKeys {
+				if _, ok := got[ks]; ok {
+					aligned++
+				}
+			}
+			if aligned == 0 {
+				vars.Error("cache[%s] 批量回源键不对齐：LoadBatch 返回 %d 条但没有一条以 KeyOf 为键（BatchLoader 须经 KeyBinder 绑定 KeyOf），本次回源结果全部作废", c.name, len(got))
+			}
+		}
 		// 回填：miss 且源也没有的写空标记（NegativeTTL<=0 则跳过）
-		for _, k := range misses {
-			ks := c.KeyOf(k)
+		for _, ks := range missKeys {
 			v := got[ks]
 			if c.buf != nil && c.buf.has(ks) {
 				continue

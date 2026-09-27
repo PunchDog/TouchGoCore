@@ -54,7 +54,7 @@ conf_dir=feature_configs
 
 	// 重置全局状态
 	resetFeatureState()
-	_configDirFlag = confDir
+	setConfigDirFlagForTest(confDir)
 
 	// 在 LoadWithError 之前注册
 	rules := &GameRules{}
@@ -129,7 +129,7 @@ conf_dir=feature_configs
 	}
 
 	resetFeatureState()
-	_configDirFlag = confDir
+	setConfigDirFlagForTest(confDir)
 
 	// 注册 nil
 	if err := RegisterFunc("dynamic_config", nil); err != nil {
@@ -188,7 +188,7 @@ conf_dir=feature_configs
 	}
 
 	resetFeatureState()
-	_configDirFlag = confDir
+	setConfigDirFlagForTest(confDir)
 
 	// 先加载主配置
 	cfg := &Cfg{}
@@ -245,7 +245,7 @@ conf_dir=feature_configs
 	}
 
 	resetFeatureState()
-	_configDirFlag = confDir
+	setConfigDirFlagForTest(confDir)
 
 	// 第一次注册
 	if err := RegisterFunc("test", nil); err != nil {
@@ -284,7 +284,7 @@ conf_dir=feature_configs
 	}
 
 	resetFeatureState()
-	_configDirFlag = confDir
+	setConfigDirFlagForTest(confDir)
 
 	// 注册不存在的配置
 	if err := RegisterFunc("missing", nil); err != nil {
@@ -333,7 +333,7 @@ conf_dir=` + absFeatureDir + `
 	}
 
 	resetFeatureState()
-	_configDirFlag = confDir
+	setConfigDirFlagForTest(confDir)
 
 	type AbsConfig struct {
 		Value string `json:"value"`
@@ -379,11 +379,15 @@ func TestNormalizeJSONName(t *testing.T) {
 	}
 }
 
-// resetFeatureState 重置功能配置全局状态（仅用于测试）
+// resetFeatureState 重置功能配置全局状态（仅用于测试）。
+// 必须在没有任何并发注册/加载时调用：_stateMu 只能盖住普通字段，
+// 整体替换 sync.Map 要求调用方处于静止态（本包测试默认串行，满足该前提）。
 func resetFeatureState() {
+	_stateMu.Lock()
 	_confDirField = ""
 	_featureDir = ""
 	_featureDirSet = false
+	_stateMu.Unlock()
 	_featureReg = sync.Map{}
 	_featureData = sync.Map{}
 	_featureLoaded = sync.Map{}

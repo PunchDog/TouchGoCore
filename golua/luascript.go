@@ -65,6 +65,13 @@ var (
 
 // LuaScript Lua脚本实例
 type LuaScript struct {
+	// rtMu 保护 runtime/thread/env 的生命周期：CallWithContext 持读锁，
+	// Init/closeKeepingObjects/ReloadScript 持写锁，确保重载与调用互斥。
+	rtMu sync.RWMutex
+	// poisoned 标记 runtime 已被超时协程污染：超时后协程仍在非线程安全的
+	// golua runtime 上执行（不会被强杀），后续任何调用都不得再使用该 runtime。
+	// Init 会重置此标记（因为创建了全新 runtime）。
+	poisoned          atomic.Bool
 	runtime           *rt.Runtime
 	thread            *rt.Thread
 	returnValues      []interface{}
@@ -82,9 +89,16 @@ type LuaScript struct {
 
 // Init 初始化Lua运行时
 func (ls *LuaScript) Init() error {
+	ls.rtMu.Lock()
+	defer ls.rtMu.Unlock()
+	return ls.initLocked()
+}
+
+// initLocked 内部初始化逻辑，调用方必须持有 rtMu 写锁。
+func (ls *LuaScript) initLocked() error {
 	// 只拆运行时，不回收对象：热重载走的就是 Init，对象登记表与 nextObjectID
 	// 必须跨这次重建存活，否则重载后新 userdata 会顶掉仍在使用的旧对象
-	ls.closeKeepingObjects()
+	ls.closeRuntimeLocked()
 
 	// 创建上下文
 	parent := luaParentCtx
@@ -106,6 +120,8 @@ func (ls *LuaScript) Init() error {
 		return fmt.Errorf("register default functions failed: %w", err)
 	}
 
+	// 新 runtime，清除中毒标记
+	ls.poisoned.Store(false)
 	return nil
 }
 
@@ -116,17 +132,27 @@ func (ls *LuaScript) Init() error {
 // 永远不触发；即便改成会触发的写法也不对——配置脚本里 `local npc = Npc()` 在主块
 // 返回后就没人了引用，按 GC 回收等于把刚配好的对象删掉。
 func (ls *LuaScript) Close() {
-	ls.closeRuntime()
+	ls.closeKeepingObjects() // 内部取写锁
 	ls.releaseRegisteredObjects()
 }
 
-// closeKeepingObjects 供热重载使用：只拆运行时，Lua 侧创建的对象要跨实例存活。
-func (ls *LuaScript) closeKeepingObjects() {
-	ls.closeRuntime()
+// IsPoisoned 报告该实例的 runtime 是否已被超时协程污染。
+// poisoned 实例拒绝所有新调用，需要 Init() 重建或创建新实例。
+func (ls *LuaScript) IsPoisoned() bool {
+	return ls.poisoned.Load()
 }
 
-// closeRuntime 释放上下文、update 定时器与 Lua 运行时。
-func (ls *LuaScript) closeRuntime() {
+// closeKeepingObjects 供热重载使用：只拆运行时，Lua 侧创建的对象要跨实例存活。
+// 取写锁以阻塞正在进行的 Call，确保不会在调用中途 nil 掉 runtime。
+func (ls *LuaScript) closeKeepingObjects() {
+	ls.rtMu.Lock()
+	defer ls.rtMu.Unlock()
+	ls.closeRuntimeLocked()
+}
+
+// closeRuntimeLocked 释放上下文、update 定时器与 Lua 运行时。
+// 调用方必须持有 rtMu 写锁。
+func (ls *LuaScript) closeRuntimeLocked() {
 	if ls.cancel != nil {
 		ls.cancel()
 	}
@@ -140,6 +166,8 @@ func (ls *LuaScript) closeRuntime() {
 		ls.timer = nil
 	}
 
+	// 即使 poisoned（超时协程仍在跑），也安全置 nil：协程已捕获 thread 局部引用，
+	// Go GC 保证其存活直到协程退出。此处只是断开本实例对旧 runtime 的引用。
 	if ls.runtime != nil {
 		ls.runtime = nil
 		ls.thread = nil
@@ -191,8 +219,31 @@ func (ls *LuaScript) Call(funcname string, list ...interface{}) ([]interface{}, 
 }
 
 // CallWithContext 使用上下文调用 Lua 函数。
-// 超时只中止等待：Lua 运行时非线程安全，后台 goroutine 不会被强杀，调用方应串行使用同一实例。
+//
+// 并发约束：rtMu 读锁只保证本调用与热重载（写锁）互斥，不保证多个 Call 之间互斥。
+// golua runtime 与 ls.thread 非线程安全，ls.returnValues 为共享字段；
+// 同一实例的并发调用方必须自行串行化（使用 SafeLuaScript 或外层加锁）。
+//
+// 超时限制：超时只中止等待，后台协程不会被强杀——golua runtime 非线程安全，
+// 无法从外部安全终止正在执行的 Lua 代码。超时后本实例被标记为 poisoned，
+// 后续调用将直接返回错误；需要恢复请调用 Init() 或创建新实例。
 func (ls *LuaScript) CallWithContext(ctx context.Context, funcname string, list ...interface{}) ([]interface{}, error) {
+	// 快速路径：已中毒直接拒绝，无需竞争锁
+	if ls.poisoned.Load() {
+		return nil, fmt.Errorf("lua runtime poisoned: previous call timed out, runtime is unsafe to reuse; call Init() or create a new instance")
+	}
+
+	ls.rtMu.RLock()
+	defer ls.rtMu.RUnlock()
+
+	// 取锁后二次检查：可能在等锁期间被 poison 或 close
+	if ls.poisoned.Load() {
+		return nil, fmt.Errorf("lua runtime poisoned: previous call timed out, runtime is unsafe to reuse; call Init() or create a new instance")
+	}
+	if ls.runtime == nil || ls.env == nil {
+		return nil, fmt.Errorf("lua runtime is not available (closed or reloading)")
+	}
+
 	select {
 	case <-ls.ctx.Done():
 		return nil, fmt.Errorf("Lua script is closed")
@@ -216,12 +267,22 @@ func (ls *LuaScript) CallWithContext(ctx context.Context, funcname string, list 
 		args = append(args, GoToLuaValueWithContext(ctx, val))
 	}
 
+	// 捕获 thread 局部引用：即使超时后 ls.thread 被置 nil，协程仍持有有效引用
+	thread := ls.thread
+
 	// 调用 Lua 函数（带超时保护）
 	resultChan := make(chan rt.Value, 1)
 	errChan := make(chan error, 1)
 
 	go func() {
-		result, err := rt.Call1(ls.thread, funcVal, args...)
+		// 防护性 recover：超时后本协程成为泄漏协程，若内部 panic 会崩溃整个进程。
+		// 由于 runtime 已被标记为 poisoned，此处 panic 不影响业务正确性。
+		defer func() {
+			if r := recover(); r != nil {
+				errChan <- fmt.Errorf("lua goroutine panic (poisoned runtime): %v", r)
+			}
+		}()
+		result, err := rt.Call1(thread, funcVal, args...)
 		if err != nil {
 			errChan <- err
 		} else {
@@ -233,6 +294,10 @@ func (ls *LuaScript) CallWithContext(ctx context.Context, funcname string, list 
 	started := time.Now()
 	select {
 	case <-ctx.Done():
+		// 超时：标记 runtime 为中毒状态，后续调用不再使用该 runtime。
+		// 注意：上面的 goroutine 仍在执行，无法安全终止（golua 非线程安全），
+		// 但由于 poisoned 标记，不会有其他调用者并发访问同一 runtime。
+		ls.poisoned.Store(true)
 		metrics.Lua.IncCalls("timeout:" + funcname)
 		metrics.Lua.ObserveCallLatency(funcname, time.Since(started))
 		return nil, fmt.Errorf("call timeout: %w", ctx.Err())

@@ -326,7 +326,14 @@ func TestTonUnregisteredEndpointSendsNothing(t *testing.T) {
 }
 
 // TestTonGatewayRetryIsTransparent 网关抖动由共用层原单重发，门面只报告最终结果。
+//
+// 新契约（L3）：Withdraw 路径仅白名单内的 HTTP 状态码可重试，5xx 不再默认 Retryable。
+// 本用例显式登记 502 到 RetryableCodes 以验证"白名单内网关抖动仍可透明重试"。
 func TestTonGatewayRetryIsTransparent(t *testing.T) {
+	// 登记 502 到 Withdraw 重试白名单，验证白名单内码可透明重发。
+	pay.RetryableCodes["502"] = struct{}{}
+	defer delete(pay.RetryableCodes, "502")
+
 	f, url := newTonFakeSupplier(t)
 	f.status["/api/withdraw"] = http.StatusBadGateway
 	cfg := payTonCfg(url, tonEndpoints())

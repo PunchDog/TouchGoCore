@@ -6,11 +6,32 @@ import (
 	"testing"
 )
 
+// snapshotPathState / restorePathState / setConfigDirFlagForTest 是测试对包级路径状态的
+// 唯一入口：这些字段已由 _stateMu 保护，测试也不能绕过锁直接赋值，否则与
+// 并发用例（concurrency_state_test.go）同时在飞时会自己造成竞争。
+func snapshotPathState() (base, conf, defFile, flagDir string) {
+	_stateMu.RLock()
+	defer _stateMu.RUnlock()
+	return _basePath, _confDir, _defaultFile, _configDirFlag
+}
+
+func restorePathState(base, conf, defFile, flagDir string) {
+	_stateMu.Lock()
+	_basePath, _confDir, _defaultFile, _configDirFlag = base, conf, defFile, flagDir
+	_stateMu.Unlock()
+}
+
+func setConfigDirFlagForTest(dir string) {
+	_stateMu.Lock()
+	_configDirFlag = dir
+	_stateMu.Unlock()
+}
+
 func withConfigPaths(t *testing.T) {
 	t.Helper()
-	prevBase, prevConf, prevFile, prevFlag := _basePath, _confDir, _defaultFile, _configDirFlag
+	prevBase, prevConf, prevFile, prevFlag := snapshotPathState()
 	t.Cleanup(func() {
-		_basePath, _confDir, _defaultFile, _configDirFlag = prevBase, prevConf, prevFile, prevFlag
+		restorePathState(prevBase, prevConf, prevFile, prevFlag)
 	})
 }
 
@@ -68,7 +89,7 @@ func TestApplyConfigDirAsParentOfConf(t *testing.T) {
 func TestLoadWithErrorFromConfDir(t *testing.T) {
 	withConfigPaths(t)
 	_, conf := writeTempConf(t)
-	_configDirFlag = conf
+	setConfigDirFlagForTest(conf)
 	cfg := &Cfg{}
 	if err := cfg.LoadWithError("GateWayServer"); err != nil {
 		t.Fatal(err)
@@ -81,7 +102,7 @@ func TestLoadWithErrorFromConfDir(t *testing.T) {
 func TestLoadWithErrorMissingServerSection(t *testing.T) {
 	withConfigPaths(t)
 	_, conf := writeTempConf(t)
-	_configDirFlag = conf
+	setConfigDirFlagForTest(conf)
 	cfg := &Cfg{}
 	if err := cfg.LoadWithError("UnknownServer"); err == nil {
 		t.Fatal("expected empty ini name error")

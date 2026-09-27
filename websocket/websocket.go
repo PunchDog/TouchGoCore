@@ -103,13 +103,43 @@ func queueParams() wsQueueParams {
 	}
 }
 
+// runState 是一次 Run 代际的全部可变状态（M4 修复）。
+//
+// 修复前 closeCh / msgQueue / tickDone / stopOnce 都是包级变量：
+//   - 二次 Run 直接覆盖 closeCh/msgQueue，但旧 Tick 协程仍在 select 这两个名字，
+//     结果是「旧 Tick + 新 Tick 同时消费新 msgQueue」，新旧连接消息跨代混投；
+//   - 旧 Tick 永远收不到旧 closeCh 的关闭信号（那个 chan 已被新值替换且无人引用），
+//     协程泄漏直到进程退出；
+//   - stopOnce 是 sync.Once 值，Run 重置后旧 Stop 调用可能命中新 Once，
+//     把上一代的关闭动作错算到这一代头上。
+//
+// 收进结构体后每代 Run 持有独立实例：Tick 协程与 Client 都通过自己捕获的指针访问，
+// 上一代资源天然与上一代协程绑定，新一代不会观察到旧状态，旧 Tick 也必定退出。
+type runState struct {
+	// generation 单调递增的代号，仅用于日志/测试观测
+	generation uint64
+	// ctx 本代 Run 的生命周期上下文，Tick 用它的 Done() 退出
+	ctx context.Context
+	// closeCh 显式停机信号；Stop 与下一轮 Run 切换前都会 close 它
+	closeCh chan struct{}
+	// msgQueue 本代的消息队列；Client.readLoop 投递、Tick 消费
+	msgQueue chan *msgQueueType
+	// tickDone Tick 协程退出后关闭，供 Stop / 下一轮 Run 等待
+	tickDone chan struct{}
+	// stopOnce 保证 closeCh 只 close 一次（重复 close 会 panic）
+	stopOnce sync.Once
+}
+
+// currentRunState 持有当前代际的状态；未 Run 或已 Stop 后为 nil。
+// 用 atomic.Pointer 而不是普通变量：Run 写入与 Client.readLoop 的读取天然并发。
+var currentRunState atomic.Pointer[runState]
+
+// runGenerationCounter 给每代 Run 分配单调递增的代号。
+var runGenerationCounter atomic.Uint64
+
 var (
-	closeCh    chan bool          = nil
-	msgQueue   chan *msgQueueType = nil
-	clientpool *sync.Pool         = nil
+	clientpool *sync.Pool = nil
 	clientcall *syncmap.Map[string, *sync.Pool]
-	stopOnce   sync.Once
-	tickDone   chan struct{}
 
 	// runCtxValue 是本轮 Run 的生命周期上下文。Run 写入时上一轮的连接协程
 	// 可能还在 DialContext/Done 上读它，普通接口变量并发读写即数据竞争。
@@ -148,6 +178,58 @@ func wsRunCtx() context.Context {
 
 // setWsRunCtx 装配本轮生命周期上下文，供 Run 使用。
 func setWsRunCtx(ctx context.Context) { runCtxValue.Store(&ctx) }
+
+// loadRunState 返回当前代际的状态快照（可能为 nil）。
+// 调用方应一次取值后存进局部变量再用：两次调用之间宿主可能已经换代。
+func loadRunState() *runState { return currentRunState.Load() }
+
+// currentMsgQueue 返回当前代际的消息队列；未 Run 时为 nil。
+// 仅供未绑定代际的旁路（如裸构造的测试 Client）回退使用。
+func currentMsgQueue() chan *msgQueueType {
+	if s := loadRunState(); s != nil {
+		return s.msgQueue
+	}
+	return nil
+}
+
+// newRunState 为本次 Run 装配独立的代际状态。
+func newRunState(ctx context.Context, readEntries int) *runState {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if readEntries <= 0 {
+		readEntries = defaultRecvQueueEntries
+	}
+	return &runState{
+		generation: runGenerationCounter.Add(1),
+		ctx:        ctx,
+		closeCh:    make(chan struct{}),
+		msgQueue:   make(chan *msgQueueType, readEntries),
+		tickDone:   make(chan struct{}),
+	}
+}
+
+// stopRunState 关闭指定代际并等待其 Tick 协程退出（M4 修复的关键路径）。
+//
+// 必须在 Run 切换前调用：Tick 退出路径会触发 shutdownWebsocket，后者摘走全局
+// serverList 并关闭客户端表里的全部连接；若放任旧 Tick 与新一轮 Run 并发，
+// 它会顺手关掉新一代刚注册的 HTTP 服务器与新接受的客户端。
+//
+// 幂等：stopOnce 保证重复调用只 close 一次；tickDone 已关时立即返回。
+func stopRunState(s *runState, waitCtx context.Context) {
+	if s == nil {
+		return
+	}
+	s.stopOnce.Do(func() { close(s.closeCh) })
+	if waitCtx == nil {
+		waitCtx = context.Background()
+	}
+	select {
+	case <-s.tickDone:
+	case <-waitCtx.Done():
+		vars.Error("WebSocket Tick(gen=%d) 停止超时: %v", s.generation, waitCtx.Err())
+	}
+}
 
 // workerPoolState 是一次 Run → Stop 生命周期内的并发消费端。
 //
@@ -262,12 +344,19 @@ func Run(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+
+	// 无效配置时不改变任何状态（保持旧语义）：先校验再停止上一代。
 	setWsRunCtx(ctx)
 	cfg := corectx.CfgFrom(ctx)
 	if cfg == nil || cfg.Ws == nil {
 		vars.Info("未启动websocket")
 		return nil
 	}
+
+	// M4 修复：先把上一代彻底收掉再装配新一代。
+	// 不等的话，旧 Tick 会在新 serverList 注册后触发 shutdownWebsocket，
+	// 把新一代的 HTTP 监听器和客户端一并关掉。
+	stopRunState(loadRunState(), ctx)
 
 	if loadClientMap() == nil {
 		// 不经 App 直接跑本模块时的兜底表：用分片实现，因为这张表每次消息派发都要查一遍，
@@ -285,10 +374,11 @@ func Run(ctx context.Context) error {
 	wsQueue.Store(&params)
 	applyTimeoutConfig(cfg.Ws)
 
-	closeCh = make(chan bool)
-	tickDone = make(chan struct{})
-	stopOnce = sync.Once{}
-	msgQueue = make(chan *msgQueueType, params.readEntries)
+	// M4 修复：本代的 closeCh/msgQueue/tickDone 全部收进 state，Tick 与 Client
+	// 都通过指针访问，不再跨代混用。
+	state := newRunState(ctx, params.readEntries)
+	currentRunState.Store(state)
+
 	clientpool = &sync.Pool{
 		New: func() interface{} {
 			return &Client{
@@ -320,11 +410,13 @@ func Run(ctx context.Context) error {
 		started++
 	}
 	if started == 0 && lastErr != nil {
+		// 启动全部失败：收回刚装的状态，避免后续 Stop 等不到 tickDone
+		currentRunState.CompareAndSwap(state, nil)
 		return lastErr
 	}
 
-	go Tick()
-	vars.Info("websocket服务启动")
+	go tickLoop(state)
+	vars.Info("websocket服务启动 gen=%d", state.generation)
 	return nil
 }
 
@@ -337,18 +429,14 @@ func Stop(ctx context.Context) {
 		return
 	}
 
-	stopOnce.Do(func() {
-		if closeCh != nil {
-			close(closeCh)
-		}
-	})
-	if tickDone != nil {
-		select {
-		case <-tickDone:
-		case <-ctx.Done():
-			vars.Error("WebSocket Tick 停止超时: %v", ctx.Err())
-		}
+	// M4 修复：只针对当前代际。上一代的状态在 Run 切换时已被 stopRunState 收掉，
+	// 这里不需再递归历史。
+	state := loadRunState()
+	if state == nil {
+		return
 	}
+	stopRunState(state, ctx)
+	currentRunState.CompareAndSwap(state, nil)
 }
 
 // applyTimeoutConfig 读取心跳与超时配置，未配置项沿用默认值。
@@ -395,25 +483,34 @@ func shutdownWebsocket() {
 	stopWorkerPool()
 }
 
-func Tick() {
+// Tick 启动当前代际的消息消费循环（对外 API 兼容入口）。
+//
+// 调用瞬间快照 currentRunState 并把它绑死给协程：这样后续 Run 切换包级指针
+// 也不会让本协程读到下一代的 msgQueue/closeCh（M4 修复的核心约束）。
+func Tick() { tickLoop(loadRunState()) }
+
+// tickLoop 是本代际的实际消费循环。state 由调用方显式传入，全程不再
+// 回读包级指针，以免与下一代 Run 交错。
+func tickLoop(state *runState) {
+	if state == nil {
+		return
+	}
 	defer func() {
-		if tickDone != nil {
-			select {
-			case <-tickDone:
-			default:
-				close(tickDone)
-			}
+		select {
+		case <-state.tickDone:
+		default:
+			close(state.tickDone)
 		}
 	}()
 	for {
 		select {
-		case <-closeCh:
+		case <-state.closeCh:
 			shutdownWebsocket()
 			return
-		case <-wsRunCtx().Done():
+		case <-state.ctx.Done():
 			shutdownWebsocket()
 			return
-		case read_msg := <-msgQueue:
+		case read_msg := <-state.msgQueue:
 			if pool := workerPool.Load(); pool != nil {
 				pool.dispatch(read_msg)
 				continue

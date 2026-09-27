@@ -352,6 +352,31 @@ func (c *RpcClient) failAllPending() {
 	})
 }
 
+// resetForReuse 池复用兜底：显式清空上一位主人可能残留的脏状态。
+//
+// 正常路径下 Close 已清干净这些字段，此处清理是幂等的；但若 Close 未走完
+// 或被跳过，复用者不会继承在途请求表（回调错投）、流状态（在死流上收发）
+// 与代际计数。调用点必须选在复用者独占期（NewTimer 的 initcallback 内：
+// timerPool.Get 已完成所有权认领，注册表尚未 Store，定时器尚未调度），
+// 不影响正在关闭的旧实例。
+func (c *RpcClient) resetForReuse() {
+	// 在途请求表：清空前先投递 nil 唤醒可能残留的等待者，语义与 failAllPending
+	// 一致且不重复遍历；正常路径下表已为空，Range 不产生任何动作。
+	c.failAllPending()
+	// 请求代际计数归零：与清空后的 pending 保持一致，新实例从 1 重新编号。
+	c.nextReqID.Store(0)
+	// 流相关字段：独占期内直接重建零值 atomic.Value（Store(nil) 会 panic，
+	// 而整体赋值在无并发的独占期安全），彻底摸除上一条脏流的引用。
+	// streamMu 仍要持有：防御独占期约定被未来改动破坏后的数据竞争。
+	c.streamMu.Lock()
+	c.closeStreamLocked()
+	c.stream = atomic.Value{}
+	c.streamMu.Unlock()
+	// 连接状态兜底：NewRpcClient 随后会按拨号结果重写，这里先归零，
+	// 避免拨号前的窗口内脏实例对外谎报「已连接」。
+	c.connStatus.Store(false)
+}
+
 func (c *RpcClient) dispatchRecv(protocol1, protocol2 int32, recv *message.FSMessage, callfunc func(pb1 proto.Message)) {
 	res := util.ParseFSMessage(recv)
 	if res == nil {
@@ -437,6 +462,10 @@ func NewRpcClient(servername, addr string, port int) *RpcClient {
 		c.closed.Store(false)
 		c.timeout = 30 * time.Second // 默认超时 30 秒
 		c.SetCallbacks(NewClientCallbacks())
+		// 池复用兜底：显式清理上一位主人可能残留的脏状态（在途请求表 / 流 / 代际计数）。
+		// 此刻正处于新主人独占期（timerPool.Get 已认领、注册表尚未 Store），
+		// 与旧实例的关闭流程无并发，清理幂等安全。
+		c.resetForReuse()
 	})
 	if err != nil {
 		vars.Error("创建RPC客户端失败[%s:%d]: %v", addr, port, err)

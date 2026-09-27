@@ -2,6 +2,7 @@ package cache
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sync"
 	"testing"
@@ -36,6 +37,8 @@ type fakeEntry struct {
 
 // fakeKV 内存版 KV：与 cache 共享注入时钟模拟物理 TTL，记录操作顺序验证 Redis 优先。
 // 同时实现 Journaler（内存 ZSET），脏账本路径默认在所有用 fakeKV 的用例中开启。
+// 还实现 SeqKV/JournalSeq（内存版 Lua CAS），于是写线的 seq 保序防线在单测里
+// 走的是与生产同形的条件写路径，而不是「fake 不支持 → 退回无条件 Set」的空转。
 type fakeKV struct {
 	mu      sync.Mutex
 	m       map[string]fakeEntry
@@ -49,6 +52,33 @@ type fakeKV struct {
 	getCall int
 	setCall int
 	delCall int
+
+	// seqGate 仅单测用：条件写（SetSeq/DelSeq/JAddUpsertSeq/JAddDeleteSeq）进入
+	// 临界区之前回调，用来确定性制造「先取到小 seq 的一方后落地」的交错。
+	// 本机无 C 工具链、-race 不可用，靠注入交错 + 不变量断言代替竞态探测。
+	// 生产路径恒为 nil。回调在锁外执行，可安全阻塞。
+	seqGate func(key string, seq int64)
+}
+
+// 编译期确认：fakeKV 覆盖 cache 对 KV 的全部可选能力，
+// 否则新增的 CAS 分支会在单测里静默走不到。
+var (
+	_ KV         = (*fakeKV)(nil)
+	_ Journaler  = (*fakeKV)(nil)
+	_ SeqKV      = (*fakeKV)(nil)
+	_ JournalSeq = (*fakeKV)(nil)
+)
+
+// envelopeSeqOf 取 envelope 顶层 seq（JSON 字段名固定 "s"，见 envelope.go）。
+// 解析失败按 0——与 Lua 里「值不可解析当作无 seq 放行」同语义。
+func envelopeSeqOf(raw string) int64 {
+	var t struct {
+		Seq int64 `json:"s"`
+	}
+	if json.Unmarshal([]byte(raw), &t) != nil {
+		return 0
+	}
+	return t.Seq
 }
 
 func newFakeKV(clk *fakeClock) *fakeKV {
@@ -119,12 +149,29 @@ func (f *fakeKV) opsOf() []string {
 	return append([]string(nil), f.ops...)
 }
 
+// rawOf 直读物理存储的原始串（断言用：绕过 TTL 判定与 ops 记录）
+func (f *fakeKV) rawOf(key string) (string, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	e, ok := f.m[key]
+	if !ok {
+		return "", false
+	}
+	return e.val, true
+}
+
 // ---------- fakeKV 的 Journaler 实现（内存 ZSET） ----------
 
 // jPut 账本核心：SET/DEL 值 + 销反向旧账 + 记新账（一键至多一条）。
 func (f *fakeKV) jPut(key string, setVal string, ttl time.Duration, zkey, keyStr string, seq int64, del bool) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	return f.jPutLocked(key, setVal, ttl, zkey, keyStr, seq, del, false)
+}
+
+// jPutLocked jPut 的持锁本体。monotone=true 时 ZADD 前先做 ZSCORE 守卫
+// （与 jAddUpsertSeqScript/jAddDeleteSeqScript 逐字同语义：仅当现有 score 更小才抬）。
+func (f *fakeKV) jPutLocked(key string, setVal string, ttl time.Duration, zkey, keyStr string, seq int64, del, monotone bool) error {
 	if f.jErr != nil {
 		return f.jErr
 	}
@@ -157,6 +204,11 @@ func (f *fakeKV) jPut(key string, setVal string, ttl time.Duration, zkey, keyStr
 	}
 	delete(zs, opp)
 	member := newOp + keyStr
+	if monotone {
+		if sc, ok := zs[member]; ok && sc >= float64(seq) {
+			return nil // 账本 score 单调上行：旧 seq 不得把它拉低
+		}
+	}
 	f.record("zadd", member)
 	zs[member] = float64(seq)
 	return nil
@@ -168,6 +220,90 @@ func (f *fakeKV) JAddUpsert(_ context.Context, key, value string, ttl time.Durat
 
 func (f *fakeKV) JAddDelete(_ context.Context, key, zkey, keyStr string, seq int64) error {
 	return f.jPut(key, "", 0, zkey, keyStr, seq, true)
+}
+
+// ---------- fakeKV 的 SeqKV / JournalSeq 实现（内存版 Lua CAS） ----------
+
+// seqBlocked 内存版 seqGuardLua：现有 envelope 的 seq 严格大于本次才拒。
+// 用「严格大于」而非「大于等于」：同 seq 重写只来自 renewIfAged（用同一个值
+// 刷新超龄条目的逻辑新鲜期），必须放行，否则那个功能在单测里会变成永远空转。
+// 键不存在或已物理过期 → 放行（与 Lua 的 GET 拿到 false/nil 一致）。
+// 调用方须持有 f.mu。
+func (f *fakeKV) seqBlocked(key string, seq int64) bool {
+	e, ok := f.m[key]
+	if !ok {
+		return false
+	}
+	if now := f.clk.Now(); now.After(e.exp) || now.Equal(e.exp) {
+		return false
+	}
+	return envelopeSeqOf(e.val) > seq
+}
+
+func (f *fakeKV) SetSeq(_ context.Context, key, value string, ttl time.Duration, seq int64) (bool, error) {
+	if f.seqGate != nil {
+		f.seqGate(key, seq)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.setCall++
+	f.record("set", key) // 与 Set 同名：对外仍是一次 Redis SET，现有操作序列断言不变
+	if f.setErr != nil {
+		return false, f.setErr
+	}
+	if f.seqBlocked(key, seq) {
+		return false, nil
+	}
+	if ttl <= 0 {
+		ttl = time.Minute
+	}
+	f.m[key] = fakeEntry{val: value, exp: f.clk.Now().Add(ttl)}
+	return true, nil
+}
+
+func (f *fakeKV) DelSeq(_ context.Context, key string, seq int64) (bool, error) {
+	if f.seqGate != nil {
+		f.seqGate(key, seq)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.delCall++
+	f.record("del", key)
+	if f.delErr != nil {
+		return false, f.delErr
+	}
+	if f.seqBlocked(key, seq) {
+		return false, nil
+	}
+	delete(f.m, key)
+	return true, nil
+}
+
+// jPutSeq 条件记账：CAS 未生效时既不写值也不记账（与 jAddUpsertSeqScript 同语义）。
+func (f *fakeKV) jPutSeq(key string, setVal string, ttl time.Duration, zkey, keyStr string, seq int64, del bool) (bool, error) {
+	if f.seqGate != nil {
+		f.seqGate(key, seq)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.jErr != nil {
+		return false, f.jErr
+	}
+	if f.seqBlocked(key, seq) {
+		return false, nil
+	}
+	if err := f.jPutLocked(key, setVal, ttl, zkey, keyStr, seq, del, true); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (f *fakeKV) JAddUpsertSeq(_ context.Context, key, value string, ttl time.Duration, zkey, keyStr string, seq int64) (bool, error) {
+	return f.jPutSeq(key, value, ttl, zkey, keyStr, seq, false)
+}
+
+func (f *fakeKV) JAddDeleteSeq(_ context.Context, key, zkey, keyStr string, seq int64) (bool, error) {
+	return f.jPutSeq(key, "", 0, zkey, keyStr, seq, true)
 }
 
 func (f *fakeKV) JClear(_ context.Context, zkey string, members ...string) error {

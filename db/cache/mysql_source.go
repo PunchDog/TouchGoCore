@@ -2,6 +2,7 @@ package cache
 
 import (
 	"context"
+	"sync"
 
 	"touchgocore/db/mysql"
 )
@@ -26,7 +27,10 @@ func MysqlSource[T any, K comparable](r *mysql.Repository[T], keyToID func(K) an
 }
 
 // MysqlBatchSource 多主键一次回源：Repository.FindAll + IN 查询。
-// idOf 从实体取回业务键（用于结果 map 的 KeyOf 对齐）。
+// idOf 从实体取回业务键，keyFn 把它转成裸键串；两者必须与该 Cache 的
+// WithKeyFunc 逐字一致。回填 map 的键由「Cache.New 延迟绑定的 KeyOf」补上
+// 命名空间前缀与 sanitize（见 KeyBinder）——旧实现直接用 keyFn(id) 做键，
+// 与查询侧 KeyOf 对不上，批量回源会全部落空并静默退化。
 func MysqlBatchSource[T any, K comparable](
 	r *mysql.Repository[T],
 	keyToID func(K) any,
@@ -34,26 +38,35 @@ func MysqlBatchSource[T any, K comparable](
 	keyFn func(K) string,
 	idOf func(*T) K,
 ) BatchLoader[K, T] {
-	single := MysqlSource[T, K](r, keyToID)
-	return batchLoader[K, T]{
-		Loader: single,
-		loadBatch: func(ctx context.Context, keys []K) (map[string]*T, error) {
-			ids := make([]any, 0, len(keys))
-			for _, k := range keys {
-				ids = append(ids, keyToID(k))
-			}
-			q := mysql.NewQuery().In(idCol, ids...)
-			rows, err := r.FindAll(ctx, q)
-			if err != nil {
-				return nil, err
-			}
-			out := make(map[string]*T, len(rows))
-			for _, row := range rows {
-				out[keyFn(idOf(row))] = row
-			}
-			return out, nil
-		},
+	if keyFn == nil {
+		keyFn = defaultKeyFunc[K]()
 	}
+	single := MysqlSource[T, K](r, keyToID)
+	bl := &batchLoader[K, T]{Loader: single}
+	bl.loadBatch = func(ctx context.Context, keys []K, keyOf func(string) string) (map[string]*T, error) {
+		ids := make([]any, 0, len(keys))
+		for _, k := range keys {
+			ids = append(ids, keyToID(k))
+		}
+		q := mysql.NewQuery().In(idCol, ids...)
+		rows, err := r.FindAll(ctx, q)
+		if err != nil {
+			return nil, err
+		}
+		return mapBatchRows(rows, keyFn, idOf, keyOf), nil
+	}
+	return bl
+}
+
+// mapBatchRows 把批量回源的行按 keyOf(keyFn(idOf(row))) 建索引。
+// 单独拆成函数：键一致性是批量回源唯一的正确性前提，得能被单测直接
+// 覆盖而不依赖真实 DB 连接。
+func mapBatchRows[T any, K comparable](rows []*T, keyFn func(K) string, idOf func(*T) K, keyOf func(string) string) map[string]*T {
+	out := make(map[string]*T, len(rows))
+	for _, row := range rows {
+		out[keyOf(keyFn(idOf(row)))] = row
+	}
+	return out
 }
 
 // MysqlSink 单条落库：Save→Upsert（实体自带主键），Delete→软删。
@@ -103,17 +116,48 @@ func MysqlBatchSink[T any, K comparable](r *mysql.Repository[T], keyToID func(K)
 
 // --- 内部装箱：让函数闭包实现 BatchLoader/BatchSaver 接口 ---
 
+// batchLoader 把「单键 Load + 批量 loadBatch 闭包」装成 BatchLoader。
+// 用指针接收者：keyOf 由 Cache.New 通过 BindKeyOf 延迟注入（见 KeyBinder）。
 type batchLoader[K comparable, V any] struct {
 	Loader    Loader[K, V]
-	loadBatch func(ctx context.Context, keys []K) (map[string]*V, error)
+	loadBatch func(ctx context.Context, keys []K, keyOf func(string) string) (map[string]*V, error)
+
+	mu    sync.RWMutex
+	keyOf func(string) string
 }
 
-func (b batchLoader[K, V]) Load(ctx context.Context, key K) (*V, error) {
+// BindKeyOf 实现 KeyBinder：由 Cache.New 注入 keyOfRaw（含前缀与 sanitize）。
+func (b *batchLoader[K, V]) BindKeyOf(f func(rawKey string) string) {
+	b.mu.Lock()
+	b.keyOf = f
+	b.mu.Unlock()
+}
+
+func (b *batchLoader[K, V]) boundKeyOf() func(string) string {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.keyOf
+}
+
+func (b *batchLoader[K, V]) Load(ctx context.Context, key K) (*V, error) {
 	return b.Loader.Load(ctx, key)
 }
-func (b batchLoader[K, V]) LoadBatch(ctx context.Context, keys []K) (map[string]*V, error) {
-	return b.loadBatch(ctx, keys)
+
+// LoadBatch 未绑定 keyOf 时直接报错：静默返回裸键结果会让调用方一个也用不上，
+// 表现成「命中率异常低 + 每次都打 DB」的难查退化。
+func (b *batchLoader[K, V]) LoadBatch(ctx context.Context, keys []K) (map[string]*V, error) {
+	keyOf := b.boundKeyOf()
+	if keyOf == nil {
+		return nil, ErrKeyOfUnbound
+	}
+	return b.loadBatch(ctx, keys, keyOf)
 }
+
+// 编译期确认：batchLoader 既是 BatchLoader 也是 KeyBinder
+var (
+	_ BatchLoader[string, struct{}] = (*batchLoader[string, struct{}])(nil)
+	_ KeyBinder                     = (*batchLoader[string, struct{}])(nil)
+)
 
 type batchSaver[K comparable, V any] struct {
 	Saver     Saver[K, V]

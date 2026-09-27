@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"touchgocore/vars"
@@ -55,14 +56,26 @@ func (b *buffer[K, V]) shard(ks string) *bufShard[K, V] {
 	return b.shards[fnv64(ks)&uint64(b.mask)]
 }
 
-// put 覆盖式入缓冲（同 key 天然去重取最新）。返回是否新增（dirty 计数用）。
-func (b *buffer[K, V]) put(ks string, e *opEntry[K, V]) (added bool) {
+// put 保序入缓冲：键不存在则插入；已存在时仅当新条目 seq 更大才覆盖，
+// 否则丢弃本次条目——同键并发写时先取到较小 seq 的一方可能后到达缓冲，
+// 无条件覆盖会让旧值滞留在写缓冲里并随后落库，把 hasNewer/dropIfOlder/
+// JClearIfSeq 的 seq 防线前提全部打穿。
+//
+// 返回：added=本次新增了一个脏键（Dirty 计数用，覆盖不算）；
+// stored=本次条目被接受（false 表示缓冲里已有更新值，本次为过期写）。
+func (b *buffer[K, V]) put(ks string, e *opEntry[K, V]) (added, stored bool) {
 	sh := b.shard(ks)
 	sh.mu.Lock()
-	_, exists := sh.m[ks]
+	defer sh.mu.Unlock()
+	cur, exists := sh.m[ks]
+	// 注意这里是 >=，而 Redis 侧的 seqGuardLua 是 >：缓冲不接受同 seq 重写
+	// （seq 由原子自增分配，同 seq 只可能是同一条目重复投递，覆盖毫无意义），
+	// 而 Redis 必须放行同 seq——renewIfAged 靠它刷新超龄条目的逻辑新鲜期。
+	if exists && cur.seq >= e.seq {
+		return false, false
+	}
 	sh.m[ks] = e
-	sh.mu.Unlock()
-	return !exists
+	return !exists, true
 }
 
 func (b *buffer[K, V]) has(ks string) bool {
@@ -150,6 +163,10 @@ func (b *buffer[K, V]) notifySignal() {
 
 // Write 写线主入口：同步写 Redis，成功后进写缓冲等定时器落库。
 // Redis 写失败 → 返回错误且不入缓冲（不制造「DB 有 Redis 无」的静默脏态）。
+//
+// 保序：Redis 那一步按 seq 条件化（SeqKV/JournalSeq 的 Lua CAS），缓冲那一步
+// 取 max(seq)。同键并发写时，先取到小 seq 但后落地的一方会在两道防线上被挡下，
+// 最终 Redis 与缓冲都停在最大 seq 对应的值（Superseded 计数可观测）。
 func (c *Cache[K, V]) Write(ctx context.Context, key K, val *V) error {
 	if val == nil {
 		return errors.New("cache: Write 值不能为 nil（删除请用 Remove）")
@@ -162,17 +179,19 @@ func (c *Cache[K, V]) Write(ctx context.Context, key K, val *V) error {
 
 	if c.cfg.Enabled {
 		wctx, cancel := context.WithTimeout(ctx, c.cfg.WriteTimeout)
-		var err error
-		if c.jr != nil {
-			err = c.jr.JAddUpsert(wctx, ks, c.mustEncode(val, seq), c.jitteredTTL(ks), c.jz, c.keyFn(key), seq)
-		} else {
-			err = c.setEnvelope(wctx, ks, val, c.jitteredTTL(ks), seq, false)
-		}
+		written, err := c.writeRedis(wctx, ks, key, val, seq)
 		cancel()
 		if err != nil {
 			c.st.KVErr.Add(1)
 			vars.Error("cache[%s] Write 同步写Redis失败 key=%s: %v", c.name, ks, err)
 			return err
+		}
+		if !written {
+			// Redis 里已有更大 seq 的值：本次写已被并发的新写超越。
+			// 绝不得入缓冲——否则旧值会在随后 flush 时盖掉库里的新行。
+			// 不是错误：按 seq 定义的线性序，本次写本就应该输。
+			c.st.Superseded.Add(1)
+			return nil
 		}
 	} else {
 		// 降级：write-through 直连落库，不丢数据
@@ -183,11 +202,33 @@ func (c *Cache[K, V]) Write(ctx context.Context, key K, val *V) error {
 
 	e := &opEntry[K, V]{key: key, val: val, op: OpUpsert, seq: seq, ts: c.clock()}
 	e.ks = ks
-	if c.buf.put(ks, e) {
+	added, stored := c.buf.put(ks, e)
+	if added {
 		c.st.Dirty.Add(1)
+	}
+	if !stored {
+		// 缓冲里已有更大 seq 的条目（典型成因：Redis 物理 TTL 恰好过期让 CAS 放行了
+		// 这个旧写）。保留新值，本次丢弃；Dirty 本来就没加，无需回退。
+		c.st.Superseded.Add(1)
+		return nil
 	}
 	c.enforceCapacity(ctx)
 	return nil
+}
+
+// writeRedis 写线的 Redis 那一步，按 KV 能力依次退阶：
+// 「条件记账」→「无条件记账」→「条件 CAS / 无条件 Set」。
+// written=false 表示 Redis 已有更大 seq 的值，本次为过期写（未写值、未记账）。
+func (c *Cache[K, V]) writeRedis(ctx context.Context, ks string, key K, val *V, seq int64) (written bool, err error) {
+	ttl := c.jitteredTTL(ks)
+	switch {
+	case c.js != nil:
+		return c.js.JAddUpsertSeq(ctx, ks, c.mustEncode(val, seq), ttl, c.jz, c.keyFn(key), seq)
+	case c.jr != nil:
+		return true, c.jr.JAddUpsert(ctx, ks, c.mustEncode(val, seq), ttl, c.jz, c.keyFn(key), seq)
+	default:
+		return c.setEnvelopeSeq(ctx, ks, val, ttl, seq, false)
+	}
 }
 
 // WriteBatch 批量入写缓冲（逐条同步写 Redis；单条失败即返回，已成功条目保留在缓冲）。
@@ -208,6 +249,10 @@ func (c *Cache[K, V]) WriteBatch(ctx context.Context, keys []K, vals []*V) error
 // 且落库失败会把刚写的缓存失效掉——不留「Redis 有、库里没有」的展示态。
 // 与普通 Write 的取舍：多一次 DB RTT 的延迟换零丢失窗口。
 // 成功后踢掉同 key 更旧的缓冲条目并销账——否则后续 flush 会把旧缓冲值盖回 DB。
+//
+// 与普通 Write 并发时：Redis 那一步同样走 seq CAS。CAS 未生效（已有更大 seq）时
+// 连 DB 一起跳过：此时新值可能已经 flush 出缓冲，若仍把本次旧值 Save 下去，
+// 库里会永久留下一个比 Redis 更旧的行，且没有任何路径会再把它纠正回来。
 func (c *Cache[K, V]) WriteSync(ctx context.Context, key K, val *V) error {
 	if val == nil {
 		return errors.New("cache: WriteSync 值不能为 nil（删除请用 Remove）")
@@ -220,11 +265,15 @@ func (c *Cache[K, V]) WriteSync(ctx context.Context, key K, val *V) error {
 	if c.cfg.Enabled {
 		seq = c.seq.Add(1)
 		wctx, cancel := context.WithTimeout(ctx, c.cfg.WriteTimeout)
-		err := c.setEnvelope(wctx, ks, val, c.jitteredTTL(ks), seq, false)
+		written, err := c.setEnvelopeSeq(wctx, ks, val, c.jitteredTTL(ks), seq, false)
 		cancel()
 		if err != nil {
 			c.st.KVErr.Add(1)
 			return err
+		}
+		if !written {
+			c.st.Superseded.Add(1)
+			return nil
 		}
 	}
 	sctx, cancel := context.WithTimeout(ctx, c.cfg.ReadTimeout*10)
@@ -251,6 +300,8 @@ func (c *Cache[K, V]) WriteSync(ctx context.Context, key K, val *V) error {
 
 // Remove 删除：同步 DEL Redis + 缓冲 tombstone，等定时器落库删除。
 // Enabled=false 时与 Write 对称：同步走 Saver.Delete，不留永不 flush 的 tombstone。
+// DEL 同样按 seq 条件化：并发的更新 Write 已先把值写进 Redis 时，本次过期删除
+// 不得把它抹掉（否则读线会回源到一个即将被新值覆盖的旧库行）。
 func (c *Cache[K, V]) Remove(ctx context.Context, key K) error {
 	if c.sn == nil {
 		return errNoSaver
@@ -263,24 +314,40 @@ func (c *Cache[K, V]) Remove(ctx context.Context, key K) error {
 	ks := c.KeyOf(key)
 	seq := c.seq.Add(1)
 	wctx, cancel := context.WithTimeout(ctx, c.cfg.WriteTimeout)
-	var err error
-	if c.jr != nil {
-		err = c.jr.JAddDelete(wctx, ks, c.jz, c.keyFn(key), seq)
-	} else {
-		err = c.kv.Del(wctx, ks)
-	}
+	written, err := c.removeRedis(wctx, ks, key, seq)
 	cancel()
 	if err != nil {
 		c.st.KVErr.Add(1)
 		return err
 	}
+	if !written {
+		c.st.Superseded.Add(1)
+		return nil
+	}
 	e := &opEntry[K, V]{key: key, op: OpDelete, seq: seq, ts: c.clock()}
 	e.ks = ks
-	if c.buf.put(ks, e) {
+	added, stored := c.buf.put(ks, e)
+	if added {
 		c.st.Dirty.Add(1)
+	}
+	if !stored {
+		c.st.Superseded.Add(1)
+		return nil
 	}
 	c.enforceCapacity(ctx)
 	return nil
+}
+
+// removeRedis Remove 的 Redis 那一步，按 KV 能力依次退阶（与 writeRedis 对称）。
+func (c *Cache[K, V]) removeRedis(ctx context.Context, ks string, key K, seq int64) (written bool, err error) {
+	switch {
+	case c.js != nil:
+		return c.js.JAddDeleteSeq(ctx, ks, c.jz, c.keyFn(key), seq)
+	case c.jr != nil:
+		return true, c.jr.JAddDelete(ctx, ks, c.jz, c.keyFn(key), seq)
+	default:
+		return c.delSeq(ctx, ks, seq)
+	}
 }
 
 // DeleteCache 只失效 Redis，不通知数据库。
@@ -375,6 +442,10 @@ var ErrFlushNotDurable = errors.New("cache: FlushNow 后仍有未落库脏数据
 //	顺带看护 Dropped 计数：flush 期间发生「超重试丢弃」（库里从未拿到值、Redis 已 Del）
 //	一律报错——那种路径绝不能被一句「flush 完成」糊过去。
 //
+// flushOnce 自身的错误一律透传（不再只记日志）：它报的是「别的键 final flush 仍失败」
+// 这类本次断言覆盖不到的丢数据事实，吞掉等于让 FlushNow 在库没追上的情况下承诺已追上。
+// 断言也报时用 errors.Join 把两者一起给调用方，两个信号都不丢。
+//
 // 当前实现是整 Cache 粒度（一次 flush 全部脏键，可能顺带落别人的账——多写不少库，
 // 不会写错）；per-key drain（摘单键 → 单条 save → dropIfOlder → 销账）在后续版本
 // 于同签名内替换，调用点零改动。
@@ -394,8 +465,9 @@ func (c *Cache[K, V]) FlushNow(ctx context.Context, keys ...K) error {
 	}
 
 	droppedBefore := c.st.Dropped.Load()
-	if err := c.flushOnce(ctx, true); err != nil {
-		vars.Error("cache[%s] FlushNow 落库报错: %v", c.name, err)
+	flushErr := c.flushOnce(ctx, true)
+	if flushErr != nil {
+		vars.Error("cache[%s] FlushNow 落库报错: %v", c.name, flushErr)
 	}
 
 	var left []string
@@ -407,13 +479,20 @@ func (c *Cache[K, V]) FlushNow(ctx context.Context, keys ...K) error {
 	}
 	if len(left) > 0 {
 		vars.Error("cache[%s] FlushNow 仍有 %d 个键未落库: %v", c.name, len(left), left)
-		return fmt.Errorf("%w: cache=%s keys=%v", ErrFlushNotDurable, c.name, left)
+		return errors.Join(
+			fmt.Errorf("%w: cache=%s keys=%v", ErrFlushNotDurable, c.name, left),
+			flushErr,
+		)
 	}
 	if dropped := c.st.Dropped.Load(); dropped > droppedBefore {
-		return fmt.Errorf("%w: cache=%s FlushNow 期间丢弃 %d 条脏数据（未落库）",
-			ErrFlushNotDurable, c.name, dropped-droppedBefore)
+		return errors.Join(
+			fmt.Errorf("%w: cache=%s FlushNow 期间丢弃 %d 条脏数据（未落库）",
+				ErrFlushNotDurable, c.name, dropped-droppedBefore),
+			flushErr,
+		)
 	}
-	return nil
+	// 断言都过了也不代表落库线干净：别的键可能仍失败（见函数注释）
+	return flushErr
 }
 
 // Close 停止后的收尾：把残余脏数据全部落库。等待预热协程结束。
@@ -597,37 +676,54 @@ func (c *Cache[K, V]) saveBatch(ctx context.Context, entries []*opEntry[K, V]) (
 		return entries, nil
 	}
 
-	// 单条并发
-	var mu sync.Mutex
-	sem := make(chan struct{}, c.cfg.SaveConcurrency)
-	var wg sync.WaitGroup
-	for _, e := range entries {
-		wg.Add(1)
-		go func(e *opEntry[K, V]) {
+	// 单条并发：固定 worker pool（并发度 = SaveConcurrency）。
+	// 旧写法是「每条目一个 goroutine + 信号量卡在 Save 前」：并发度看着有界，
+	// 实际协程数等于条目数——BatchSize=200 的一批就是 200 个协程堆在信号量上，
+	// 大批量叠加多分片时协程数与调度抖动都不可控。改成取活式 worker：
+	// 协程数恒为 min(SaveConcurrency, len(entries))，落库语义与错误聚合行为不变。
+	workers := c.cfg.SaveConcurrency
+	if workers <= 0 {
+		workers = 1
+	}
+	if workers > len(entries) {
+		workers = len(entries)
+	}
+
+	var (
+		mu   sync.Mutex
+		wg   sync.WaitGroup
+		next atomic.Int64
+	)
+	wg.Add(workers)
+	for range workers {
+		go func() {
 			defer wg.Done()
-			if c.buf.hasNewer(e.ks, e.seq) {
+			for {
+				i := next.Add(1) - 1
+				if i >= int64(len(entries)) {
+					return
+				}
+				e := entries[i]
+				if c.buf.hasNewer(e.ks, e.seq) {
+					c.st.Dirty.Add(-1)
+					continue
+				}
+				var err error
+				if e.op == OpDelete {
+					err = c.sn.Delete(sctx, e.key)
+				} else {
+					err = c.sn.Save(sctx, e.key, e.val)
+				}
 				mu.Lock()
-				c.st.Dirty.Add(-1)
+				if err != nil {
+					vars.Warning("cache[%s] 落库失败 key=%s: %v", c.name, e.ks, err)
+					failed = append(failed, e)
+				} else {
+					ok = append(ok, e)
+				}
 				mu.Unlock()
-				return
 			}
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			var err error
-			if e.op == OpDelete {
-				err = c.sn.Delete(sctx, e.key)
-			} else {
-				err = c.sn.Save(sctx, e.key, e.val)
-			}
-			mu.Lock()
-			if err != nil {
-				vars.Warning("cache[%s] 落库失败 key=%s: %v", c.name, e.ks, err)
-				failed = append(failed, e)
-			} else {
-				ok = append(ok, e)
-			}
-			mu.Unlock()
-		}(e)
+		}()
 	}
 	wg.Wait()
 	if len(ok) > 0 {
@@ -638,6 +734,7 @@ func (c *Cache[K, V]) saveBatch(ctx context.Context, entries []*opEntry[K, V]) (
 
 // renewIfAged 落库成功后，若该条目在 Redis 里已活过逻辑新鲜期
 // （长重试/超龄场景），重写一次对齐新鲜度；正常情况下 Write 已同步写过，不动。
+// 走 CAS：重试期间可能已有更新的 Write 落地，不得用超龄旧值把它盖掉。
 func (c *Cache[K, V]) renewIfAged(ctx context.Context, e *opEntry[K, V]) {
 	if !c.cfg.Enabled || e.op != OpUpsert {
 		return
@@ -647,7 +744,7 @@ func (c *Cache[K, V]) renewIfAged(ctx context.Context, e *opEntry[K, V]) {
 	}
 	rctx, cancel := context.WithTimeout(ctx, c.cfg.WriteTimeout)
 	defer cancel()
-	if err := c.setEnvelope(rctx, e.ks, e.val, c.jitteredTTL(e.ks), e.seq, false); err != nil {
+	if _, err := c.setEnvelopeSeq(rctx, e.ks, e.val, c.jitteredTTL(e.ks), e.seq, false); err != nil {
 		c.st.KVErr.Add(1)
 	}
 }

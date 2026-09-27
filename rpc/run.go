@@ -16,7 +16,20 @@ const (
 	MAX_CHANNEL_SIZE   = defaultChannelSize
 )
 
-var channelSize = defaultChannelSize
+// currentChannelSize 返回本轮生效的服务端接收/处理队列容量（M4 修复）。
+//
+// 修复前是包级变量 channelSize：Run 写入与 server.go 构造服务端时读取天然并发，
+// 二次 Run 之间未启动完毕的旧服务器会按新一代的容量开队列，同时赋值本身
+// 也是数据竞争。改为每次构造时从 activeCfg 取值：同一轮 Run 内多次调用返回一致值，
+// 不同轮之间互不干扰，也不再需要包级可变状态。
+func currentChannelSize() int {
+	if cfg := activeCfg(); cfg != nil {
+		if n := cfg.QueueCapacity(defaultChannelSize); n > 0 {
+			return n
+		}
+	}
+	return defaultChannelSize
+}
 
 // rpcRunCtx 本轮 Run 的生命周期上下文。原子指针：server/auth 协程每轮 select 都要
 // 读它的 Done()，用普通变量会与下一轮 Run 的赋值构成数据竞争。
@@ -87,7 +100,6 @@ func Run(ctx context.Context) error {
 		vars.Info("RPC配置为空，跳过RPC服务启动")
 		return nil
 	}
-	channelSize = root.QueueCapacity(defaultChannelSize)
 	rpcCfg := root.Rpc
 	if rpcCfg == nil {
 		vars.Info("RPC配置为空，跳过RPC服务启动")

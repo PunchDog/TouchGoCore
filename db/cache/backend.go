@@ -29,6 +29,25 @@ type BatchLoader[K comparable, V any] interface {
 	LoadBatch(ctx context.Context, keys []K) (map[string]*V, error)
 }
 
+// KeyBinder 是 BatchLoader 可选实现的「键映射延迟绑定」接口。
+//
+// LoadBatch 的结果 map 必须以 Cache.KeyOf(key) 为键（含命名空间前缀与 sanitize），
+// 但 BatchLoader 被构造时还拿不到它将挂靠哪个 Cache、那个 Cache 的 prefix/group
+// 又是什么——它手里只有 keyFn(key) 得到的裸键串。两边各算一半就会错位：
+// 回填键无前缀/未 sanitize，查询侧用 KeyOf 去取永远取不到，于是批量回源
+// 全部落空、静默退化成「每次 MGetOrLoad 都打一次 DB 但一个也用不上」。
+//
+// 因此由 Cache.New 在构造末尾类型断言探测并注入自己的 KeyOf（late-binding）；
+// 实现方在未绑定时直接调 LoadBatch 必须报错而不是静默返回错键的结果。
+type KeyBinder interface {
+	// BindKeyOf 注入「裸键串 → 完整 Redis 键」的映射（即 Cache.keyOfRaw）。
+	BindKeyOf(func(rawKey string) string)
+}
+
+// ErrKeyOfUnbound 批量回源尚未绑定 KeyOf：说明该 BatchLoader 未经 Cache.New/Register
+// 注入就直接调了 LoadBatch。宁可报错也不静默返回一堆对不上键的结果。
+var ErrKeyOfUnbound = errors.New("cache: BatchLoader 未绑定 KeyOf（须经 Cache.New/Register 注入）")
+
 // OpKind 写线条目操作类型
 type OpKind uint8
 

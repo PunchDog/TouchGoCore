@@ -51,16 +51,21 @@ func init() {
 
 // ApplyFlags 解析命令行并重新解析配置目录。Run / LoadWithError 会调用。
 func ApplyFlags() {
+	// flag.Parse 会顺着注册时交出去的指针直接写 _configDirFlag 与 *_defServerId，
+	// 这两处写入不经过本包任何代码，所以解析动作本身也要落在写锁里，
+	// 否则它与 configDirFlag()/GetServerID() 的读就是并发读写。
+	_stateMu.Lock()
 	if !flag.Parsed() {
 		flag.Parse()
 	}
+	_stateMu.Unlock()
 	resolveConfigPaths()
 }
 
 // resolveConfigPaths 解析 conf 目录。
 // 优先级：-c/--config > 环境变量 CONFIG_PATH > 可执行文件旁/上级/CWD 自动查找。
 func resolveConfigPaths() {
-	if dir := strings.TrimSpace(_configDirFlag); dir != "" {
+	if dir := strings.TrimSpace(configDirFlag()); dir != "" {
 		applyConfigDir(dir)
 		return
 	}
@@ -107,10 +112,44 @@ func applyConfigDir(p string) {
 	}
 }
 
+// setConfDir 整组更新 conf 目录派生出的三个路径。三者必须同时可见：
+// 只更新 _confDir 而 _defaultFile 还是旧值时，LoadWithError 会拿旧 ini 配新目录。
 func setConfDir(confDir string) {
+	_stateMu.Lock()
 	_confDir = confDir
 	_defaultFile = filepath.Join(confDir, "config.ini")
 	_basePath = filepath.Dir(confDir)
+	_stateMu.Unlock()
+}
+
+// configDirFlag 读取 -c/--config 的当前值（写方是 flag.Parse，见 ApplyFlags）。
+func configDirFlag() string {
+	_stateMu.RLock()
+	defer _stateMu.RUnlock()
+	return _configDirFlag
+}
+
+// pathSnapshot 成组取出 conf 目录与 config.ini 路径，供一次加载全程复用，
+// 避免加载途中另一协程改了路径导致 ini 与主 JSON 来自不同目录。
+func pathSnapshot() (confDir, defaultFile string) {
+	_stateMu.RLock()
+	defer _stateMu.RUnlock()
+	return _confDir, _defaultFile
+}
+
+// setConfDirField 记录 INI 里 conf_dir 字段的原始值。
+func setConfDirField(v string) {
+	_stateMu.Lock()
+	_confDirField = v
+	_stateMu.Unlock()
+}
+
+// featureDirSnapshot 成组取出功能配置目录及其「是否已解析」标记。
+// 两者必须一起读：只读 _featureDir 会把「目录已置位但值为空」与「尚未解析」混为一谈。
+func featureDirSnapshot() (dir string, isSet bool) {
+	_stateMu.RLock()
+	defer _stateMu.RUnlock()
+	return _featureDir, _featureDirSet
 }
 
 // Load 加载配置文件（兼容旧接口，内部调用LoadWithError）。
@@ -123,18 +162,26 @@ func (this *Cfg) Load(cfgname string) {
 }
 
 // LoadWithError 加载配置文件（返回error而非panic）
-// 推荐使用此方法替代Load，便于上层决定错误处理策略
+// 推荐使用此方法替代Load，便于上层决定错误处理策略。
+//
+// 并发安全：整个加载过程持 _loadMu 串行化——ini、主 JSON、功能 JSON 是三次独立读盘，
+// 必须看到同一份路径快照；调用方还常共享同一个 *Cfg（如 config.Cfg_），
+// 并发 json.Unmarshal 到同一目标本身就是数据竞争。路径与功能目录状态另由 _stateMu 保护。
 func (this *Cfg) LoadWithError(cfgname string) error {
+	_loadMu.Lock()
+	defer _loadMu.Unlock()
+
 	ApplyFlags()
-	p, err := ini.Load(_defaultFile)
+	confDir, defaultFile := pathSnapshot()
+	p, err := ini.Load(defaultFile)
 	if err != nil {
-		return fmt.Errorf("读取ini失败 [%s]: %w", _defaultFile, err)
+		return fmt.Errorf("读取ini失败 [%s]: %w", defaultFile, err)
 	}
 	iniName := strings.TrimSpace(p.GetString(cfgname, "ini", ""))
 	if iniName == "" {
-		return fmt.Errorf("配置文件路径为空, 服务器名: %s, ini: %s", cfgname, _defaultFile)
+		return fmt.Errorf("配置文件路径为空, 服务器名: %s, ini: %s", cfgname, defaultFile)
 	}
-	path1 := filepath.Join(_confDir, iniName)
+	path1 := filepath.Join(confDir, iniName)
 
 	file, err := os.ReadFile(path1)
 	if err != nil {
@@ -146,9 +193,13 @@ func (this *Cfg) LoadWithError(cfgname string) error {
 	}
 
 	// 解析功能配置文件夹
-	_confDirField = strings.TrimSpace(p.GetString(cfgname, "conf_dir", ""))
-	if _confDirField != "" {
+	confDirField := strings.TrimSpace(p.GetString(cfgname, "conf_dir", ""))
+	setConfDirField(confDirField)
+	if confDirField != "" {
 		resolveFeatureDir()
+		// 整轮固定一份功能目录：既避开逐个配置重复加锁读全局，也保证同一批配置
+		// 一定来自同一个目录（即使将来有人在加载途中改动了状态）。
+		featureDir, _ := featureDirSnapshot()
 		// 先收集所有已注册的 key，避免在迭代中做 I/O
 		var registered []string
 		_featureReg.Range(func(key, value any) bool {
@@ -158,7 +209,7 @@ func (this *Cfg) LoadWithError(cfgname string) error {
 		// 逐个加载
 		for _, name := range registered {
 			target, _ := _featureReg.Load(name)
-			if loadErr := loadFeatureConfig(name, target); loadErr != nil {
+			if loadErr := loadFeatureConfigFrom(featureDir, name, target); loadErr != nil {
 				return loadErr
 			}
 		}
@@ -207,35 +258,62 @@ var (
 	_defServerId   = flag.String("s", "default", "server flag") //默认服务器ID
 
 	// 功能配置注册系统
-	_confDirField  string   // INI 中 conf_dir 字段值
-	_featureDir    string   // 功能配置文件夹绝对路径
-	_featureDirSet bool     // 功能配置文件夹是否已解析
+	_confDirField  string   // INI 中 conf_dir 字段值（读写均持 _stateMu）
+	_featureDir    string   // 功能配置文件夹绝对路径（读写均持 _stateMu）
+	_featureDirSet bool     // 功能配置文件夹是否已解析（读写均持 _stateMu）
 	_featureReg    sync.Map // key=jsonname, value=注册的目标 struct 指针或 *map[string]any
 	_featureData   sync.Map // key=jsonname, value=已加载的数据（struct 指针或 map[string]any）
 	_featureLoaded sync.Map // key=jsonname, value=bool
+
+	// _stateMu 保护上面所有包级可变状态：_configDirFlag、_basePath、_confDir、
+	// _defaultFile、*_defServerId，以及 _confDirField / _featureDir / _featureDirSet。
+	//
+	// 为什么是 RWMutex 而不是 atomic：读点（GetConfDir / GetDefaultFile / GetBasePath /
+	// GetFeatureDir / GetServerID）分布在启动装配与运行期日志、监控、路由注册路径上，
+	// 属于多协程高频只读；写点只在 init / ApplyFlags / LoadWithError 的路径解析里，低频。
+	// 又因为这些字段是「成组」的（_confDir / _defaultFile / _basePath 由同一次解析得出，
+	// _featureDir 与 _featureDirSet 必须同时可见），单变量 atomic 无法保证组内一致性，
+	// 故用一把锁盖住整组。
+	//
+	// _loadMu 串行化整次配置加载与功能配置注册（见 LoadWithError / RegisterFunc 注释）。
+	// 锁序固定为 _loadMu → _stateMu：只有这两个入口先持 _loadMu 再取 _stateMu，
+	// 反向持锁不存在，因此不会成环；持锁期间不回调业务代码，无自锁风险。
+	_stateMu sync.RWMutex
+	_loadMu  sync.Mutex
 )
 
 func GetBasePath() string {
+	_stateMu.RLock()
+	defer _stateMu.RUnlock()
 	return _basePath
 }
 
 // GetConfDir 返回 conf 目录（config.ini 与各服 JSON 所在目录）。
 func GetConfDir() string {
+	_stateMu.RLock()
+	defer _stateMu.RUnlock()
 	return _confDir
 }
 
-// Deprecated: 拼写错误（Fie 应为 File），请使用 GetDefaultFile。
-// 正确拼写的版本已存在且被使用，本函数仅为兼容既有外部调用保留。
+// GetDefaultFie 返回 config.ini 路径。
+//
+// Deprecated: 拼写错误（Fie 应为 File），计划于下一个大版本移除；请改用 GetDefaultFile。
+// 本函数仅为兼容既有外部调用保留，行为与 GetDefaultFile 完全一致。
 func GetDefaultFie() string {
 	return GetDefaultFile()
 }
 
 // GetDefaultFile 返回 config.ini 路径（GetDefaultFie 的正确拼写）。
 func GetDefaultFile() string {
+	_stateMu.RLock()
+	defer _stateMu.RUnlock()
 	return _defaultFile
 }
 
 func GetServerID() string {
+	// _defServerId 指向的值由 flag.Parse 写入，读侧同样走 _stateMu（写侧见 ApplyFlags）。
+	_stateMu.RLock()
+	defer _stateMu.RUnlock()
 	return *_defServerId
 }
 
@@ -253,6 +331,10 @@ func PathExists(path string) bool {
 // resolveFeatureDir 解析功能配置文件夹路径
 // 相对路径基于 _confDir，绝对路径直接使用
 func resolveFeatureDir() {
+	// 读（_featureDirSet / _confDirField / _confDir）与写（_featureDir / _featureDirSet）
+	// 必须在同一临界区，否则两个协程会基于不同的中间态各自拼出一份目录。
+	_stateMu.Lock()
+	defer _stateMu.Unlock()
 	if _featureDirSet {
 		return
 	}
@@ -283,8 +365,17 @@ func normalizeJSONName(name string) string {
 // 调用时机：LoadWithError 之前或之后均可。
 //   - 之前注册：LoadWithError 加载主配置后自动加载所有已注册的 JSON
 //   - 之后注册：立即加载对应 JSON 文件
+//
+// 并发安全：与 LoadWithError 共用 _loadMu，注册与加载互斥。缺了这把锁，同一个 target
+// 可能被两条加载路径同时命中：注册方先 LoadOrStore 再读 _featureDirSet，读到已置位就立即
+// 加载；而加载方的 _featureReg.Range 可能已经收走了同一个名字，于是两个协程并发
+// json.Unmarshal 写同一个用户结构体——这是用户内存上的数据竞争（-race 会报，本机跑不了）。
+// 持锁后注册要么整段在加载之前（只由加载方解析），要么整段在之后（只由注册方解析）。
 func RegisterFunc(jsonname string, target any) error {
 	name := normalizeJSONName(jsonname)
+
+	_loadMu.Lock()
+	defer _loadMu.Unlock()
 
 	// 检查是否已注册
 	if _, loaded := _featureReg.LoadOrStore(name, target); loaded {
@@ -292,21 +383,23 @@ func RegisterFunc(jsonname string, target any) error {
 	}
 
 	// 如果功能配置文件夹已解析，立即加载
-	if _featureDirSet {
-		return loadFeatureConfig(name, target)
+	if dir, isSet := featureDirSnapshot(); isSet {
+		return loadFeatureConfigFrom(dir, name, target)
 	}
 
 	return nil
 }
 
-// loadFeatureConfig 加载单个功能配置文件
-func loadFeatureConfig(jsonname string, target any) error {
+// loadFeatureConfigFrom 用调用方给定的功能目录加载单个功能配置文件。
+// 目录由调用方一次快照传入，读盘期间不再取全局，因此不会读到加载途中被另一协程
+// 改写的 _featureDir（两个调用方：LoadWithError 的整轮快照、RegisterFunc 的立即加载）。
+func loadFeatureConfigFrom(featureDir, jsonname string, target any) error {
 	name := normalizeJSONName(jsonname)
-	if _featureDir == "" {
+	if featureDir == "" {
 		return fmt.Errorf("功能配置文件夹未配置")
 	}
 
-	path := filepath.Join(_featureDir, name)
+	path := filepath.Join(featureDir, name)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("读取功能配置出错 [%s]: %w", path, err)
@@ -351,6 +444,8 @@ func GetFeatureConfigMap(jsonname string) (map[string]any, bool) {
 
 // GetFeatureDir 返回功能配置文件夹路径
 func GetFeatureDir() string {
+	_stateMu.RLock()
+	defer _stateMu.RUnlock()
 	return _featureDir
 }
 

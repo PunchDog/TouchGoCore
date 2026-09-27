@@ -213,7 +213,7 @@ func (p *Provider) Call(ctx context.Context, endpoint string, payload any, signV
 	if err != nil {
 		return nil, fmt.Errorf("通道[%s]序列化请求失败: %w", p.name, err)
 	}
-	return p.send(ctx, endpoint, body, signValues)
+	return p.send(ctx, endpoint, body, signValues, false)
 }
 
 // callWithExtras 在通用报文之后追加特有字段：先是 Options.Extras（配置给的、
@@ -221,7 +221,7 @@ func (p *Provider) Call(ctx context.Context, endpoint string, payload any, signV
 //
 // 追加值与并入报文的键值由 mergeExtras 同一次遍历产出：分成两次遍历迟早会漂移，
 // 而漂移的表现是「字段发出去了却没签进签名域」——被供应商整批拒签。
-func (p *Provider) callWithExtras(ctx context.Context, endpoint string, payload any, signValues []string, orderExtra map[string]string) (json.RawMessage, error) {
+func (p *Provider) callWithExtras(ctx context.Context, endpoint string, payload any, signValues []string, orderExtra map[string]string, strictRetry bool) (json.RawMessage, error) {
 	fields, extraSigns, err := mergeExtras(p.opt.Extras, orderExtra)
 	if err != nil {
 		return nil, fmt.Errorf("通道[%s]特有字段不可用: %w", p.name, err)
@@ -230,11 +230,12 @@ func (p *Provider) callWithExtras(ctx context.Context, endpoint string, payload 
 	if err != nil {
 		return nil, fmt.Errorf("通道[%s]序列化请求失败: %w", p.name, err)
 	}
-	return p.send(ctx, endpoint, body, append(signValues, extraSigns...))
+	return p.send(ctx, endpoint, body, append(signValues, extraSigns...), strictRetry)
 }
 
 // send 是发一次 POST 的公共部分：查端点路径、挂签名头、交给 HTTP 客户端。
-func (p *Provider) send(ctx context.Context, endpoint string, body []byte, signValues []string) (json.RawMessage, error) {
+// strictRetry 为 true 时使用白名单判定 HTTP 层可重试性（Withdraw 路径）。
+func (p *Provider) send(ctx context.Context, endpoint string, body []byte, signValues []string, strictRetry bool) (json.RawMessage, error) {
 	path, ok := p.opt.Endpoint(endpoint)
 	if !ok {
 		return nil, fmt.Errorf("通道[%s]未配置 endpoints.%s，该操作不可用", p.name, endpoint)
@@ -246,12 +247,16 @@ func (p *Provider) send(ctx context.Context, endpoint string, body []byte, signV
 		}
 		return nil
 	}
+	parseFn := p.parse
+	if strictRetry {
+		parseFn = p.parseStrict
+	}
 	return p.hc.Do(ctx, CallSpec{
 		Method: http.MethodPost,
 		Path:   path,
 		Body:   body,
 		Sign:   sign,
-		Parse:  p.parse,
+		Parse:  parseFn,
 	})
 }
 
@@ -340,16 +345,32 @@ func marshalPayload(base any, fieldsExtra map[string]string) ([]byte, error) {
 }
 
 // parse 把响应包络拆成 data 载荷；业务失败转成 ProviderError 并带上可重试标记。
+// Deposit/查询路径使用本方法：429 与 5xx 默认可重试。
 func (p *Provider) parse(status int, hdr http.Header, body []byte) (json.RawMessage, error) {
+	return p.parseResponse(status, hdr, body, false)
+}
+
+// parseStrict 是 Withdraw 路径的解析器：HTTP 状态码仅按 RetryableCodes 白名单
+// 判定可重试，5xx 不再默认 Retryable。出款重试依赖供应商幂等，风险高——
+// 白名单空表时任何传输层错误都不可自动重发。
+func (p *Provider) parseStrict(status int, hdr http.Header, body []byte) (json.RawMessage, error) {
+	return p.parseResponse(status, hdr, body, true)
+}
+
+func (p *Provider) parseResponse(status int, hdr http.Header, body []byte, strictRetry bool) (json.RawMessage, error) {
 	// 非 2xx 先按传输层判掉：网关/反代拦下来的 502 页面里偶然出现 "code":"0"
 	// 并不能算供应商受理，认成功就等于把一笔没出去的单记成已出款。
 	if status < 200 || status >= 300 {
+		retryable := status == http.StatusTooManyRequests || status >= 500
+		if strictRetry {
+			_, retryable = RetryableCodes[strconv.Itoa(status)]
+		}
 		return nil, &ProviderError{
 			Channel:    p.name,
 			Code:       strconv.Itoa(status),
 			Msg:        http.StatusText(status),
 			HTTPStatus: status,
-			Retryable:  status == http.StatusTooManyRequests || status >= 500,
+			Retryable:  retryable,
 		}
 	}
 	var env envelope
@@ -569,18 +590,20 @@ func (p *Provider) placeOrder(ctx context.Context, endpoint string, o *PayOrder,
 		return nil, err
 	}
 	req := p.NewOrderRequest(o)
-	data, err := p.callWithExtras(ctx, endpoint, req, req.SignValues(), req.Extra)
+	strictRetry := endpoint == EndpointWithdraw
+	data, err := p.callWithExtras(ctx, endpoint, req, req.SignValues(), req.Extra, strictRetry)
 	if err != nil {
 		return nil, err
 	}
 	res := p.Result(data, req.OrderNo)
-	// 回执必须与请求对账：供应商回 success 但金额偏小/偏大/为 0，或回了另一张
-	// 单号时，上游按回执记账就是凭空改账。pending/unknown 常省略金额，那种
-	// 情况不在这里卡——只有终态成功才强制对金额；单号非空且对不上则不论状态都拒。
+	// 回执必须与请求对账：供应商回 success 但金额偏小/偏大，或回了另一张
+	// 单号时，上游按回执记账就是凭空改账。供应商省略金额（0/缺省）是合法的
+	// 「未给出」语义，不作为不一致处理——只有非零且与订单不等才拒。
+	// 单号非空且对不上则不论状态都拒。
 	if res.OrderNo != "" && res.OrderNo != req.OrderNo {
 		return nil, fmt.Errorf("通道[%s]回执订单号 %s 与请求 %s 不一致", p.name, res.OrderNo, req.OrderNo)
 	}
-	if res.Status == StatusSuccess && (res.Amount == 0 || res.Amount != o.Amount) {
+	if res.Status == StatusSuccess && res.Amount != 0 && res.Amount != o.Amount {
 		return nil, fmt.Errorf("通道[%s]回执金额 %d 与请求 %d 不一致", p.name, res.Amount, o.Amount)
 	}
 	// 回执给了手续费却没给计价币种时，按本单币种兜底：账本划转类通道的佣金
@@ -600,7 +623,7 @@ func (p *Provider) QueryOrder(ctx context.Context, orderNo string) (*PayResult, 
 		return nil, errors.New("订单号（幂等键）为空")
 	}
 	req := QueryRequest{AppID: p.opt.AppID, MerchantID: p.opt.MerchantID, OrderNo: orderNo}
-	data, err := p.callWithExtras(ctx, EndpointQuery, req, req.SignValues(), nil)
+	data, err := p.callWithExtras(ctx, EndpointQuery, req, req.SignValues(), nil, false)
 	if err != nil {
 		return nil, err
 	}
@@ -620,7 +643,7 @@ func (p *Provider) QueryAccount(ctx context.Context, q *AccountQuery) (*AccountI
 		MerchantID: firstNonEmpty(strings.TrimSpace(q.MerchantID), p.opt.MerchantID),
 		Currency:   strings.TrimSpace(q.Currency),
 	}
-	data, err := p.callWithExtras(ctx, EndpointAccount, req, req.SignValues(), nil)
+	data, err := p.callWithExtras(ctx, EndpointAccount, req, req.SignValues(), nil, false)
 	if err != nil {
 		return nil, err
 	}

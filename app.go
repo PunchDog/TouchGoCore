@@ -310,6 +310,7 @@ func (app *App) Shutdown(timeout time.Duration) error {
 	if !app.started {
 		app.cancel()
 		app.closeDatabase()
+		vars.Shutdown()
 		return nil
 	}
 

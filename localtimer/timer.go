@@ -24,6 +24,9 @@ var (
 	// ErrTimerCanceled 续期窗口内定时器被业务移除或被另一次 AddTimer 接管，
 	// 本次续期作废。这是正常收尾，不计入调度失败统计。
 	ErrTimerCanceled = errors.New("timer renewal canceled")
+	// ErrTimerInvalidated 定时器已作废（不活跃或已归还），SafeHandle 的操作
+	// 在检测到作废状态时返回此错误，将「作废契约」从注释约束升级为类型/返回值约束。
+	ErrTimerInvalidated = errors.New("timer has been invalidated (inactive or released)")
 )
 
 // 常量定义
@@ -547,23 +550,23 @@ func (t *Timer) Pause() {
 	t.RemoveFromManager(false)
 }
 
-// HasNext 检查是否有下一次执行。
+// TryAdvance 尝试推进到下一次执行并返回是否成功。
 //
-// 注意它有副作用：判定为「有下一次」时顺手把 nextTime 推进到 now+interval。
-// S67 桶化后这条要格外当心 —— 节点在链期间它的桶位是按入链那一刻的 nextTime 算定的，
-// 光改 nextTime 不会换桶，最坏要等游标绕完一整圈才被重看（秒档 60s、分档 10min）。
+// 这是 HasNext 的显式副作用版本：成功时将 nextTime 推进到 now+interval 并
+// 扣减剩余次数（有限次定时器），返回 true；已耗尽或已作废时返回 false。
+//
+// 新代码应使用 TryAdvance 替代 HasNext，因为方法名明确表达了「有改期副作用」。
+//
+// 注意：节点在链期间桶位按入链那一刻的 nextTime 算定，光改 nextTime 不会换桶；
 // 库内调用点（executeTimer 续期）都发生在「已摘链、尚未重挂」的窗口里，因此安全；
-// 业务若在定时器仍在调度时直接调它改期，必须紧跟一次 AddTimer 重挂。
-func (t *Timer) HasNext() bool {
+// 业务若在定时器仍在调度时直接调用，必须紧跟一次 AddTimer 重挂。
+func (t *Timer) TryAdvance() bool {
 	if !t.isActive.Load() {
 		return false
 	}
 
 	if t.count.Load() != CountCorrectionValue {
 		// CAS 扣减：count 已 <= 0 时直接判负返回，绝不再扣。
-		// 原先无条件 Add(-1) 在 count==0 时会把 -1 存回去，GetRemainingCount
-		// 从此返回 -1；这里保证 count 永不为负，且 count==1 扣到 0 后返回 false
-		// 的原语义不变。
 		for {
 			c := t.count.Load()
 			if c <= 0 {
@@ -580,6 +583,21 @@ func (t *Timer) HasNext() bool {
 
 	t.nextTime.Store(util.CurrentMS() + t.interval.Load())
 	return true
+}
+
+// HasNext 检查是否有下一次执行。
+//
+// Deprecated: 此方法带有改期副作用（判定为「有下一次」时把 nextTime 推进到
+// now+interval），名字暗示只读但实际有写入。新代码应使用 TryAdvance 替代。
+// 本方法保留以确保向后兼容，内部委托给 TryAdvance。
+//
+// S67 桶化后这条要格外当心 —— 节点在链期间它的桶位是按入链那一刻的 nextTime
+// 算定的，光改 nextTime 不会换桶，最坏要等游标绕完一整圈才被重看（秒档 60s、
+// 分档 10min）。库内调用点（executeTimer 续期）都发生在「已摘链、尚未重挂」
+// 的窗口里，因此安全；业务若在定时器仍在调度时直接调它改期，必须紧跟一次
+// AddTimer 重挂。
+func (t *Timer) HasNext() bool {
+	return t.TryAdvance()
 }
 
 // GetUID 返回唯一标识符

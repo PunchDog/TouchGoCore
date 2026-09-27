@@ -754,11 +754,14 @@ func StartGrpcServer(name string, port int, useTLS bool) error {
 	vars.Info("gRPC监听已启动[%s]，服务器名称:%s, TLS: %v", addr, name, useTLS)
 
 	s := grpc.NewServer(serverOptions...)
+	// M4 修复：不再读包级变量 channelSize，每次构造都从当前配置取，
+	// 同一轮 Run 内一致，跨轮互不干扰。
+	chanSize := currentChannelSize()
 	service := &RpcServer{
 		name:               name,
 		service:            s,
-		readchannel:        make(chan *MessageInfo, channelSize),
-		handlechannel:      make(chan *MessageInfo, channelSize),
+		readchannel:        make(chan *MessageInfo, chanSize),
+		handlechannel:      make(chan *MessageInfo, chanSize),
 		done:               make(chan struct{}),
 		readClose:          make(chan struct{}),
 		readGone:           make(chan struct{}),

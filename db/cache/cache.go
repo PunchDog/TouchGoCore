@@ -33,6 +33,9 @@ type Cache[K comparable, V any] struct {
 	jz     string                  // 账本 ZSET 键
 	keyDec func(string) (K, error) // 恢复重放时 keyStr→K
 
+	sq SeqKV      // KV 支持「按 seq 条件写」时的 CAS 句柄；nil=退回无条件 Set/Del
+	js JournalSeq // KV 支持「按 seq 条件记账」时的句柄；nil=退回 JAddUpsert/JAddDelete
+
 	fails sync.Map // string(keyString) → time.Time，回源失败退避（防打穿 DB）
 	seq   atomic.Int64
 	st    Stats
@@ -58,12 +61,13 @@ type Stats struct {
 	Recovered   atomic.Int64 // 启动扫账成功重放落库的条目
 	RecoverMiss atomic.Int64 // 账本在但 envelope 已过期/坏值/键解不开——不可恢复，已告警
 	JournalErr  atomic.Int64 // 账本操作失败（尽力而为路径，不阻断读写）
+	Superseded  atomic.Int64 // 并发写被更大 seq 超越而丢弃（Redis CAS 未生效/缓冲保留新值）
 }
 
 // StatsSnapshot 计数快照
 type StatsSnapshot struct {
 	Hits, Miss, Loads, LoadErr, KVErr, Prefetch, Dropped, FlushOK, FlushErr, Dirty int64
-	Recovered, RecoverMiss, JournalErr                                             int64
+	Recovered, RecoverMiss, JournalErr, Superseded                                 int64
 }
 
 func (s *Stats) Snapshot() StatsSnapshot {
@@ -73,6 +77,7 @@ func (s *Stats) Snapshot() StatsSnapshot {
 		Dropped: s.Dropped.Load(), FlushOK: s.FlushOK.Load(), FlushErr: s.FlushErr.Load(),
 		Dirty: s.Dirty.Load(), Recovered: s.Recovered.Load(),
 		RecoverMiss: s.RecoverMiss.Load(), JournalErr: s.JournalErr.Load(),
+		Superseded: s.Superseded.Load(),
 	}
 }
 
@@ -179,14 +184,27 @@ func New[K comparable, V any](name string, kv KV, opts ...Option[K, V]) (*Cache[
 	if c.keyDec == nil {
 		c.keyDec = decodeKeyDefault[K]
 	}
+	if s, ok := c.kv.(SeqKV); ok {
+		c.sq = s
+	}
 	if c.sn != nil {
 		c.buf = newBuffer[K, V](c.cfg.Shards)
 		if c.cfg.Journal {
 			if j, ok := c.kv.(Journaler); ok {
 				c.jr = j
 				c.jz = c.journalKey()
+				if js, ok := c.kv.(JournalSeq); ok {
+					c.js = js
+				}
 			}
 		}
+	}
+	// 批量回源键延迟绑定（late-binding）：BatchLoader 的结果 map 必须以 KeyOf(key)
+	// 为键，但它被构造时还拿不到本 Cache 的命名空间/sanitize 规则。这里把 KeyOf
+	// 注入进去，杜绝「回填键与查询键不一致 → 批量回源全部落空」的静默退化。
+	// 注意：同一个 BatchLoader 实例被多个 Cache 共用时后绑定者胜出，应一 Cache 一实例。
+	if kb, ok := c.ld.(KeyBinder); ok {
+		kb.BindKeyOf(c.keyOfRaw)
 	}
 	return c, nil
 }
@@ -207,15 +225,24 @@ func (c *Cache[K, V]) keyBase() string {
 
 // KeyOf 生成 Redis 键：{prefix}:{group}:{name}:{key}
 func (c *Cache[K, V]) KeyOf(key K) string {
-	sanitize := func(s string) string {
-		s = strings.ReplaceAll(s, ":", "_")
-		if len(s) > 128 {
-			sum := sha1.Sum([]byte(s))
-			s = s[:96] + "#" + hex.EncodeToString(sum[:8])
-		}
-		return s
+	return c.keyOfRaw(c.keyFn(key))
+}
+
+// keyOfRaw 把「已经由 keyFn 得到的原始键串」套上命名空间与 sanitize。
+// 与 KeyOf 是同一条路径，单独拆出来给只有字符串、拿不到 K 的一侧复用
+// （批量回源经 KeyBinder 注入的就是它），保证两边键形完全一致。
+func (c *Cache[K, V]) keyOfRaw(raw string) string {
+	return c.keyBase() + ":" + sanitizeKey(raw)
+}
+
+// sanitizeKey 键串安全化：":" 会破坏命名空间分段，超长键取 sha1 摘要收敛长度。
+func sanitizeKey(s string) string {
+	s = strings.ReplaceAll(s, ":", "_")
+	if len(s) > 128 {
+		sum := sha1.Sum([]byte(s))
+		s = s[:96] + "#" + hex.EncodeToString(sum[:8])
 	}
-	return c.keyBase() + ":" + sanitize(c.keyFn(key))
+	return s
 }
 
 func defaultKeyFunc[K comparable]() func(K) string {
@@ -249,9 +276,9 @@ func jitterDuration(base time.Duration, jitterPct int, ks string) time.Duration 
 	return time.Duration(uint64(base) - span/2 + h%(span+1))
 }
 
-// setEnvelope 把值编码为 envelope 写入 Redis（带物理 TTL 与逻辑过期戳）。
-// val==nil 且 nullTTl>0 表示写空标记。
-func (c *Cache[K, V]) setEnvelope(ctx context.Context, ks string, val *V, ttl time.Duration, seq int64, null bool) error {
+// buildEnvelope 组装 envelope 原始串（setEnvelope / setEnvelopeSeq 共用）。
+// val==nil 时写零值 + Null 由调用方决定。
+func (c *Cache[K, V]) buildEnvelope(val *V, seq int64, null bool) (string, error) {
 	e := &envelope[V]{ExpMS: c.clock().UnixMilli() + int64(c.cfg.logicalTTL().Milliseconds()), Seq: seq, Null: null}
 	if val != nil {
 		e.Value = *val
@@ -259,13 +286,47 @@ func (c *Cache[K, V]) setEnvelope(ctx context.Context, ks string, val *V, ttl ti
 		var zero V
 		e.Value = zero
 	}
-	raw, err := encode(c.codec, e)
+	return encode(c.codec, e)
+}
+
+// setEnvelope 把值编码为 envelope 写入 Redis（带物理 TTL 与逻辑过期戳）。
+// val==nil 且 nullTTl>0 表示写空标记。无条件覆盖，仅用于读线回填等
+// 「本次 seq 一定是最新」的路径；写线请用 setEnvelopeSeq。
+func (c *Cache[K, V]) setEnvelope(ctx context.Context, ks string, val *V, ttl time.Duration, seq int64, null bool) error {
+	raw, err := c.buildEnvelope(val, seq, null)
 	if err != nil {
 		return err
 	}
 	sctx, cancel := context.WithTimeout(ctx, c.cfg.WriteTimeout)
 	defer cancel()
 	return c.kv.Set(sctx, ks, raw, ttl)
+}
+
+// setEnvelopeSeq 同 setEnvelope，但按 seq 条件写（Redis 侧 Lua CAS）：
+// 只有「键不存在 / 值不可解析 / 现有 envelope.Seq 不大于本次 seq」才真正落地。
+// written=false 表示 Redis 里已有更大 seq 的值，本次是过期写——调用方不得再
+// 把该值放进写缓冲，否则旧值会在随后 flush 时盖掉库里的新行。
+// KV 不实现 SeqKV 时退回无条件 Set，written 恒为 true（旧行为）。
+func (c *Cache[K, V]) setEnvelopeSeq(ctx context.Context, ks string, val *V, ttl time.Duration, seq int64, null bool) (written bool, err error) {
+	if c.sq == nil {
+		return true, c.setEnvelope(ctx, ks, val, ttl, seq, null)
+	}
+	raw, err := c.buildEnvelope(val, seq, null)
+	if err != nil {
+		return false, err
+	}
+	sctx, cancel := context.WithTimeout(ctx, c.cfg.WriteTimeout)
+	defer cancel()
+	return c.sq.SetSeq(sctx, ks, raw, ttl, seq)
+}
+
+// delSeq 按 seq 条件删除（Remove 用）：现有值 seq 严格更大时不删。
+// KV 不实现 SeqKV 时退回无条件 Del，written 恒为 true。
+func (c *Cache[K, V]) delSeq(ctx context.Context, ks string, seq int64) (written bool, err error) {
+	if c.sq == nil {
+		return true, c.kv.Del(ctx, ks)
+	}
+	return c.sq.DelSeq(ctx, ks, seq)
 }
 
 func fnv64(s string) uint64 {

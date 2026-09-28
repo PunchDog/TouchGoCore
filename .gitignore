@@ -56,3 +56,4 @@ websocket/example_test.go
 localtimer/internal/
 testdata/
 .qoder/repowiki/
+.qoder/

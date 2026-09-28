@@ -84,7 +84,7 @@ func TestTRC20RuleRejectsBadAddressBeforeSending(t *testing.T) {
 func TestTRC20RuleRejectsMemo(t *testing.T) {
 	rule, ok := pay.ChainRuleFor(pay.CurrencyTRX)
 	if !ok {
-		t.Fatal("TRX 与 USDT 共用地址形态，规则也要一并登记")
+		t.Fatal("TRX 规则已移交 tron 包登记（地址规则归属链包）；usdt 经 tron 的薄包装依赖它，这里没登记说明接线断了")
 	}
 	if err := rule.CheckMemo(&pay.PayOrder{}); err != nil {
 		t.Errorf("不带备注被拒: %v", err)

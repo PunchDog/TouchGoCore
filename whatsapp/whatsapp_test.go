@@ -168,6 +168,9 @@ func TestOperationsRefuseWhenNotStarted(t *testing.T) {
 	if err := WhatsappSendCode(nil, "86138"); err == nil {
 		t.Error("未启动时发码应当被拒")
 	}
+	if _, err := WhatsappFriends(nil, "86138"); err == nil {
+		t.Error("未启动时查好友列表应当被拒")
+	}
 	if _, err := WhatsappLogin(nil, "86138", "123456"); err == nil {
 		t.Error("未启动时登录应当被拒")
 	}

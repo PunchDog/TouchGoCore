@@ -103,6 +103,12 @@ const (
 	CallWhatsappMsg = "WhatsappMsg"
 	CallUsdtMsg     = "UsdtMsg"
 	CallTonMsg      = "TonMsg"
+	// CallTronMsg / CallBscMsg / CallSolMsg 是 TRON(TRX) / BSC(BNB) / Solana(SOL)
+	// 三条原生币通道的回调前缀，口径与上面三条完全一致：按 <前缀>+<动作> 注册，
+	// 载荷是 *pay.PayResult，通道包本身不落库。
+	CallTronMsg = "TronMsg"
+	CallBscMsg  = "BscMsg"
+	CallSolMsg  = "SolMsg"
 	// CallPaySDKMsg + pay_sdks 的段名 = 该段签名密钥的注入钩子，载荷是 *string
 	// （指向该段的 secret_key 字段本身）。
 	//

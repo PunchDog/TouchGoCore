@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"touchgocore/ai"
+	"touchgocore/bsc"
 	"touchgocore/corectx"
 	"touchgocore/db"
 	"touchgocore/gin"
@@ -11,7 +12,9 @@ import (
 	"touchgocore/localtimer"
 	"touchgocore/mapmanager"
 	"touchgocore/rpc"
+	"touchgocore/sol"
 	"touchgocore/telegram"
+	"touchgocore/tron"
 	"touchgocore/usdt"
 	"touchgocore/websocket"
 	"touchgocore/whatsapp"
@@ -81,8 +84,8 @@ func (s *telegramService) Stop(ctx context.Context) error {
 	return nil
 }
 
-// 三条资金通道各一个适配器：配置独立开关、故障彼此无关，合并成一个 Service
-// 会让「钱包没配好」连带停掉另外两条能用的通道。
+// 资金通道各一个适配器：配置独立开关、故障彼此无关，合并成一个 Service
+// 会让「钱包没配好」连带停掉其它能用的通道。
 // Start 一律返回 nil：通道故障不阻断整机启动，不启动的判断与原因由包内留日志。
 
 // whatsappService WhatsApp 登录与充值/提现服务适配器
@@ -121,6 +124,45 @@ func (s *tonService) Start(ctx context.Context) error {
 }
 func (s *tonService) Stop(ctx context.Context) error {
 	telegram.TonStop(ctx)
+	return nil
+}
+
+// tronService TRON 原生币(TRX) 充值/提现服务适配器
+type tronService struct{}
+
+func (s *tronService) Name() string { return "tron" }
+func (s *tronService) Start(ctx context.Context) error {
+	tron.TronStart(ctx)
+	return nil
+}
+func (s *tronService) Stop(ctx context.Context) error {
+	tron.TronStop(ctx)
+	return nil
+}
+
+// bscService BSC 原生币(BNB) 充值/提现服务适配器
+type bscService struct{}
+
+func (s *bscService) Name() string { return "bsc" }
+func (s *bscService) Start(ctx context.Context) error {
+	bsc.BscStart(ctx)
+	return nil
+}
+func (s *bscService) Stop(ctx context.Context) error {
+	bsc.BscStop(ctx)
+	return nil
+}
+
+// solService Solana 原生币(SOL) 充值/提现服务适配器
+type solService struct{}
+
+func (s *solService) Name() string { return "sol" }
+func (s *solService) Start(ctx context.Context) error {
+	sol.SolStart(ctx)
+	return nil
+}
+func (s *solService) Stop(ctx context.Context) error {
+	sol.SolStop(ctx)
 	return nil
 }
 

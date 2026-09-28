@@ -15,10 +15,14 @@ import (
 //
 // CurrencyTRX 不是本仓的充值/提现币种，它是手续费侧的事实：TRON 上转 USDT，
 // gas 是以 TRX 收的，与转账币种不同一种。
+// CurrencyBNB / CurrencySOL 是另两条链的原生币：BNB 是 BSC（EVM 形态）的 gas 币，
+// SOL 是 Solana 的 gas 币（lamports，9 位最小单位）。
 const (
 	CurrencyUSDT = "USDT"
 	CurrencyTON  = "TON"
 	CurrencyTRX  = "TRX"
+	CurrencyBNB  = "BNB"
+	CurrencySOL  = "SOL"
 )
 
 // 公链网络标识。主网与测试网的区别必须是配置里看得出来的一个字段值，
@@ -31,6 +35,12 @@ const (
 	// NetworkShasta 与 NetworkNile 是 TRON 的两条测试网。
 	NetworkShasta = "shasta"
 	NetworkNile   = "nile"
+	// NetworkChapel 是 BSC 的测试网（旧名 Chapel、现名 BSC Testnet 同源），
+	// 沿「链自带专名就单独登记」的 TRON 口径，不用通用的 testnet 顶替。
+	NetworkChapel = "chapel"
+	// NetworkDevnet 是 Solana 的测试网名——它不叫 testnet，
+	// 供应商按各自的链生态登记，混填会让测试单进了主网网关。
+	NetworkDevnet = "devnet"
 )
 
 // Deprecated: NetworkTRC20 把代币标准当成了网络。TRC20 是「USDT 这张合约跑在
@@ -45,7 +55,7 @@ const NetworkTRC20 = "trc20"
 // 「与网络不符」而拒单，反之把没看懂的值当成测试网，才会让测试网地址混进主网报文。
 func IsTestnet(network string) bool {
 	switch strings.ToLower(strings.TrimSpace(network)) {
-	case NetworkTestnet, NetworkShasta, NetworkNile:
+	case NetworkTestnet, NetworkShasta, NetworkNile, NetworkChapel, NetworkDevnet:
 		return true
 	default:
 		return false
@@ -80,6 +90,10 @@ const (
 	// EndpointAccount 是查商户账户的逻辑名。它排在下单之前是有原因的：
 	// 提现前先看一眼可用余额与账户状态，比把单发出去再等供应商拒要省一次资金动作。
 	EndpointAccount = "account"
+	// EndpointFriendList 是按账号查好友列表的逻辑名（whatsapp 消息侧）。
+	// 它不在资金契约里流转——报文形态由通道包给出，pay 只登记逻辑名，
+	// 与 send_code/login 同一个口径：代码里固定名字、配置里填实际路径。
+	EndpointFriendList = "friend_list"
 )
 
 // 商户账户状态。

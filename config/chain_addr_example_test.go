@@ -12,8 +12,11 @@ import (
 	"touchgocore/config"
 	"touchgocore/pay"
 
-	// 只为把两个通道包的 init 链进来：不导入则注册表是空的，
+	// 只为把通道包的 init 链进来：不导入则注册表是空的，
 	// 下面的地址断言会全部走「未登记即放行」那条路，测不出任何东西。
+	// bsc/sol 不直接或间接被 config 引到，必须显式点名；tron 经 usdt 的薄包装间接链入。
+	_ "touchgocore/bsc"
+	_ "touchgocore/sol"
 	_ "touchgocore/telegram"
 	_ "touchgocore/usdt"
 )
@@ -29,16 +32,16 @@ func loadExample(t *testing.T) *config.Cfg {
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		t.Fatalf("example.json 反序列化失败: %v", err)
 	}
-	if cfg.Usdt == nil || cfg.Telegram == nil {
-		t.Fatalf("示例缺 usdt / telegram 段: %p %p", cfg.Usdt, cfg.Telegram)
+	if cfg.Usdt == nil || cfg.Telegram == nil || cfg.Tron == nil || cfg.Bsc == nil || cfg.Sol == nil {
+		t.Fatalf("示例缺 usdt / telegram / tron / bsc / sol 段: %p %p %p %p %p", cfg.Usdt, cfg.Telegram, cfg.Tron, cfg.Bsc, cfg.Sol)
 	}
 	return &cfg
 }
 
-// TestChainRulesLinked 三条链的规则都得在注册表里。
+// TestChainRulesLinked 各条链的规则都得在注册表里。
 // 这条先于地址断言跑，否则「规则没登记」会伪装成「地址全对」。
 func TestChainRulesLinked(t *testing.T) {
-	for _, c := range []string{pay.CurrencyUSDT, pay.CurrencyTRX, pay.CurrencyTON} {
+	for _, c := range []string{pay.CurrencyUSDT, pay.CurrencyTRX, pay.CurrencyTON, pay.CurrencyBNB, pay.CurrencySOL} {
 		if _, ok := pay.ChainRuleFor(c); !ok {
 			t.Fatalf("币种 %s 无链上规则：通道包的 init 未被链进来，已登记的是 %v", c, pay.CurrenciesWithRules())
 		}
@@ -56,10 +59,13 @@ func TestExampleChainAddressesAreReal(t *testing.T) {
 	nets := map[string]string{
 		"usdt.network":         cfg.Usdt.Network,
 		"telegram.ton_network": cfg.Telegram.TonNetwork,
+		"tron.network":         cfg.Tron.Network,
+		"bsc.network":          cfg.Bsc.Network,
+		"sol.network":          cfg.Sol.Network,
 	}
 	for name, v := range nets {
 		switch v {
-		case pay.NetworkMainnet, pay.NetworkTestnet, pay.NetworkShasta, pay.NetworkNile:
+		case pay.NetworkMainnet, pay.NetworkTestnet, pay.NetworkShasta, pay.NetworkNile, pay.NetworkChapel, pay.NetworkDevnet:
 		default:
 			t.Errorf(`%s=%q 不是已登记的公链网络标识（代币标准名不算网络）`, name, v)
 		}

@@ -165,7 +165,7 @@
             "token": ""
         }
     },
-    "pay_sdks说明": "资金 SDK 集中登记表：一段=一套供应商接入（驱动、基址、凭证、端点表、我方商户账户）。同一供应商常同时供着充值、提现、验证码下发三条链路，凭证抄三份必然改漏一处，所以只在这里写一次；telegram.ton / usdt.provider / whatsapp.provider / whatsapp.login 四段各自用 {sdk, account} 引用这里的一段",
+    "pay_sdks说明": "资金 SDK 集中登记表：一段=一套供应商接入（驱动、基址、凭证、端点表、我方商户账户）。同一供应商常同时供着充值、提现、验证码下发三条链路，凭证抄三份必然改漏一处，所以只在这里写一次；telegram.ton / usdt.provider / whatsapp.provider / whatsapp.login / tron.provider / bsc.provider / sol.provider 各段各自用 {sdk, account} 引用这里的一段",
     "pay_sdks": {
         "supplier_a": {
             "enable": "off",
@@ -183,7 +183,7 @@
             "max_retries": 2,
             "notify_url": "https://example.com/callback/pay",
             "notify_url说明": "回调接收地址，随下单报文交给供应商并参与签名域（不签它就可能被改成别人的接收端）。留空则按供应商为该 AppID 登记的默认值",
-            "endpoints说明": "逻辑名 -> 供应商实际路径。逻辑名固定为 account/recharge/query/withdraw/login/send_code 六个，缺某个键则该操作就地拒绝、不发请求",
+            "endpoints说明": "逻辑名 -> 供应商实际路径。资金侧逻辑名固定为 account/recharge/query/withdraw，消息侧为 login/send_code/friend_list（好友列表按账号查询，whatsapp 登录链路用），缺某个键则该操作就地拒绝、不发请求",
             "endpoints": {
                 "account": "/pay/account",
                 "recharge": "/pay/recharge",
@@ -217,7 +217,8 @@
             "notify_url": "",
             "endpoints": {
                 "send_code": "/wa/send_code",
-                "login": "/wa/login"
+                "login": "/wa/login",
+                "friend_list": "/wa/friend_list"
             }
         }
     },
@@ -267,6 +268,42 @@
         "network": "mainnet",
         "contract说明": "TRC20 合约地址；原生 TRX 留空。同一 TRON 通道下 USDT 与原生币靠这一列区分。启动时按 Base58Check 验格式（长度 34、版本字节 0x41、末尾 4 字节双 SHA256 校验和），不通过则该通道不启动。它会并进报文并追加到签名域末尾，顺序由 usdt 包登记",
         "contract": "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t",
+        "provider说明": "资金链路的 SDK 引用",
+        "provider": {
+            "sdk": "supplier_a",
+            "account": "default"
+        }
+    },
+    "tron说明": "TRON 原生币(TRX) 通道（充值/提现），代码在 tron 包。金额一律整数最小单位（TRX 是 6 位小数）；同链代币 USDT 请走 usdt 段，不在这里配",
+    "tron": {
+        "network说明": "公链网络标识（mainnet / shasta / nile），随下单报文交给供应商并参与签名；留空则按供应商为该 AppID 登记的默认值",
+        "network": "mainnet",
+        "token说明": "TRC10 代币合约 id（纯数字串，如 1000101）；原生 TRX 留空。TRC20 的 Base58 合约地址填 usdt.contract，填在这里会被启动校验拒掉——两类代币的收端识别字段形态不同",
+        "token": "",
+        "provider说明": "资金链路的 SDK 引用",
+        "provider": {
+            "sdk": "supplier_a",
+            "account": "default"
+        }
+    },
+    "bsc说明": "BSC(BNB Smart Chain，EVM 形态) 原生币(BNB) 通道（充值/提现），代码在 bsc 包。金额一律整数最小单位（BNB 是 18 位小数）；链上 gas 以 BNB 计，单笔实际成本看回执的 fee 与 fee_currency",
+    "bsc": {
+        "network说明": "公链网络标识（mainnet / chapel），随下单报文交给供应商并参与签名；留空则按供应商为该 AppID 登记的默认值",
+        "network": "mainnet",
+        "token说明": "BEP20 代币合约地址（0x + 40 位十六进制）；原生 BNB 留空。启动时验格式：混合大小写时要过 EIP-55 校验和，不通过则该通道不启动。它会并进报文并追加到签名域末尾，键名 contract 与 usdt 侧口径一致",
+        "token": "",
+        "provider说明": "资金链路的 SDK 引用",
+        "provider": {
+            "sdk": "supplier_a",
+            "account": "default"
+        }
+    },
+    "sol说明": "Solana 原生币(SOL) 通道（充值/提现），代码在 sol 包。金额一律整数最小单位 lamports（9 位小数），位数填错就是 10^n 倍的不可逆多付",
+    "sol": {
+        "network说明": "公链网络标识（mainnet / devnet），随下单报文交给供应商并参与签名；留空则按供应商为该 AppID 登记的默认值。Solana 的测试网叫 devnet 不叫 testnet",
+        "network": "mainnet",
+        "token说明": "SPL 代币合约地址（Base58 解出恰好 32 字节）；原生 SOL 留空。过不了格式校验则该通道不启动。报文里的特有字段键沿用 contract，与 usdt 侧口径一致",
+        "token": "",
         "provider说明": "资金链路的 SDK 引用",
         "provider": {
             "sdk": "supplier_a",

@@ -193,6 +193,15 @@ func validatePayChannels(c *Cfg) error {
 	if c.Usdt != nil {
 		refs["usdt.provider"] = c.Usdt.Provider
 	}
+	if c.Tron != nil {
+		refs["tron.provider"] = c.Tron.Provider
+	}
+	if c.Bsc != nil {
+		refs["bsc.provider"] = c.Bsc.Provider
+	}
+	if c.Sol != nil {
+		refs["sol.provider"] = c.Sol.Provider
+	}
 	if c.Whatsapp != nil {
 		refs["whatsapp.login"] = c.Whatsapp.Login
 		refs["whatsapp.provider"] = c.Whatsapp.Provider

@@ -248,11 +248,14 @@ func (app *App) registerServices() {
 		&luaService{},
 		&rpcService{},
 		&telegramService{},
-		// 三条资金通道晚于 telegram：配置各自独立开关，没配就是不启动，
+		// 资金通道晚于 telegram：配置各自独立开关，没配就是不启动，
 		// 不影响前面任何服务起来。
 		&whatsappService{},
 		&usdtService{},
 		&tonService{},
+		&tronService{},
+		&bscService{},
+		&solService{},
 		&ginService{},
 		&modelAPIService{},
 		// 缓存层放最后：Shutdown 反序停止 ⇒ 它最先停，

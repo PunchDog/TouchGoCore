@@ -82,3 +82,52 @@ func WhatsappLogout() {
 		p.SetToken("")
 	}
 }
+
+// FriendInfo 是好友列表里的一条账号记录。
+//
+// 字段按「文档到位后照抄」的位置留着；它只描述供应商回什么，
+// 不保证都非空——供应商没给的列就是空串。
+type FriendInfo struct {
+	UserID   string `json:"user_id"`
+	Phone    string `json:"phone"`
+	Nickname string `json:"nickname"`
+	Status   string `json:"status"`
+}
+
+// WhatsappFriends 按传入的 whatsapp 账号向供应商查好友列表。
+//
+// 走登录链路：好友数据挂在会话（token）下，而不是资金链路上。
+// account 是手机号或供应商侧 user_id，两者取其一，trim 后为空即拒。
+//
+// 同步返回、不广播回调：这是读操作，下游要的是当场拿结果，
+// 口径与 WhatsappAccount 一致（回执广播只留给会变更的资金动作）。
+func WhatsappFriends(ctx context.Context, account string) ([]*FriendInfo, error) {
+	p, err := currentLogin()
+	if err != nil {
+		return nil, err
+	}
+	account = strings.TrimSpace(account)
+	if account == "" {
+		return nil, errors.New("whatsapp 查询好友列表失败: 账号为空")
+	}
+	if ctx == nil {
+		ctx = runCtx()
+	}
+	req := &friendListRequest{AppID: p.AppID(), Account: account}
+	data, err := p.Call(ctx, pay.EndpointFriendList, req, req.signValues())
+	if err != nil {
+		return nil, err
+	}
+	var d friendListData
+	if err := json.Unmarshal(data, &d); err != nil {
+		// 解不开列表就报错，不交空切片：空切片会被上游读成「这个账号没有好友」，
+		// 把一次回执格式问题伪装成一个业务事实（对齐登录侧「不回空会话」的原则）。
+		return nil, &pay.ProviderError{Channel: "whatsapp", Code: "bad_friend_data", Msg: "好友列表回执不可解析"}
+	}
+	friends := make([]*FriendInfo, 0, len(d.List))
+	for i := range d.List {
+		f := d.List[i]
+		friends = append(friends, &f)
+	}
+	return friends, nil
+}

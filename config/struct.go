@@ -368,6 +368,37 @@ type UsdtConfig struct {
 	Contract string `json:"contract"`
 }
 
+// TronConfig 是 TRON 原生币（TRX）通道配置。
+type TronConfig struct {
+	Provider *PaySDKRef `json:"provider"`
+	// Network 是公链网络标识（mainnet/shasta/nile），留空按供应商默认。
+	Network string `json:"network"`
+	// Token 是 TRC10 代币合约 id（纯数字串，如 1000101）；原生 TRX 留空。
+	// TRC20 的合约地址填 usdt.contract，填在这里会在装配时被拒——
+	// 两类代币的收端识别字段不同形态，混填等于把每一单送进错误的资产域。
+	Token string `json:"token"`
+}
+
+// BscConfig 是 BSC（BNB Smart Chain，EVM 形态）原生币通道配置。
+type BscConfig struct {
+	Provider *PaySDKRef `json:"provider"`
+	// Network 是公链网络标识（mainnet/chapel），留空按供应商默认。
+	Network string `json:"network"`
+	// Token 是 BEP20 代币合约地址（0x + 40 位十六进制，混合大小写时要过
+	// EIP-55 校验和，过不了则通道不启动）；原生 BNB 留空。
+	Token string `json:"token"`
+}
+
+// SolConfig 是 Solana 原生币（SOL）通道配置。
+type SolConfig struct {
+	Provider *PaySDKRef `json:"provider"`
+	// Network 是公链网络标识（mainnet/devnet），留空按供应商默认。
+	Network string `json:"network"`
+	// Token 是 SPL 代币合约地址（Base58 解出恰好 32 字节，过不了则通道不启动）；
+	// 原生 SOL 留空。报文里的特有字段键沿用 contract，与 usdt 侧口径一致。
+	Token string `json:"token"`
+}
+
 // Lua 配置
 type LuaConfig struct {
 	ScriptPath     string `json:"script_path"`     // Lua 脚本路径

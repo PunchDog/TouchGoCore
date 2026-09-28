@@ -1,6 +1,8 @@
 package whatsapp
 
 import (
+	"encoding/json"
+
 	"touchgocore/config"
 	"touchgocore/pay"
 	"touchgocore/paysdk"
@@ -71,4 +73,46 @@ type loginData struct {
 	Token  string `json:"token"`
 	UserID string `json:"user_id"`
 	Phone  string `json:"phone"`
+}
+
+// friendListRequest 是按账号查好友列表的报文。
+//
+// 字段名与签名域顺序都按「文档到位后照抄」的位置留着：改报文只改这个结构体的
+// json tag，改签名域只改 signValues 的顺序，两者写在相邻几行是刻意的——
+// 报文加了字段而签名域漏掉，是供应商全量拒签最典型的成因。
+type friendListRequest struct {
+	AppID string `json:"app_id,omitempty"`
+	// Account 是传入的 whatsapp 账号（手机号或供应商侧 user_id），两者取其一，
+	// 口径由供应商登记的那个账号为准——本包不猜它指的是哪种。
+	Account string `json:"account"`
+}
+
+func (r *friendListRequest) signValues() []string {
+	return []string{r.AppID, r.Account}
+}
+
+// friendListData 是好友列表的回执载荷。
+//
+// 兼容两种供应商形态：data 为 {"list":[...]} 或直接就是数组。
+// 解不开列表时报错而不是交空切片：空切片会被上游读成「这个账号没有好友」，
+// 把一次回执格式问题伪装成一个业务事实。
+type friendListData struct {
+	List []FriendInfo
+}
+
+// UnmarshalJSON 先按对象形态解，不中再按数组形态解；两者都不中报错。
+func (d *friendListData) UnmarshalJSON(b []byte) error {
+	var obj struct {
+		List []FriendInfo `json:"list"`
+	}
+	if err := json.Unmarshal(b, &obj); err == nil && obj.List != nil {
+		d.List = obj.List
+		return nil
+	}
+	var arr []FriendInfo
+	if err := json.Unmarshal(b, &arr); err != nil {
+		return err
+	}
+	d.List = arr
+	return nil
 }

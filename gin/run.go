@@ -19,7 +19,8 @@ import (
 )
 
 var (
-	routerMap = make(map[string]*routeEntry)
+	// routerMap 二级索引：外层 key=纯净路径，内层 key=HTTP 方法（"" 为通配，放行所有方法）。
+	routerMap = make(map[string]map[string]*routeEntry)
 	// routerMu 保护 routerMap：RegisterRouter 可能在 Run 之后由业务动态调用，
 	// 而 Run 会整表快照路由表。
 	routerMu   sync.Mutex
@@ -111,6 +112,8 @@ type IRouterTimeout interface {
 // 路由的 HTTP 方法、显式路径与 ctx 超时分别由 IRouterInterface、IRouterPath、
 // IRouterTimeout 三个可选能力提供，未实现即走默认推导与默认超时。
 // RegisterRouter 只负责填充 routerMap；具体分发由 Run 里的根劫持 handler 完成。
+// 重复判定按「路径 + 方法」两级：同一方法被重复注册时后者覆盖前者并报错；
+// 同一路径的不同方法（如先注册 GET 再注册 POST）各自注册、互不覆盖。
 func RegisterRouter(class IRouterInterface) {
 	sname, mnames := util.GetClassName(class)
 	rcvr := reflect.ValueOf(class)
@@ -163,13 +166,31 @@ func RegisterRouter(class IRouterInterface) {
 
 		handler := buildRouteHandler(rcvr, sname, mnameCopy, entry, timeouts)
 
+		// 写入拆为「路径:方法」二级。旧版每个路径只挂单个 routeEntry，
+		// 同路径的另一方法 handler 会被整条替换掉、静默丢失。
 		routerMu.Lock()
-		if _, dup := routerMap[callbackmsg]; dup {
-			// URL 由「类型名/方法名」推导，同类型的第二个实例必然与第一个撞同一批路径，
-			// 这里以后者覆盖前者；需要两套实例并存请拆分类型或用不同路由前缀。
-			vars.Error("路由 %s 重复注册（同名类型的多个实例），本次注册的实例将覆盖先前实例", callbackmsg)
+		byMethod := routerMap[callbackmsg]
+		if byMethod == nil {
+			byMethod = make(map[string]*routeEntry, len(methods)+1)
+			routerMap[callbackmsg] = byMethod
 		}
-		routerMap[callbackmsg] = &routeEntry{fn: handler, methods: methods}
+		// 二级 key = HTTP 方法；methods 为空（未设 RouterType）时用通配键 ""，放行所有方法。
+		keys := make([]string, 0, len(methods)+1)
+		if len(methods) == 0 {
+			keys = append(keys, methodAny)
+		} else {
+			for m := range methods {
+				keys = append(keys, m)
+			}
+		}
+		for _, mk := range keys {
+			if _, dup := byMethod[mk]; dup {
+				// 只有「路径 + 方法」两级都命中才算重复注册，后注册覆盖前者；
+				// 同一 URL 的不同方法各自注册、互不覆盖。
+				vars.Error("路由 %s %q 重复注册，本次 handler 将覆盖先前 handler", callbackmsg, mk)
+			}
+			byMethod[mk] = &routeEntry{fn: handler}
+		}
 		routerMu.Unlock()
 	}
 }

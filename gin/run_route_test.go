@@ -40,7 +40,7 @@ func isolateRegistry(t *testing.T) {
 	t.Helper()
 	routerMu.Lock()
 	prev := routerMap
-	routerMap = make(map[string]*routeEntry)
+	routerMap = make(map[string]map[string]*routeEntry)
 	routerMu.Unlock()
 	methodCache.Clear()
 	t.Cleanup(func() {
@@ -51,27 +51,21 @@ func isolateRegistry(t *testing.T) {
 	})
 }
 
-// invokeRoute 调用注册表里唯一的 handler，返回响应体。
-func invokeRoute(t *testing.T, path string) string {
+// invokeRoute 按「路径 + 方法」调用注册表里的 handler，返回响应体。
+func invokeRoute(t *testing.T, path, method string) string {
 	t.Helper()
 	routerMu.Lock()
-	var fn func(ctx *gin.Context)
-	for k, v := range routerMap {
-		if path == "" || k == path {
-			fn = v.fn
-			break
-		}
-	}
+	entry := lookupRoute(path, method)
 	routerMu.Unlock()
-	if fn == nil {
-		t.Fatalf("✘ 路由 %q 未注册（现有: %v）", path, routerKeys())
+	if entry == nil {
+		t.Fatalf("✘ 路由 %q %s 未注册（现有: %v）", path, method, routerKeys())
 	}
 
 	gin.SetMode(gin.TestMode)
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
-	c.Request = httptest.NewRequest(http.MethodGet, "/"+path, nil)
-	fn(c)
+	c.Request = httptest.NewRequest(method, "/"+path, nil)
+	entry.fn(c)
 	return w.Body.String()
 }
 
@@ -96,7 +90,7 @@ func TestMethodCacheIsPerReceiver(t *testing.T) {
 	RegisterRouter(a)
 	RegisterRouter(b)
 
-	if got := invokeRoute(t, "/singlerecv/hello"); got != "hello:B" {
+	if got := invokeRoute(t, "/singlerecv/hello", http.MethodGet); got != "hello:B" {
 		t.Fatalf("✘ 后注册实例 B 的路由执行了 %q（应为 hello:B，修复前会串到 A）", got)
 	}
 }
@@ -105,7 +99,7 @@ func TestMethodCacheIsPerReceiver(t *testing.T) {
 func TestSingleInstanceStillWorks(t *testing.T) {
 	isolateRegistry(t)
 	RegisterRouter(&singleRecv{tag: "C"})
-	if got := invokeRoute(t, "/singlerecv/hello"); got != "hello:C" {
+	if got := invokeRoute(t, "/singlerecv/hello", http.MethodGet); got != "hello:C" {
 		t.Fatalf("✘ 响应 %q != hello:C", got)
 	}
 }
@@ -118,7 +112,7 @@ func TestRouterTypeSuffixKeepsPathFilter(t *testing.T) {
 	if len(keys) != 1 {
 		t.Fatalf("注册 key %v", keys)
 	}
-	if got := invokeRoute(t, keys[0]); got != "ping:D" {
+	if got := invokeRoute(t, keys[0], http.MethodGet); got != "ping:D" {
 		t.Fatalf("✘ 响应 %q != ping:D", got)
 	}
 }

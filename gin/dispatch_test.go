@@ -23,8 +23,8 @@ import (
 //  1. newRootHandler：命中路径+方法 -> 调用；方法不在白名单 -> 404；未注册路径 -> 404；
 //     /ws 前缀静默 404；/static 前缀走文件服务；
 //  2. Run 集成：显式/默认路由经根 handler 真实分发命中。
-// 根 handler 直接读全局 routerMap（map[string]*routeEntry），用例通过
-// isolateRegistry 在干净的注册表上写入条目后再构造 handler。
+// 根 handler 直接读全局 routerMap（map[string]map[string]*routeEntry，二级 key=方法），
+// 用例通过 isolateRegistry 在干净的注册表上写入条目后再构造 handler。
 // 复用 run_route_test.go 的 isolateRegistry / freeTCPPort。
 // ============================================================================
 
@@ -40,18 +40,23 @@ func echoHandler(body string) func(*gin.Context) {
 	return func(c *gin.Context) { c.String(http.StatusOK, body) }
 }
 
-// setRoute 在干净的注册表里写入一条分发条目（methods==nil 表示放行所有方法）。
-func setRoute(path string, fn func(*gin.Context), methods map[string]bool) {
+// setRoute 在干净的注册表里写入一条分发条目（method==methodAny 表示放行所有方法）。
+func setRoute(path, method string, fn func(*gin.Context)) {
 	routerMu.Lock()
-	routerMap[path] = &routeEntry{fn: fn, methods: methods}
+	byMethod := routerMap[path]
+	if byMethod == nil {
+		byMethod = make(map[string]*routeEntry)
+		routerMap[path] = byMethod
+	}
+	byMethod[method] = &routeEntry{fn: fn}
 	routerMu.Unlock()
 }
 
 // TestNewRootHandlerDispatch 命中/方法不匹配/未注册三类分支。
 func TestNewRootHandlerDispatch(t *testing.T) {
 	isolateRegistry(t)
-	setRoute("/a", echoHandler("A"), nil)
-	setRoute("/b", echoHandler("B"), map[string]bool{"POST": true})
+	setRoute("/a", methodAny, echoHandler("A"))
+	setRoute("/b", http.MethodPost, echoHandler("B"))
 	h := newRootHandler(nil)
 
 	// 命中：无方法限制

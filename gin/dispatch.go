@@ -19,19 +19,35 @@ import (
 // 分发顺序：
 //  1. /static 前缀 + 配置了静态目录 -> 交 http.FileServer 服务；
 //  2. /ws 前缀 -> 静默 404（不查表、不打业务 warning；ws 实际跑在独立端口）；
-//  3. routerMap 精确命中且方法允许 -> 调用该路由 handler；
-//  4. 其余（未注册路径 / 方法不在白名单）-> 404 + vars.Warning。
+//  3. routerMap 按「路径 + 方法」精确命中（精确方法缺失时回退通配条目）-> 调用该路由 handler；
+//  4. 其余（未注册路径 / 方法既无精确也无通配条目）-> 404 + vars.Warning。
 // ============================================================================
 
 const (
 	staticPrefix = "/static"
 	wsPrefix     = "/ws"
+	// methodAny 是 routerMap 二级 key 的通配方法：RouterType 未声明时注册到此键，
+	// 任意请求方法都可命中。
+	methodAny = ""
 )
 
-// routeEntry 分发条目：fn 为已构建好的 handler，methods==nil 表示放行所有方法。
+// routeEntry 分发条目：fn 为已构建好的 handler，方法维度信息由 routerMap 的二级 key 承载。
 type routeEntry struct {
-	fn      func(*gin.Context)
-	methods map[string]bool
+	fn func(*gin.Context)
+}
+
+// lookupRoute 按「路径 + 方法」查注册表：精确方法优先，缺失时回退通配键。
+// 读表不持锁：键存在即条目已完整写入（routerMu 下整指针替换），
+// 与改造前直读 routerMap 的模式同一风险水平。
+func lookupRoute(path, method string) *routeEntry {
+	byMethod := routerMap[path]
+	if byMethod == nil {
+		return nil
+	}
+	if e, ok := byMethod[method]; ok {
+		return e
+	}
+	return byMethod[methodAny]
 }
 
 // newRootHandler 组装根劫持 handler：静态目录 -> /ws 排除 -> routerMap 精确分发 -> 404+warning。
@@ -53,13 +69,13 @@ func newRootHandler(staticDir *string) gin.HandlerFunc {
 			return
 		}
 
-		// 3. routerMap 精确分发
-		if e, ok := routerMap[p]; ok && (e.methods == nil || e.methods[c.Request.Method]) {
+		// 3. routerMap 按路径+方法精确分发（精确方法缺失时回退通配条目）
+		if e := lookupRoute(p, c.Request.Method); e != nil {
 			vars.Debug("HTTP %s %s -> %v", c.Request.Method, p, e.fn)
 			e.fn(c)
 			return
 		}
-		// 4. 未命中 / 方法不允许：404 + warning
+		// 4. 未命中 / 方法未注册：404 + warning
 		vars.Warning("HTTP 404 未匹配路由: %s %s", c.Request.Method, p)
 		c.JSON(http.StatusNotFound, gin.H{"error": "not found", "code": 404})
 	}

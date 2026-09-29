@@ -1,6 +1,7 @@
 package gin
 
 import (
+	"net/http"
 	"strings"
 	"testing"
 
@@ -40,7 +41,7 @@ func TestIRouterPathExplicitPath(t *testing.T) {
 	if keys[0] != "/wst/api/m/login" {
 		t.Fatalf("✘ 显式路径未生效: %v", keys)
 	}
-	if got := invokeRoute(t, keys[0]); got != "login-ok" {
+	if got := invokeRoute(t, keys[0], http.MethodPost); got != "login-ok" {
 		t.Fatalf("✘ handler 响应 %q != login-ok", got)
 	}
 	for _, k := range keys {
@@ -59,7 +60,7 @@ func TestDefaultDerivationUnchanged(t *testing.T) {
 	if len(keys) != 1 || keys[0] != "/plainrecv/hello" {
 		t.Fatalf("✘ 默认推导行为被改变: %v", keys)
 	}
-	if got := invokeRoute(t, keys[0]); got != "hi" {
+	if got := invokeRoute(t, keys[0], http.MethodGet); got != "hi" {
 		t.Fatalf("✘ handler 响应 %q != hi", got)
 	}
 }

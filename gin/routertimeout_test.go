@@ -47,10 +47,12 @@ func invokeForDeadline(t *testing.T, path string) time.Duration {
 	t.Helper()
 	routerMu.Lock()
 	var fn func(ctx *gin.Context)
-	// 注册表 key 就是纯净路径，value 为 *routeEntry，取其 fn 即可。
-	for k, v := range routerMap {
-		if k == path {
-			fn = v.fn
+	// 注册表是「路径:方法」二级索引，用 lookupRoute 取该路径下已注册的 handler。
+	if e := lookupRoute(path, methodAny); e != nil {
+		fn = e.fn
+	} else {
+		for _, e := range routerMap[path] {
+			fn = e.fn
 			break
 		}
 	}

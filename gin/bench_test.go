@@ -63,12 +63,13 @@ func registerBench() {
 }
 
 // routeFn 从注册表取出一条路由的 handler。
-// routerMap 存的是 *routeEntry，且注册期可能并发写，取用必须持锁。
+// routerMap 是「路径:方法」二级索引，且注册期可能并发写，取用必须持锁；
+// 基准路由未声明 RouterType，落在通配键上。
 func routeFn(t testing.TB, path string) func(*gin.Context) {
 	t.Helper()
 	routerMu.Lock()
 	defer routerMu.Unlock()
-	e := routerMap[path]
+	e := lookupRoute(path, methodAny)
 	if e == nil {
 		t.Fatalf("route %s not registered", path)
 	}

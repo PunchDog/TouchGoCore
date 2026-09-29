@@ -1,6 +1,7 @@
 package gin
 
 import (
+	"net/http"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -49,10 +50,10 @@ func TestQAMixedExplicitAndDerivedPaths(t *testing.T) {
 	if !found[derivedKey] {
 		t.Fatalf("✘ 默认推导路径缺失 %q: %v", derivedKey, keys)
 	}
-	if got := invokeRoute(t, explicitKey); got != "explicit-ok" {
+	if got := invokeRoute(t, explicitKey, http.MethodPost); got != "explicit-ok" {
 		t.Fatalf("✘ 显式 handler 响应 %q != explicit-ok", got)
 	}
-	if got := invokeRoute(t, derivedKey); got != "derived-ok" {
+	if got := invokeRoute(t, derivedKey, http.MethodPost); got != "derived-ok" {
 		t.Fatalf("✘ 推导 handler 响应 %q != derived-ok", got)
 	}
 }

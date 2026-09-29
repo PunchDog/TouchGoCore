@@ -4,8 +4,8 @@ package gin
 // 覆盖默认的 /{小写类型名}/{小写方法名} 推导规则。
 //
 //	key   = Go 方法名（大小写与 reflect 返回的方法名完全一致）
-//	value = 以 "/" 开头的完整路径（gin 语法，路径参数用 ":name"，
-//	        如 /wst/api/m/mobile/sendMessage/:id）
+//	value = 以 "/" 开头的完整字面路径（如 /wst/api/m/mobile/sendMessage）。
+//	        分发为纯净路径的精确匹配，不支持 ":name" 这类 gin 路径参数。
 //
 // 未实现该接口、或某方法名未出现在 map 中时，一律回退到默认推导，
 // 保证 proxywork 等现有调用方零改动、行为不变（纯增量、向后兼容）。

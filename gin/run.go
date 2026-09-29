@@ -21,7 +21,7 @@ import (
 var (
 	routerMap = make(map[string]func(ctx *gin.Context))
 	// routerMu 保护 routerMap：RegisterRouter 可能在 Run 之后由业务动态调用，
-	// 而 Run 会整表遍历注册路由。
+	// 而 Run 会整表快照路由表。
 	routerMu   sync.Mutex
 	httpServer *http.Server
 	httpMu     sync.Mutex
@@ -62,6 +62,11 @@ func getMethodCacheEntry(rcvr reflect.Value, sname, mname string) (*methodCacheE
 	}
 
 	methodType := method.Type()
+	// handler 必须是 func(*gin.Context) 签名；零参类型方法（RouterType 等）在这里拦下，
+	// 否则下面 In(0) 会直接 panic。
+	if methodType.NumIn() != 1 {
+		return nil, fmt.Errorf("method %s on %s: 需要 1 个 *gin.Context 参数，实际 %d 个", mname, sname, methodType.NumIn())
+	}
 	entry := &methodCacheEntry{
 		method:  method,
 		argType: methodType.In(0),
@@ -105,6 +110,7 @@ type IRouterTimeout interface {
 //
 // 路由的 HTTP 方法、显式路径与 ctx 超时分别由 IRouterInterface、IRouterPath、
 // IRouterTimeout 三个可选能力提供，未实现即走默认推导与默认超时。
+// RegisterRouter 只负责填充 routerMap；具体分发由 Run 里的根劫持 handler 完成。
 func RegisterRouter(class IRouterInterface) {
 	sname, mnames := util.GetClassName(class)
 	rcvr := reflect.ValueOf(class)
@@ -144,41 +150,13 @@ func RegisterRouter(class IRouterInterface) {
 		}
 
 		// 预热方法缓存
-		if _, err := getMethodCacheEntry(rcvr, sname, mnameCopy); err != nil {
+		entry, err := getMethodCacheEntry(rcvr, sname, mnameCopy)
+		if err != nil {
 			vars.Error("注册路由方法失败: %s.%s: %v", sname, mnameCopy, err)
 			continue
 		}
 
-		handler := func(ctx *gin.Context) {
-			// 默认 15s，避免慢接口拖死 worker；RouterTimeout 按路径覆盖（如 CheckUrlNow 批量探测外网放宽到 60s）
-			reqTimeout := 15 * time.Second
-			if sec, h := timeouts[ctx.FullPath()]; h {
-				reqTimeout = time.Duration(sec) * time.Second
-			}
-
-			ctxnew, cancel := context.WithTimeout(ctx.Request.Context(), reqTimeout)
-			defer cancel() // 必须调用，释放资源
-
-			// 将新的 ctx 写入请求
-			ctx.Request = ctx.Request.WithContext(ctxnew)
-
-			// 从缓存获取方法信息
-			entry, err := getMethodCacheEntry(rcvr, sname, mnameCopy)
-			if err != nil {
-				ctx.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
-				return
-			}
-
-			// 根据参数类型构造调用参数
-			var args []reflect.Value
-			args = []reflect.Value{reflect.ValueOf(ctx)}
-
-			// 调用函数
-			result := entry.method.Call(args)
-
-			// 回消息（使用预缓存的返回值类型）
-			sendResponse(ctx, result, entry.returnKinds)
-		}
+		handler := buildRouteHandler(rcvr, sname, mnameCopy, entry, timeouts)
 
 		routerMu.Lock()
 		if _, dup := routerMap[callbackmsg]; dup {
@@ -188,6 +166,40 @@ func RegisterRouter(class IRouterInterface) {
 		}
 		routerMap[callbackmsg] = handler
 		routerMu.Unlock()
+	}
+}
+
+// buildRouteHandler 组装路由 handler：默认 15s，避免慢接口拖死 worker；
+// RouterTimeout 按请求路径 ctx.Request.URL.Path 覆盖（根劫持走 NoRoute，ctx.FullPath() 恒为空，
+// 故按真实请求路径查超时表，与 routerMap 分发的纯净路径一致）。
+func buildRouteHandler(rcvr reflect.Value, sname, mname string, entry *methodCacheEntry, timeouts map[string]int64) func(ctx *gin.Context) {
+	return func(ctx *gin.Context) {
+		reqTimeout := 15 * time.Second
+		if sec, h := timeouts[ctx.Request.URL.Path]; h {
+			reqTimeout = time.Duration(sec) * time.Second
+		}
+
+		ctxnew, cancel := context.WithTimeout(ctx.Request.Context(), reqTimeout)
+		defer cancel() // 必须调用，释放资源
+
+		// 将新的 ctx 写入请求
+		ctx.Request = ctx.Request.WithContext(ctxnew)
+
+		// 从缓存获取方法信息（注册期已预热，这里兜底实例迟到激活的场景）
+		cached, err := getMethodCacheEntry(rcvr, sname, mname)
+		if err != nil {
+			ctx.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+			return
+		}
+
+		// 根据参数类型构造调用参数
+		args := []reflect.Value{reflect.ValueOf(ctx)}
+
+		// 调用函数
+		result := cached.method.Call(args)
+
+		// 回消息（使用预缓存的返回值类型）
+		sendResponse(ctx, result, cached.returnKinds)
 	}
 }
 
@@ -255,35 +267,15 @@ func Run(ctx context.Context) error {
 	}
 
 	routerMu.Lock()
-	routes := make(map[string]func(ctx *gin.Context), len(routerMap))
+	snapshot := make(map[string]func(ctx *gin.Context), len(routerMap))
 	for k, v := range routerMap {
-		routes[k] = v
+		snapshot[k] = v
 	}
 	routerMu.Unlock()
 
-	for router, fn := range routes {
-		r := strings.Split(router, "|")
-		if len(r) == 1 {
-			ginServer.Any(router, fn)
-		} else {
-			ss := strings.Split(r[1], "&&")
-			for _, v := range ss {
-				if v == "GET" {
-					ginServer.GET(r[0], fn)
-				}
-				if v == "POST" {
-					ginServer.POST(r[0], fn)
-				}
-				if v == "PUT" {
-					ginServer.PUT(r[0], fn)
-				}
-			}
-		}
-	}
-
-	if cfg.Web.Static != nil {
-		ginServer.Static("/static", *cfg.Web.Static)
-	}
+	// 只注册唯一根劫持：不向 gin 路由树挂任何具体路由，全部经 NoRoute 手动分发。
+	// 静态目录与 /ws 排除均在该 handler 内处理，避免与通配的路由树冲突。
+	ginServer.NoRoute(newRootHandler(buildDispatchIndex(snapshot), cfg.Web.Static))
 
 	addr := "[::]:" + strconv.Itoa(cfg.Web.HTTPPort)
 	useTLS := cfg.Web.TLS != nil && cfg.Web.TLS.Enable

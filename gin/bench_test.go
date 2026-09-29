@@ -62,15 +62,25 @@ func registerBench() {
 	})
 }
 
+// routeFn 从注册表取出一条路由的 handler。
+// routerMap 存的是 *routeEntry，且注册期可能并发写，取用必须持锁。
+func routeFn(t testing.TB, path string) func(*gin.Context) {
+	t.Helper()
+	routerMu.Lock()
+	defer routerMu.Unlock()
+	e := routerMap[path]
+	if e == nil {
+		t.Fatalf("route %s not registered", path)
+	}
+	return e.fn
+}
+
 // ==================== 1. Handler 层并发基准（剥离网络，直测封装开销） ====================
 
 func BenchmarkWrappedHandler_Ping(b *testing.B) {
 	gin.SetMode(gin.TestMode)
 	registerBench()
-	fn := routerMap["/benchrouter/ping"]
-	if fn == nil {
-		b.Fatal("route not registered")
-	}
+	fn := routeFn(b, "/benchrouter/ping")
 
 	b.ReportAllocs()
 	b.RunParallel(func(pb *testing.PB) {
@@ -86,10 +96,7 @@ func BenchmarkWrappedHandler_Ping(b *testing.B) {
 func BenchmarkWrappedHandler_Echo(b *testing.B) {
 	gin.SetMode(gin.TestMode)
 	registerBench()
-	fn := routerMap["/benchrouter/echo"]
-	if fn == nil {
-		b.Fatal("route not registered")
-	}
+	fn := routeFn(b, "/benchrouter/echo")
 
 	b.ReportAllocs()
 	b.RunParallel(func(pb *testing.PB) {

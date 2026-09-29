@@ -47,10 +47,10 @@ func invokeForDeadline(t *testing.T, path string) time.Duration {
 	t.Helper()
 	routerMu.Lock()
 	var fn func(ctx *gin.Context)
-	// 注册表 key 是「路径|方法列表」，这里只按路径取 handler
+	// 注册表 key 就是纯净路径，value 为 *routeEntry，取其 fn 即可。
 	for k, v := range routerMap {
-		if p, _, _ := strings.Cut(k, "|"); p == path {
-			fn = v
+		if k == path {
+			fn = v.fn
 			break
 		}
 	}
@@ -112,7 +112,7 @@ func TestRouterTimeoutWithExplicitPath(t *testing.T) {
 	RegisterRouter(&explicitTimeoutRecv{})
 
 	keys := routerKeys()
-	if len(keys) != 1 || keys[0] != "/wst/api/m/login|POST" {
+	if len(keys) != 1 || keys[0] != "/wst/api/m/login" {
 		t.Fatalf("✘ 显式路径未生效: %v", keys)
 	}
 	if got := invokeForDeadline(t, "/wst/api/m/login"); !within(got, 45) {

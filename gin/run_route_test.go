@@ -40,7 +40,7 @@ func isolateRegistry(t *testing.T) {
 	t.Helper()
 	routerMu.Lock()
 	prev := routerMap
-	routerMap = make(map[string]func(ctx *gin.Context))
+	routerMap = make(map[string]*routeEntry)
 	routerMu.Unlock()
 	methodCache.Clear()
 	t.Cleanup(func() {
@@ -58,7 +58,7 @@ func invokeRoute(t *testing.T, path string) string {
 	var fn func(ctx *gin.Context)
 	for k, v := range routerMap {
 		if path == "" || k == path {
-			fn = v
+			fn = v.fn
 			break
 		}
 	}

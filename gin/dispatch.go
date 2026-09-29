@@ -34,35 +34,8 @@ type routeEntry struct {
 	methods map[string]bool
 }
 
-// buildDispatchIndex 把 routerMap 快照（key 形如 "/path" 或 "/path|GET&&POST"）
-// 归一为「纯净路径 -> routeEntry」的只读索引，供根 handler O(1) 查询。
-// 返回的 map 在服务器运行期只读，无需加锁。
-func buildDispatchIndex(routes map[string]func(*gin.Context)) map[string]*routeEntry {
-	idx := make(map[string]*routeEntry, len(routes))
-	for key, fn := range routes {
-		path, methods := splitRouteKey(key)
-		idx[path] = &routeEntry{fn: fn, methods: methods}
-	}
-	return idx
-}
-
-// splitRouteKey 拆出纯净路径与方法白名单集合。无 "|" 后缀表示放行所有方法。
-func splitRouteKey(key string) (string, map[string]bool) {
-	i := strings.IndexByte(key, '|')
-	if i < 0 {
-		return key, nil // 无方法后缀 => Any
-	}
-	path := key[:i]
-	ms := strings.Split(key[i+1:], "&&")
-	set := make(map[string]bool, len(ms))
-	for _, m := range ms {
-		set[strings.TrimSpace(m)] = true
-	}
-	return path, set
-}
-
 // newRootHandler 组装根劫持 handler：静态目录 -> /ws 排除 -> routerMap 精确分发 -> 404+warning。
-func newRootHandler(index map[string]*routeEntry, staticDir *string) gin.HandlerFunc {
+func newRootHandler(staticDir *string) gin.HandlerFunc {
 	var fileServer http.Handler
 	if staticDir != nil {
 		fileServer = http.StripPrefix(staticPrefix+"/", http.FileServer(http.Dir(*staticDir)))
@@ -79,8 +52,9 @@ func newRootHandler(index map[string]*routeEntry, staticDir *string) gin.Handler
 			c.Status(http.StatusNotFound)
 			return
 		}
+
 		// 3. routerMap 精确分发
-		if e, ok := index[p]; ok && (e.methods == nil || e.methods[c.Request.Method]) {
+		if e, ok := routerMap[p]; ok && (e.methods == nil || e.methods[c.Request.Method]) {
 			vars.Debug("HTTP %s %s -> %v", c.Request.Method, p, e.fn)
 			e.fn(c)
 			return

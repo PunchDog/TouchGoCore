@@ -19,7 +19,7 @@ import (
 )
 
 var (
-	routerMap = make(map[string]func(ctx *gin.Context))
+	routerMap = make(map[string]*routeEntry)
 	// routerMu 保护 routerMap：RegisterRouter 可能在 Run 之后由业务动态调用，
 	// 而 Run 会整表快照路由表。
 	routerMu   sync.Mutex
@@ -145,8 +145,13 @@ func RegisterRouter(class IRouterInterface) {
 		if callbackmsg == "" {
 			callbackmsg = fmt.Sprintf("/%s/%s", strings.ToLower(sname), strings.ToLower(mnameCopy))
 		}
+
+		var methods map[string]bool = nil
 		if s := class.RouterType(); s != nil && len(s) > 0 { //设置了只注册哪些监控
-			callbackmsg += "|" + strings.Join(s, "&&")
+			methods = make(map[string]bool, len(s))
+			for _, m := range s {
+				methods[m] = true
+			}
 		}
 
 		// 预热方法缓存
@@ -164,7 +169,7 @@ func RegisterRouter(class IRouterInterface) {
 			// 这里以后者覆盖前者；需要两套实例并存请拆分类型或用不同路由前缀。
 			vars.Error("路由 %s 重复注册（同名类型的多个实例），本次注册的实例将覆盖先前实例", callbackmsg)
 		}
-		routerMap[callbackmsg] = handler
+		routerMap[callbackmsg] = &routeEntry{fn: handler, methods: methods}
 		routerMu.Unlock()
 	}
 }
@@ -266,16 +271,9 @@ func Run(ctx context.Context) error {
 		ginServer.Use(cors.New(corsCfg))
 	}
 
-	routerMu.Lock()
-	snapshot := make(map[string]func(ctx *gin.Context), len(routerMap))
-	for k, v := range routerMap {
-		snapshot[k] = v
-	}
-	routerMu.Unlock()
-
 	// 只注册唯一根劫持：不向 gin 路由树挂任何具体路由，全部经 NoRoute 手动分发。
 	// 静态目录与 /ws 排除均在该 handler 内处理，避免与通配的路由树冲突。
-	ginServer.NoRoute(newRootHandler(buildDispatchIndex(snapshot), cfg.Web.Static))
+	ginServer.NoRoute(newRootHandler(cfg.Web.Static))
 
 	addr := "[::]:" + strconv.Itoa(cfg.Web.HTTPPort)
 	useTLS := cfg.Web.TLS != nil && cfg.Web.TLS.Enable

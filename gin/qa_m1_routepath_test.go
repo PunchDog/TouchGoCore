@@ -41,8 +41,8 @@ func TestQAMixedExplicitAndDerivedPaths(t *testing.T) {
 	for _, k := range keys {
 		found[k] = true
 	}
-	const explicitKey = "/wst/api/m/login|POST"
-	const derivedKey = "/qaderivedrecv/addurllist|POST"
+	const explicitKey = "/wst/api/m/login"
+	const derivedKey = "/qaderivedrecv/addurllist"
 	if !found[explicitKey] {
 		t.Fatalf("✘ 显式路径缺失 %q: %v", explicitKey, keys)
 	}
@@ -63,7 +63,7 @@ func TestQANoPathInterfaceStillTwoSegment(t *testing.T) {
 	RegisterRouter(&qaDerivedRecv{})
 
 	keys := routerKeys()
-	if len(keys) != 1 || keys[0] != "/qaderivedrecv/addurllist|POST" {
+	if len(keys) != 1 || keys[0] != "/qaderivedrecv/addurllist" {
 		t.Fatalf("✘ 两段推导规则被改变: %v", keys)
 	}
 }

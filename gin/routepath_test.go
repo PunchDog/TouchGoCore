@@ -37,7 +37,7 @@ func TestIRouterPathExplicitPath(t *testing.T) {
 	if len(keys) != 1 {
 		t.Fatalf("✘ 应只注册 1 条路由，实际 %d: %v", len(keys), keys)
 	}
-	if keys[0] != "/wst/api/m/login|POST" {
+	if keys[0] != "/wst/api/m/login" {
 		t.Fatalf("✘ 显式路径未生效: %v", keys)
 	}
 	if got := invokeRoute(t, keys[0]); got != "login-ok" {
@@ -56,7 +56,7 @@ func TestDefaultDerivationUnchanged(t *testing.T) {
 	RegisterRouter(&plainRecv{})
 
 	keys := routerKeys()
-	if len(keys) != 1 || keys[0] != "/plainrecv/hello|GET" {
+	if len(keys) != 1 || keys[0] != "/plainrecv/hello" {
 		t.Fatalf("✘ 默认推导行为被改变: %v", keys)
 	}
 	if got := invokeRoute(t, keys[0]); got != "hi" {
@@ -77,10 +77,10 @@ func TestPartialRouterPathFallsBack(t *testing.T) {
 	for _, k := range keys {
 		found[k] = true
 	}
-	if !found["/wst/api/m/explicit|POST"] {
+	if !found["/wst/api/m/explicit"] {
 		t.Fatalf("✘ 显式路径缺失: %v", keys)
 	}
-	if !found["/partialrecv/fallback|POST"] {
+	if !found["/partialrecv/fallback"] {
 		t.Fatalf("✘ 未列出方法未回退默认推导: %v", keys)
 	}
 }

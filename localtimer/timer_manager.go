@@ -4,6 +4,8 @@ import (
 	"context"
 	"sync"
 	"sync/atomic"
+
+	"touchgocore/list"
 )
 
 // timerTask 是调度通道中传递的定时器项。
@@ -76,6 +78,17 @@ func NewTimerManager() *TimerManager {
 		}
 		wheel.isRunning.Store(true)
 		mgr.wheels[i] = wheel
+
+		// 挂上桶环的隔离与限频钩子（B-F5）：确定性 panic 的肇事节点由轮侧按
+		// unlinkStale 语义摘除，panic 日志复用该轮的每秒限频线。必须在起轮协程
+		// 之前赋值：这两个字段与 slotRing.residue 同一口径，只由本档轮的消费
+		// 协程读取，构造期写、运行期只读，不存在竞态。
+		wheel.tickWheel.quarantineNode = func(node list.INode) {
+			mgr.quarantinePanicNode(wheel, node)
+		}
+		wheel.tickWheel.shouldWarn = func() bool {
+			return wheelShouldWarn(wheel)
+		}
 
 		// 启动时间轮协程
 		mgr.wheelWG.Add(1)

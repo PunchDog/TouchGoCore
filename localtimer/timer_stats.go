@@ -128,7 +128,12 @@ func (m *TimerManager) GetQueueStats() TimerQueueStats {
 	}
 	channels := currentTimerChannels()
 	s.ScheduleShardLen = make([]int, len(channels))
-	s.ScheduleShardCap = int(shardCapFor(len(channels)))
+	// 无通道（TimeStop 之后、尚未 Run）时容量一律为 0，与门面路径 GetQueueStats
+	// 的口径一致：此刻根本没有通道，shardCapFor(0) 会被钳成 1 片而谎报
+	// 「理论每片容量」100000，depth/capacity 算出 0%，看着像健康运行而不是停摆。
+	if len(channels) > 0 {
+		s.ScheduleShardCap = int(shardCapFor(len(channels)))
+	}
 	for i, shard := range channels {
 		s.ScheduleShardLen[i] = len(shard)
 		s.ScheduleLen += len(shard)

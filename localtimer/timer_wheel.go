@@ -326,6 +326,49 @@ func (m *TimerManager) unlinkStale(wheel *TimerWheel, parent *Timer, node list.I
 	m.stats.timersRemoved.Add(1)
 }
 
+// quarantinePanicNode 隔离桶环上的「确定性炸点」节点（B-F5）：同一桶连续 panic
+// 达到上限后由桶环回调本函数，按 unlinkStale 的语义把节点摘除——摘链、扣计数、
+// 断开归属、计入 timersRemoved，让整档轮恢复桶扫描节奏，而不是每拍整环重扫。
+//
+// 肇事节点的 GetParent 本身可能就是 panic 源（业务实现缺陷正是最常见形态），
+// 此时拿不到 parent、也就没法走 parent.mu：退而在 wheelLock 保护下做链表级
+// 摘链 + 扣计数。该实例就此脱离调度，留给业务侧自行处置——轮侧以恢复扫描秩序
+// 为先，宁可漏掉一个坏节点的收尾，也不能让它拖死整档轮。
+//
+// 锁序与包内口径一致：parent.mu → wheelLock → list 锁；调用方（桶环扫描回调）
+// 不持任何锁，与 commitDispatch/unlinkStale 的调用前提相同。
+func (m *TimerManager) quarantinePanicNode(wheel *TimerWheel, node list.INode) {
+	if node == nil {
+		return
+	}
+	parent := safeNodeParent(node)
+	if parent == nil {
+		// 拿不到归属（非定时器节点 / GetParent panic）：轮锁下做裸摘链
+		wheel.wheelLock.Lock()
+		defer wheel.wheelLock.Unlock()
+		node.GetNode().Remove()
+		wheel.timerCount.Add(-1)
+		m.stats.timersRemoved.Add(1)
+		return
+	}
+	m.unlinkStale(wheel, parent, node)
+}
+
+// safeNodeParent 取节点的归属 parent；非定时器节点、parent 为 nil、或业务实现的
+// GetParent 直接 panic 时一律返回 nil，绝不让异常抛回调用方。
+func safeNodeParent(node list.INode) (parent *Timer) {
+	defer func() {
+		if recover() != nil {
+			parent = nil
+		}
+	}()
+	timer, ok := node.(TimerInterface)
+	if !ok {
+		return nil
+	}
+	return timer.GetParent()
+}
+
 // cleanupWheel 清理时间轮
 //
 // 关键：业务回调（Tick）必须在完全释放 wheelLock 之后执行。

@@ -418,9 +418,23 @@ func (t *Timer) beginTick(expectGen uint64) bool {
 	t.inTick.Add(1)
 
 	if t.gen.Load() != expectGen {
-		// 实例已易主（或本条是陈旧的重复调度项）：只撤销在飞标记，
-		// 绝不替新主人做归还收尾。
-		t.inTick.Add(-1)
+		// 实例已易主（或本条是陈旧的重复调度项），绝不替新主人做归还收尾。
+		// 但在飞计数增到这里、代次校验完成之前的窗口内，业务 Remove 可能已经
+		// 因 inTick>0 把归还挂起（requestReleaseLocked 判 releaseDeferred、置
+		// pendingRelease）并推进了代次——那个归还请求唯一的落地者就是本次
+		// beginTick 的退路。此时走 endTick 补做归还（对照下面 abandoned 分支的
+		// 同一写法）：裸减计数会让 pendingRelease 永久悬挂，实例既不回池、
+		// 池 puts 也少计。
+		//
+		// 条件带 !released：released 为真说明归还已经落地（Put 完成），实例正在
+		// 池中等待认领，此刻没有「悬挂的请求」要补，维持裸减即可——这也让本分支
+		// 绝不介入「池认领中」的实例。未挂起（pendingRelease 为假）时同样裸减，
+		// 与既往行为一致，不误触代次匹配语义。
+		if t.pendingRelease.Load() && !t.released.Load() {
+			t.endTick()
+		} else {
+			t.inTick.Add(-1)
+		}
 		return false
 	}
 	if t.abandoned() || t.inPool.Load() {

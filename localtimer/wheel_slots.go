@@ -36,6 +36,12 @@ import (
 // 下一拍重试，不必等一圈（S64 的背压语义原样保留）。
 // ============================================================================
 
+// slotPanicQuarantineThreshold 同一桶的连续 panic 上限：达到即认定桶内存在
+// 「确定性炸点」（每次扫描必 panic 的节点）。此前只按残留处理——游标冻结、
+// 每拍重扫——整档轮会退化为每拍整环扫描 + 每拍一条 panic 日志（vars 异步缓冲
+// 满时单条最长阻塞 5 秒）。超过上限后把肇事节点摘除隔离，让轮恢复桶扫描节奏。
+const slotPanicQuarantineThreshold = 8
+
 // slotRing 一档时间轮内部的桶环。
 //
 // 每条子链自带读写锁，语义与原先那一条大链表完全一致：Add 在子链写锁里挂节点，
@@ -50,6 +56,21 @@ type slotRing struct {
 	// residue 只由本档轮的消费协程读写（runWheel 每档一条），不参与跨协程通信，
 	// 其效果最终通过 cursor 这一个原子量体现，故不必原子。
 	residue bool // 本桶扫描中有节点被留在原地（投递通道满或回调 panic）
+
+	// panicStreak 每桶的连续 panic 计数（下标即物理桶号）。与 residue 同一口径：
+	// 只由本档轮的消费协程（runWheel 每档一条）读写，不参与跨协程通信，不必原子。
+	// 一次无 panic 的完整扫描即清零，因此计的是「连续」而非累计。
+	panicStreak []int
+
+	// quarantineNode 隔离一个确定性 panic 的肇事节点：按 unlinkStale 语义摘链、
+	// 扣计数、断开归属（锁序 parent.mu → wheelLock → list 锁，由轮侧实现保证）。
+	// 由 NewTimerManager 在建轮时挂上；nil 表示本环不具备隔离能力（测试裸环、
+	// 构造期的轮），panic 时退回纯残留处理，与既往行为一致。
+	quarantineNode func(node list.INode)
+
+	// shouldWarn panic 日志限频钩子，接到所属轮的 wheelShouldWarn（与背压告警
+	// 共用同一条每秒限频线）。nil 表示不限频（测试裸环保持逐条输出便于排查）。
+	shouldWarn func() bool
 }
 
 // newSlotRing 建一环。slotCount 必须 > 0。
@@ -62,6 +83,7 @@ func newSlotRing(wheelConfig int64, slotCount int) *slotRing {
 	}
 	r := &slotRing{wheelConfig: wheelConfig, slotCount: int64(slotCount)}
 	r.slots = make([]*list.List, slotCount)
+	r.panicStreak = make([]int, slotCount)
 	for i := range r.slots {
 		r.slots[i] = list.NewUnindexedList()
 	}
@@ -233,18 +255,18 @@ func (r *slotRing) RangeWindow(currentTime int64, f func(list.INode) bool) {
 		// 这一支不回退游标（游标本拍就没动，下一拍仍覆盖同一对桶），依据的是那条
 		// 未成文不变式：在链节点的应落桶步数恒 > 游标（slotFor 一律钳到 cursor+1），
 		// 所以这里能留下残留的只有 slot(cur+1)，而它正是下一拍要扫的那一格。
-		if !r.scanSlot(r.slots[r.slotOfStep(target)], f) {
+		if !r.scanSlot(r.slotOfStep(target), f) {
 			return
 		}
-		r.scanSlot(r.slots[r.slotOfStep(cur+1)], f)
+		r.scanSlot(r.slotOfStep(cur+1), f)
 		return
 	}
 	if target-cur >= r.slotCount {
 		// 落后超过一圈：逐格追已无意义，整环扫一遍（lookahead 那格也在这一次里覆盖了）。
 		// 此时若有残留，游标退回「再落后一圈」的位置，下一拍仍满足整环条件——背压没
 		// 消化完就保持变更前的全扫节奏，绝不把留在身后任意一格里的节点推到一整圈之后。
-		for _, slot := range r.slots {
-			if !r.scanSlot(slot, f) {
+		for i := range r.slots {
+			if !r.scanSlot(i, f) {
 				return
 			}
 		}
@@ -265,7 +287,7 @@ func (r *slotRing) RangeWindow(currentTime int64, f func(list.INode) bool) {
 		last = target + 1
 	}
 	for step := cur + 1; step <= last; step++ {
-		if !r.scanSlot(r.slots[r.slotOfStep(step)], f) {
+		if !r.scanSlot(r.slotOfStep(step), f) {
 			return
 		}
 		if r.residue {
@@ -285,9 +307,9 @@ func (r *slotRing) RangeWindow(currentTime int64, f func(list.INode) bool) {
 	r.cursor.Store(next)
 }
 
-// scanSlot 扫描一个桶，返回「是否继续扫后面的桶」。
+// scanSlot 扫描第 idx 号桶，返回「是否继续扫后面的桶」。
 //
-// 比裸 rangeSlot 多做两件事：
+// 比裸 rangeSlot 多做三件事：
 //
 //  1. 空桶快路径。落后超过一圈（进程被 GC/挂起恢复）时要逐个过 slotCount 个桶，
 //     毫秒轮就是 1000 次读锁加一次快照取还，即使全空也要几十到上百微秒；
@@ -299,18 +321,96 @@ func (r *slotRing) RangeWindow(currentTime int64, f func(list.INode) bool) {
 //     这里就地收下并按残留处理：游标退回本桶之前，本桶剩余节点与其余各桶下一拍重试，
 //     其余定时器照常派发。日志只能留在这里——扫描不在任何锁内（commitDispatch
 //     自带 defer 释放），而 vars 异步缓冲满时最长阻塞 5 秒，持锁打日志会拖死整轮。
-func (r *slotRing) scanSlot(slot *list.List, f func(list.INode) bool) (cont bool) {
+//
+//  3. 确定性炸点的隔离（B-F5）。残留处理只兜得住「偶发 panic」：一个每次扫描必炸的
+//     节点会让游标永远退在本桶之前，整档轮退化为每拍整环扫描（落后满一圈后走
+//     RangeWindow 的全环分支）+ 每拍一条 panic 日志。因此对同一桶记连续 panic 计数，
+//     达到 slotPanicQuarantineThreshold 后逐节点复扫定位肇事者，交给轮侧的
+//     quarantineNode 按 unlinkStale 语义摘除隔离，本拍不再标记残留——游标照常推进，
+//     轮恢复桶扫描节奏。panic 日志经 shouldWarn（接所属轮的 wheelShouldWarn）限频，
+//     与背压告警共用「每轮每秒最多一条」的限频线，杜绝日志洪水。
+//
+// panicStreak 的读写与 residue 同一口径：只在本档轮消费协程上进行，不加锁。
+func (r *slotRing) scanSlot(idx int, f func(list.INode) bool) (cont bool) {
+	slot := r.slots[idx]
 	if slot.Length() == 0 {
 		return true
 	}
 	defer func() {
 		if err := recover(); err != nil {
+			r.panicStreak[idx]++
+			if r.quarantineNode != nil && r.panicStreak[idx] >= slotPanicQuarantineThreshold {
+				// 连续 panic 达到上限：定位并隔离肇事节点。隔离后不标记残留——
+				// 炸点已被摘除，本桶没有「没送走」的节点，游标应当照常推进。
+				r.quarantineSlot(idx, f)
+				r.panicStreak[idx] = 0
+				if r.shouldWarn == nil || r.shouldWarn() {
+					vars.Error("时间轮桶扫描连续 %d 拍发生panic，已隔离肇事节点: 桶=%d 最后错误=%v",
+						slotPanicQuarantineThreshold, idx, err)
+				}
+				cont = true
+				return
+			}
 			r.markResidue()
-			vars.Error("时间轮桶扫描回调发生panic，本桶剩余节点推迟到下一拍重试: %v", err)
+			if r.shouldWarn == nil || r.shouldWarn() {
+				vars.Error("时间轮桶扫描回调发生panic，本桶剩余节点推迟到下一拍重试: %v", err)
+			}
 			cont = true
 		}
 	}()
-	return rangeSlot(slot, f)
+	ok := rangeSlot(slot, f)
+	// 本桶完整扫完且无 panic：连续计数清零（计的是「连续」而非累计）
+	r.panicStreak[idx] = 0
+	return ok
+}
+
+// quarantineSlot 定位并隔离桶内的确定性炸点：取一次新快照，把节点逐个重新喂给
+// 扫描回调，谁 panic 就交给 quarantineNode 摘除。
+//
+// 快照是 panic 之后重取的：此前已成功派发的节点早已摘链，不会出现在快照里；
+// 「未到期而留在原地」的节点被重喂一次是幂等的（扫描回调自带归属/到期复核）。
+// 逐节点的回调与隔离各自包 recover：隔离钩子由轮侧提供（内部要拿 parent.mu →
+// wheelLock），任何一环再炸都不能把整档轮协程带下去，也不能漏掉桶里其余的炸点。
+//
+// 调用前提与 scanSlot 主路径相同：不持任何锁（tickWheelSection 的判定全程无锁，
+// commitDispatch/unlinkStale 自带 defer 释放），因此 quarantineNode 内部按包内
+// 锁序拿锁不会构成逆序。
+func (r *slotRing) quarantineSlot(idx int, f func(list.INode) bool) {
+	slot := r.slots[idx]
+	var nodes []list.INode
+	slot.Range(func(n list.INode) bool {
+		nodes = append(nodes, n)
+		return true
+	})
+	for _, n := range nodes {
+		if r.callScanNode(n, f) {
+			continue
+		}
+		r.quarantineOne(n)
+	}
+}
+
+// callScanNode 把单个节点喂给扫描回调，返回是否未 panic。
+//
+// 回调返回 false（要求终止扫描）也按「未 panic」处理：终止语义由主扫描路径负责，
+// 隔离扫描必须走完整个桶，否则可能漏掉排在后面的肇事节点。
+func (r *slotRing) callScanNode(n list.INode, f func(list.INode) bool) (ok bool) {
+	defer func() {
+		if recover() != nil {
+			ok = false
+		}
+	}()
+	f(n)
+	return true
+}
+
+// quarantineOne 隔离单个肇事节点；隔离动作自身再包一层 recover，钩子出任何问题
+// 都不允许打断本桶其余节点的定位。
+func (r *slotRing) quarantineOne(n list.INode) {
+	defer func() {
+		_ = recover()
+	}()
+	r.quarantineNode(n)
 }
 
 // rangeSlot 包一层，让回调返回 false 能终止整个窗口/全环扫描。

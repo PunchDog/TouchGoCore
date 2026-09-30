@@ -64,6 +64,9 @@ func (m *TimerManager) CloseCtx(ctx context.Context) bool {
 // 轮协程已退出，这些 task 永远不会被 handleTimerAdd 消化：对应定时器既不在链上，
 // 也不会有人再执行它。留着不管就是「幻影活跃」——IsActive() 仍报 true，
 // 实例却永远回不了对象池，而且监控上完全看不出这笔损失。
+//
+// 撤活跃标记前必须按代次甄别（见循环内注释）：捞出来的 task 可能只是实例易主前
+// 的陈旧残影，它对应的实例此刻可能正在别的管理器上活跃。
 func (m *TimerManager) drainPendingAdds() {
 	var total int64
 	for _, wheel := range m.wheels {
@@ -76,9 +79,20 @@ func (m *TimerManager) drainPendingAdds() {
 				// 这里只断计数不追状态，避免收尾路径反过来 panic。
 				if task.timer != nil {
 					if parent := task.timer.GetParent(); parent != nil {
-						// 撤销 addTimerLocked 置上的活跃标记；管理器已关闭，
-						// 并发的 AddTimer 会在入口直接返回 ErrTimerManagerClosed，不会重写。
-						parent.isActive.Store(false)
+						// 只有 task 仍属该实例的当前代次，才撤销 addTimerLocked 置上的
+						// 活跃标记（口径同 timerTask.isValid：活跃 + 代次一致）。实例可能
+						// 已经 Pause（gen++）后被另一个管理器 AddTimer 复活——池易主/多
+						// 管理器形态下这条 task 只是陈旧残影，裸 Store(false) 会把在别处
+						// 活跃的实例静默杀死。非本代 task 只计数（total），不动状态。
+						// 校验与撤标记整体持 parent.mu：与 AddTimer 的「清理→推进代次→
+						// 恢复活跃→入队」临界区互斥，杜绝检查与 Store 之间被复活方穿插。
+						// 本管理器侧并发的 AddTimer 会在入口直接返回 ErrTimerManagerClosed，
+						// 不会重写这个标记。
+						parent.mu.Lock()
+						if parent.IsActive() && parent.gen.Load() == task.gen {
+							parent.isActive.Store(false)
+						}
+						parent.mu.Unlock()
 					}
 				}
 			default:

@@ -83,7 +83,21 @@ func Run(ctx context.Context) {
 	if old := timerRT.Swap(rt); old != nil {
 		vars.Warning("定时器系统重复启动，先收尾上一轮生命周期")
 		old.shutdown()
-		old.tickWG.Wait()
+		// 带预算地等旧 tick 协程退出：消费协程卡死在业务 Tick 里时，无预算的
+		// Wait 会让本次 Run 永久挂死，与下面 waitConsumersDrain「超时只报错、
+		// 不阻塞本轮启动」的意图矛盾（TimeStop 的同一路径正是带预算写法）。
+		// 超时后照常继续本轮启动：孤儿协程醒来时会因 timeTick 循环顶的生命周期
+		// 检查（closech 已关闭）自行退出，不会去消费新一轮的调度项。
+		oldDone := make(chan struct{})
+		go func() {
+			old.tickWG.Wait()
+			close(oldDone)
+		}()
+		select {
+		case <-oldDone:
+		case <-time.After(DefaultCloseBudget):
+			vars.Error("等待上一轮滴答协程退出超时: 有分片卡在业务 Tick 里未返回，本轮照常启动（孤儿协程醒来后会因生命周期检查自行退出）")
+		}
 	}
 	if !waitConsumersDrain(DefaultCloseBudget) {
 		vars.Error("等待上一轮消费协程退出超时: 有分片卡在业务 Tick 里未返回，本轮照常启动（该协程醒来后会因生命周期检查自行退出）")

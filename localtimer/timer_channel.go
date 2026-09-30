@@ -1,6 +1,8 @@
 package localtimer
 
 // shardCapFor 单片容量：总容量按片数均分（S68），非法片数按 1 片算，且不低于 1。
+// 只服务于「建通道」与「通道已存在」两种场合；通道数组为空（TimeStop 后/未 Run）
+// 时的统计口径是容量 0 而不是钳成 1 片的理论值，见 GetQueueStats 的调用侧。
 func shardCapFor(n int) int64 {
 	if n < 1 {
 		n = 1

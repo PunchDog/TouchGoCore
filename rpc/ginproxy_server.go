@@ -3,12 +3,22 @@ package rpc
 import (
 	"context"
 	"fmt"
+	"strings"
 	"touchgocore/gin"
 	"touchgocore/network/message"
 	"touchgocore/vars"
 
 	"google.golang.org/protobuf/proto"
 )
+
+// isUpperHTTPMethod 判定方法段是否为合法的大写 HTTP 方法（与 config.validateGinPath 同口径）。
+func isUpperHTTPMethod(m string) bool {
+	switch m {
+	case "GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", "CONNECT", "TRACE":
+		return true
+	}
+	return false
+}
 
 // ============================================================================
 // 反向 gRPC 路由代理：网关服务端侧。
@@ -25,20 +35,39 @@ func (s *RpcServer) handleGinProxyFrame(cs *clientSession, clientNameKey string,
 		reg := &message.GinRouteRegistration{}
 		if err := proto.Unmarshal(msg.GetBody(), reg); err != nil {
 			vars.Error("RPC服务端解析路由注册失败[%s]: %v", clientNameKey, err)
-			s.sendGinRegisterAck(clientNameKey, reqID, false, "invalid registration body")
+			s.sendGinRegisterAck(cs, clientNameKey, reqID, false, "invalid registration body")
+			return
+		}
+		// A-F3 配套闸门：本会话已被同名新会话顶替时拒绝注册。旧连接上迟到的注册帧
+		// 若放行，会把条目的 session 代际写回旧值，旧会话随后的双键回收又会误删，
+		// 新会话路由静默 404。会话流按名解析的 sessionProxy 本身无此问题。
+		if cur, ok := s.nametoclientstream.Load(clientNameKey); !ok || cur != cs {
+			vars.Error("RPC服务端拒绝过期会话的路由注册[%s] session=%d（当前会话已切换）", clientNameKey, cs.id)
+			s.sendGinRegisterAck(cs, clientNameKey, reqID, false, "stale session, registration rejected")
 			return
 		}
 		proxy := &sessionProxy{server: s, clientNameKey: clientNameKey}
 		n := 0
 		for _, r := range reg.GetRoutes() {
-			if r == nil || r.GetUrlPath() == "" {
+			if r == nil {
 				continue
 			}
-			gin.RegisterGRPCRoute(clientNameKey, r.GetUrlPath(), r.GetMethod(), proxy)
+			// A-F2：注册前逐条复核格式，非法条目跳过并留痕，不影响同帧其余合法条目。
+			// 客户端共享 token 鉴权，上报内容按不可信处理。
+			path, method := r.GetUrlPath(), r.GetMethod()
+			if !strings.HasPrefix(path, "/") {
+				vars.Error("RPC服务端拒绝非法路由注册[%s] session=%d: path=%q 必须以 / 开头", clientNameKey, cs.id, path)
+				continue
+			}
+			if method != "" && !isUpperHTTPMethod(method) {
+				vars.Error("RPC服务端拒绝非法路由注册[%s] session=%d: %q method=%q 不是大写 HTTP 方法", clientNameKey, cs.id, path, method)
+				continue
+			}
+			gin.RegisterGRPCRoute(clientNameKey, cs.id, path, method, proxy)
 			n++
 		}
-		vars.Info("RPC服务端注册反向路由[%s] 共%d条", clientNameKey, n)
-		s.sendGinRegisterAck(clientNameKey, reqID, true, fmt.Sprintf("registered %d routes", n))
+		vars.Info("RPC服务端注册反向路由[%s] session=%d 共%d条", clientNameKey, cs.id, n)
+		s.sendGinRegisterAck(cs, clientNameKey, reqID, true, fmt.Sprintf("registered %d routes", n))
 
 	case ginSubProxyResp:
 		rsp := &message.GinHTTPResponse{}
@@ -63,14 +92,19 @@ func (s *RpcServer) handleGinProxyFrame(cs *clientSession, clientNameKey string,
 }
 
 // sendGinRegisterAck 回一帧注册确认（复用 request_id 让客户端 pending 匹配）。
-func (s *RpcServer) sendGinRegisterAck(clientNameKey string, reqID uint64, ok bool, m string) {
+// 必须走 cs 自己的流而不是按名解析「当前会话」：注册帧可能来自已被顶替的旧会话
+// （stale 拒绝路径），按名发送会把回执发到新会话的流上，旧客户端只能干等超时。
+func (s *RpcServer) sendGinRegisterAck(cs *clientSession, clientNameKey string, reqID uint64, ok bool, m string) {
 	body, err := proto.Marshal(&message.GinRegisterAck{Ok: ok, Msg: m})
 	if err != nil {
 		vars.Error("RPC服务端序列化注册回执失败[%s]: %v", clientNameKey, err)
 		return
 	}
 	frame := newGinProxyFrame(ginSubRegisterAck, reqID, body)
-	if err := s.sendToSession(clientNameKey, frame); err != nil {
+	cs.sendMu.Lock()
+	err = cs.stream.Send(frame)
+	cs.sendMu.Unlock()
+	if err != nil {
 		vars.Error("RPC服务端回注册回执失败[%s]: %v", clientNameKey, err)
 	}
 }

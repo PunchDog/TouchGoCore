@@ -284,8 +284,10 @@ func (s *RpcServer) closeSession(clientNameKey string, cs *clientSession) {
 	// 无论是否仍是本会话，都要作废这一会话在途的代理等待，让 sessionProxy.Do 立即失败（回 502）。
 	cs.abandonProxyPending()
 	if own {
-		// 同名重连时新会话已接管并重新注册路由，这里只回收本会话属主的路由，不误删新会话的。
-		gin.UnregisterGRPCRoutes(clientNameKey)
+		// A-F3：按 owner+session 双键回收。own 判定（sessionMu 内）与本行回收（锁外）
+		// 之间存在窗口：同名新会话可能已接管并重新注册路由。双键回收保证只摘本会话
+		// （cs.id）代际的条目，新会话注册的条目 session 不同，不会被旧会话抹掉。
+		gin.UnregisterGRPCRoutes(clientNameKey, cs.id)
 		s.triggerOnClientDisconnected(clientNameKey)
 	}
 }

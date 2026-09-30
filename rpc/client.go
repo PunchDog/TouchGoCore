@@ -32,8 +32,14 @@ var (
 
 // closeDrainTimeout Close 排空后台协程的兜底上限：正常路径 recvLoop 随流取消即时退出、
 // sendGinRegistration 随 failAllPending 立即返回，仅 pathological 的业务代理 handler 卡住
-// 才会触顶。超时后告警并继续交还对象池，宁可留极小残留竞争也不让停机挂死。
+// 才会触顶。超时后**不交还对象池**（见 drainBackground / Close 的取舍说明）。
 const closeDrainTimeout = 5 * time.Second
+
+// defaultProxyConcurrency 下行代理请求的客户端并发上限（A-F6）。
+// 修复前每条代理请求起一个无界 goroutine：网关侧一次流量尖峰或恶意刷量
+// 就能让后端进程 goroutine 爆量。超限的请求直接回 503 语义的代理响应，
+// 让网关按「后端过载」处理，而不是把客户端拖死。
+const defaultProxyConcurrency = 64
 
 // RpcClient rpc客户端
 type RpcClient struct {
@@ -72,6 +78,20 @@ type RpcClient struct {
 	// Close 交还对象池（Remove）前必须排空，否则旧主人的协程会与复用同一块内存的新主人的
 	// initcallback 并发读写裸字段（serverName/fullAddr 等），构成对象池 use-after-free 数据竞争。
 	bgWG sync.WaitGroup
+	// proxySem 下行代理 handler 的并发信号量（容量 defaultProxyConcurrency）。
+	// 惰性初始化（proxySemaphore）：RpcClient 经 localtimer 对象池复用，零值实例
+	// 与测试直接构造的实例都拿不到 make 过的 channel；Once 保证只建一次。
+	// 池复用时上一位主人的令牌必已归还——未归还（drain 超时）的实例不会被 Remove 交还池。
+	proxySem     chan struct{}
+	proxySemOnce sync.Once
+}
+
+// proxySemaphore 返回（并按需创建）代理并发信号量。
+func (c *RpcClient) proxySemaphore() chan struct{} {
+	c.proxySemOnce.Do(func() {
+		c.proxySem = make(chan struct{}, defaultProxyConcurrency)
+	})
+	return c.proxySem
 }
 
 // Close 主动关闭客户端：停重连定时器、作废流、唤醒等待中的请求、关连接并从注册表摘除。
@@ -100,7 +120,15 @@ func (c *RpcClient) Close() error {
 	// 交还对象池前必须排空与流绑定的后台协程：否则旧主人的 recvLoop / sendGinRegistration /
 	// handleProxyRequest 仍可能读写裸字段，而 Remove 后这块内存随时被新 NewRpcClient 取走、
 	// 其 initcallback 并写 serverName/fullAddr——这正是对象池 use-after-free 数据竞争的根因。
-	c.drainBackground()
+	if !c.drainBackground() {
+		// A-F6：排空超时（业务代理 handler 卡死）则**不交还对象池**。
+		// 取舍说明：卡死的协程仍持有本实例的字段引用，此时 Remove 交池等于把
+		// 同一块内存交给新主人并发读写（use-after-free 数据竞争）；宁可泄漏这一个
+		// 实例（连同卡死的 goroutine，它本就无法被强杀），也不制造静默的数据串台。
+		// 泄漏有上界：只有触发 closeDrainTimeout 的异常关闭才会走到这里。
+		vars.Error("RPC客户端[%s]后台协程未排空，实例不交还对象池（宁可泄漏，避免池复用 use-after-free）", c.fullAddr)
+		return nil
+	}
 	// 所有权交还对象池：注册表里已无引用，Pause 会让这个实例永久悬挂
 	c.Remove()
 	return nil
@@ -108,7 +136,8 @@ func (c *RpcClient) Close() error {
 
 // drainBackground 等待本客户端所有与流绑定的后台协程退出，带超时兜底。
 // 目的：让 NewTimer initcallback 的「独占期」假设真正成立——交还对象池后不再有旧协程读写裸字段。
-func (c *RpcClient) drainBackground() {
+// 返回是否在预算内完成排空；false 表示仍有协程在跑，调用方不得交还对象池。
+func (c *RpcClient) drainBackground() bool {
 	done := make(chan struct{})
 	go func() {
 		c.bgWG.Wait()
@@ -116,8 +145,10 @@ func (c *RpcClient) drainBackground() {
 	}()
 	select {
 	case <-done:
+		return true
 	case <-time.After(closeDrainTimeout):
 		vars.Error("RPC客户端关闭时后台协程未在[%v]内退出[%s]，可能存在卡死的业务代理回调", closeDrainTimeout, c.fullAddr)
+		return false
 	}
 }
 
@@ -357,11 +388,22 @@ func (c *RpcClient) recvLoop(stream message.Grpc_MsgClient) {
 		// 反向代理请求（服务端发起，子码=3）：不当作自身 pending 响应，
 		// 起协程异步处理避免拖慢客户端自身 RPC 回包。注册回执（子码=2）仍走下方 rid 匹配。
 		if recv.GetHead().GetProtocol1() == ProtocolGinProxy && recv.GetHead().GetProtocol2() == ginSubProxyReq {
+			// A-F6：并发信号量限流。占不到令牌说明已有 defaultProxyConcurrency 个
+			// 代理 handler 在跑，直接回 503 语义的代理响应，不再起无界 goroutine。
+			select {
+			case c.proxySemaphore() <- struct{}{}:
+			default:
+				vars.Error("RPC客户端代理并发超限(>%d)[%s]，request_id=%d 直接回 503",
+					defaultProxyConcurrency, c.fullAddr, recv.GetHead().GetRequestId())
+				c.respondProxyOverloaded(recv)
+				continue
+			}
 			// 本协程仍在 bgWG 计数内（Done 未执行），此处 Add(1) 发生在计数>0 时，
 			// 与并发 Wait 合法；handleProxyRequest 会读裸字段，故纳入 Close 排空范围。
 			c.bgWG.Add(1)
 			go func() {
 				defer c.bgWG.Done()
+				defer func() { <-c.proxySemaphore() }()
 				c.handleProxyRequest(recv)
 			}()
 			continue

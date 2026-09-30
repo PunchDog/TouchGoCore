@@ -117,7 +117,7 @@ func TestGinProxyDispatchHandler(t *testing.T) {
 	RegisterGinProxyHandler("/dp/:id|GET", func(req *GinProxyRequest) *GinProxyResponse {
 		return &GinProxyResponse{Status: http.StatusOK, Body: []byte("hi " + req.Params["id"])}
 	})
-	rsp := client.dispatchProxyHandler(&message.GinHTTPRequest{
+	rsp := client.dispatchProxyHandler(context.Background(), &message.GinHTTPRequest{
 		Method:         http.MethodGet,
 		MatchedPattern: "/dp/:id",
 		Params:         []*message.GinParam{{Key: "id", Value: "bob"}},
@@ -127,14 +127,14 @@ func TestGinProxyDispatchHandler(t *testing.T) {
 	}
 
 	// 无回调 -> 501。
-	miss := client.dispatchProxyHandler(&message.GinHTTPRequest{Method: http.MethodGet, MatchedPattern: "/nope"})
+	miss := client.dispatchProxyHandler(context.Background(), &message.GinHTTPRequest{Method: http.MethodGet, MatchedPattern: "/nope"})
 	if miss.GetStatus() != http.StatusNotImplemented {
 		t.Fatalf("✘ 无回调应 501，实际 %d", miss.GetStatus())
 	}
 
 	// panic 回调 -> 500（隔离崩溃，不让 panic 击穿 recvLoop）。
 	RegisterGinProxyHandler("/boom|GET", func(*GinProxyRequest) *GinProxyResponse { panic("kaboom") })
-	pan := client.dispatchProxyHandler(&message.GinHTTPRequest{Method: http.MethodGet, MatchedPattern: "/boom"})
+	pan := client.dispatchProxyHandler(context.Background(), &message.GinHTTPRequest{Method: http.MethodGet, MatchedPattern: "/boom"})
 	if pan.GetStatus() != http.StatusInternalServerError {
 		t.Fatalf("✘ panic 回调应 500，实际 %d", pan.GetStatus())
 	}
@@ -189,7 +189,7 @@ func TestGinProxyRegistrationAck(t *testing.T) {
 	st := &gpRecordStream{}
 	cs := &clientSession{stream: st}
 	srv.nametoclientstream.Store("peer", cs)
-	t.Cleanup(func() { gin.UnregisterGRPCRoutes("peer") })
+	t.Cleanup(func() { gin.UnregisterGRPCRoutes("peer", cs.id) })
 
 	reg := &message.GinRouteRegistration{Routes: []*message.GinRoute{
 		{UrlPath: "/regtest/hello", Method: http.MethodGet},

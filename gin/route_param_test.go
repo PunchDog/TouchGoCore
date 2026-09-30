@@ -13,7 +13,7 @@ import (
 // ":name" 参数段匹配的回归用例：
 //   - 精确未命中时逐段匹配参数路由，":id" 段捕获非空单段并回填 ctx.Param；
 //   - 方法门控与字面路由同口径（精确方法优先，再通配）；
-//   - 尾斜杠（空参数段）/ 段数不符 / 方法不匹配均落 404；
+//   - 尾斜杠（空参数段）/ 段数不符落 404；方法不匹配落 405+Allow（A-F8）；
 //   - 字面路由优先于参数路由（同段数时精确命中不被参数模式抢占）。
 // 复用 run_route_test.go 的 isolateRegistry / freeTCPPort。
 // ============================================================================
@@ -54,7 +54,7 @@ func TestParamRouteMatchAndCapture(t *testing.T) {
 	}
 }
 
-// TestParamRouteMissBranches 空参数段 / 段数不符 / 方法不匹配都应 404。
+// TestParamRouteMissBranches 空参数段 / 段数不符应 404；方法不匹配应 405+Allow（A-F8）。
 func TestParamRouteMissBranches(t *testing.T) {
 	isolateRegistry(t)
 	RegisterRouter(&paramRecv{})
@@ -65,11 +65,15 @@ func TestParamRouteMissBranches(t *testing.T) {
 		{"尾斜杠空参数", http.MethodGet, "/wst/api/m/mobile/sendMessage/"},
 		{"段数过多", http.MethodGet, "/wst/api/m/mobile/sendMessage/5/extra"},
 		{"段数不足", http.MethodGet, "/wst/api/m/mobile/sendMessage"},
-		{"方法不匹配", http.MethodPost, "/wst/api/m/mobile/sendMessage/5"},
 	} {
 		if code, _ := serveRoot(t, tc.method, tc.path); code != http.StatusNotFound {
 			t.Fatalf("✘ %s：%s %s 应 404，实际 %d", tc.name, tc.method, tc.path, code)
 		}
+	}
+	// 模式命中但方法未注册（GET 注册，POST 请求）：405 + Allow。
+	code, _ := serveRoot(t, http.MethodPost, "/wst/api/m/mobile/sendMessage/5")
+	if code != http.StatusMethodNotAllowed {
+		t.Fatalf("✘ 方法不匹配：%s 应 405，实际 %d", "POST /wst/api/m/mobile/sendMessage/5", code)
 	}
 }
 

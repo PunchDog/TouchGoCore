@@ -21,9 +21,11 @@ import (
 var (
 	// routerMap 二级索引：外层 key=纯净路径，内层 key=HTTP 方法（"" 为通配，放行所有方法）。
 	routerMap = make(map[string]map[string]*routeEntry)
-	// routerMu 保护 routerMap：RegisterRouter 可能在 Run 之后由业务动态调用，
-	// 而 Run 会整表快照路由表。
-	routerMu   sync.Mutex
+	// routerMu 保护 routerMap：RegisterRouter / RegisterGRPCRoute 可能在 Run 之后
+	// 动态调用（含 gRPC 客户端连接/断连触发的运行期注册与回收），而分发侧每个
+	// HTTP 请求都要查表。用 RWMutex：分发读多写少，读侧 RLock 并发安全，
+	// 杜绝「无锁读 map vs 运行期写 map」的 fatal concurrent map read/write。
+	routerMu   sync.RWMutex
 	httpServer *http.Server
 	httpMu     sync.Mutex
 )

@@ -1,6 +1,7 @@
 package rpc
 
 import (
+	"context"
 	"net/http"
 	"sync"
 	"time"
@@ -155,7 +156,23 @@ func (c *RpcClient) sendGinRegistration() {
 	}
 }
 
-// handleProxyRequest 处理一条下行代理请求：查回调 → 执行 → 回传响应（request_id 原样回填）。
+// proxyHandlerTimeout 客户端代理回调的执行超时（A-F6）。
+// 与服务端 serveGRPCProxy 的 15s 同口径、略短 1s：赶在服务端放弃（回 502）之前
+// 把本端的超时响应回帧，让网页端拿到确定的 504 而不是网关侧的笼统 502。
+const proxyHandlerTimeout = 14 * time.Second
+
+// respondProxyOverloaded 并发超限时直接回一帧 503 语义的代理响应（不执行回调）。
+func (c *RpcClient) respondProxyOverloaded(recv *message.FSMessage) {
+	rid := recv.GetHead().GetRequestId()
+	body, err := proto.Marshal(&message.GinHTTPResponse{Status: http.StatusServiceUnavailable})
+	if err != nil {
+		vars.Error("RPC客户端序列化过载代理响应失败[%s]: %v", c.fullAddr, err)
+		return
+	}
+	c.sendRaw(newGinProxyFrame(ginSubProxyResp, rid, body))
+}
+
+// handleProxyRequest 处理一条下行代理请求：查回调 → 带超时执行 → 回传响应（request_id 原样回填）。
 func (c *RpcClient) handleProxyRequest(recv *message.FSMessage) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -169,7 +186,10 @@ func (c *RpcClient) handleProxyRequest(recv *message.FSMessage) {
 	}
 	rid := recv.GetHead().GetRequestId()
 
-	rsp := c.dispatchProxyHandler(req)
+	ctx, cancel := context.WithTimeout(context.Background(), proxyHandlerTimeout)
+	defer cancel()
+
+	rsp := c.dispatchProxyHandler(ctx, req)
 	body, err := proto.Marshal(rsp)
 	if err != nil {
 		vars.Error("RPC客户端序列化代理响应失败[%s]: %v", c.fullAddr, err)
@@ -178,8 +198,9 @@ func (c *RpcClient) handleProxyRequest(recv *message.FSMessage) {
 	c.sendRaw(newGinProxyFrame(ginSubProxyResp, rid, body))
 }
 
-// dispatchProxyHandler 按 matched_pattern + method 查本地回调并执行；无回调回 501，panic 回 500。
-func (c *RpcClient) dispatchProxyHandler(req *message.GinHTTPRequest) *message.GinHTTPResponse {
+// dispatchProxyHandler 按 matched_pattern + method 查本地回调并执行；无回调回 501，panic 回 500，
+// ctx 超时回 504（A-F6：回调本体不可强杀，超时后其 goroutine 继续跑完即弃，结果不再回传）。
+func (c *RpcClient) dispatchProxyHandler(ctx context.Context, req *message.GinHTTPRequest) *message.GinHTTPResponse {
 	h, ok := lookupGinProxyHandler(req.GetMatchedPattern(), req.GetMethod())
 	if !ok {
 		return &message.GinHTTPResponse{Status: http.StatusNotImplemented}
@@ -194,27 +215,41 @@ func (c *RpcClient) dispatchProxyHandler(req *message.GinHTTPRequest) *message.G
 		Body:           req.GetBody(),
 	}
 
-	var presp *GinProxyResponse
-	callErr := func() (err any) {
-		defer func() { err = recover() }()
-		presp = h(preq)
-		return nil
+	type callResult struct {
+		presp *GinProxyResponse
+		rerr  any
+	}
+	resultCh := make(chan callResult, 1)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				resultCh <- callResult{rerr: r}
+			}
+		}()
+		resultCh <- callResult{presp: h(preq)}
 	}()
-	if callErr != nil {
-		vars.Error("RPC客户端代理回调panic[%s] %s %s: %v", c.fullAddr, req.GetMethod(), req.GetUrlPath(), callErr)
-		return &message.GinHTTPResponse{Status: http.StatusInternalServerError}
-	}
-	if presp == nil {
-		return &message.GinHTTPResponse{Status: http.StatusInternalServerError}
-	}
-	status := int32(presp.Status)
-	if status == 0 {
-		status = http.StatusOK
-	}
-	return &message.GinHTTPResponse{
-		Status:  status,
-		Headers: httpHeadersToGin(presp.Header),
-		Body:    presp.Body,
+
+	select {
+	case <-ctx.Done():
+		vars.Error("RPC客户端代理回调超时[%s] %s %s: %v", c.fullAddr, req.GetMethod(), req.GetUrlPath(), ctx.Err())
+		return &message.GinHTTPResponse{Status: http.StatusGatewayTimeout}
+	case res := <-resultCh:
+		if res.rerr != nil {
+			vars.Error("RPC客户端代理回调panic[%s] %s %s: %v", c.fullAddr, req.GetMethod(), req.GetUrlPath(), res.rerr)
+			return &message.GinHTTPResponse{Status: http.StatusInternalServerError}
+		}
+		if res.presp == nil {
+			return &message.GinHTTPResponse{Status: http.StatusInternalServerError}
+		}
+		status := int32(res.presp.Status)
+		if status == 0 {
+			status = http.StatusOK
+		}
+		return &message.GinHTTPResponse{
+			Status:  status,
+			Headers: httpHeadersToGin(res.presp.Header),
+			Body:    res.presp.Body,
+		}
 	}
 }
 

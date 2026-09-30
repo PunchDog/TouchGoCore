@@ -20,8 +20,8 @@ import (
 
 // ============================================================================
 // 根劫持 + 手动分发（NoRoute）的回归用例：
-//  1. newRootHandler：命中路径+方法 -> 调用；方法不在白名单 -> 404；未注册路径 -> 404；
-//     /ws 前缀静默 404；/static 前缀走文件服务；
+//  1. newRootHandler：命中路径+方法 -> 调用；路径在但方法不在白名单 -> 405+Allow；
+//     未注册路径 -> 404；/ws 前缀静默 404；/static 前缀走文件服务；
 //  2. Run 集成：显式/默认路由经根 handler 真实分发命中。
 // 根 handler 直接读全局 routerMap（map[string]map[string]*routeEntry，二级 key=方法），
 // 用例通过 isolateRegistry 在干净的注册表上写入条目后再构造 handler。
@@ -71,11 +71,14 @@ func TestNewRootHandlerDispatch(t *testing.T) {
 	if w.Code != http.StatusOK || w.Body.String() != "B" {
 		t.Fatalf("✘ /b POST 未命中: %d %q", w.Code, w.Body.String())
 	}
-	// 方法不在白名单 -> 404
+	// 方法不在白名单 -> 405 + Allow（A-F8：路径已注册、方法未注册）
 	c, w = newTestCtx(http.MethodGet, "/b")
 	h(c)
-	if w.Code != http.StatusNotFound {
-		t.Fatalf("✘ /b GET 方法不匹配应 404，实际 %d", w.Code)
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("✘ /b GET 方法不匹配应 405，实际 %d", w.Code)
+	}
+	if allow := w.Header().Get("Allow"); allow != http.MethodPost {
+		t.Fatalf("✘ 405 应带 Allow: POST，实际 %q", allow)
 	}
 	// 未注册路径（含任意深度）-> 404
 	for _, p := range []string{"/unknown", "/api1/api2", "/api1/api2/api3"} {
@@ -129,7 +132,7 @@ func (*dpRecv) RouterType() []string       { return []string{"GET"} }
 func (*dpRecv) Ping(_ *gin.Context) string { return "pong" }
 
 // TestDispatchRunIntegration 经 Run 起真实服务器，验证根劫持分发命中已注册路由，
-// 方法不匹配/未注册路径/ws 均 404。
+// 方法不匹配 405、未注册路径/ws 404。
 func TestDispatchRunIntegration(t *testing.T) {
 	isolateRegistry(t)
 	RegisterRouter(&dpRecv{})
@@ -160,8 +163,8 @@ func TestDispatchRunIntegration(t *testing.T) {
 	if status, body := do("GET", "/dprecv/ping"); status != http.StatusOK || body != "pong" {
 		t.Fatalf("✘ 命中分发失败: %d %q", status, body)
 	}
-	if status, _ := do("POST", "/dprecv/ping"); status != http.StatusNotFound {
-		t.Fatalf("✘ 方法不匹配应 404，实际 %d", status)
+	if status, _ := do("POST", "/dprecv/ping"); status != http.StatusMethodNotAllowed {
+		t.Fatalf("✘ 方法不匹配应 405，实际 %d", status)
 	}
 	if status, _ := do("GET", "/deep/not/registered"); status != http.StatusNotFound {
 		t.Fatalf("✘ 未注册路径应 404，实际 %d", status)

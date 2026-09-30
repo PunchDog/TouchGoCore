@@ -59,11 +59,10 @@ func isolateRegistry(t *testing.T) {
 }
 
 // invokeRoute 按「路径 + 方法」调用注册表里的 handler，返回响应体。
+// lookupRoute 自带 routerMu 读锁（A-F1），外层不得再持写锁，否则 RLock 死锁。
 func invokeRoute(t *testing.T, path, method string) string {
 	t.Helper()
-	routerMu.Lock()
 	entry := lookupRoute(path, method)
-	routerMu.Unlock()
 	if entry == nil {
 		t.Fatalf("✘ 路由 %q %s 未注册（现有: %v）", path, method, routerKeys())
 	}

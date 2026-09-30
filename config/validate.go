@@ -159,6 +159,8 @@ func (c *Cfg) Validate() error {
 				return err
 			}
 		}
+		// seenGinPaths: 归一化 "path|method" -> 首次登记处（报错定位用），跨全部客户端汇总。
+		seenGinPaths := make(map[string]string)
 		for i, cl := range rpc.Client {
 			if cl == nil {
 				continue
@@ -167,6 +169,15 @@ func (c *Cfg) Validate() error {
 				if err := validateGinPath(gp); err != nil {
 					return fmt.Errorf("rpc.client[%d].ginpath[%d]=%q: %w", i, j, gp, err)
 				}
+				// A-F7：path|method 全局去重（同客户端内与跨客户端一并拦）。
+				// 网关按「路径+方法」精确分发，且代理注册拒绝覆盖不同属主的既有条目：
+				// 重复项要么被拒（死配置），要么互相遮蔽，都是部署期就能确定的错。
+				key := ginPathKey(gp)
+				where := fmt.Sprintf("rpc.client[%d].ginpath[%d]", i, j)
+				if prev, dup := seenGinPaths[key]; dup {
+					return fmt.Errorf("%s=%q: path|method 与 %s 重复", where, gp, prev)
+				}
+				seenGinPaths[key] = where
 			}
 		}
 		if rpc.TLS != nil && rpc.TLS.Enable {
@@ -343,6 +354,8 @@ func filesExist(prefix, cert, key string) error {
 // validateGinPath 轻校验一条 ginpath 项（形如 "urlpath|METHOD"）。
 // 拦的是「静默注册错路由」：前导斜杠缺失、方法段小写、":name" 段冒号后为空，
 // 都是部署期就能确定的拼写错，留到运行时只会把一条永远撞不上的路由推进网关。
+// 另拦 /static、/ws 保留前缀（A-F7）：网关根劫持在查路由表**之前**就把 /static
+// 交给文件服务器、把 /ws 静默 404（gin/dispatch.go），此类 ginpath 永远分发不到，是死路由。
 func validateGinPath(item string) error {
 	if item == "" {
 		return fmt.Errorf("ginpath 项为空")
@@ -367,7 +380,22 @@ func validateGinPath(item string) error {
 			return fmt.Errorf(":name 段 %q 冒号后至少需要一个字符", seg)
 		}
 	}
+	// 保留前缀按段边界判定：/static、/static/... 与 /ws、/ws/... 拦截，
+	// /staticfoo、/wsx 不受影响。
+	for _, reserved := range []string{"/static", "/ws"} {
+		if path == reserved || strings.HasPrefix(path, reserved+"/") {
+			return fmt.Errorf("urlpath %q 占用网关保留前缀 %s（根劫持在查表前处理），此类配置是死路由", path, reserved)
+		}
+	}
 	return nil
+}
+
+// ginPathKey 把一条 ginpath 项归一化为去重键 "path|method"：
+// "/x"（省略方法）与 "/x|"（显式空方法）等价，都归一为 "/x|"。
+// 调用前应先过 validateGinPath，非法项不参与去重。
+func ginPathKey(item string) string {
+	path, method, _ := strings.Cut(item, "|")
+	return path + "|" + method
 }
 
 func validateRpcAuth(auth *RpcAuthConfig) error {

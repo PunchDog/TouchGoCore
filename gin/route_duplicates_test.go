@@ -41,10 +41,8 @@ func TestSamePathDifferentMethodsCoexist(t *testing.T) {
 	if got := invokeRoute(t, "/dup/api", http.MethodPost); got != "post" {
 		t.Fatalf("✘ POST handler 未各自注册，响应 %q（应为 post）", got)
 	}
-	// 既无精确条目也无通配条目的方法 -> 不命中注册表
-	routerMu.Lock()
+	// 既无精确条目也无通配条目的方法 -> 不命中注册表（lookupRoute 自带读锁）
 	hit := lookupRoute("/dup/api", http.MethodDelete)
-	routerMu.Unlock()
 	if hit != nil {
 		t.Fatal("✘ DELETE 未注册却命中了路由")
 	}

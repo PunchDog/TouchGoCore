@@ -53,18 +53,35 @@ type GRPCProxyStream interface {
 // defaultGRPCProxyTimeout 代理请求默认超时，与本地路由 buildRouteHandler 的 15s 同口径。
 const defaultGRPCProxyTimeout = 15 * time.Second
 
+// maxProxyRequestBody 代理请求体读取上限（A-F4）。
+// 与 rpc 侧帧上限对齐：rpc/run.go 的 MAX_MSG_SIZE=10MB 限制的是整帧
+// （body + headers + proto 编码开销），这里再留出 64KB 帧头余量，保证
+// 读进来的 body 编码进 GinHTTPRequest 后必然不会超出 gRPC 发送上限。
+// 超限直接回 413，不再 io.ReadAll 到内存（防未认证外网 POST 大 body 打爆网关内存）。
+const maxProxyRequestBody = 10*1024*1024 - 64*1024
+
 // RegisterGRPCRoute 把一条远端客户端提供的路由写入分发表，与 RegisterRouter 完全同构：
 //   - 含 ":name" 段的注册键走 paramRoutes（paramMu 保护），字面路径走 routerMap（routerMu 保护）；
 //   - method 为空落到通配键 methodAny，任意请求方法都可命中；
-//   - 重复注册（模板 + 方法两级都命中）按既有约定 vars.Error 并后者覆盖。
+//   - sessionID 为注册来源会话的代际标识（rpc 侧传 clientSession.id，gin 只做等值比较），
+//     记录进 routeEntry，供 UnregisterGRPCRoutes 按 owner+session 双键回收（A-F3）。
+//
+// 覆盖规则（A-F2）：同键（模板+方法）已存在条目时，只有 owner 相同（同一客户端
+// 重注册/重连）才允许覆盖；owner 不同——包括被覆盖者是本地 fn 路由（owner==""）
+// 或其他客户端的代理条目——一律拒绝注册并 vars.Error。否则任一已鉴权 RPC 客户端
+// 都能劫持网关上的任意 HTTP 路由（所有客户端共享同一 token，被攻陷即接管 /pay/callback 类路径）。
 //
 // clientName 为注册来源客户端名，供断连时 UnregisterGRPCRoutes 按属主回收。
-func RegisterGRPCRoute(clientName, path, method string, stream GRPCProxyStream) {
+func RegisterGRPCRoute(clientName string, sessionID uint64, path, method string, stream GRPCProxyStream) {
 	if path == "" || stream == nil {
 		vars.Error("GRPC 路由注册参数非法: client=%s path=%q stream==nil:%v", clientName, path, stream == nil)
 		return
 	}
-	entry := &routeEntry{proxy: stream, owner: clientName}
+	if clientName == "" {
+		vars.Error("GRPC 路由注册被拒: client 名为空 path=%q method=%q（代理条目必须携带属主）", path, method)
+		return
+	}
+	entry := &routeEntry{proxy: stream, owner: clientName, session: sessionID}
 
 	if hasParamSegment(path) {
 		paramMu.Lock()
@@ -75,8 +92,13 @@ func RegisterGRPCRoute(clientName, path, method string, stream GRPCProxyStream) 
 			paramIndex[path] = pr
 			paramRoutes = append(paramRoutes, pr)
 		}
-		if _, dup := pr.byMethod[method]; dup {
-			vars.Error("GRPC 参数路由 %s %q 重复注册（client=%s），本次将覆盖先前 handler", path, method, clientName)
+		if old, dup := pr.byMethod[method]; dup {
+			if !sameProxyOwner(old, clientName) {
+				vars.Error("GRPC 参数路由注册被拒: %s %q 已被 owner=%q 占用（session=%d），来源 client=%q session=%d 不得覆盖",
+					path, method, old.owner, old.session, clientName, sessionID)
+				return
+			}
+			vars.Error("GRPC 参数路由 %s %q 同属主重复注册（client=%s session=%d），本次将覆盖先前 handler", path, method, clientName, sessionID)
 		}
 		pr.byMethod[method] = entry
 		return
@@ -89,22 +111,39 @@ func RegisterGRPCRoute(clientName, path, method string, stream GRPCProxyStream) 
 		byMethod = make(map[string]*routeEntry, 1)
 		routerMap[path] = byMethod
 	}
-	if _, dup := byMethod[method]; dup {
-		vars.Error("GRPC 路由 %s %q 重复注册（client=%s），本次将覆盖先前 handler", path, method, clientName)
+	if old, dup := byMethod[method]; dup {
+		if !sameProxyOwner(old, clientName) {
+			vars.Error("GRPC 路由注册被拒: %s %q 已被 owner=%q 占用（session=%d），来源 client=%q session=%d 不得覆盖",
+				path, method, old.owner, old.session, clientName, sessionID)
+			return
+		}
+		vars.Error("GRPC 路由 %s %q 同属主重复注册（client=%s session=%d），本次将覆盖先前 handler", path, method, clientName, sessionID)
 	}
 	byMethod[method] = entry
 }
 
-// UnregisterGRPCRoutes 按属主回收断连客户端注册的所有路由（字面 + 参数两侧），
-// 只摘 owner==clientName 的条目，不影响本地路由、其他客户端、以及同一 paramRoute 的其余方法。
-func UnregisterGRPCRoutes(clientName string) {
+// sameProxyOwner 判定既有条目能否被 clientName 覆盖：只有同属主的代理条目可覆盖。
+// 本地 fn 路由 owner==""，任何代理注册都不得覆盖它。
+func sameProxyOwner(old *routeEntry, clientName string) bool {
+	return old != nil && old.proxy != nil && old.owner == clientName
+}
+
+// UnregisterGRPCRoutes 按「属主 + 会话代际」双键回收断连客户端注册的所有路由
+// （字面 + 参数两侧），只摘 owner==clientName 且 session==sessionID 的条目。
+// 双键是 A-F3 的修复核心：同名重连后，旧会话延迟执行的回收不得抹掉新会话
+// （session 不同）刚注册的条目；也不影响本地路由、其他客户端、以及同一
+// paramRoute 的其余方法。
+func UnregisterGRPCRoutes(clientName string, sessionID uint64) {
 	if clientName == "" {
 		return
+	}
+	owned := func(e *routeEntry) bool {
+		return e.owner == clientName && e.session == sessionID
 	}
 	routerMu.Lock()
 	for path, byMethod := range routerMap {
 		for method, e := range byMethod {
-			if e.owner == clientName {
+			if owned(e) {
 				delete(byMethod, method)
 			}
 		}
@@ -119,7 +158,7 @@ func UnregisterGRPCRoutes(clientName string) {
 		kept := paramRoutes[:0]
 		for _, pr := range paramRoutes {
 			for method, e := range pr.byMethod {
-				if e.owner == clientName {
+				if owned(e) {
 					delete(pr.byMethod, method)
 				}
 			}
@@ -134,17 +173,38 @@ func UnregisterGRPCRoutes(clientName string) {
 	paramMu.Unlock()
 }
 
+// hopByHopHeaders 是 RFC 2616 §13.5.1 的逐跳头，只对单次传输连接有效，
+// 代理不得透传（A-F5）；Content-Length 一并剔除——响应体已由网关重新成帧，
+// 远端报的长度与实际字节数不再必然一致，留给 Go 自行计算。
+var hopByHopHeaders = map[string]struct{}{
+	"Connection":          {},
+	"Keep-Alive":          {},
+	"Proxy-Authenticate":  {},
+	"Proxy-Authorization": {},
+	"Te":                  {},
+	"Trailer":             {},
+	"Transfer-Encoding":   {},
+	"Upgrade":             {},
+	"Content-Length":      {},
+}
+
 // serveGRPCProxy 把命中的 HTTP 请求经 proxy 转发给远端客户端并回写网页端。
-// 读请求体、组装 ProxyRequest、带默认超时调用 Do；失败/超时回 502。
+// 读请求体（带上限，超限 413）、组装 ProxyRequest、带默认超时调用 Do；失败/超时回 502。
 func serveGRPCProxy(c *gin.Context, proxy GRPCProxyStream) {
 	p := c.Request.URL.Path
 	var body []byte
 	if c.Request.Body != nil {
 		defer c.Request.Body.Close()
-		b, err := io.ReadAll(c.Request.Body)
+		// A-F4：限长读取。多读 1 字节用于区分「恰好等于上限」与「超限」。
+		b, err := io.ReadAll(io.LimitReader(c.Request.Body, maxProxyRequestBody+1))
 		if err != nil {
 			vars.Error("GRPC 代理读取请求体失败 %s %s: %v", c.Request.Method, p, err)
 			c.AbortWithStatusJSON(http.StatusBadGateway, gin.H{"error": "bad gateway", "code": 502})
+			return
+		}
+		if int64(len(b)) > maxProxyRequestBody {
+			vars.Error("GRPC 代理请求体超限(>%d 字节) %s %s，已拒绝", maxProxyRequestBody, c.Request.Method, p)
+			c.AbortWithStatusJSON(http.StatusRequestEntityTooLarge, gin.H{"error": "request entity too large", "code": 413})
 			return
 		}
 		body = b
@@ -179,7 +239,19 @@ func serveGRPCProxy(c *gin.Context, proxy GRPCProxyStream) {
 	if status == 0 {
 		status = http.StatusOK
 	}
+	// A-F5：status 钳制——只有合法的 [100,599] 才透传。负数/超界值写进
+	// WriteHeader 会产生畸形响应（Go 会打 unknown status code 警告并按 200 处理），
+	// 远端客户端已被视为不可信来源，这里直接判为坏响应回 502。
+	if status < 100 || status > 599 {
+		vars.Error("GRPC 代理返回非法状态码 %d %s %s: status=%d，按 502 处理", rsp.Status, c.Request.Method, p, status)
+		c.AbortWithStatusJSON(http.StatusBadGateway, gin.H{"error": "bad gateway", "code": 502})
+		return
+	}
+	// A-F5：剔除 hop-by-hop 头与 Content-Length，只透传端到端头。
 	for k, vs := range rsp.Header {
+		if _, skip := hopByHopHeaders[http.CanonicalHeaderKey(k)]; skip {
+			continue
+		}
 		for _, v := range vs {
 			c.Writer.Header().Add(k, v)
 		}

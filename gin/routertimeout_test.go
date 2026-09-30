@@ -45,18 +45,19 @@ func (*explicitTimeoutRecv) Login(_ *gin.Context) string { return "login" }
 // handler 里的 defer cancel() 在返回时已执行，但 WithTimeout 的 deadline 取消后仍可读。
 func invokeForDeadline(t *testing.T, path string) time.Duration {
 	t.Helper()
-	routerMu.Lock()
+	// lookupRoute 自带 routerMu 读锁（A-F1），外层不再持锁；fallback 扫描单独持读锁。
 	var fn func(ctx *gin.Context)
 	// 注册表是「路径:方法」二级索引，用 lookupRoute 取该路径下已注册的 handler。
 	if e := lookupRoute(path, methodAny); e != nil {
 		fn = e.fn
 	} else {
+		routerMu.RLock()
 		for _, e := range routerMap[path] {
 			fn = e.fn
 			break
 		}
+		routerMu.RUnlock()
 	}
-	routerMu.Unlock()
 	if fn == nil {
 		t.Fatalf("✘ 路由 %q 未注册（现有: %v）", path, routerKeys())
 	}

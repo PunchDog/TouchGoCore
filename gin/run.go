@@ -184,7 +184,7 @@ func RegisterRouter(class IRouterInterface) {
 			paramMu.Lock()
 			pr := paramIndex[callbackmsg]
 			if pr == nil {
-				pr = &paramRoute{segs: strings.Split(callbackmsg, "/"), byMethod: make(map[string]*routeEntry, len(keys))}
+				pr = &paramRoute{key: callbackmsg, segs: strings.Split(callbackmsg, "/"), byMethod: make(map[string]*routeEntry, len(keys))}
 				paramIndex[callbackmsg] = pr
 				paramRoutes = append(paramRoutes, pr)
 			}

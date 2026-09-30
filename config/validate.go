@@ -159,6 +159,16 @@ func (c *Cfg) Validate() error {
 				return err
 			}
 		}
+		for i, cl := range rpc.Client {
+			if cl == nil {
+				continue
+			}
+			for j, gp := range cl.GinPath {
+				if err := validateGinPath(gp); err != nil {
+					return fmt.Errorf("rpc.client[%d].ginpath[%d]=%q: %w", i, j, gp, err)
+				}
+			}
+		}
 		if rpc.TLS != nil && rpc.TLS.Enable {
 			if err := filesExist("rpc.tls", rpc.TLS.CertFile, rpc.TLS.KeyFile); err != nil {
 				return err
@@ -326,6 +336,36 @@ func filesExist(prefix, cert, key string) error {
 	}
 	if !PathExists(key) {
 		return fmt.Errorf("%s 私钥不存在: %s", prefix, key)
+	}
+	return nil
+}
+
+// validateGinPath 轻校验一条 ginpath 项（形如 "urlpath|METHOD"）。
+// 拦的是「静默注册错路由」：前导斜杠缺失、方法段小写、":name" 段冒号后为空，
+// 都是部署期就能确定的拼写错，留到运行时只会把一条永远撞不上的路由推进网关。
+func validateGinPath(item string) error {
+	if item == "" {
+		return fmt.Errorf("ginpath 项为空")
+	}
+	path, method, hasMethod := strings.Cut(item, "|")
+	if path == "" || path[0] != '/' {
+		return fmt.Errorf("urlpath 必须以 / 开头")
+	}
+	if hasMethod {
+		switch method {
+		case "GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", "CONNECT", "TRACE":
+		default:
+			// 空方法段（"path|"）等价通配，允许；其余必须是大写 HTTP 方法。
+			if method != "" {
+				return fmt.Errorf("method %q 不是大写 HTTP 方法（GET/POST/...），留空表示通配", method)
+			}
+		}
+	}
+	// ":name" 段：冒号后至少一个字符，且不能完全等于冒号。
+	for _, seg := range strings.Split(path, "/") {
+		if strings.HasPrefix(seg, ":") && len(seg) < 2 {
+			return fmt.Errorf(":name 段 %q 冒号后至少需要一个字符", seg)
+		}
 	}
 	return nil
 }

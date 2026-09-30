@@ -148,7 +148,12 @@
                 "name": "其他服来连接时查询的名字，通过这个名字查找端口",
                 "port": 7000,
                 "addr": "127.0.0.1",
-                "use_tls": false
+                "use_tls": false,
+                "ginpath说明": "可选。作为客户端连上网关后，把本进程的 HTTP 路由反向注册到网关 gin，每项形如 urlpath|METHOD（METHOD 省略=通配），urlpath 可含 :name 参数段",
+                "ginpath": [
+                    "/proxy/hello|GET",
+                    "/proxy/user/:id|GET"
+                ]
             }
         ],
         "tls": {

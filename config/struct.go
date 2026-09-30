@@ -139,6 +139,10 @@ type RpcAddr struct {
 	Addr   string `json:"addr"`
 	Port   int    `json:"port"`
 	UseTLS bool   `json:"use_tls"` // 是否使用 TLS，为 false 时表示内网连接跳过 TLS
+	// GinPath 仅客户端侧使用：声明本进程可通过反向 gRPC 代理到网关 gin 的 HTTP 路由。
+	// 每项形如 "urlpath|METHOD"（METHOD 省略=通配所有方法），urlpath 可含 ":name" 参数段。
+	// 连接建立后客户端据此向网关注册路由；服务端条目忽略该项。
+	GinPath []string `json:"ginpath"`
 }
 
 type RpcTLSConfig struct {

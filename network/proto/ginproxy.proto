@@ -1,0 +1,58 @@
+syntax = "proto3";
+
+package network.message;
+option go_package = "touchgocore/network/message";
+
+// 反向 gRPC 路由代理的框架内部消息（不进 util 协议注册表）。
+// 这些消息由 rpc 侧自行 proto.Marshal 后塞进 FSMessage.body 跨流传输，
+// 用保留协议号 protocol1=ProtocolGinProxy + protocol2 子码标识帧类型。
+// headers 用 repeated GinHeader（多值头）而非 map，params 用 repeated GinParam。
+
+// 单条待注册路由：url_path 可含 ":name" 段；method 为空表示通配所有方法。
+message GinRoute {
+  string url_path = 1;
+  string method = 2;
+}
+
+// 客户端 -> 服务端：连接建立后上报本地可代理的路由清单。
+message GinRouteRegistration {
+  repeated GinRoute routes = 1;
+}
+
+// 服务端 -> 客户端：注册确认。
+message GinRegisterAck {
+  bool ok = 1;
+  string msg = 2;
+}
+
+// 路径参数捕获（":name" 段回填）。
+message GinParam {
+  string key = 1;
+  string value = 2;
+}
+
+// HTTP 头（多值）。
+message GinHeader {
+  string key = 1;
+  repeated string values = 2;
+}
+
+// 服务端 -> 客户端：把命中的 HTTP 请求转发给远端处理。
+// matched_pattern 为服务端命中的注册模板（含 ":name" 原样），
+// params 为服务端已捕获的路径参数——客户端据此直接回调、无需二次匹配。
+message GinHTTPRequest {
+  string method = 1;
+  string url_path = 2;
+  string raw_query = 3;
+  string matched_pattern = 4;
+  repeated GinParam params = 5;
+  repeated GinHeader headers = 6;
+  bytes body = 7;
+}
+
+// 客户端 -> 服务端：回传 HTTP 响应，服务端再写回网页端。
+message GinHTTPResponse {
+  int32 status = 1;
+  repeated GinHeader headers = 2;
+  bytes body = 3;
+}

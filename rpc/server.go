@@ -11,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"touchgocore/gin"
 	"touchgocore/metrics"
 	"touchgocore/network/message"
 	"touchgocore/syncmap"
@@ -99,6 +100,11 @@ type clientSession struct {
 	id     uint64
 	stream message.Grpc_MsgServer
 	sendMu sync.Mutex
+	// 反向代理等待表：本会话发起的代理请求 request_id(=proxySeq) -> chan *message.GinHTTPResponse。
+	// 服务端在 sessionProxy.Do 里按 request_id 登记并等待，Msg 循环收到代理响应帧后按 id 投递。
+	proxyPending sync.Map
+	// proxySeq 本会话代理请求流水号（命名空间与客户端 nextReqID 独立，避免跨端碰撞）。
+	proxySeq atomic.Uint64
 }
 
 var sessionSeq atomic.Uint64
@@ -219,6 +225,12 @@ func (s *RpcServer) Msg(stream message.Grpc_MsgServer) error {
 		if msg.GetHead() != nil {
 			reqID = msg.GetHead().GetRequestId()
 		}
+		// 反向路由代理内部帧：不进 readchannel/handler 流水线（框架内部消息，且需要会话流上下文），
+		// 就地按子码分派：注册请求 -> 写网关 routerMap 并回执；代理响应 -> 投递等待中的 Do。
+		if p1 == ProtocolGinProxy {
+			s.handleGinProxyFrame(cs, clientNameKey, reqID, p2, msg)
+			continue
+		}
 		item := &MessageInfo{
 			Req:           msg,
 			ClientNameKey: clientNameKey,
@@ -269,7 +281,11 @@ func (s *RpcServer) closeSession(clientNameKey string, cs *clientSession) {
 		own = true
 	}
 	s.sessionMu.Unlock()
+	// 无论是否仍是本会话，都要作废这一会话在途的代理等待，让 sessionProxy.Do 立即失败（回 502）。
+	cs.abandonProxyPending()
 	if own {
+		// 同名重连时新会话已接管并重新注册路由，这里只回收本会话属主的路由，不误删新会话的。
+		gin.UnregisterGRPCRoutes(clientNameKey)
 		s.triggerOnClientDisconnected(clientNameKey)
 	}
 }

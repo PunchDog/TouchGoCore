@@ -26,7 +26,14 @@ import (
 var (
 	// RpcClient rpc客户端
 	rpcClient_ *syncmap.Map[string, *RpcClient]
+	// errClientClosed 客户端已关闭时拒绝新建/复用流。
+	errClientClosed = errors.New("rpc client closed")
 )
+
+// closeDrainTimeout Close 排空后台协程的兜底上限：正常路径 recvLoop 随流取消即时退出、
+// sendGinRegistration 随 failAllPending 立即返回，仅 pathological 的业务代理 handler 卡住
+// 才会触顶。超时后告警并继续交还对象池，宁可留极小残留竞争也不让停机挂死。
+const closeDrainTimeout = 5 * time.Second
 
 // RpcClient rpc客户端
 type RpcClient struct {
@@ -61,6 +68,10 @@ type RpcClient struct {
 	closed atomic.Bool
 	// 回调接口（原子指针：SetCallbacks 可与 recvLoop/发送并发）
 	callbacks atomic.Pointer[ClientCallbacks]
+	// bgWG 追踪与流绑定的后台协程（recvLoop / sendGinRegistration / handleProxyRequest）。
+	// Close 交还对象池（Remove）前必须排空，否则旧主人的协程会与复用同一块内存的新主人的
+	// initcallback 并发读写裸字段（serverName/fullAddr 等），构成对象池 use-after-free 数据竞争。
+	bgWG sync.WaitGroup
 }
 
 // Close 主动关闭客户端：停重连定时器、作废流、唤醒等待中的请求、关连接并从注册表摘除。
@@ -86,9 +97,28 @@ func (c *RpcClient) Close() error {
 	// 回调必须在交还对象池之前触发：Remove 之后这个实例可能立刻被下一个客户端复用，
 	// 回调里读到的 UID/地址/状态就成了别人的数据
 	c.triggerOnDisconnected(nil)
+	// 交还对象池前必须排空与流绑定的后台协程：否则旧主人的 recvLoop / sendGinRegistration /
+	// handleProxyRequest 仍可能读写裸字段，而 Remove 后这块内存随时被新 NewRpcClient 取走、
+	// 其 initcallback 并写 serverName/fullAddr——这正是对象池 use-after-free 数据竞争的根因。
+	c.drainBackground()
 	// 所有权交还对象池：注册表里已无引用，Pause 会让这个实例永久悬挂
 	c.Remove()
 	return nil
+}
+
+// drainBackground 等待本客户端所有与流绑定的后台协程退出，带超时兜底。
+// 目的：让 NewTimer initcallback 的「独占期」假设真正成立——交还对象池后不再有旧协程读写裸字段。
+func (c *RpcClient) drainBackground() {
+	done := make(chan struct{})
+	go func() {
+		c.bgWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(closeDrainTimeout):
+		vars.Error("RPC客户端关闭时后台协程未在[%v]内退出[%s]，可能存在卡死的业务代理回调", closeDrainTimeout, c.fullAddr)
+	}
 }
 
 // IsClosed 返回客户端是否已被主动关闭。
@@ -227,6 +257,11 @@ func (c *RpcClient) ensureStream(conn *grpc.ClientConn) (message.Grpc_MsgClient,
 
 // ensureStreamLocked 调用者必须持有 streamMu
 func (c *RpcClient) ensureStreamLocked(conn *grpc.ClientConn) (message.Grpc_MsgClient, error) {
+	// 已关闭则拒绝建流：确保 Close 置 closed 后不会再 Add 新的后台协程，
+	// 使 Close 的 bgWG.Wait 与所有 bgWG.Add 之间形成 happens-before（杜绝 Add-after-Wait）。
+	if c.closed.Load() {
+		return nil, errClientClosed
+	}
 	if c.streamValid.Load() {
 		if streamVal := c.stream.Load(); streamVal != nil {
 			return streamVal.(message.Grpc_MsgClient), nil
@@ -246,7 +281,19 @@ func (c *RpcClient) ensureStreamLocked(conn *grpc.ClientConn) (message.Grpc_MsgC
 	c.stream.Store(stream)
 	c.streamCancel = cancel
 	c.streamValid.Store(true)
-	go c.recvLoop(stream)
+	c.bgWG.Add(1)
+	go func() {
+		defer c.bgWG.Done()
+		c.recvLoop(stream)
+	}()
+	// 流新建（含重连重建）后按 ginpath 配置向网关注册反向路由。
+	// 异步发送：sendGinRegistration 会再次 ensureStream（需 streamMu），
+	// 同步调用会与当前持锁的 ensureStreamLocked 自死锁。
+	c.bgWG.Add(1)
+	go func() {
+		defer c.bgWG.Done()
+		c.sendGinRegistration()
+	}()
 	return stream, nil
 }
 
@@ -306,6 +353,18 @@ func (c *RpcClient) recvLoop(stream message.Grpc_MsgClient) {
 		rid := uint64(0)
 		if recv.GetHead() != nil {
 			rid = recv.GetHead().GetRequestId()
+		}
+		// 反向代理请求（服务端发起，子码=3）：不当作自身 pending 响应，
+		// 起协程异步处理避免拖慢客户端自身 RPC 回包。注册回执（子码=2）仍走下方 rid 匹配。
+		if recv.GetHead().GetProtocol1() == ProtocolGinProxy && recv.GetHead().GetProtocol2() == ginSubProxyReq {
+			// 本协程仍在 bgWG 计数内（Done 未执行），此处 Add(1) 发生在计数>0 时，
+			// 与并发 Wait 合法；handleProxyRequest 会读裸字段，故纳入 Close 排空范围。
+			c.bgWG.Add(1)
+			go func() {
+				defer c.bgWG.Done()
+				c.handleProxyRequest(recv)
+			}()
+			continue
 		}
 		if rid != 0 {
 			v, ok := c.pending.Load(rid)

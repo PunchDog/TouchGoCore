@@ -37,16 +37,42 @@ const (
 	methodAny = ""
 )
 
-// routeEntry 分发条目：fn 为已构建好的 handler，方法维度信息由 routerMap 的二级 key 承载。
+// routeEntry 分发条目：
+//   - fn 非 nil：本地注册的 handler（RegisterRouter 口径），方法维度由 routerMap 二级 key 承载。
+//   - proxy 非 nil：该路由由远端 gRPC 客户端提供（fn 为 nil），命中时经 proxy 转发；
+//     owner 为注册来源客户端名，断连时按属主回收。
 type routeEntry struct {
-	fn func(*gin.Context)
+	fn    func(*gin.Context)
+	proxy GRPCProxyStream
+	owner string
 }
 
 // paramRoute 含 ":name" 参数段的注册键：segs 为注册期预切的模式段，
 // byMethod 与 routerMap 内层同构（精确方法优先，缺失回退通配键 methodAny）。
 type paramRoute struct {
+	key      string // 注册键字面（含 ":name" 原样），供 MatchedRoute 回查
 	segs     []string
 	byMethod map[string]*routeEntry
+}
+
+// matchedRouteKey 是命中路由的注册模板在 gin 上下文中的存放键。根劫持下
+// c.FullPath() 恒为空（没有任何 gin 路由被命中），而下游中间件（验签、
+// 限流、审计）需要「这条请求撞的是哪条注册路由」——框架知道答案，
+// 就必须在分发时替他记下来，而不是让每个下游各自反推 URL。
+const matchedRouteKey = "touchgo:matched_route"
+
+// MatchedRoute 返回本次请求命中的注册模板路径（含 ":name" 段的原样返回，
+// 字面路由即路径本身）；未命中任何路由时返回空串。
+func MatchedRoute(c *gin.Context) string {
+	if c == nil {
+		return ""
+	}
+	if v, ok := c.Get(matchedRouteKey); ok {
+		if s, ok := v.(string); ok {
+			return s
+		}
+	}
+	return ""
 }
 
 var (
@@ -106,10 +132,12 @@ func lookupRoute(path, method string) *routeEntry {
 
 // matchRoute 完整分发匹配：先走 routerMap 精确查表（字面路由零额外开销），
 // 未命中再扫描参数路由；命中时把捕获的 ":name" 段写进 c.Params，
-// 处理器内 ctx.Param("id") 即可取值。
+// 处理器内 ctx.Param("id") 即可取值；同时把命中的注册模板记进上下文，
+// 下游中间件用 MatchedRoute 取（根劫持下 c.FullPath() 恒空，这是唯一真源）。
 func matchRoute(c *gin.Context) *routeEntry {
 	p := c.Request.URL.Path
 	if e := lookupRoute(p, c.Request.Method); e != nil {
+		c.Set(matchedRouteKey, p)
 		return e
 	}
 	return matchParamRoute(c, p)
@@ -139,6 +167,7 @@ func matchParamRoute(c *gin.Context, p string) *routeEntry {
 			continue
 		}
 		c.Params = append(c.Params, ps...)
+		c.Set(matchedRouteKey, pr.key)
 		return e
 	}
 	return nil
@@ -165,6 +194,11 @@ func newRootHandler(staticDir *string) gin.HandlerFunc {
 
 		// 3. 精确分发，未命中再试参数路由（命中时已回填 c.Params）
 		if e := matchRoute(c); e != nil {
+			// 代理型条目：远端 gRPC 客户端提供的路由，经流转发并等待响应。
+			if e.proxy != nil {
+				serveGRPCProxy(c, e.proxy)
+				return
+			}
 			vars.Debug("HTTP %s %s -> %v", c.Request.Method, p, e.fn)
 			e.fn(c)
 			return

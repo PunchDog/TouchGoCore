@@ -35,18 +35,25 @@ func (g *getRecv) Ping(_ *gin.Context) string {
 	return "ping:" + g.tag
 }
 
-// isolateRegistry 让用例在干净的注册表上运行。
+// isolateRegistry 让用例在干净的注册表上运行（字面表与参数表一并隔离）。
 func isolateRegistry(t *testing.T) {
 	t.Helper()
 	routerMu.Lock()
 	prev := routerMap
 	routerMap = make(map[string]map[string]*routeEntry)
 	routerMu.Unlock()
+	paramMu.Lock()
+	prevRoutes, prevIndex := paramRoutes, paramIndex
+	paramRoutes, paramIndex = nil, make(map[string]*paramRoute)
+	paramMu.Unlock()
 	methodCache.Clear()
 	t.Cleanup(func() {
 		routerMu.Lock()
 		routerMap = prev
 		routerMu.Unlock()
+		paramMu.Lock()
+		paramRoutes, paramIndex = prevRoutes, prevIndex
+		paramMu.Unlock()
 		methodCache.Clear()
 	})
 }

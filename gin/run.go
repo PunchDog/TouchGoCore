@@ -114,6 +114,8 @@ type IRouterTimeout interface {
 // RegisterRouter 只负责填充 routerMap；具体分发由 Run 里的根劫持 handler 完成。
 // 重复判定按「路径 + 方法」两级：同一方法被重复注册时后者覆盖前者并报错；
 // 同一路径的不同方法（如先注册 GET 再注册 POST）各自注册、互不覆盖。
+// 含 ":name" 参数段的注册键存入独立的参数路由表，分发时精确未命中再逐段匹配，
+// 捕获值通过 ctx.Param 暴露给处理器。
 func RegisterRouter(class IRouterInterface) {
 	sname, mnames := util.GetClassName(class)
 	rcvr := reflect.ValueOf(class)
@@ -166,14 +168,6 @@ func RegisterRouter(class IRouterInterface) {
 
 		handler := buildRouteHandler(rcvr, sname, mnameCopy, entry, timeouts)
 
-		// 写入拆为「路径:方法」二级。旧版每个路径只挂单个 routeEntry，
-		// 同路径的另一方法 handler 会被整条替换掉、静默丢失。
-		routerMu.Lock()
-		byMethod := routerMap[callbackmsg]
-		if byMethod == nil {
-			byMethod = make(map[string]*routeEntry, len(methods)+1)
-			routerMap[callbackmsg] = byMethod
-		}
 		// 二级 key = HTTP 方法；methods 为空（未设 RouterType）时用通配键 ""，放行所有方法。
 		keys := make([]string, 0, len(methods)+1)
 		if len(methods) == 0 {
@@ -182,6 +176,35 @@ func RegisterRouter(class IRouterInterface) {
 			for m := range methods {
 				keys = append(keys, m)
 			}
+		}
+
+		// 含 ":name" 参数段的注册键不进 routerMap（具体请求路径永远撞不上字面键），
+		// 单独存 paramRoutes；分发时精确未命中再逐段匹配。
+		if hasParamSegment(callbackmsg) {
+			paramMu.Lock()
+			pr := paramIndex[callbackmsg]
+			if pr == nil {
+				pr = &paramRoute{segs: strings.Split(callbackmsg, "/"), byMethod: make(map[string]*routeEntry, len(keys))}
+				paramIndex[callbackmsg] = pr
+				paramRoutes = append(paramRoutes, pr)
+			}
+			for _, mk := range keys {
+				if _, dup := pr.byMethod[mk]; dup {
+					vars.Error("参数路由 %s %q 重复注册，本次 handler 将覆盖先前 handler", callbackmsg, mk)
+				}
+				pr.byMethod[mk] = &routeEntry{fn: handler}
+			}
+			paramMu.Unlock()
+			continue
+		}
+
+		// 写入拆为「路径:方法」二级。旧版每个路径只挂单个 routeEntry，
+		// 同路径的另一方法 handler 会被整条替换掉、静默丢失。
+		routerMu.Lock()
+		byMethod := routerMap[callbackmsg]
+		if byMethod == nil {
+			byMethod = make(map[string]*routeEntry, len(methods)+1)
+			routerMap[callbackmsg] = byMethod
 		}
 		for _, mk := range keys {
 			if _, dup := byMethod[mk]; dup {

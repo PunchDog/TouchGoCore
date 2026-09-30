@@ -109,6 +109,16 @@ const (
 	CallTronMsg = "TronMsg"
 	CallBscMsg  = "BscMsg"
 	CallSolMsg  = "SolMsg"
+	// CallZaloMsg / CallFacebookMsg / CallInstagramMsg 是三条社交平台适配通道的回调前缀，
+	// 广播口径与 CallWhatsappMsg 一致：按 <前缀>+<动作> 注册，载荷是 *pay.PayResult，
+	// 通道包本身不落库。
+	//
+	// 这四条各自占一个前缀，而不是共用一个「社交类」前缀：它们不止走资金，还各有一条
+	// 登录链路，下游对「会话失效要重登」和「充值到账要加积分」的处理本就不同，合到
+	// 一个前缀等于让订阅方在回调里靠载荷猜通道——猜错就是把 A 家的单记到 B 家头上。
+	CallZaloMsg      = "ZaloMsg"
+	CallFacebookMsg  = "FacebookMsg"
+	CallInstagramMsg = "InstagramMsg"
 	// CallPaySDKMsg + pay_sdks 的段名 = 该段签名密钥的注入钩子，载荷是 *string
 	// （指向该段的 secret_key 字段本身）。
 	//

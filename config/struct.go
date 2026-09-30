@@ -196,7 +196,8 @@ type TelegramConfig struct {
 // 配置结构体刻意留在 config 包而不是 pay 包：本包的 Cfg 要引用它，而 pay 只认
 // 与配置无关的 ProviderOptions（端点表也是以取值函数的形式交进去）。若把结构体
 // 挪到 pay，config→pay 与 pay→config 两头引用就成环了。
-// 各通道包（whatsapp/usdt/telegram）负责把本结构逐字段转成 pay.ProviderOptions。
+// 各通道包（whatsapp/zalo/facebook/instagram/usdt/telegram）负责把本结构逐字段转成
+// pay.ProviderOptions。
 //
 // Enable 必须显式为 "on" 才启动。出款接口的新配置段默认不启动，
 // 比「写了 base_url 就以为开了」更安全：漏一个开关的代价是少一条通道，
@@ -352,6 +353,49 @@ type WhatsappConfig struct {
 	Login    *PaySDKRef `json:"login"`    // 登录/验证码下发通道引用的 SDK
 	Provider *PaySDKRef `json:"provider"` // 充值/提现通道引用的 SDK
 	// Templates 是消息模板名表，键为逻辑名（auth_verify/bind_notice）。
+	Templates map[string]string `json:"templates"`
+}
+
+// ZaloConfig 是 Zalo 通道配置，与 WhatsappConfig 同构，差异只在供应商口径：
+// Zalo 是越南的即时通讯 App，我方登录的是供应商代持的账号，账号归属与凭证有效期
+// 都由那家供应商定，本层不为这几件事加字段——多一个字段就多一处和供应商口径打架的地方。
+type ZaloConfig struct {
+	Login    *PaySDKRef `json:"login"`    // 登录/验证码下发通道引用的 SDK
+	Provider *PaySDKRef `json:"provider"` // 充值/提现通道引用的 SDK
+	// Templates 是消息模板名表，逻辑名口径与 WhatsappConfig 一致。
+	Templates map[string]string `json:"templates"`
+}
+
+// FacebookConfig 是 Facebook 通道配置，与 WhatsappConfig 同构，差异只在供应商口径。
+//
+// 真实世界 Facebook 走 OAuth 跳转授权，但本包登录的是供应商代持账号，登录链路仍然只有
+// 「下发一次性凭证、拿凭证换会话」两步。那个 code 到底是短信验证码、OAuth 授权码还是
+// 回调 ticket，由供应商在 pay_sdks 里的登记口径决定，本层不猜：签名形状保持与 whatsapp
+// 同构，换成 OAuth 形态改的是 SDK 段与供应商适配代码，不是这里的一个字段。
+//
+// 供应商压根没有「下发验证码」这一环时，就在该 SDK 段的 endpoints 里不登记 send_code：
+// 缺键的操作就地拒绝、不发请求，比为了凑齐两段而配一个假的登录网关省事，也不会让会员
+// 看到一个点了必失败的入口。
+type FacebookConfig struct {
+	Login    *PaySDKRef `json:"login"`    // 登录/验证码下发通道引用的 SDK
+	Provider *PaySDKRef `json:"provider"` // 充值/提现通道引用的 SDK
+	// Templates 是消息模板名表，逻辑名口径与 WhatsappConfig 一致。
+	Templates map[string]string `json:"templates"`
+}
+
+// InstagramConfig 是 Instagram 通道配置，与 FacebookConfig 同构。
+//
+// 两家同属 Meta、多半复用同一段 SDK，仍然拆成两个配置段：两条通道的账号、商户账户
+// 与开关各自独立，合并成一段就等于让「只关 Instagram」这件事没法表达。
+// code 形态的口径同 FacebookConfig 所述，也不在这里区分。
+//
+// Instagram 没有「好友」概念，好友列表操作的逻辑名仍沿用 friend_list，读作「按账号
+// 返回的关联账号列表」：四条社交通道各起一个逻辑名的话，端点表就散成四个名字，
+// 而取路径那侧只按逻辑名查，多一个名字就是多一处配漏了静默失败的地方。
+type InstagramConfig struct {
+	Login    *PaySDKRef `json:"login"`    // 登录/验证码下发通道引用的 SDK
+	Provider *PaySDKRef `json:"provider"` // 充值/提现通道引用的 SDK
+	// Templates 是消息模板名表，逻辑名口径与 WhatsappConfig 一致。
 	Templates map[string]string `json:"templates"`
 }
 

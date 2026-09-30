@@ -251,6 +251,9 @@ func (app *App) registerServices() {
 		// 资金通道晚于 telegram：配置各自独立开关，没配就是不启动，
 		// 不影响前面任何服务起来。
 		&whatsappService{},
+		&zaloService{},
+		&facebookService{},
+		&instagramService{},
 		&usdtService{},
 		&tonService{},
 		&tronService{},

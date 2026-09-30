@@ -186,7 +186,12 @@ func validatePayChannels(c *Cfg) error {
 	refs := map[string]*PaySDKRef{}
 	// service 标记这条引用只做验证码下发/登录换会话，不动资金：
 	// 这样的 SDK 本就没有商户账户，按资金链路口径要求它等于逼配置里填个假商户号。
-	service := map[string]bool{"whatsapp.login": true}
+	service := map[string]bool{
+		"whatsapp.login":  true,
+		"zalo.login":      true,
+		"facebook.login":  true,
+		"instagram.login": true,
+	}
 	if c.Telegram != nil {
 		refs["telegram.ton"] = c.Telegram.Ton
 	}
@@ -205,6 +210,18 @@ func validatePayChannels(c *Cfg) error {
 	if c.Whatsapp != nil {
 		refs["whatsapp.login"] = c.Whatsapp.Login
 		refs["whatsapp.provider"] = c.Whatsapp.Provider
+	}
+	if c.Zalo != nil {
+		refs["zalo.login"] = c.Zalo.Login
+		refs["zalo.provider"] = c.Zalo.Provider
+	}
+	if c.Facebook != nil {
+		refs["facebook.login"] = c.Facebook.Login
+		refs["facebook.provider"] = c.Facebook.Provider
+	}
+	if c.Instagram != nil {
+		refs["instagram.login"] = c.Instagram.Login
+		refs["instagram.provider"] = c.Instagram.Provider
 	}
 	for _, name := range sortedMapKeys(refs) {
 		ref := refs[name]

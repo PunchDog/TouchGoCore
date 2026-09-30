@@ -7,8 +7,10 @@ import (
 	"touchgocore/bsc"
 	"touchgocore/corectx"
 	"touchgocore/db"
+	"touchgocore/facebook"
 	"touchgocore/gin"
 	lua "touchgocore/golua"
+	"touchgocore/instagram"
 	"touchgocore/localtimer"
 	"touchgocore/mapmanager"
 	"touchgocore/rpc"
@@ -18,6 +20,7 @@ import (
 	"touchgocore/usdt"
 	"touchgocore/websocket"
 	"touchgocore/whatsapp"
+	"touchgocore/zalo"
 )
 
 // ==================== 服务适配器 ====================
@@ -98,6 +101,45 @@ func (s *whatsappService) Start(ctx context.Context) error {
 }
 func (s *whatsappService) Stop(ctx context.Context) error {
 	whatsapp.WhatsappStop(ctx)
+	return nil
+}
+
+// zaloService Zalo 登录与充值/提现服务适配器（Start 为何返回 nil 见上方说明）
+type zaloService struct{}
+
+func (s *zaloService) Name() string { return "zalo" }
+func (s *zaloService) Start(ctx context.Context) error {
+	zalo.ZaloStart(ctx)
+	return nil
+}
+func (s *zaloService) Stop(ctx context.Context) error {
+	zalo.ZaloStop(ctx)
+	return nil
+}
+
+// facebookService Facebook 登录与充值/提现服务适配器（口径同 zaloService）
+type facebookService struct{}
+
+func (s *facebookService) Name() string { return "facebook" }
+func (s *facebookService) Start(ctx context.Context) error {
+	facebook.FacebookStart(ctx)
+	return nil
+}
+func (s *facebookService) Stop(ctx context.Context) error {
+	facebook.FacebookStop(ctx)
+	return nil
+}
+
+// instagramService Instagram 登录与充值/提现服务适配器（口径同 zaloService）
+type instagramService struct{}
+
+func (s *instagramService) Name() string { return "instagram" }
+func (s *instagramService) Start(ctx context.Context) error {
+	instagram.InstagramStart(ctx)
+	return nil
+}
+func (s *instagramService) Stop(ctx context.Context) error {
+	instagram.InstagramStop(ctx)
 	return nil
 }
 

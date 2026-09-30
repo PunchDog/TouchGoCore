@@ -165,7 +165,7 @@
             "token": ""
         }
     },
-    "pay_sdks说明": "资金 SDK 集中登记表：一段=一套供应商接入（驱动、基址、凭证、端点表、我方商户账户）。同一供应商常同时供着充值、提现、验证码下发三条链路，凭证抄三份必然改漏一处，所以只在这里写一次；telegram.ton / usdt.provider / whatsapp.provider / whatsapp.login / tron.provider / bsc.provider / sol.provider 各段各自用 {sdk, account} 引用这里的一段",
+    "pay_sdks说明": "资金 SDK 集中登记表：一段=一套供应商接入（驱动、基址、凭证、端点表、我方商户账户）。同一供应商常同时供着充值、提现、验证码下发三条链路，凭证抄三份必然改漏一处，所以只在这里写一次；telegram.ton / usdt.provider / whatsapp.provider / whatsapp.login / zalo.provider / zalo.login / facebook.provider / facebook.login / instagram.provider / instagram.login / tron.provider / bsc.provider / sol.provider 各段各自用 {sdk, account} 引用这里的一段。资金链路平台无关，zalo/facebook/instagram 的 provider 与 whatsapp 一样指向 supplier_a；但每条社交通道的登录链路各登记一段（supplier_wa/supplier_zalo/supplier_fb/supplier_ig），原因是 endpoints 的键是全局逻辑名、不带平台维度（权威定义在 pay/types.go，取路径那侧按逻辑名查），同一段服务不了 /wa/login 与 /zalo/login 两种实际路径。代价：密钥注入钩子按段名注册（util.CallPaySDKMsg+段名），同一供应商登记多段时，下游注入逻辑要逐段名循环，且别把密钥抄进版本库",
     "pay_sdks": {
         "supplier_a": {
             "enable": "off",
@@ -183,7 +183,7 @@
             "max_retries": 2,
             "notify_url": "https://example.com/callback/pay",
             "notify_url说明": "回调接收地址，随下单报文交给供应商并参与签名域（不签它就可能被改成别人的接收端）。留空则按供应商为该 AppID 登记的默认值",
-            "endpoints说明": "逻辑名 -> 供应商实际路径。资金侧逻辑名固定为 account/recharge/query/withdraw，消息侧为 login/send_code/friend_list（好友列表按账号查询，whatsapp 登录链路用），缺某个键则该操作就地拒绝、不发请求",
+            "endpoints说明": "逻辑名 -> 供应商实际路径。资金侧逻辑名固定为 account/recharge/query/withdraw，消息侧为 login/send_code/friend_list（好友列表按账号查询，whatsapp/zalo/facebook/instagram 四条登录链路都用这个逻辑名；Instagram 没有好友概念，同名沿用、读作按账号返回的关联账号列表），缺某个键则该操作就地拒绝、不发请求——比如供应商没有「下发验证码」这一环时就不登记 send_code，比配一个假的登录网关省事",
             "endpoints": {
                 "account": "/pay/account",
                 "recharge": "/pay/recharge",
@@ -219,6 +219,67 @@
                 "send_code": "/wa/send_code",
                 "login": "/wa/login",
                 "friend_list": "/wa/friend_list"
+            }
+        },
+        "supplier_zalo": {
+            "enable": "off",
+            "driver": "generic_md5",
+            "driver说明": "验证码下发链路的驱动标记。只发消息不出钱，所以 accounts 留空也不会报错；真有通道段引用它做资金操作时，会在 Resolve 里报「未配置 accounts」",
+            "base_url": "https://supplier.example/api",
+            "app_id": "CHANGE-ME",
+            "secret_key": "",
+            "secret_key说明": "留空由下游经 util.CallPaySDKMsg+\"supplier_zalo\" 钩子注入。钩子按段名注册，供应商同一套凭证登记成 supplier_wa/supplier_zalo/supplier_fb/supplier_ig 多段时，下游要逐段各注一次——这是多段登记的代价，别把密钥抄进版本库来图省事",
+            "auth_header": "X-Sign",
+            "token_header": "Authorization",
+            "token_header说明": "登录成功后供应商给的会话凭证写在这个头里；只进请求头，不进日志与错误文案",
+            "timeout_sec": 30,
+            "max_retries": 2,
+            "notify_url": "",
+            "endpoints说明": "zalo 的登录链路单独成段而不是复用 supplier_wa：endpoints 的键是全局逻辑名、不带平台维度（权威定义 pay/types.go），取路径那侧按 login 只会查出一个路径，一段服务不了 /wa/login 与 /zalo/login 两种实际路径。供应商可以是同一家，段名不能共用",
+            "endpoints": {
+                "send_code": "/zalo/send_code",
+                "login": "/zalo/login",
+                "friend_list": "/zalo/friend_list"
+            }
+        },
+        "supplier_fb": {
+            "enable": "off",
+            "driver": "generic_md5",
+            "driver说明": "验证码下发链路的驱动标记。只发消息不出钱，所以 accounts 留空也不会报错；真有通道段引用它做资金操作时，会在 Resolve 里报「未配置 accounts」",
+            "base_url": "https://supplier.example/api",
+            "app_id": "CHANGE-ME",
+            "secret_key": "",
+            "auth_header": "X-Sign",
+            "token_header": "Authorization",
+            "token_header说明": "登录成功后供应商给的会话凭证写在这个头里；只进请求头，不进日志与错误文案",
+            "timeout_sec": 30,
+            "max_retries": 2,
+            "notify_url": "",
+            "endpoints说明": "facebook 是 Meta 系：真实世界走 OAuth 跳转授权，但这里登录的是供应商代持账号，一次性凭证（code）是短信验证码、OAuth 授权码还是回调 ticket 由供应商登记口径决定，包侧不猜。供应商若没有「下发验证码」这一环，本段就不登记 send_code，该操作就地拒绝、不发请求",
+            "endpoints": {
+                "send_code": "/fb/send_code",
+                "login": "/fb/login",
+                "friend_list": "/fb/friend_list"
+            }
+        },
+        "supplier_ig": {
+            "enable": "off",
+            "driver": "generic_md5",
+            "driver说明": "验证码下发链路的驱动标记。只发消息不出钱，所以 accounts 留空也不会报错；真有通道段引用它做资金操作时，会在 Resolve 里报「未配置 accounts」",
+            "base_url": "https://supplier.example/api",
+            "app_id": "CHANGE-ME",
+            "secret_key": "",
+            "auth_header": "X-Sign",
+            "token_header": "Authorization",
+            "token_header说明": "登录成功后供应商给的会话凭证写在这个头里；只进请求头，不进日志与错误文案",
+            "timeout_sec": 30,
+            "max_retries": 2,
+            "notify_url": "",
+            "endpoints说明": "ig 与 fb 多半同源（同一供应商、同一套代持体系），仍各登一段：两条通道的账号与开关各自独立，共用一段就没法表达「只关 Instagram」。friend_list 在 IG 语境读作「按账号返回的关联账号列表」——逻辑名不另起，四条社交通道共用一套名字，否则取路径那侧按逻辑名查，多一个名字就是多一处配漏了静默失败的地方",
+            "endpoints": {
+                "send_code": "/ig/send_code",
+                "login": "/ig/login",
+                "friend_list": "/ig/friend_list"
             }
         }
     },
@@ -261,6 +322,53 @@
             "auth_verify": "tpl_auth_verify",
             "bind_notice": "tpl_bind_notice"
         }
+    },
+    "zalo说明": "Zalo 通道（登录/充值/提现），代码在 zalo 包。Zalo 是越南的即时通讯 App，我方登录的是供应商代持的账号，账号归属与凭证有效期都由那家供应商定，本层不为这几件事加字段。登录与资金各引用一个 SDK 段，与 whatsapp 同一口径：验证码走消息网关、充值提现走支付网关是常见形态，两段独立开关",
+    "zalo": {
+        "login说明": "登录与验证码下发链路的 SDK 引用。这类链路只发消息、不出钱，被引用的 SDK 段没有 accounts 也能启动；account 留空即可",
+        "login": {
+            "sdk": "supplier_zalo",
+            "account": ""
+        },
+        "provider说明": "充值/提现链路的 SDK 引用。充值提现与社交平台无关，一家支付网关可同时供多条社交通道，所以与 whatsapp 指向同一个 supplier_a/default——凭证只在 pay_sdks 登记一次，这里只留两个名字",
+        "provider": {
+            "sdk": "supplier_a",
+            "account": "default"
+        },
+        "templates说明": "消息模板名表，键是逻辑名；auth_verify 是下发验证码用的模板，与 whatsapp 同一逻辑名口径",
+        "templates": {
+            "auth_verify": "tpl_zalo_verify"
+        }
+    },
+    "facebook说明": "Facebook 通道（登录/充值/提现），代码在 facebook 包。真实世界 Facebook 走 OAuth 跳转授权，但本包登录的是供应商代持账号，登录链路仍只有「下发一次性凭证、拿凭证换会话」两步；code 是短信验证码、OAuth 授权码还是回调 ticket，由供应商在 pay_sdks 段的登记口径决定，包侧不猜。供应商没有「下发验证码」这一环时，就在其 SDK 段的 endpoints 里不登记 send_code，该操作就地拒绝、不发请求，不为凑齐两段配一个假网关",
+    "facebook": {
+        "login说明": "登录与验证码下发链路的 SDK 引用。单独成段（supplier_fb）而不是复用 supplier_wa 的原因见 pay_sdks说明：endpoints 的逻辑名不带平台维度，一段给不出两个 /login 路径",
+        "login": {
+            "sdk": "supplier_fb",
+            "account": ""
+        },
+        "provider说明": "充值/提现链路的 SDK 引用，与 zalo/whatsapp 指向同一个 supplier_a/default",
+        "provider": {
+            "sdk": "supplier_a",
+            "account": "default"
+        },
+        "templates说明": "Meta 系通常没有消息模板概念，留空即可（不填或空对象都行）；取到空串模板名不进报文，不会发出一个占位模板",
+        "templates": {}
+    },
+    "instagram说明": "Instagram 通道（登录/充值/提现），代码在 instagram 包。与 facebook 同属 Meta 系、多半复用同一家供应商，仍拆成独立通道段与独立 SDK 段（supplier_ig）：两条通道的账号、商户与开关各自独立，合并成一段就没法表达「只关 Instagram」；code 形态口径同 facebook说明。Instagram 没有「好友」概念，friend_list 逻辑名照样沿用，读作「按账号返回的关联账号列表」——四条社交通道共用一套逻辑名，端点表才不至于散成四个名字各配一遍",
+    "instagram": {
+        "login说明": "登录与验证码下发链路的 SDK 引用；供应商若没有下发验证码环节，就在 supplier_ig 段里去掉 endpoints.send_code",
+        "login": {
+            "sdk": "supplier_ig",
+            "account": ""
+        },
+        "provider说明": "充值/提现链路的 SDK 引用，与 facebook/zalo/whatsapp 指向同一个 supplier_a/default",
+        "provider": {
+            "sdk": "supplier_a",
+            "account": "default"
+        },
+        "templates说明": "Meta 系通常没有消息模板概念，留空即可；取到空串模板名不进报文",
+        "templates": {}
     },
     "usdt说明": "USDT(TRC20) 通道（充值/提现），代码在 usdt 包。金额一律整数最小单位（USDT 这张合约是 6 位小数，位数取自合约自身的元数据），配置与报文都不出现浮点。注意链上手续费不是万分比：TRON 的 gas 以 TRX 计、由发送方付、与转账金额无关，单笔实际成本看回执的 fee 与 fee_currency",
     "usdt": {

@@ -24,8 +24,14 @@ Go 游戏服务框架：WebSocket、gRPC、定时器、Lua、Telegram、Gin、Re
 - Prometheus：`metrics.enabled`，可选 `metrics.token` 保护 `/metrics`。
 - 资金通道：供应商接入集中在顶层 `pay_sdks` 表，一段=一套供应商（`driver` 驱动标记、`base_url`、
   凭证、`endpoints` 端点表、`accounts` 我方商户账户）。通道段 `telegram.ton`（TON）、
-  `usdt.provider`（USDT/TRC20）、`whatsapp.provider`（充值/提现）、`whatsapp.login`（登录/验证码）
+  `usdt.provider`（USDT/TRC20）、`tron.provider` / `bsc.provider` / `sol.provider`（原生币）、
+  `whatsapp.provider` / `whatsapp.login` 与 `zalo` / `facebook` / `instagram` 的同名两段（充值/提现、登录/验证码）
   只写 `{sdk, account}` 两个名字引用它，同一供应商的几条链路因此共用一份凭证，不必抄三份。
+  四条社交通道同构：登录各引一段消息网关（`supplier_wa`/`supplier_zalo`/`supplier_fb`/`supplier_ig`），
+  资金一律复用支付网关段——充值提现与平台无关，凭证只登记一次；登录之所以一家一段，
+  是因为 `endpoints` 的键是全局逻辑名、不带平台维度，一段服务不了 `/wa/login` 与 `/zalo/login`
+  两种实际路径；代价是密钥注入钩子按段名注册（`util.CallPaySDKMsg+段名`），同一供应商登记多段时
+  下游要逐段注入，别把密钥抄进版本库。
   「开不开」有两处真相：SDK 段的 `enable` 决定这套凭证能不能用，通道段的 `sdk` 决定这条通道用不用它，
   两处都到位才是开；缺段或写 `off` 都不阻断整机。出款引用必须点到一个 `enable: "on"` 的商户账户
   （只有验证码链路可以没有账户）。键名与逐项说明见 [config/example.json](config/example.json)。
@@ -41,7 +47,7 @@ Go 游戏服务框架：WebSocket、gRPC、定时器、Lua、Telegram、Gin、Re
 
 ```bash
 go build ./... && go vet ./...
-go test ./config ./corectx ./db ./rpc ./util ./websocket ./telegram .
+go test ./config ./corectx ./db ./rpc ./util ./websocket ./telegram ./whatsapp ./zalo ./facebook ./instagram .
 ```
 
 `go build ./...` 会连带编译 `example/` 的 3 个包（同属主模块），那里的编译错误是真错误。

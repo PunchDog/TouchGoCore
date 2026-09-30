@@ -89,8 +89,11 @@ func toBool(src interface{}) bool {
 		return v != "" && v != "0" && v != "false"
 	case float32, float64:
 		return reflect.ValueOf(v).Float() != 0
-	case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
+	case int, int8, int16, int32, int64:
 		return reflect.ValueOf(v).Int() != 0
+	case uint, uint8, uint16, uint32, uint64:
+		// 无符号 kind 调 .Int() 会 panic，必须走 .Uint()
+		return reflect.ValueOf(v).Uint() != 0
 	case time.Time:
 		return !v.IsZero()
 	default:
@@ -101,8 +104,11 @@ func toBool(src interface{}) bool {
 // toInt 将任意类型转换为int64
 func toInt(src interface{}) int64 {
 	switch v := src.(type) {
-	case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
+	case int, int8, int16, int32, int64:
 		return reflect.ValueOf(v).Int()
+	case uint, uint8, uint16, uint32, uint64:
+		// 无符号 kind 调 .Int() 会 panic；超过 MaxInt64 的大值按位截断为负数
+		return int64(reflect.ValueOf(v).Uint())
 	case float32, float64:
 		return int64(reflect.ValueOf(v).Float())
 	case string:
@@ -133,8 +139,10 @@ func toFloat64(src interface{}) float64 {
 		return float64(v)
 	case float64:
 		return v
-	case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
+	case int, int8, int16, int32, int64:
 		return float64(reflect.ValueOf(v).Int())
+	case uint, uint8, uint16, uint32, uint64:
+		return float64(reflect.ValueOf(v).Uint())
 	case string:
 		if v = strings.TrimSpace(v); v == "" {
 			return 0
@@ -163,8 +171,10 @@ func toString(src interface{}) string {
 		return v
 	case float32, float64:
 		return strconv.FormatFloat(reflect.ValueOf(v).Float(), 'f', -1, 64)
-	case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
+	case int, int8, int16, int32, int64:
 		return strconv.FormatInt(reflect.ValueOf(v).Int(), 10)
+	case uint, uint8, uint16, uint32, uint64:
+		return strconv.FormatUint(reflect.ValueOf(v).Uint(), 10)
 	case bool:
 		return strconv.FormatBool(v)
 	case time.Time:
@@ -199,8 +209,10 @@ func toTime(src interface{}) time.Time {
 			}
 		}
 		return time.Time{}
-	case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
+	case int, int8, int16, int32, int64:
 		return time.UnixMilli(reflect.ValueOf(v).Int())
+	case uint, uint8, uint16, uint32, uint64:
+		return time.UnixMilli(int64(reflect.ValueOf(v).Uint()))
 	case float32, float64:
 		return time.UnixMilli(int64(reflect.ValueOf(v).Float()))
 	default:

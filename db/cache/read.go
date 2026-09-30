@@ -151,7 +151,11 @@ func (c *Cache[K, V]) reload(ks string, key K, ld Loader[K, V]) (any, error) {
 		if val == nil {
 			ttl = c.jitteredNegativeTTL(ks)
 		}
-		if err := c.kv.Set(sctx, ks, c.mustEncode(val, seq), ttl); err != nil {
+		// 回填必须走 seq-guarded CAS：脏检查与写入之间若并发 Write 落了更高 seq
+		// 的新值，裸 Set 会用源库旧值把它盖掉（违 Redis 优先）。CAS 未生效
+		// （written=false）说明 Redis 已有更新的值，静默放弃本次回填即可——
+		// 下方读回路径拿到的正是那个新值。
+		if _, err := c.setEnvelopeSeq(sctx, ks, val, ttl, seq, val == nil); err != nil {
 			c.st.KVErr.Add(1)
 			if c.cfg.RequireRedis {
 				vars.Error("cache[%s] 回填Redis失败 key=%s: %v", c.name, ks, err)
@@ -338,7 +342,8 @@ func (c *Cache[K, V]) MGetOrLoad(ctx context.Context, keys []K) (map[string]*V, 
 				ttl = c.jitteredNegativeTTL(ks)
 			}
 			sctx, scancel := context.WithTimeout(ctx, c.cfg.WriteTimeout)
-			err := c.setEnvelope(sctx, ks, v, ttl, c.seq.Add(1), v == nil)
+			// 与单键回填同理：批量回填也走 seq-guarded CAS，防旧值降级覆盖
+			_, err := c.setEnvelopeSeq(sctx, ks, v, ttl, c.seq.Add(1), v == nil)
 			scancel()
 			if err != nil {
 				c.st.KVErr.Add(1)

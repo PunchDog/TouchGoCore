@@ -33,6 +33,12 @@ func (dbo *DbOperate) CreateGridFile(filename string, data []byte) error {
 
 	//新做一个桶
 	fileId, err := bucket.UploadFromStream(filename, bytes.NewBuffer(data))
+	if err != nil {
+		// 上传失败必须立刻返回：此前该 err 会被下面 bucket.Find 的 err 覆盖，
+		// 失败被静默吞掉、调用方拿到 nil。
+		vars.Error("[CreateGridFile] bucket.UploadFromStream(%s) err = %+v", filename, err)
+		return err
+	}
 
 	//查找老桶 并删除
 	filter := bson.M{"filename": filename, "_id": bson.M{"$ne": fileId}}

@@ -2,6 +2,8 @@ package db
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"time"
 
@@ -51,6 +53,15 @@ func NewMongoDB(cfg *config.MongoDBConfig) (*DbOperate, error) {
 	return dbo, nil
 }
 
+// mongoPoolKey 基于连接配置生成稳定的注册表键：host|db|replicaSet|密码哈希前 8 字节。
+// 凭证（用户名/密码）绝不出现在键与任何日志里；同实例键稳定（复用连接命中同一 key），
+// 不同 host/db/replicaSet/密码天然分键（密码轮换不会复用旧凭证连接）。
+// 与 db/mysql、db/redis 的 poolKey 同一口径。
+func mongoPoolKey(cfg *config.MongoDBConfig) string {
+	sum := sha256.Sum256([]byte(cfg.Password))
+	return cfg.Host + "|" + cfg.DBName + "|" + cfg.ReplicaSetName + "|" + hex.EncodeToString(sum[:8])
+}
+
 func (dbo *DbOperate) newMongoDB(cfg *config.MongoDBConfig) error {
 	var url string = ""
 	if cfg.Username == "" && cfg.Password == "" {
@@ -65,10 +76,12 @@ func (dbo *DbOperate) newMongoDB(cfg *config.MongoDBConfig) error {
 	vars.Info("DbOperate mongodb connecting host:%s db:%s", cfg.Host, cfg.DBName)
 
 	dbo.dbName = cfg.DBName
-	dbo.url = url
+	// 只存不含凭证的连接键：dbmap 复用/删除与全部日志出口都用它，含密码的
+	// 原始 url 仅限本函数内 ApplyURI 一次性使用，绝不落地。
+	dbo.url = mongoPoolKey(cfg)
 
 	//有连接直接用
-	if dbo.connectOnly(url) {
+	if dbo.connectOnly(dbo.url) {
 		return nil
 	}
 
@@ -110,8 +123,8 @@ func (dbo *DbOperate) newMongoDB(cfg *config.MongoDBConfig) error {
 		}
 	}
 
-	dbmap.Global.Store(url, dbo.session)
-	vars.Info("DbOperate Connect %s mongodb...OK", dbo.url)
+	dbmap.Global.Store(dbo.url, dbo.session)
+	vars.Info("DbOperate Connect host:%s db:%s mongodb...OK", cfg.Host, cfg.DBName)
 	return nil
 }
 

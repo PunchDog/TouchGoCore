@@ -132,7 +132,7 @@ func (dbo *DbOperate) DBFindAll(name string, query interface{}, resHandler func(
 	}
 	ctx, cancel := newTimeoutContext()
 	defer cancel()
-	vars.Debug("[DbOperate.DBFindAll] dbo.dbName = %v, dbo.url= %v", dbo.dbName, dbo.url)
+	vars.Debug("[DbOperate.DBFindAll] dbo.dbName = %v", dbo.dbName)
 	collection := dbo.session.Database(dbo.dbName).Collection(name)
 	qCursor, err := collection.Find(ctx, query)
 	if err != nil {

@@ -2,6 +2,7 @@ package cache
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 	"sort"
@@ -383,7 +384,8 @@ func (s *redisStore) JAddDeleteSeq(ctx context.Context, key, zkey, keyStr string
 // 崩溃/被杀时来不及落库的条目重新落库。逐条尽力：
 //   - tombstone 账 → 重放 Saver.Delete；
 //   - upsert 账 → 读 Redis envelope（值本体），成功则重放 Saver.Save；
-//     envelope 已物理过期/坏值 → 不可恢复，RecoverMiss 计数 + Error 告警；
+//     envelope 确认已消失（ErrNoEntry）/坏值 → 不可恢复，RecoverMiss 计数 + Error 告警；
+//     Redis 读值瞬态错误 → 保留账目，下次启动再试（不得误判为永久丢失）；
 //   - 落库失败 → 保留账目，下次启动再试（不丢不复活已销的账）。
 func (c *Cache[K, V]) recoverJournal(ctx context.Context) {
 	if c.jr == nil || c.sn == nil || !c.cfg.Enabled {
@@ -430,6 +432,14 @@ func (c *Cache[K, V]) recoverJournal(ctx context.Context) {
 		}
 		raw, gerr := c.kv.Get(jctx, c.KeyOf(k))
 		if gerr != nil {
+			if !errors.Is(gerr, ErrNoEntry) {
+				// 瞬态错误（网络/超时/Redis 短暂不可用）≠ 值永久消失：
+				// 误销账 = 未落库数据永久丢失。保留账目，下次启动再试
+				// （与下方 Save 失败分支同一口径）。
+				c.st.JournalErr.Add(1)
+				vars.Warning("cache[%s] 恢复跳过：Redis 读值瞬态错误 key=%s seq=%d: %v（留待下次启动）", c.name, je.KeyStr, je.Seq, gerr)
+				continue
+			}
 			c.st.RecoverMiss.Add(1)
 			vars.Error("cache[%s] 恢复失败：账本在但 Redis 值已消失（TTL 早于重启过期）key=%s seq=%d", c.name, je.KeyStr, je.Seq)
 			_ = c.jr.JClear(jctx, c.jz, member)

@@ -216,8 +216,9 @@ func NewClient(cfg *config.MySqlDBConfig, opts ...Option) (*Client, error) {
 		Logger: logger.Default.LogMode(o.loggerLevel),
 	})
 	if err != nil {
+		// Error.SQL 只存脱敏 DSN：完整 DSN 含密码，不得进入错误对象
 		return nil, newError("Open", fmt.Errorf("failed to open mysql: %w", err),
-			classify(err), dsn, nil, time.Since(start))
+			classify(err), redactDSN(dsn), nil, time.Since(start))
 	}
 	sqlDB, err := engine.DB()
 	if err != nil {

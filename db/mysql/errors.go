@@ -228,3 +228,17 @@ func redactSQL(s string) string {
 	}
 	return s
 }
+
+// redactDSN 去除 DSN 中的密码段（user:pass@tcp(host)/db → user:***@tcp(host)/db）。
+// 用于 Error.SQL 字段卫生：完整 DSN 含密码，绝不允许进入错误对象/日志。
+// 解析失败时整串丢弃（返回空）——宁可丢掉诊断串也不泄露凭证。
+func redactDSN(dsn string) string {
+	cfg, err := mysql.ParseDSN(dsn)
+	if err != nil {
+		return ""
+	}
+	if cfg.Passwd != "" {
+		cfg.Passwd = "***"
+	}
+	return cfg.FormatDSN()
+}

@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 	"touchgocore/config"
 	"touchgocore/corectx"
 	"touchgocore/util"
@@ -309,25 +310,86 @@ func extractAuthToken(c *gin.Context) string {
 	return ""
 }
 
-// 监听端口
-func ListenAndServe(port int, className string) error {
-	ws := wsCfg()
-	// 每次监听都按当前配置新建 Upgrader：全局 sync.Once 会把首次配置永久钉死
-	upgrader := newUpgrader(ws)
-	readLimit := currentMaxMessageSize()
+// sensitiveQuerySubstrings 需要脱敏的 query 参数名（小写子串匹配）。
+// 凭证/token 一律不得进日志是本仓硬口径：gin.Default 的 Logger 会把
+// /ws?token=xxx 原样打出，这里对含敏感子串的参数整体遮蔽。
+var sensitiveQuerySubstrings = []string{
+	"token", "auth", "password", "passwd", "secret", "sign", "key", "credential", "session",
+}
 
-	r := gin.Default()
+// sanitizeRawQuery 对原始 query 串脱敏：敏感参数值替换为 ***，其余保留。
+// 不可解析的 query 整体遮蔽，宁可丢观测也不冒泄漏风险。
+func sanitizeRawQuery(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	vals, err := url.ParseQuery(raw)
+	if err != nil {
+		return "<masked-unparseable-query>"
+	}
+	extra := ""
+	if ws := wsCfg(); ws != nil {
+		extra = strings.ToLower(ws.AuthTokenQuery)
+	}
+	for k := range vals {
+		lk := strings.ToLower(k)
+		if extra != "" && lk == extra {
+			vals[k] = []string{"***"}
+			continue
+		}
+		for _, s := range sensitiveQuerySubstrings {
+			if strings.Contains(lk, s) {
+				vals[k] = []string{"***"}
+				break
+			}
+		}
+	}
+	return vals.Encode()
+}
 
-	// 使用中间件将className存储到gin.Context中
-	r.Use(func(c *gin.Context) {
-		c.Set("className", className)
+// sanitizedRequestLogger 访问日志中间件：等价 gin.Logger 的观测面，
+// 但 query 先过 sanitizeRawQuery，token 一类的凭证不落日志。
+func sanitizedRequestLogger() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		start := time.Now()
 		c.Next()
-	})
+		path := c.Request.URL.Path
+		if q := sanitizeRawQuery(c.Request.URL.RawQuery); q != "" {
+			path += "?" + q
+		}
+		vars.Info("WS-HTTP %s %s %d %v %s",
+			c.Request.Method, path, c.Writer.Status(), time.Since(start), getDirectIP(c.Request))
+	}
+}
 
-	handler := func(c *gin.Context) {
+// panicGuardMiddleware 兜底恢复：panic 信息进 vars 日志（不打请求 URL，避免凭证入日志）。
+func panicGuardMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		defer func() {
+			if err := recover(); err != nil {
+				vars.Error("WebSocket 路由 panic: %v", err)
+				// 不写状态码：连接可能已被 hijack（Upgrade 之后），再写响应只会产生
+				// superfluous WriteHeader 噪音；wsHandler 内部另有针对已劫持连接的关闭。
+				c.Abort()
+			}
+		}()
+		c.Next()
+	}
+}
+
+// wsHandler 构造 WebSocket 升级处理函数（从 ListenAndServe 抽出以便独立测试）。
+func wsHandler(className string, upgrader *websocket.Upgrader, readLimit int64) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// W6：wsConn 声明提到 recover 之前——Upgrade 成功后连接已被 hijack，
+		// net/http 不再管它的生死；panic 恢复路径若不显式 Close，这条连接
+		// （连同底层 fd）会一直挂到进程退出。
+		var wsConn *websocket.Conn
 		defer func() {
 			if err := recover(); err != nil {
 				vars.Error("WebSocket处理发生panic错误: %v", err)
+				if wsConn != nil {
+					wsConn.Close()
+				}
 			}
 		}()
 
@@ -355,10 +417,7 @@ func ListenAndServe(port int, className string) error {
 		}
 		// ========== 认证结束 ==========
 
-		var (
-			wsConn *websocket.Conn
-			err    error
-		)
+		var err error
 		// 完成ws协议的握手操作
 		// Upgrade:websocket
 		if wsConn, err = upgrader.Upgrade(c.Writer, c.Request, nil); err != nil {
@@ -384,8 +443,28 @@ func ListenAndServe(port int, className string) error {
 			return
 		}
 	}
+}
+
+// 监听端口
+func ListenAndServe(port int, className string) error {
+	ws := wsCfg()
+	// 每次监听都按当前配置新建 Upgrader：全局 sync.Once 会把首次配置永久钉死
+	upgrader := newUpgrader(ws)
+	readLimit := currentMaxMessageSize()
+
+	// W7：不用 gin.Default —— 其 Logger 会把 query 里的 token 原样打进日志。
+	// 换成 New + 脱敏访问日志 + 自带 panic 兜底（不打印请求 URL）。
+	r := gin.New()
+	r.Use(panicGuardMiddleware(), sanitizedRequestLogger())
+
+	// 使用中间件将className存储到gin.Context中
+	r.Use(func(c *gin.Context) {
+		c.Set("className", className)
+		c.Next()
+	})
+
 	for _, p := range websocketListenPaths(ws) {
-		r.GET(p, handler)
+		r.GET(p, wsHandler(className, upgrader, readLimit))
 		vars.Info("WebSocket 路由已注册: GET %s", p)
 	}
 

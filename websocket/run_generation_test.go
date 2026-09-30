@@ -62,7 +62,7 @@ func snapshotM4Globals(t *testing.T) {
 	prevQueue := wsQueue.Swap(nil)
 	prevRunCtx := runCtxValue.Swap(nil)
 	prevClientMap := loadClientMap()
-	prevPool := clientpool
+	prevPool := clientpool.Swap(nil)
 	t.Cleanup(func() {
 		// 先把测试期间起的 Tick 收掉，避免它在新测试里继续消费旧 state
 		if s := loadRunState(); s != nil {
@@ -72,7 +72,7 @@ func snapshotM4Globals(t *testing.T) {
 		wsQueue.Store(prevQueue)
 		runCtxValue.Store(prevRunCtx)
 		storeClientMap(prevClientMap)
-		clientpool = prevPool
+		clientpool.Store(prevPool)
 	})
 }
 

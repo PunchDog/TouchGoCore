@@ -332,7 +332,17 @@ func (w *RotatingFileWriter) startAgeCleanup() {
 	}()
 }
 
-// compressFile 压缩日志文件
+// compressionCreate 创建压缩目标文件（测试接缝：可注入 Close 失败的写入器）
+var compressionCreate = func(name string) (io.WriteCloser, error) {
+	return os.Create(name)
+}
+
+// compressFile 压缩日志文件。
+//
+// W（vars-P2）：gzip 的 CRC 收尾写在 gw.Close 里，修复前 Close 挂在 defer 上且
+// 错误被吞，io.Copy 一成功就删源文件 → Close 失败时源已删、.gz 又是坏的，数据双失。
+// 现在显式按「copy → gw.Close → dst.Close → src.Close → 删源」推进，
+// 任一步失败都清掉半成品 .gz 并保留源文件。
 func (w *RotatingFileWriter) compressFile(filePath string) {
 	gzipPath := filePath + ".gz"
 
@@ -341,25 +351,52 @@ func (w *RotatingFileWriter) compressFile(filePath string) {
 	if err != nil {
 		return
 	}
-	defer src.Close()
 
 	// 创建压缩文件
-	dst, err := os.Create(gzipPath)
+	dst, err := compressionCreate(gzipPath)
 	if err != nil {
+		src.Close()
 		return
 	}
-	defer dst.Close()
 
-	// 执行压缩
-	gw, _ := gzip.NewWriterLevel(dst, gzip.BestCompression)
-	if gw != nil {
-		defer gw.Close()
-		if _, err := io.Copy(gw, src); err == nil {
-			// 删除原始文件
-			os.Remove(filePath)
-		} else {
-			os.Remove(gzipPath)
-		}
+	fail := func(stage string, err error) {
+		Error("日志压缩%s失败，保留源文件并清理半成品归档: %s: %v", stage, filePath, err)
+		_ = os.Remove(gzipPath)
+	}
+
+	gw, err := gzip.NewWriterLevel(dst, gzip.BestCompression)
+	if err != nil {
+		dst.Close()
+		src.Close()
+		fail("初始化", err)
+		return
+	}
+
+	if _, err := io.Copy(gw, src); err != nil {
+		_ = gw.Close()
+		_ = dst.Close()
+		src.Close()
+		fail("写入", err)
+		return
+	}
+	// CRC 收尾：Close 失败意味着 .gz 不完整，绝不能删源文件
+	if err := gw.Close(); err != nil {
+		_ = dst.Close()
+		src.Close()
+		fail("gzip 收尾", err)
+		return
+	}
+	if err := dst.Close(); err != nil {
+		src.Close()
+		fail("归档关闭", err)
+		return
+	}
+	// 源文件句柄必须先释放再删：Windows 下删除仍被打开的文件会失败
+	src.Close()
+
+	// 归档完整落盘后才删除原始文件
+	if err := os.Remove(filePath); err != nil {
+		Error("日志压缩成功但源文件删除失败: %s: %v", filePath, err)
 	}
 }
 

@@ -236,13 +236,17 @@ func (m *ChannelLoggerManager) logViaHandler(entry logEntry) {
 // 建，异步模式下恒为 nil，于是 slog.SetDefault(m.GetLogger()) 等于把默认器换成
 // slog.Default() 自己，slog.Info 一类调用永远进不了日志文件——门面 vars.Info 走的是
 // 另一条路（LogAsyncSimple），所以只有直接用 slog 的宿主会踩到。
+//
+// W（vars-P2）：返回的是 managerSlogHandler 间接层而不是当时的 handler 快照。
+// adoptSlogDefault 只在 Initialize 时调用一次，zap 模式 SetLevel 会重建 writer 并
+// 关闭旧句柄；若这里交出快照，slog.Default 从此一直写已关闭的旧 writer，日志静默消失。
 func (m *ChannelLoggerManager) GetLogger() *slog.Logger {
 	m.mu.RLock()
 	handler := m.slogHandler
 	m.mu.RUnlock()
 
 	if handler != nil {
-		return slog.New(handler)
+		return slog.New(&managerSlogHandler{m: m})
 	}
 
 	return slog.Default()

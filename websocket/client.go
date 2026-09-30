@@ -320,12 +320,12 @@ func (c *Client) readLoop() {
 		if _, data, err := conn.ReadMessage(); err == nil {
 			if c.Connected() {
 				item := &msgQueueType{uid: c.UID, data: data}
+				// W2：入队阶段不做任何统计。权威计数点是「消息真正被处理」
+				// （processMessage → UpdateStatsFromMessage）；此前这里入队即 +1，
+				// 与处理侧再 +1 叠加，同一条消息被计两遍。
 				if queueParams().dropOnFull {
 					select {
 					case queue <- item:
-						c.stats.messagesReceived.Add(1)
-						c.stats.bytesReceived.Add(int64(len(data)))
-						c.stats.lastActivity.Store(util.CurrentTime())
 					case <-c.closeCh:
 						return
 					default:
@@ -336,9 +336,6 @@ func (c *Client) readLoop() {
 				} else {
 					select {
 					case queue <- item:
-						c.stats.messagesReceived.Add(1)
-						c.stats.bytesReceived.Add(int64(len(data)))
-						c.stats.lastActivity.Store(util.CurrentTime())
 					case <-c.closeCh:
 						return
 					}
@@ -386,9 +383,12 @@ func (c *Client) Close(reason string) {
 			table.Delete(c.UID)
 		}
 
-		// 调用 OnClose 回调
+		// 调用 OnClose 回调：外部回调必须收敛 panic（W1）。
+		// 这条路径跑在 Close 调用方协程上——单连接关闭时是读写协程，
+		// shutdownWebsocket 全服关闭时是 Tick 消费协程且在 Range 里串行执行：
+		// panic 逃逸轻则吃掉一个消费者、中断后续所有客户端的关闭，重则崩掉关服进程。
 		if c.ICall != nil {
-			c.OnClose(c)
+			c.runCloseGate()
 		}
 
 		// 关闭通知通道并断开底层连接；msgChan 保持开放，写入方靠 closed 判断丢弃
@@ -426,12 +426,14 @@ func (c *Client) recycle() {
 		c.UID = 0
 
 		// 归还 ICall 到对象池
-		if clientpool != nil && c.ICall != nil {
-			if icallpool, ok := clientcall.Load(c.iCallName); ok {
-				// 使用指针避免复制sync.Pool
-				icallpool.Put(c.ICall)
-			} else {
-				vars.Error("未找到类名对应的ICall接口实现: %s", c.iCallName)
+		if clientpool.Load() != nil && c.ICall != nil {
+			if m := clientcall.Load(); m != nil {
+				if icallpool, ok := m.Load(c.iCallName); ok {
+					// 使用指针避免复制sync.Pool
+					icallpool.Put(c.ICall)
+				} else {
+					vars.Error("回收ICall时未找到类名对应的对象池，丢弃实例: %s", c.iCallName)
+				}
 			}
 			c.ICall = nil
 		}
@@ -451,8 +453,8 @@ func (c *Client) recycle() {
 		}
 
 		// 归还 Client 到对象池：这一步是所有权交接，此后不得再写 c 的任何字段
-		if clientpool != nil {
-			clientpool.Put(c)
+		if pool := clientpool.Load(); pool != nil {
+			pool.Put(c)
 		}
 	})
 }
@@ -536,16 +538,55 @@ func (client *Client) runConnectGate() (ok bool) {
 	return client.OnConnect(client)
 }
 
+// acquireICall 从类名对应的对象池取一个回调实例并断言为 ICall。
+// 第二个返回值是该实例所属的池，调用方在断言失败时可把实例放回，避免泄漏。
+func acquireICall(className string) (ICall, *sync.Pool, error) {
+	m := clientcall.Load()
+	if m == nil {
+		return nil, nil, fmt.Errorf("回调注册表未初始化: %s", className)
+	}
+	icallpool, h := m.Load(className)
+	if !h {
+		return nil, nil, fmt.Errorf("未找到类名对应的ICall接口实现: %s", className)
+	}
+	icall := icallpool.Get()
+	if icall == nil {
+		return nil, icallpool, fmt.Errorf("内存池获取失败: %s", className)
+	}
+	// W4：comma-ok 断言，池被塞进异常类型时降级为错误而不是 panic
+	call, ok := icall.(ICall)
+	if !ok {
+		icallpool.Put(icall)
+		return nil, icallpool, fmt.Errorf("ICall池返回类型 %T 未实现ICall接口: %s", icall, className)
+	}
+	return call, icallpool, nil
+}
+
+// runCloseGate 执行业务 OnClose 并收敛 panic（W1）：
+// 与 runConnectGate/processMessage 同口径，用户在 OnClose 里 panic 只记录、不外抛，
+// 关闭流程（closeCh、底层连接、后续客户端的 Range 关闭）必须继续走完。
+func (c *Client) runCloseGate() {
+	defer func() {
+		if r := recover(); r != nil {
+			UpdateErrorStats()
+			metrics.WS.IncErrors("panic")
+			vars.Error("WebSocket OnClose 回调 panic, 客户端: %s: %v", c.remoteAddr, r)
+		}
+	}()
+	c.OnClose(c)
+}
+
 // 修改InitConnection为NewClient
 func NewClient(connType interface{}, remoteAddr string, className string) (*Client, error) {
 	uid := nextUID()
 
 	var client *Client = nil
-	if clientpool != nil {
-		client = clientpool.Get().(*Client)
-		if client == nil {
+	if pool := clientpool.Load(); pool != nil {
+		got, ok := pool.Get().(*Client)
+		if !ok || got == nil {
 			return nil, errors.New("内存池获取失败")
 		}
+		client = got
 	} else {
 		client = &Client{}
 	}
@@ -584,20 +625,13 @@ func NewClient(connType interface{}, remoteAddr string, className string) (*Clie
 	client.remoteAddr = remoteAddr
 	//使用反射创建ICall接口
 	if className != "" {
-		if icallpool, h := clientcall.Load(className); h {
-			// 使用指针避免复制sync.Pool
-			icall := icallpool.Get()
-			if icall == nil {
-				vars.Error("内存池获取失败: %s", className)
-				client.Close("内存池获取失败")
-				return nil, errors.New("内存池获取失败")
-			}
-			client.ICall = icall.(ICall)
-		} else {
-			vars.Error("未找到类名对应的ICall接口实现: %s", className)
-			client.Close("未找到类名对应的ICall接口实现")
-			return nil, errors.New("未找到类名对应的ICall接口实现")
+		call, _, err := acquireICall(className)
+		if err != nil {
+			vars.Error("%v", err)
+			client.Close(err.Error())
+			return nil, err
 		}
+		client.ICall = call
 	} else {
 		//使用默认的
 		client.ICall = &defaultCall{}

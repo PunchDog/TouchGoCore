@@ -87,3 +87,57 @@ func (h *channelSlogHandler) WithGroup(name string) slog.Handler {
 	}
 	return &channelSlogHandler{m: h.m, attrs: h.attrs, groupPrefix: prefix}
 }
+
+// ============================================================================
+// managerSlogHandler：把 slog 调用间接到管理器「当前」持有的 handler 上。
+//
+// adoptSlogDefault 是一次性快照：slog.SetDefault(m.GetLogger()) 之后，zap 模式的
+// SetLevel 会重建整条 writer/handler 链路并关闭旧句柄。若 GetLogger 交出的是当时的
+// handler 实例，slog.Default 会永远绑在已关闭的旧链路上继续写，日志静默丢失。
+// 间接层每次调用都在 m.mu 读锁下解析当前 handler，天然跟随 SetLevel 换代。
+// ============================================================================
+
+type managerSlogHandler struct {
+	m *ChannelLoggerManager
+}
+
+// current 取当前生效的 handler 快照（可能为 nil）。
+func (h *managerSlogHandler) current() slog.Handler {
+	h.m.mu.RLock()
+	defer h.m.mu.RUnlock()
+	return h.m.slogHandler
+}
+
+func (h *managerSlogHandler) Enabled(ctx context.Context, level slog.Level) bool {
+	if c := h.current(); c != nil {
+		return c.Enabled(ctx, level)
+	}
+	return false
+}
+
+func (h *managerSlogHandler) Handle(ctx context.Context, r slog.Record) error {
+	if c := h.current(); c != nil {
+		return c.Handle(ctx, r)
+	}
+	return nil
+}
+
+func (h *managerSlogHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	if len(attrs) == 0 {
+		return h
+	}
+	if c := h.current(); c != nil {
+		return c.WithAttrs(attrs)
+	}
+	return h
+}
+
+func (h *managerSlogHandler) WithGroup(name string) slog.Handler {
+	if name == "" {
+		return h
+	}
+	if c := h.current(); c != nil {
+		return c.WithGroup(name)
+	}
+	return h
+}

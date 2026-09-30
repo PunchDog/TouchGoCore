@@ -87,7 +87,10 @@ type wsQueueParams struct {
 	writeEntries int
 	readEntries  int
 	backpressure bool
-	dropOnFull   bool
+	// dropOnFull 只作用于「接收队列」：readLoop 入队满时 true=丢弃、false=阻塞。
+	// 发送队列不受它控制——SendMsg 永远是非阻塞投递，msgChan 满即丢弃并记日志
+	// （config.DropOnFull 的注释未提及这一差异，此处以实际行为为准）。
+	dropOnFull bool
 }
 
 var wsQueue atomic.Pointer[wsQueueParams]
@@ -141,8 +144,11 @@ var currentRunState atomic.Pointer[runState]
 var runGenerationCounter atomic.Uint64
 
 var (
-	clientpool *sync.Pool = nil
-	clientcall *syncmap.Map[string, *sync.Pool]
+	// clientpool/clientcall 原是普通包级指针变量：Run 换代时直接覆盖 clientpool，
+	// 而旧连接的 recycle/NewClient 仍在无同步读取，换代瞬间即数据竞争。
+	// 与 runCtxValue/msgQueue 同口径，改为 atomic.Pointer 做代际快照交换。
+	clientpool atomic.Pointer[sync.Pool]
+	clientcall atomic.Pointer[syncmap.Map[string, *sync.Pool]]
 
 	// runCtxValue 是本轮 Run 的生命周期上下文。Run 写入时上一轮的连接协程
 	// 可能还在 DialContext/Done 上读它，普通接口变量并发读写即数据竞争。
@@ -301,10 +307,16 @@ func RegisterCall(className string, factoryFunc any) {
 	if typ.Kind() == reflect.Ptr {
 		typ = typ.Elem()
 	}
-	if clientcall == nil {
-		clientcall = new(syncmap.Map[string, *sync.Pool])
+	m := clientcall.Load()
+	if m == nil {
+		nm := new(syncmap.Map[string, *sync.Pool])
+		if clientcall.CompareAndSwap(nil, nm) {
+			m = nm
+		} else {
+			m = clientcall.Load()
+		}
 	}
-	clientcall.Store(className, &sync.Pool{
+	m.Store(className, &sync.Pool{
 		New: func() any {
 			return reflect.New(typ).Interface()
 		},
@@ -382,13 +394,13 @@ func Run(ctx context.Context) error {
 	state := newRunState(ctx, params.readEntries)
 	currentRunState.Store(state)
 
-	clientpool = &sync.Pool{
+	clientpool.Store(&sync.Pool{
 		New: func() interface{} {
 			return &Client{
 				ICall: nil,
 			}
 		},
-	}
+	})
 
 	if size := cfg.Ws.WorkerPoolSize; size > 0 {
 		initWorkerPool(size, cfg.Ws.ShardByKey, state)
@@ -414,6 +426,11 @@ func Run(ctx context.Context) error {
 	}
 	if started == 0 && lastErr != nil {
 		// 启动全部失败：收回刚装的状态，避免后续 Stop 等不到 tickDone
+		// W5：Worker Pool 建在端口绑定之前，全败分支不收池会泄漏常驻 worker 协程
+		stopWorkerPool()
+		if state != nil {
+			state.pool.Store(nil)
+		}
 		currentRunState.CompareAndSwap(state, nil)
 		return lastErr
 	}
@@ -561,6 +578,15 @@ func processMessage(read_msg *msgQueueType) (panicked bool) {
 		UpdateErrorStats()
 		metrics.WS.IncErrors("parse")
 		vars.Error("解析消息失败，客户端: %d", read_msg.uid)
+		return false
+	}
+	// W3 别名复核：dispatch 前再确认实例仍属于本消息的 uid。
+	// Load 与派发之间实例可能已关闭、回池并被 NewClient 复用（新 UID/新 ICall），
+	// 旧 uid 的滞留消息若继续派发，等于把上一条连接的数据喂给新连接的回调。
+	if client.UID != read_msg.uid {
+		UpdateErrorStats()
+		metrics.WS.IncErrors("stale")
+		vars.Error("客户端实例已被复用（uid 不匹配），丢弃滞留消息: msg_uid=%d client_uid=%d", read_msg.uid, client.UID)
 		return false
 	}
 	client.UpdateStatsFromMessage(read_msg.data)

@@ -69,20 +69,20 @@ func dirtyClient() *Client {
 func setupPoolStatsEnv(t *testing.T, newPooled func() any) {
 	t.Helper()
 
-	prevPool, prevCall, prevMap := clientpool, clientcall, loadClientMap()
+	prevPool, prevCall, prevMap := clientpool.Swap(nil), clientcall.Swap(nil), loadClientMap()
 	prevState := loadRunState()
 	// 队列容量按「条」计，压小避免每条连接白白分配 1024 槽的发送队列
 	prevQueue := wsQueue.Swap(&wsQueueParams{writeEntries: 16, readEntries: 8, dropOnFull: true})
 
-	clientpool = &sync.Pool{New: newPooled}
-	clientcall = syncmap.NewMap[string, *sync.Pool]()
-	RegisterCall(reuseCallName, &reuseCall{})
+	clientpool.Store(&sync.Pool{New: newPooled})
+	RegisterCall(reuseCallName, &reuseCall{}) // clientcall 已由 RegisterCall 惰性建表
 	storeClientMap(syncmap.NewMap[int64, *Client]())
 	// 代际状态：readLoop 需要 dispatchQueue() 非 nil，否则启动即退出
 	currentRunState.Store(newRunState(context.Background(), 8))
 
 	t.Cleanup(func() {
-		clientpool, clientcall = prevPool, prevCall
+		clientpool.Store(prevPool)
+		clientcall.Store(prevCall)
 		storeClientMap(prevMap)
 		currentRunState.Store(prevState)
 		wsQueue.Store(prevQueue)
@@ -199,10 +199,23 @@ func TestPooledClientStatsResetOnReuse(t *testing.T) {
 	if !waitCounter(3*time.Second, func() bool { return first.stats.messagesSent.Load() >= 1 }) {
 		t.Fatalf("✘ 出站计数未推进（用例前提不成立）: %+v", first.GetStats())
 	}
-	if err := peer.WriteMessage(gorillaws.BinaryMessage, []byte("world!")); err != nil {
+	// W2 之后入站计数的权威点在 processMessage（消息真正被处理），readLoop 只入队不计数。
+	// 因此从本代 msgQueue 取出对端消息交给 processMessage，推进入站计数。
+	if err := peer.WriteMessage(gorillaws.BinaryMessage, testMsgBytes(t)); err != nil {
 		t.Fatalf("✘ 对端写入失败: %v", err)
 	}
-	if !waitCounter(3*time.Second, func() bool { return first.stats.messagesReceived.Load() >= 1 }) {
+	q := first.dispatchQueue()
+	if q == nil {
+		t.Fatal("✘ 用例前提不成立：无代际队列")
+	}
+	var inbound *msgQueueType
+	select {
+	case inbound = <-q:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("✘ readLoop 未把入站消息投递到队列: %+v", first.GetStats())
+	}
+	processMessage(inbound)
+	if first.stats.messagesReceived.Load() < 1 {
 		t.Fatalf("✘ 入站计数未推进（用例前提不成立）: %+v", first.GetStats())
 	}
 	// 补齐另外三个计数器，凑成「五个都脏」的复用前状态
@@ -270,7 +283,7 @@ func TestRecycleDecrementsBeforePoolReturn(t *testing.T) {
 	}
 
 	// 回池的实例必须已经摘掉计数：新主人拿到手时 counted 必为 false
-	pooled, ok := clientpool.Get().(*Client)
+	pooled, ok := clientpool.Load().Get().(*Client)
 	if !ok || pooled == nil {
 		t.Fatal("✘ 对象池未归还实例")
 	}
@@ -280,7 +293,7 @@ func TestRecycleDecrementsBeforePoolReturn(t *testing.T) {
 	if pooled.counted.Load() {
 		t.Fatal("✘ 池中实例仍标记为已计数：说明 Put 早于 CAS，新主人会顶掉这次 -1")
 	}
-	clientpool.Put(pooled)
+	clientpool.Load().Put(pooled)
 
 	// 重复回收必须是 no-op，不得二次 -1
 	c.recycle()
@@ -339,7 +352,11 @@ func TestConcurrentBorrowReturnKeepsConnectionCount(t *testing.T) {
 				if time.Now().After(deadline) {
 					return
 				}
-				x, ok := clientpool.Get().(*Client)
+				pool := clientpool.Load()
+				if pool == nil {
+					return
+				}
+				x, ok := pool.Get().(*Client)
 				if !ok || x == nil {
 					continue
 				}

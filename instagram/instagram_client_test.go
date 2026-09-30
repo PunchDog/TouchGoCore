@@ -289,24 +289,29 @@ func TestBusinessFailureIsNotRetried(t *testing.T) {
 	}
 }
 
-// TestGatewayRetryIsTransparent 网关抖动由共用层重试，门面只报告最终结果。
+// TestWhitelistedBizCodeRetryIsTransparent 白名单内的供应商业务码由共用层原单重发，门面只报告最终结果。
 //
-// 新契约（L3）：Withdraw 路径仅白名单内的 HTTP 状态码可重试，5xx 不再默认 Retryable。
-// 本用例显式登记 502 到 RetryableCodes 以验证"白名单内网关抖动仍可透明重试"。
-func TestGatewayRetryIsTransparent(t *testing.T) {
-	// 登记 502 到 Withdraw 重试白名单，验证白名单内码可透明重发（走带锁入口）。
-	pay.SetRetryableCodes("502")
-	defer pay.DeleteRetryableCode("502")
+// 新契约（L3）：Withdraw 严格路径仅 RetryableCodes 白名单内的码可重试，5xx 不再默认 Retryable。
+// 本用例用【虚构业务码 59901】验证白名单机制：登记后该码触发同一张单透明重发。
+// 警示：严禁拿 502/504 这类网关状态码做演示——502=受理状态未知（请求可能已被供应商受理、
+// 只是回执没穿回来），把它登记进提现白名单再原单重发就是双付；详见 pay.SetRetryableCodes 文档。
+func TestWhitelistedBizCodeRetryIsTransparent(t *testing.T) {
+	// 虚构业务码走带锁入口临时登记，用后即撤，不裸写 map；不用真实网关码（502/504）以免背书双付风险配置。
+	const fakeBizCode = "59901"
+	pay.SetRetryableCodes(fakeBizCode)
+	defer pay.DeleteRetryableCode(fakeBizCode)
 
 	f, url := newFakeSupplier(t)
-	f.status["/api/withdraw"] = http.StatusBadGateway
+	// 供应商以 2xx 包络回一个「明确拒绝、未受理」的业务码——这类码原单重发不会双花，
+	// 正是白名单的合法用途（区别于受理状态未知的 502/504 网关码）。
+	f.response["/api/withdraw"] = `{"code":"59901","msg":"供应商明确拒绝，未受理"}`
 	cfg := payCfg(url, allEndpoints())
 	cfg.PaySDks[testSection].MaxRetries = 1
 	startWith(t, cfg)
 
 	_, err := InstagramWithdraw(nil, &pay.PayOrder{OrderNo: "O1", Amount: 100, Address: "TAddr1"})
 	if err == nil {
-		t.Fatal("持续 5xx 应当报错")
+		t.Fatal("白名单内业务码持续被拒应当报错")
 	}
 	if n := len(f.seen()); n != 2 {
 		t.Fatalf("请求次数=%d，期望 2（首次 + 1 次重试），且两次都是同一张单", n)

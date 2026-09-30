@@ -105,6 +105,13 @@ type CallSpec struct {
 	// Parse 把响应换成归一载荷。返回 *ProviderError 且 Retryable=true 时本层会重发。
 	// 为 nil 时使用 DefaultParse（按 2xx / 429 / 5xx 分类）。
 	Parse func(status int, hdr http.Header, body []byte) (json.RawMessage, error)
+	// noTransportRetry 是严格路径标记（Withdraw 专用，由 Provider.send 置位）：
+	// 为 true 时 transport / read_body 错误一律 Retryable=false。
+	// 这两类错误发生在「请求已经写出、响应没能读回」的窗口里——供应商可能已经
+	// 受理了这一单，客户端原单重发在幂等不完备时就是双付。响应解析层的白名单
+	// （parseStrict）管不到这里，必须在本层单独收口。
+	// 刻意不导出：通道包不得自行构造带此标记的 CallSpec，严格口径的判定权留在 pay 内部。
+	noTransportRetry bool
 }
 
 // Do 发送请求并按错误分类重试，成功返回归一载荷。
@@ -171,13 +178,16 @@ func (c *Client) attempt(ctx context.Context, spec CallSpec) (json.RawMessage, t
 
 	resp, err := c.http.Do(httpReq)
 	if err != nil {
-		return nil, 0, &ProviderError{Channel: c.name, Code: "transport", Msg: err.Error(), Retryable: retryableByCtx(ctx, err)}
+		// 严格路径下传输层错误不自动重发：请求可能已被供应商受理，只是响应没回来。
+		retryable := retryableByCtx(ctx, err) && !spec.noTransportRetry
+		return nil, 0, &ProviderError{Channel: c.name, Code: "transport", Msg: err.Error(), Retryable: retryable}
 	}
 	defer resp.Body.Close()
 
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {
-		return nil, 0, &ProviderError{Channel: c.name, Code: "read_body", Msg: "读取响应失败", Retryable: true}
+		// 读体失败时状态行与头已经到了，但载荷（含受理结论）丢了——严格路径同样不得重发。
+		return nil, 0, &ProviderError{Channel: c.name, Code: "read_body", Msg: "读取响应失败", Retryable: !spec.noTransportRetry}
 	}
 
 	parse := spec.Parse

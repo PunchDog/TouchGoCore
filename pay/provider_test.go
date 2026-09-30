@@ -55,8 +55,11 @@ func TestEnvelopeSucceeded(t *testing.T) {
 // TestRetryableCodesEmptyByDefault 业务码默认可重试性必须是「不可重试」。
 // 哪天有人往表里塞了个出款相关码，这条测试会逼他写下理由。
 func TestRetryableCodesEmptyByDefault(t *testing.T) {
-	if len(RetryableCodes) != 0 {
-		t.Fatalf("RetryableCodes 已登记 %d 项，确认每个码都可原单重发后再提交", len(RetryableCodes))
+	retryableCodesMu.RLock()
+	n := len(RetryableCodes)
+	retryableCodesMu.RUnlock()
+	if n != 0 {
+		t.Fatalf("RetryableCodes 已登记 %d 项，确认每个码都可原单重发后再提交", n)
 	}
 }
 

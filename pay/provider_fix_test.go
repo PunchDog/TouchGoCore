@@ -122,10 +122,10 @@ func TestWithdrawRetryWhitelistRejects5xx(t *testing.T) {
 
 // TestWithdrawRetryWhitelistAllowsRegisteredCode 验证白名单含某码时该码可重试。
 func TestWithdrawRetryWhitelistAllowsRegisteredCode(t *testing.T) {
-	// 临时注册 502 到白名单
+	// 临时注册 502 到白名单（走带锁入口，不裸写 map）
 	code := strconv.Itoa(http.StatusBadGateway)
-	RetryableCodes[code] = struct{}{}
-	defer delete(RetryableCodes, code)
+	SetRetryableCodes(code)
+	defer DeleteRetryableCode(code)
 
 	p, err := NewProvider(ProviderOptions{
 		Name: "usdt", BaseURL: "https://x.example", SecretKey: "s",

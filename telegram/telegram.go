@@ -328,16 +328,28 @@ func TelegramStop(ctx context.Context) {
 	}
 }
 
+// testPanicHook 仅供测试注入 panic 用，生产代码恒为 nil、不得赋值。
+// 存在的原因：recover 分支平时无从触达，没有注入点就无法用用例钉住
+// 「panic 时必须返回 error」这条 fail-closed 口径。
+var testPanicHook func()
+
 // ValidateWebAppData 验证Telegram WebApp数据
 // botToken: 机器人的Token
 // data: 原始查询字符串（例如："user=auth_date=...&hash=..."）
 // 返回：验证成功后的键值对map，或错误信息
-func validateWebAppData(botToken, data string) (map[string]any, error) {
+func validateWebAppData(botToken, data string) (result map[string]any, err error) {
 	defer func() {
 		if condition := recover(); condition != nil {
 			vars.Error("validateWebAppData panic: %v", condition)
+			// fail-closed：panic 说明这份数据没走完校验，必须给出 error。
+			// 具名返回值在这里是承重的——不具名时 recover 后返回的是零值 nil error，
+			// 调用方会把「没校验完」当成「校验通过」。文案不带 panic 内容与输入数据。
+			result, err = nil, errors.New("telegram webapp data verify panic")
 		}
 	}()
+	if testPanicHook != nil {
+		testPanicHook()
+	}
 	// 分割查询字符串为键值对
 	pairs := strings.Split(data, "&")
 	kvPairs := make([][]string, 0, len(pairs))
@@ -389,8 +401,9 @@ func validateWebAppData(botToken, data string) (map[string]any, error) {
 	h.Write([]byte(dataCheckStr.String()))
 	serverHash := hex.EncodeToString(h.Sum(nil))
 
-	// 比较哈希
-	if serverHash != hashValue {
+	// 比较哈希。hmac.Equal 是常数时间比较：普通 != 会在首个不同字节处短路，
+	// 响应耗时随猜测前缀正确长度增长，给逐字节爆破留出计时侧信道。
+	if !hmac.Equal([]byte(serverHash), []byte(hashValue)) {
 		return nil, errors.New("invalid hash")
 	}
 
@@ -406,8 +419,8 @@ func validateWebAppData(botToken, data string) (map[string]any, error) {
 		}
 	}
 
-	// 构建结果map
-	result := make(map[string]any)
+	// 构建结果map（result 是具名返回值：recover 分支要能改到它）
+	result = make(map[string]any)
 	for _, kv := range kvPairs {
 		value, err := url.QueryUnescape(kv[1])
 		if err != nil {
@@ -427,12 +440,18 @@ func validateWebAppData(botToken, data string) (map[string]any, error) {
 }
 
 // TelegramVerify 验证并返回Telegram WebApp数据
-func TelegramVerify(data string) (string, string, error) {
+func TelegramVerify(data string) (id, username string, err error) {
 	defer func() {
 		if condition := recover(); condition != nil {
 			vars.Error("telegram verify panic: %v", condition)
+			// fail-closed：同 validateWebAppData，recover 后必须显式置 error，
+			// 且文案不含 panic 内容与输入数据（其中可能带用户身份载荷）。
+			id, username, err = "", "", errors.New("telegram verify panic")
 		}
 	}()
+	if testPanicHook != nil {
+		testPanicHook()
+	}
 
 	tg := telegramCfg()
 	if tg == nil || tg.BotToken == "" {
@@ -447,8 +466,7 @@ func TelegramVerify(data string) (string, string, error) {
 	}
 	vars.Info("telegram verify success: %v", result)
 
-	// 安全类型断言和提取
-	var id, username string
+	// 安全类型断言和提取（id/username 是具名返回值：recover 分支要能改到它们）
 	if userMap, ok := result["user"].(map[string]any); ok {
 		// 提取用户ID（支持多种数字类型）
 		if idVal, ok := userMap["id"]; ok {

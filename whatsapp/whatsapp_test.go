@@ -149,6 +149,28 @@ func TestLoginChainNeedsNoMerchantAccount(t *testing.T) {
 	}
 }
 
+// TestLoginSectionPassesCfgValidation 是 L0 口径的补测：config 的校验把 whatsapp.login 标为
+// service 类引用（验证码下发/登录换会话，不动资金），它引用的 SDK 段即使没有商户账户，
+// 也应通过 (*config.Cfg).Validate()（走 ResolveService 分支）并被本包成功装配出登录链路。
+// zalo/facebook/instagram 三胞胎已有同构用例，范本这里缺一条反向漂移的钉子，
+// 免得某次改 config 时把 whatsapp.login 漏出 service 名单、只在部署期才炸。
+func TestLoginSectionPassesCfgValidation(t *testing.T) {
+	cfg := payCfg("https://pay.invalid", nil)
+	delete(cfg.PaySDks, testSection)
+	cfg.PaySDks[loginSection] = &config.PaySDKConfig{
+		Enable: "on", Driver: pay.DriverGeneric, BaseURL: "https://pay.invalid",
+		AppID: "app1", SecretKey: testSecret,
+	}
+	// 只留登录引用：provider 为 nil 即不参与校验，否则缺 accounts 会被出款口径拦下。
+	cfg.Whatsapp = &config.WhatsappConfig{Login: &config.PaySDKRef{SDK: loginSection}}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("whatsapp.login 引用无账户的 SDK 段应通过配置校验（service 分支）: %v", err)
+	}
+	if _, ok := openLogin(cfg, cfg.Whatsapp.Login); !ok {
+		t.Error("校验放行的下发链路应能被本包装配起来")
+	}
+}
+
 // TestOperationsRefuseWhenNotStarted 未启动时门面函数返回错误而不是 panic。
 func TestOperationsRefuseWhenNotStarted(t *testing.T) {
 	WhatsappStop(nil)

@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -46,7 +47,47 @@ func SignMD5(secret string, values ...string) string {
 // 空表是刻意的：文档没到位之前，任何业务码一律按不可重试处理。把「余额不足」
 // 当限流来重试只是重复挨拒；把出款失败当可重试则有双花风险。确认安全的码
 // （限流、网关超时）之后在这里逐字登记，比在调用点散落 if 好收口。
+//
+// Deprecated: 本 map 的裸导出仅为编译兼容保留（既有通道包测试直接写它），
+// 直接读写不带锁，与 parseResponse 的并发读构成 race 面。新代码一律走
+// SetRetryableCodes / DeleteRetryableCode / IsRetryableCode 三个带锁入口；
+// 包内判定已全部改走 IsRetryableCode。
 var RetryableCodes = map[string]struct{}{}
+
+// retryableCodesMu 护住 RetryableCodes 的包内读写：解析响应（读）可能发生在
+// 任何一次出款/查询的 goroutine 里，登记（写）可能发生在运行期配置热更时，
+// 无锁并发读写 map 在 Go runtime 是 fatal，不是「偶尔读到旧值」。
+var retryableCodesMu sync.RWMutex
+
+// SetRetryableCodes 登记「可以原单重发」的错误码（带锁写入，可重复调用）。
+// 空串跳过。登记的每一个码都等于宣布「这个码下原单重发不会双花」，
+// 没有供应商文档背书不要登记。
+func SetRetryableCodes(codes ...string) {
+	retryableCodesMu.Lock()
+	defer retryableCodesMu.Unlock()
+	for _, c := range codes {
+		if c == "" {
+			continue
+		}
+		RetryableCodes[c] = struct{}{}
+	}
+}
+
+// DeleteRetryableCode 撤销一个已登记的错误码（带锁写入）。
+func DeleteRetryableCode(code string) {
+	retryableCodesMu.Lock()
+	defer retryableCodesMu.Unlock()
+	delete(RetryableCodes, code)
+}
+
+// IsRetryableCode 查询错误码是否在「可原单重发」白名单里（带锁读取）。
+// 包内所有判定必须走本函数，不得直读 map。
+func IsRetryableCode(code string) bool {
+	retryableCodesMu.RLock()
+	defer retryableCodesMu.RUnlock()
+	_, ok := RetryableCodes[code]
+	return ok
+}
 
 // envelope 是响应包络（注入点：真实包络形态确定后改这一个结构与其 succeeded/parse）。
 type envelope struct {
@@ -90,7 +131,8 @@ type ProviderOptions struct {
 	// Extras 是通道特有字段（如 USDT 的 contract、TON 的 jetton）。
 	// 登记顺序就是签名域追加顺序：这些字段由配置给出、在报文里追加在通用字段之后，
 	// 若签名域不跟着追加，供应商按「报文有、签名没有」会全量拒签。
-	// 同名字段不得重复登记，也不得与单内 Extra 撞名——map 只留一值、签名却会双 append。
+	// 同名字段不得重复登记，不得与单内 Extra 撞名——map 只留一值、签名却会双 append；
+	// 也不得与报文已签名量（payloadKeyNames）撞名，否则配置就能改写金额等字段而签名域看不见。
 	Extras []ExtraField
 }
 
@@ -234,7 +276,9 @@ func (p *Provider) callWithExtras(ctx context.Context, endpoint string, payload 
 }
 
 // send 是发一次 POST 的公共部分：查端点路径、挂签名头、交给 HTTP 客户端。
-// strictRetry 为 true 时使用白名单判定 HTTP 层可重试性（Withdraw 路径）。
+// strictRetry 为 true 时（Withdraw 路径）两处同时收紧：
+// 响应解析走 parseStrict 白名单，且 CallSpec.noTransportRetry 置位——
+// transport/read_body 错误一律不可自动重发（见 client.go 的字段注释）。
 func (p *Provider) send(ctx context.Context, endpoint string, body []byte, signValues []string, strictRetry bool) (json.RawMessage, error) {
 	path, ok := p.opt.Endpoint(endpoint)
 	if !ok {
@@ -257,15 +301,20 @@ func (p *Provider) send(ctx context.Context, endpoint string, body []byte, signV
 		Body:   body,
 		Sign:   sign,
 		Parse:  parseFn,
+		// 严格口径必须覆盖传输层：只收紧 parseStrict 的话，白名单空表挡得住 5xx，
+		// 却挡不住「提现已发出、响应超时/断连」后的自动重发——那是双付，不是抖动。
+		noTransportRetry: strictRetry,
 	})
 }
 
 // mergeExtras 把通道特有字段与单内特有字段并成「要进报文的键值」，
 // 同时按同一次遍历的顺序产出「要追加进签名域的值」。空名或空值两侧一起跳过。
 //
-// 单内 Extra 的键不许撞上已签名量（见 payloadKeyNames）：允许撞名的话
+// 两侧的键都不许撞上已签名量（见 payloadKeyNames）：允许撞名的话
 // Extra{"amount":"1"} 就能覆盖报文里的金额，而签名域里签的还是原来那个数，
-// 校验和看着完全正确。
+// 校验和看着完全正确。配置侧 Extras 同样过这道闸——它虽然出自配置而非请求方，
+// 但配置写错一个键名（amount/order_no）的表现与恶意覆盖一模一样，
+// 必须在构造出的第一次调用就报出来，而不是等供应商对不上账。
 //
 // Options.Extras 内部重名、以及单内 Extra 与配置 Extras 撞名，一律拒绝：
 // fields 是 map 只会留一个 JSON 值，signs 却会 append 两次——报文一值、签名域两值，
@@ -276,6 +325,9 @@ func mergeExtras(extras []ExtraField, orderExtra map[string]string) (map[string]
 	for _, e := range extras {
 		if e.Name == "" || e.Value == "" {
 			continue
+		}
+		if _, reserved := payloadKeyNames[e.Name]; reserved {
+			return nil, nil, fmt.Errorf("通道特有字段 %s 与报文已签名量同名，会覆盖签名域", e.Name)
 		}
 		if _, dup := fields[e.Name]; dup {
 			return nil, nil, fmt.Errorf("通道特有字段 %s 重复登记，报文一值却会双签", e.Name)
@@ -352,7 +404,9 @@ func (p *Provider) parse(status int, hdr http.Header, body []byte) (json.RawMess
 
 // parseStrict 是 Withdraw 路径的解析器：HTTP 状态码仅按 RetryableCodes 白名单
 // 判定可重试，5xx 不再默认 Retryable。出款重试依赖供应商幂等，风险高——
-// 白名单空表时任何传输层错误都不可自动重发。
+// 白名单空表时任何「响应层」错误都不可自动重发；「传输层」错误（请求可能已被
+// 受理但响应没读回）由 CallSpec.noTransportRetry 在 attempt 层同样钉死为不可重发，
+// 两层合起来才是完整口径，单靠本解析器会被 transport/read_body 绕过。
 func (p *Provider) parseStrict(status int, hdr http.Header, body []byte) (json.RawMessage, error) {
 	return p.parseResponse(status, hdr, body, true)
 }
@@ -363,7 +417,7 @@ func (p *Provider) parseResponse(status int, hdr http.Header, body []byte, stric
 	if status < 200 || status >= 300 {
 		retryable := status == http.StatusTooManyRequests || status >= 500
 		if strictRetry {
-			_, retryable = RetryableCodes[strconv.Itoa(status)]
+			retryable = IsRetryableCode(strconv.Itoa(status))
 		}
 		return nil, &ProviderError{
 			Channel:    p.name,
@@ -385,7 +439,7 @@ func (p *Provider) parseResponse(status int, hdr http.Header, body []byte, stric
 		}
 	}
 	if !env.succeeded() {
-		_, retryable := RetryableCodes[env.Code]
+		retryable := IsRetryableCode(env.Code)
 		return nil, &ProviderError{
 			Channel:    p.name,
 			Code:       env.Code,

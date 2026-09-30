@@ -55,7 +55,24 @@ func (m *TimerManager) CloseCtx(ctx context.Context) bool {
 	for _, wheel := range m.wheels {
 		wheel.isRunning.Store(false)
 	}
-	m.drainPendingAdds()
+	// drainPendingAdds 同样纳入收尾预算：它要逐条取 task.timer 的 parent.mu，
+	// 病态场景（某个消费者卡在 handleTimerAdd 持锁不放）下无预算等待会无限阻塞，
+	// 恰好复现本方法声称修复的「一个卡住的收尾拖死进程退出」。放到协程里跑、
+	// 只等预算：超时后放弃等待（协程泄漏有界——它只可能卡在这把 mu 上），
+	// 与 wheelWG 等待同一取舍口径。
+	drainDone := make(chan struct{})
+	go func() {
+		m.drainPendingAdds()
+		close(drainDone)
+	}()
+	select {
+	case <-drainDone:
+	case <-ctx.Done():
+		if !timedOut {
+			timedOut = true
+			vars.Error("排空入队通道残留未在收尾预算内完成，放弃等待: %v", ctx.Err())
+		}
+	}
 	return timedOut
 }
 

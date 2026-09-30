@@ -220,7 +220,14 @@ func (c *RpcClient) dispatchProxyHandler(ctx context.Context, req *message.GinHT
 		rerr  any
 	}
 	resultCh := make(chan callResult, 1)
+	// 回调 goroutine 纳入 bgWG：ctx 超时（504）后本函数即返回并归还 proxySem
+	// 令牌，但回调本体不可强杀、仍在跑。不纳管的话，慢后端下孤儿回调按
+	// ~64/14s 累积，既有界并发形同虚设，Close 的排空也看不见它们（对象池
+	// use-after-free 防线失守）。本调用发生在 handleProxyRequest 的 bgWG
+	// 计数内（计数>0），Add 与并发 Wait 合法。
+	c.bgWG.Add(1)
 	go func() {
+		defer c.bgWG.Done()
 		defer func() {
 			if r := recover(); r != nil {
 				resultCh <- callResult{rerr: r}

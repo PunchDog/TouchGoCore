@@ -62,6 +62,10 @@ var retryableCodesMu sync.RWMutex
 // SetRetryableCodes 登记「可以原单重发」的错误码（带锁写入，可重复调用）。
 // 空串跳过。登记的每一个码都等于宣布「这个码下原单重发不会双花」，
 // 没有供应商文档背书不要登记。
+//
+// 警示：提现（Withdraw/strict 路径）白名单严禁纳入 502/504 这类网关状态码——
+// 502=请求可能已被供应商受理、只是回执没穿回来，受理状态未知；把「未知」当
+// 「失败」原单重发就是双付。同理，任何「不能证明请求未被受理」的码都不得登记。
 func SetRetryableCodes(codes ...string) {
 	retryableCodesMu.Lock()
 	defer retryableCodesMu.Unlock()

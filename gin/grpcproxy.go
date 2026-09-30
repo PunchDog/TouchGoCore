@@ -72,14 +72,19 @@ const maxProxyRequestBody = 10*1024*1024 - 64*1024
 // 都能劫持网关上的任意 HTTP 路由（所有客户端共享同一 token，被攻陷即接管 /pay/callback 类路径）。
 //
 // clientName 为注册来源客户端名，供断连时 UnregisterGRPCRoutes 按属主回收。
-func RegisterGRPCRoute(clientName string, sessionID uint64, path, method string, stream GRPCProxyStream) {
+//
+// 返回值 accepted：条目真正落库（含同属主覆盖）返回 true；参数非法、或同键
+// 已被其他属主占用而被拒时返回 false。rpc 服务端据此只把 accepted==true 的条目
+// 计入注册回执的成功数——被拒条目若也计数，客户端会误以为自己在服务该路由，
+// 实际请求仍路由到旧属主（或 502），且无从自愈。
+func RegisterGRPCRoute(clientName string, sessionID uint64, path, method string, stream GRPCProxyStream) bool {
 	if path == "" || stream == nil {
 		vars.Error("GRPC 路由注册参数非法: client=%s path=%q stream==nil:%v", clientName, path, stream == nil)
-		return
+		return false
 	}
 	if clientName == "" {
 		vars.Error("GRPC 路由注册被拒: client 名为空 path=%q method=%q（代理条目必须携带属主）", path, method)
-		return
+		return false
 	}
 	entry := &routeEntry{proxy: stream, owner: clientName, session: sessionID}
 
@@ -96,12 +101,12 @@ func RegisterGRPCRoute(clientName string, sessionID uint64, path, method string,
 			if !sameProxyOwner(old, clientName) {
 				vars.Error("GRPC 参数路由注册被拒: %s %q 已被 owner=%q 占用（session=%d），来源 client=%q session=%d 不得覆盖",
 					path, method, old.owner, old.session, clientName, sessionID)
-				return
+				return false
 			}
 			vars.Error("GRPC 参数路由 %s %q 同属主重复注册（client=%s session=%d），本次将覆盖先前 handler", path, method, clientName, sessionID)
 		}
 		pr.byMethod[method] = entry
-		return
+		return true
 	}
 
 	routerMu.Lock()
@@ -115,11 +120,12 @@ func RegisterGRPCRoute(clientName string, sessionID uint64, path, method string,
 		if !sameProxyOwner(old, clientName) {
 			vars.Error("GRPC 路由注册被拒: %s %q 已被 owner=%q 占用（session=%d），来源 client=%q session=%d 不得覆盖",
 				path, method, old.owner, old.session, clientName, sessionID)
-			return
+			return false
 		}
 		vars.Error("GRPC 路由 %s %q 同属主重复注册（client=%s session=%d），本次将覆盖先前 handler", path, method, clientName, sessionID)
 	}
 	byMethod[method] = entry
+	return true
 }
 
 // sameProxyOwner 判定既有条目能否被 clientName 覆盖：只有同属主的代理条目可覆盖。
@@ -239,10 +245,12 @@ func serveGRPCProxy(c *gin.Context, proxy GRPCProxyStream) {
 	if status == 0 {
 		status = http.StatusOK
 	}
-	// A-F5：status 钳制——只有合法的 [100,599] 才透传。负数/超界值写进
-	// WriteHeader 会产生畸形响应（Go 会打 unknown status code 警告并按 200 处理），
-	// 远端客户端已被视为不可信来源，这里直接判为坏响应回 502。
-	if status < 100 || status > 599 {
+	// A-F5：status 钳制——只有合法的最终状态 [200,599] 才透传。1xx 是信息性
+	// 响应（Go net/http 把 WriteHeader(1xx) 当 interim，101 无 hijack 属异常），
+	// 不能作为最终状态放行；负数/超界值写进 WriteHeader 会产生畸形响应
+	//（Go 会打 unknown status code 警告并按 200 处理）。远端客户端已被视为
+	// 不可信来源，这里直接判为坏响应回 502。
+	if status < 200 || status > 599 {
 		vars.Error("GRPC 代理返回非法状态码 %d %s %s: status=%d，按 502 处理", rsp.Status, c.Request.Method, p, status)
 		c.AbortWithStatusJSON(http.StatusBadGateway, gin.H{"error": "bad gateway", "code": 502})
 		return

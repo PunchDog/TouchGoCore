@@ -54,7 +54,13 @@ func (this *IniParser) GetInt32(section string, key string, idefault int32) int3
 		return idefault
 	}
 
-	value_int, _ := s.Key(key).Int()
+	// 键缺失或值不可解析时必须回默认值：go-ini 的 Section/Key 对不存在的键
+	// 返回空串，Int() 解析空串报错并回 0——吞掉这个错误等于把所有缺省项
+	// 静默变成 0（超时、端口、容量类配置尤其致命）。
+	value_int, err := s.Key(key).Int()
+	if err != nil {
+		return idefault
+	}
 
 	return int32(value_int)
 }
@@ -69,7 +75,10 @@ func (this *IniParser) GetUint32(section string, key string, idefault uint32) ui
 		return idefault
 	}
 
-	value_int, _ := s.Key(key).Uint()
+	value_int, err := s.Key(key).Uint()
+	if err != nil {
+		return idefault
+	}
 
 	return uint32(value_int)
 }
@@ -84,7 +93,10 @@ func (this *IniParser) GetInt64(section string, key string, idefault int64) int6
 		return idefault
 	}
 
-	value_int, _ := s.Key(key).Int64()
+	value_int, err := s.Key(key).Int64()
+	if err != nil {
+		return idefault
+	}
 	return value_int
 }
 
@@ -98,7 +110,10 @@ func (this *IniParser) GetUint64(section string, key string, idefault uint64) ui
 		return idefault
 	}
 
-	value_int, _ := s.Key(key).Uint64()
+	value_int, err := s.Key(key).Uint64()
+	if err != nil {
+		return idefault
+	}
 	return value_int
 }
 
@@ -112,7 +127,10 @@ func (this *IniParser) GetFloat32(section string, key string, fdefault float32) 
 		return fdefault
 	}
 
-	value_float, _ := s.Key(key).Float64()
+	value_float, err := s.Key(key).Float64()
+	if err != nil {
+		return fdefault
+	}
 	return float32(value_float)
 }
 
@@ -126,7 +144,10 @@ func (this *IniParser) GetFloat64(section string, key string, fdefault float64) 
 		return fdefault
 	}
 
-	value_float, _ := s.Key(key).Float64()
+	value_float, err := s.Key(key).Float64()
+	if err != nil {
+		return fdefault
+	}
 	return value_float
 }
 

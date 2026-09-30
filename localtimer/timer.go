@@ -178,10 +178,21 @@ func (p *TimerPool) Get(cls TimerInterface) TimerInterface {
 			continue
 		}
 		if parent.inPool.CompareAndSwap(true, false) {
-			// 认领成功：粘性释放标记随所有权一并转移给新主人
+			// 认领成功：粘性释放标记随所有权一并转移给新主人。
+			//
+			// 三个标志的重置必须整体纳入 parent.mu 临界区（与 requestReleaseLocked /
+			// endTick 锁内复核同一把锁）：若裸重置，陈旧 tick 任务的 endTick 可能在
+			// 「快路径读到旧 pendingRelease=true」之后、「锁内仲裁」之前被认领方穿插，
+			// 仲裁时读到 inPool=false（已认领）+ putClaimed=false（已重置）的组合而
+			// 判 releaseNow，把新主人正持有的实例二次 Put = 双重所有权/使用后释放。
+			// 认领方在锁内一次性重置后，endTick 的锁内复核（pendingRelease 已被清）
+			// 必然放弃归还，交错窗口消除。本临界区只碰原子标志、不取 wheelLock、
+			// 不调用户代码，锁序（mu → wheelLock）不受影响。
+			parent.mu.Lock()
 			parent.released.Store(false)
 			parent.pendingRelease.Store(false)
 			parent.putClaimed.Store(false)
+			parent.mu.Unlock()
 			p.gets.Add(1)
 			return obj
 		}
@@ -454,9 +465,18 @@ func (t *Timer) endTick() {
 		return
 	}
 	if !t.pendingRelease.Load() {
-		return
+		return // 快路径：无挂起请求，不取锁
 	}
 	t.mu.Lock()
+	// 锁内复核 pendingRelease：快路径读取与本临界区之间可能穿插 TimerPool.Get
+	// 的认领（Get 在同一把 mu 下重置 released/pendingRelease/putClaimed）。
+	// 锁内仍为 true 才说明挂起的归还请求确属当前所有者；已被认领方清掉时
+	// 必须放弃，否则 requestReleaseLocked 会看到「inPool=false + putClaimed=false」
+	// 判 releaseNow，把新主人正持有的实例二次 Put。
+	if !t.pendingRelease.Load() {
+		t.mu.Unlock()
+		return
+	}
 	outcome := t.requestReleaseLocked()
 	t.mu.Unlock()
 	if outcome == releaseNow {

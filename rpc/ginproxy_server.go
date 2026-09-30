@@ -48,6 +48,7 @@ func (s *RpcServer) handleGinProxyFrame(cs *clientSession, clientNameKey string,
 		}
 		proxy := &sessionProxy{server: s, clientNameKey: clientNameKey}
 		n := 0
+		var rejected []string
 		for _, r := range reg.GetRoutes() {
 			if r == nil {
 				continue
@@ -57,17 +58,33 @@ func (s *RpcServer) handleGinProxyFrame(cs *clientSession, clientNameKey string,
 			path, method := r.GetUrlPath(), r.GetMethod()
 			if !strings.HasPrefix(path, "/") {
 				vars.Error("RPC服务端拒绝非法路由注册[%s] session=%d: path=%q 必须以 / 开头", clientNameKey, cs.id, path)
+				rejected = append(rejected, path+"|"+method)
 				continue
 			}
 			if method != "" && !isUpperHTTPMethod(method) {
 				vars.Error("RPC服务端拒绝非法路由注册[%s] session=%d: %q method=%q 不是大写 HTTP 方法", clientNameKey, cs.id, path, method)
+				rejected = append(rejected, path+"|"+method)
 				continue
 			}
-			gin.RegisterGRPCRoute(clientNameKey, cs.id, path, method, proxy)
+			// gin 侧对「跨属主覆盖」等情形会拒绝落库并返回 false：被拒条目绝不
+			// 计入成功数，否则客户端误以为自己在服务该路由（实际仍路由到旧属主
+			// 或 502），失去自愈依据。逐条 Warning 留痕并把被拒 path 带进 ack 明细。
+			if !gin.RegisterGRPCRoute(clientNameKey, cs.id, path, method, proxy) {
+				vars.Warning("RPC服务端路由注册被拒[%s] session=%d: %q method=%q 未落库（格式非法或已被其他属主占用）",
+					clientNameKey, cs.id, path, method)
+				rejected = append(rejected, path+"|"+method)
+				continue
+			}
 			n++
 		}
-		vars.Info("RPC服务端注册反向路由[%s] session=%d 共%d条", clientNameKey, cs.id, n)
-		s.sendGinRegisterAck(cs, clientNameKey, reqID, true, fmt.Sprintf("registered %d routes", n))
+		vars.Info("RPC服务端注册反向路由[%s] session=%d 共%d条（被拒%d条）", clientNameKey, cs.id, n, len(rejected))
+		msg := fmt.Sprintf("registered %d routes", n)
+		if len(rejected) > 0 {
+			msg += fmt.Sprintf("; %d rejected: %s", len(rejected), strings.Join(rejected, ","))
+		}
+		// ok 语义：只要还有条目成功落库就算部分成功；全军覆没且确有被拒条目时
+		// 回 ok=false，让客户端明确知道这次注册没有生效。
+		s.sendGinRegisterAck(cs, clientNameKey, reqID, n > 0 || len(rejected) == 0, msg)
 
 	case ginSubProxyResp:
 		rsp := &message.GinHTTPResponse{}

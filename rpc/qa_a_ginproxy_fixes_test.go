@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -95,7 +96,7 @@ func TestQaAServerRejectsInvalidRoutes(t *testing.T) {
 	if !ack.GetOk() {
 		t.Fatalf("✘ 含合法条目的注册帧应 ack ok，实际 msg=%q", ack.GetMsg())
 	}
-	if ack.GetMsg() != "registered 3 routes" {
+	if !strings.HasPrefix(ack.GetMsg(), "registered 3 routes") {
 		t.Fatalf("✘ 应只注册 3 条合法路由，ack msg=%q", ack.GetMsg())
 	}
 }

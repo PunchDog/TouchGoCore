@@ -19,9 +19,9 @@ import (
 func TestPlaceOrderAmountValidation(t *testing.T) {
 	order := &PayOrder{OrderNo: "ORD-100", Amount: 5000, Currency: CurrencyUSDT}
 	cases := []struct {
-		name      string
-		resp      string
-		wantOK    bool
+		name       string
+		resp       string
+		wantOK     bool
 		wantErrSub string
 	}{
 		{
@@ -121,9 +121,14 @@ func TestWithdrawRetryWhitelistRejects5xx(t *testing.T) {
 }
 
 // TestWithdrawRetryWhitelistAllowsRegisteredCode 验证白名单含某码时该码可重试。
+//
+// 警示：502=提现受理状态未知（请求可能已被供应商受理、只是回执没穿回来），
+// 提现白名单严禁纳入 502/504，原单重发有双付风险。本用例为验证白名单机制，
+// 特意使用虚构状态码，不构成对任何真实 HTTP 状态码（尤其 502）的登记背书。
 func TestWithdrawRetryWhitelistAllowsRegisteredCode(t *testing.T) {
-	// 临时注册 502 到白名单（走带锁入口，不裸写 map）
-	code := strconv.Itoa(http.StatusBadGateway)
+	// 虚构码走带锁入口临时登记，用后即撤，不裸写 map
+	const fakeCode = 59901 // 非真实 HTTP 语义，仅为机制验证
+	code := strconv.Itoa(fakeCode)
 	SetRetryableCodes(code)
 	defer DeleteRetryableCode(code)
 
@@ -134,14 +139,23 @@ func TestWithdrawRetryWhitelistAllowsRegisteredCode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 502 在白名单中 → 可重试
-	_, perr := p.parseStrict(http.StatusBadGateway, nil, json.RawMessage(`{}`))
+	// 虚构码在白名单中 → 可重试
+	_, perr := p.parseStrict(fakeCode, nil, json.RawMessage(`{}`))
 	var pe *ProviderError
 	if !errors.As(perr, &pe) {
 		t.Fatalf("期望 ProviderError，实得 %v", perr)
 	}
 	if !pe.Retryable {
-		t.Error("502 已登记白名单，Withdraw 路径应可重试")
+		t.Error("虚构码已登记白名单，Withdraw 路径应可重试")
+	}
+	// 502 未登记且严禁登记（受理状态未知，重发有双付风险）→ 不可重试
+	_, perr502 := p.parseStrict(http.StatusBadGateway, nil, json.RawMessage(`{}`))
+	var pe502 *ProviderError
+	if !errors.As(perr502, &pe502) {
+		t.Fatalf("期望 ProviderError，实得 %v", perr502)
+	}
+	if pe502.Retryable {
+		t.Error("502 不得在 Withdraw 路径可重试（受理状态未知，双付风险）")
 	}
 	// 500 不在白名单 → 不可重试
 	_, perr2 := p.parseStrict(http.StatusInternalServerError, nil, json.RawMessage(`{}`))

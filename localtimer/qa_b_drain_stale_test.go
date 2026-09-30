@@ -80,9 +80,11 @@ func TestQaBDrainPendingAddsSkipsForeignGen(t *testing.T) {
 	if !mgr1.CloseCtx(ctx) {
 		t.Error("✘ mgr1 收尾未按预期超时（轮协程应被 GetParent 卡住）")
 	}
-	if s := mgr1.GetStats(); s.TimersDropped == 0 {
-		t.Fatal("✘ 前置条件：drainPendingAdds 没有捞出任何调度项，本用例无从观测")
-	}
+	// P3-2 契约变更：drainPendingAdds 已纳入收尾预算 select，预算耗尽时 CloseCtx
+	// 先返回、排空在后台协程继续，统计是异步落账——前置条件改为有界轮询等待。
+	qaBWaitFor(t, 2*time.Second, "前置条件：drainPendingAdds 没有捞出任何调度项，本用例无从观测", func() bool {
+		return mgr1.GetStats().TimersDropped > 0
+	})
 
 	// 5) 实例必须仍活跃，且在 mgr2 正常触发
 	if !victim.IsActive() {

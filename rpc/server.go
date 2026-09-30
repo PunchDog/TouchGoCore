@@ -262,11 +262,24 @@ func (s *RpcServer) Msg(stream message.Grpc_MsgServer) error {
 }
 
 // openSession 登记一条客户端流并触发连接回调。
+// 同名新会话顶替旧会话时，主动按「owner + 旧会话代际」双键回收旧会话注册的
+// 代理路由：旧会话的 closeSession 走 own=false 分支不再注销，若不在此清理，
+// 旧代际残条目（新会话注册集之外的路由）会永久悬挂——按名解析失败回 502
+// 而不是 404。双键回收只摘 session==旧id 的条目，新会话随后注册的条目
+// session 不同，绝不会被误伤（不重新引入 A-F3）。
 func (s *RpcServer) openSession(clientNameKey string, stream message.Grpc_MsgServer) *clientSession {
 	cs := &clientSession{id: sessionSeq.Add(1), stream: stream}
 	s.sessionMu.Lock()
+	var stale *clientSession
+	if old, ok := s.nametoclientstream.Load(clientNameKey); ok && old != nil && old != cs {
+		stale = old
+	}
 	s.nametoclientstream.Store(clientNameKey, cs)
 	s.sessionMu.Unlock()
+	if stale != nil {
+		vars.Info("RPC服务端同名会话顶替[%s]: 旧session=%d 新session=%d，回收旧代际路由", clientNameKey, stale.id, cs.id)
+		gin.UnregisterGRPCRoutes(clientNameKey, stale.id)
+	}
 	s.triggerOnClientConnected(clientNameKey)
 	return cs
 }

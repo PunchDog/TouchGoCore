@@ -261,9 +261,16 @@ func (l *Loader) RemoveWords(words []string) error {
 	return nil
 }
 
-// Clear 清空所有敏感词
+// Clear 清空所有敏感词。
+//
+// 不能整体重新赋值 l.words（sync.Map 值拷贝写）：会与并发 GetWords 的 Range、
+// AddWord/RemoveWord 的 Store/Delete 竞争，且旧 map 上的在途操作全部作用在
+// 被丢弃的实例上。改为保持同一个 sync.Map，Range 出所有 key 逐个 Delete。
 func (l *Loader) Clear() error {
-	l.words = sync.Map{}
+	l.words.Range(func(key, _ interface{}) bool {
+		l.words.Delete(key)
+		return true
+	})
 	l.notifyObserversIfNeeded(true)
 	return nil
 }

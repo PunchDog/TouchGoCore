@@ -126,16 +126,22 @@ func (ac *AhoCorasick) buildFailureLinks() {
 	ac.built = true
 }
 
-// buildOutputList 预计算节点的输出列表（所有通过失败链可到达的结束节点）
+// buildOutputList 预计算节点的输出列表（所有通过失败链可到达的结束节点）。
+//
+// 标准 AC 要求收集整条 fail 链上的全部 isEnd 节点（dictionary suffix link）。
+// 旧实现只在 failLink 本身 isEnd 时才追加，failLink 不是词尾但其更深的 fail 链
+// 上有词尾时会整段丢失（例如词表 {"abcd","bcx","c"}：fail(abc)=bc 非词尾，
+// 而 fail(bc)=c 是词尾，旧实现让 abc 节点的 output 为空，文本 "abc" 漏检 "c"）。
+// 修复：无论 failLink 是否 isEnd，都继承它的 output 列表。BFS 构建顺序保证
+// failLink（深度更小）的 output 在此之前已计算完成。
 func (ac *AhoCorasick) buildOutputList(node *AhoCorasickNode) {
-	if node.failLink != nil && node.failLink.isEnd {
-		// 将失败链上的结束节点添加到输出列表
-		node.output = append(node.output, node.failLink)
-		// 递归添加更深层的输出
-		for _, failNode := range node.failLink.output {
-			node.output = append(node.output, failNode)
-		}
+	if node.failLink == nil {
+		return
 	}
+	if node.failLink.isEnd {
+		node.output = append(node.output, node.failLink)
+	}
+	node.output = append(node.output, node.failLink.output...)
 }
 
 // Match 查找文本中的第一个匹配

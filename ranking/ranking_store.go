@@ -118,11 +118,17 @@ func LoadRankTrees(infos []DbRankInfo) map[int64]*RankTree {
 	return rts
 }
 
-// dump排名模块
+// dump排名模块。
+//
+// RTSLock 只保护 rts 这张 map 本身，不保护各棵树内部；AddRankInfo 会在
+// rt.rwMutex 写锁下修改 *RankInfo 的 Value/Timestamp 字段，因此读取 entry 字段
+// 必须持各树自己的读锁，否则与并发写构成数据竞争。
+// 锁序固定为 RTSLock → rt.rwMutex（GetRankTree 等入口不会反向嵌套），无死锁。
 func saveRankTrees(rts map[int64]*RankTree) []DbRankInfo {
 	infos := make([]DbRankInfo, 0)
 	RTSLock.RLock()
 	for Type, rt := range rts {
+		rt.rwMutex.RLock()
 		rt.EntryMapping.Range(func(key int64, entry *RankInfo) bool {
 			info := DbRankInfo{
 				Type:      Type,
@@ -133,6 +139,7 @@ func saveRankTrees(rts map[int64]*RankTree) []DbRankInfo {
 			infos = append(infos, info)
 			return true
 		})
+		rt.rwMutex.RUnlock()
 	}
 	RTSLock.RUnlock()
 	return infos

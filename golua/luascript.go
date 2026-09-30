@@ -134,6 +134,22 @@ func (ls *LuaScript) initLocked() error {
 func (ls *LuaScript) Close() {
 	ls.closeKeepingObjects() // 内部取写锁
 	ls.releaseRegisteredObjects()
+	// 实例已作废：从全局登记表摘除，避免 luaInstances 长期钉住死实例
+	unregisterLuaInstance(ls)
+}
+
+// unregisterLuaInstance 把实例从 luaInstances 登记表摘除。
+// 只删「键仍归属本实例」的条目：UID 为 0（未经 NewLuaScriptWithContext 登记）
+// 或键已被其他实例接管时不动别人的登记项。
+func unregisterLuaInstance(ls *LuaScript) {
+	if ls == nil || ls.UID == 0 {
+		return
+	}
+	luaInstancesMu.Lock()
+	if cur, ok := luaInstances[ls.UID]; ok && cur == ls {
+		delete(luaInstances, ls.UID)
+	}
+	luaInstancesMu.Unlock()
 }
 
 // IsPoisoned 报告该实例的 runtime 是否已被超时协程污染。

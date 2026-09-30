@@ -29,7 +29,7 @@ type ScriptWatcher struct {
 	dependencies map[string]time.Time
 	callbacks    []ScriptReloadCallback
 	callbacksOld []ScriptReloadCallbackOld // 旧版本回调列表
-	parentCtx    context.Context          // 原始父上下文，用于 Stop 后 Start 重建 ctx
+	parentCtx    context.Context           // 原始父上下文，用于 Stop 后 Start 重建 ctx
 	ctx          context.Context
 	cancel       context.CancelFunc
 }
@@ -222,7 +222,11 @@ func (sw *ScriptWatcher) reloadScript(ctx context.Context) {
 		sw.script = oldScript
 		sw.mu.Unlock()
 
+		// ls.ctx 由 rtMu 保护：CallWithContext 在读锁下读它，initLocked 在写锁下
+		// 写它。这里裸写会与并发调用构成数据竞争，必须同样持写锁。
+		oldScript.rtMu.Lock()
 		oldScript.ctx = ctx
+		oldScript.rtMu.Unlock()
 		// Close 已把旧脚本的 update 定时器作废归还，不重建就再没人驱动它；
 		// Init 失败时不能起表——那时 runtime 可能是 nil，update 会直接踩空。
 		if err := oldScript.Init(); err != nil {
@@ -248,6 +252,11 @@ func (sw *ScriptWatcher) reloadScript(ctx context.Context) {
 
 	// 恢复注册的对象（深拷贝）
 	restoreRegisteredObjects(newScript, objectsCopy)
+
+	// 旧实例已被新实例取代、且不再回退：从全局登记表摘除，否则每次热重载
+	// 都会在 luaInstances 里多钉住一代旧实例（表长随代数无界增长，无法 GC）。
+	// 只删旧代：新实例有自己的 UID，deleteInstance 还会校验 map 里的归属。
+	unregisterLuaInstance(oldScript)
 
 	// 更新脚本引用
 	sw.mu.Lock()

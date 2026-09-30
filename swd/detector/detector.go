@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math"
 	"sync"
 	"sync/atomic"
 	"unicode"
@@ -19,7 +20,13 @@ import (
 
 // detector 实现敏感词检测器接口
 type detector struct {
-	primary          core.Algorithm     // 主要算法（始终构建，默认 AC 自动机）
+	// primary 主算法（始终构建，默认 AC 自动机）。
+	//
+	// 并发不变量：热重载（OnWordsChanged）绝不就地 Build 已发布的实例，而是
+	// 构建全新算法对象后经 atomic.Pointer 整体发布；Detect/Match 读取路径每次
+	// atomic.Load 当前指针后遍历。构建期间旧实例仍然完整可用，读写两侧没有
+	// 共享可变状态，因此读取路径无需持 d.mu。
+	primary          atomic.Pointer[core.Algorithm]
 	secondary        core.Algorithm     // 次要算法（可选，默认禁用）
 	secondaryEnabled atomic.Bool        // 是否启用次要算法
 	secondaryBuilt   atomic.Bool        // 次要算法是否已构建
@@ -28,8 +35,10 @@ type detector struct {
 	mu               sync.RWMutex
 	options          *core.SWDOptions
 	config           *config.MappingConfig
-	wordCount        int                          // 词库规模
-	avgWordLength    float64                      // 平均词长，用于预分配
+	wordCount        int // 词库规模
+	// avgWordLengthBits 存 math.Float64bits(avgWordLength)：MatchAll 在锁外读取
+	// 估算容量，OnWordsChanged 在锁内写入，用原子存取消除数据竞争。
+	avgWordLengthBits atomic.Uint64
 
 	// Rune 缓存：减少重复的 []rune(text) 转换（使用 LRU 缓存替代 sync.Map，防止内存泄漏）
 	runeCache *common.LRUCache[string, []rune]
@@ -38,8 +47,28 @@ type detector struct {
 	wordsCache atomic.Value // map[string]category.Category
 
 	// 算法选择缓存（线程安全）
-	algoCache atomic.Value // map[byte]core.Algorithm
+	algoCache    atomic.Value // map[byte]core.Algorithm
 	cacheUpdated atomic.Bool
+}
+
+// getPrimary 原子读取当前主算法（读取路径统一入口）
+func (d *detector) getPrimary() core.Algorithm {
+	return *d.primary.Load()
+}
+
+// setPrimary 原子发布主算法（仅在构造与持 d.mu 写锁的重建路径调用）
+func (d *detector) setPrimary(algo core.Algorithm) {
+	d.primary.Store(&algo)
+}
+
+// getAvgWordLength 原子读取平均词长
+func (d *detector) getAvgWordLength() float64 {
+	return math.Float64frombits(d.avgWordLengthBits.Load())
+}
+
+// setAvgWordLength 原子写入平均词长
+func (d *detector) setAvgWordLength(v float64) {
+	d.avgWordLengthBits.Store(math.Float64bits(v))
 }
 
 // NewDetector 创建一个新的检测器实例
@@ -91,19 +120,19 @@ func NewDetectorWithConfig(options *core.SWDOptions, cfg *config.MappingConfig) 
 	}
 
 	d := &detector{
-		primary:          primaryAlgo,
 		secondary:        nil,
 		secondaryEnabled: atomic.Bool{},
 		secondaryBuilt:   atomic.Bool{},
 		secondaryType:    core.AlgorithmTrie, // 默认次要算法为 Trie
 		wordCount:        wordCount,
-		avgWordLength:    avgWordLength,
 		preprocess:       preprocessor.NewPreprocessorWithConfig(options, cfg),
 		options:          options,
 		config:           cfg,
 		cacheUpdated:     atomic.Bool{},
 		runeCache:        common.NewLRUCache[string, []rune](1024), // LRU 缓存容量 1024
 	}
+	d.setPrimary(primaryAlgo)
+	d.setAvgWordLength(avgWordLength)
 
 	// 初始化词库缓存
 	d.updateWordsCache(words)
@@ -122,7 +151,12 @@ func NewDetectorWithConfig(options *core.SWDOptions, cfg *config.MappingConfig) 
 	return d, nil
 }
 
-// OnWordsChanged 实现Observer接口,当词库变更时重建算法
+// OnWordsChanged 实现Observer接口,当词库变更时重建算法。
+//
+// 竞态消除（构建/发布分离）：绝不就地 Build 已发布的主算法——那会与不持锁的
+// Detect/Match 遍历并发读写同一批节点/map（concurrent map read/write fatal）。
+// 这里构建一个全新实例，Build 完成后经 atomic.Pointer 一次性发布；发布前读方
+// 一直使用完整可用的旧实例。
 func (d *detector) OnWordsChanged(words map[string]category.Category) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -138,18 +172,50 @@ func (d *detector) OnWordsChanged(words map[string]category.Category) {
 	if wordCount > 0 {
 		avgWordLength /= float64(wordCount)
 	}
-	d.avgWordLength = avgWordLength
+	d.setAvgWordLength(avgWordLength)
 
 	// 标记次要算法需要重建
 	d.secondaryBuilt.Store(false)
 
-	// 重建主要算法
-	if err := d.primary.Build(words); err != nil {
+	// 重建主要算法：全新实例 Build 完成后原子发布
+	oldPrimary := d.getPrimary()
+	var newPrimary core.Algorithm
+	switch oldPrimary.Type() {
+	case core.AlgorithmTrie:
+		newPrimary = algorithm.NewTrie()
+	default:
+		newPrimary = algorithm.NewAhoCorasick()
+	}
+	if err := newPrimary.Build(words); err != nil {
+		// 构建失败不发布：读方继续使用旧实例，避免把主算法置为半建状态
 		log.Printf("重建主要算法失败: %v", err)
+	} else {
+		d.setPrimary(newPrimary)
+		d.refreshAlgoCachePrimary(oldPrimary, newPrimary)
 	}
 
 	// 更新词库缓存
 	d.updateWordsCacheUnlocked(words)
+}
+
+// refreshAlgoCachePrimary 把算法选择缓存中对旧主算法的引用替换为新实例。
+//
+// 不能直接调 updateAlgoCache：它内部可能走 getSecondaryAlgorithm 取 d.mu 写锁，
+// 而 OnWordsChanged 已持有该锁，会自死锁。此处只做等值替换，缓存里的次要算法
+// 引用保持不变（次要算法由 secondaryBuilt 标记驱动懒重建）。
+func (d *detector) refreshAlgoCachePrimary(oldAlgo, newAlgo core.Algorithm) {
+	cache, ok := d.algoCache.Load().(map[byte]core.Algorithm)
+	if !ok {
+		return
+	}
+	newCache := make(map[byte]core.Algorithm, len(cache))
+	for k, v := range cache {
+		if v == oldAlgo {
+			v = newAlgo
+		}
+		newCache[k] = v
+	}
+	d.algoCache.Store(newCache)
 }
 
 // updateWordsCache 更新词库快照缓存（需要在锁外调用）
@@ -278,6 +344,7 @@ func (d *detector) updateAlgoCache() {
 	// 预分配变量，减少循环内的内存分配
 	var algo core.Algorithm
 	var textLen int
+	primary := d.getPrimary()
 
 	// 根据配置填充缓存
 	for len := byte(0); len < byte(algoCacheSize); len++ {
@@ -292,10 +359,10 @@ func (d *detector) updateAlgoCache() {
 			if secondary, err := d.getSecondaryAlgorithm(); err == nil {
 				algo = secondary
 			} else {
-				algo = d.primary
+				algo = primary
 			}
 		} else {
-			algo = d.primary
+			algo = primary
 		}
 
 		newCache[len] = algo
@@ -317,7 +384,7 @@ func (d *detector) UpdateAlgoCache() {
 func (d *detector) selectAlgorithmForText(text string) core.Algorithm {
 	// 快速路径：未启用次要算法
 	if !d.secondaryEnabled.Load() {
-		return d.primary
+		return d.getPrimary()
 	}
 
 	// 使用缓存：根据文本长度区间快速选择
@@ -558,10 +625,14 @@ func (d *detector) MatchAll(text string) []core.SensitiveWord {
 		matches = algo.MatchAll(processedText)
 	}
 
-	// 预分配过滤后的匹配结果切片，使用平均词长估算
-	estimatedCount := len(processedText) / int(d.avgWordLength)
-	if estimatedCount < len(matches) {
-		estimatedCount = len(matches)
+	// 预分配过滤后的匹配结果切片，使用平均词长估算。
+	// 守卫：词库清空（Clear/OnWordsChanged 空表）后平均词长为 0，
+	// 直接做整数除法会 panic（integer divide by zero），此时退化为按命中数分配。
+	estimatedCount := len(matches)
+	if avg := d.getAvgWordLength(); avg > 0 {
+		if est := int(float64(len(processedText)) / avg); est > estimatedCount {
+			estimatedCount = est
+		}
 	}
 	filteredMatches := make([]core.SensitiveWord, 0, estimatedCount)
 	for _, match := range matches {

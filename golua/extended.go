@@ -80,13 +80,15 @@ func (lt *LuaTable) SetByPath(path string, value interface{}) error {
 			if !exists {
 				next = newTable(nil)
 				current.Set(key, next)
+			} else if tbl, isTable := val.(*LuaTable); isTable {
+				// 注意：这里不能用 `next, isTable := val.(*LuaTable)` ——
+				// := 会在 else 块内遮蔽外层 next，外层保持 nil，
+				// 路径已存在时 current = next 即变 nil，下一次 Set 直接空指针崩溃。
+				next = tbl
 			} else {
-				next, isTable := val.(*LuaTable)
-				if !isTable {
-					// 不是 table，需要替换
-					next = newTable(nil)
-					current.Set(key, next)
-				}
+				// 不是 table，需要替换
+				next = newTable(nil)
+				current.Set(key, next)
 			}
 
 			current = next
@@ -128,8 +130,13 @@ func cleanupCache() bool {
 	})
 
 	if count > cacheMaxSize {
-		// 清理旧缓存（简化版：全部清空）
-		pathCache = sync.Map{}
+		// 清理旧缓存（简化版：全部清空）。
+		// 不能整体重新赋值包级变量 pathCache（值拷贝写）：会与并发
+		// Load/Store/Range 竞争。保持同一实例，Range 出 key 逐个 Delete。
+		pathCache.Range(func(k, _ interface{}) bool {
+			pathCache.Delete(k)
+			return true
+		})
 		return true
 	}
 	return false

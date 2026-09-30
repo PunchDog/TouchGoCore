@@ -61,7 +61,8 @@ func populateTable(tbl *LuaTable, data interface{}) {
 		}
 	case []map[string]interface{}:
 		for i, item := range v {
-			tbl.Set(i+1, newTable(item))
+			// 与 Append 同口径：数组下标统一用 int64 键
+			tbl.Set(int64(i+1), newTable(item))
 		}
 	default:
 		rv := reflect.ValueOf(v)
@@ -148,12 +149,16 @@ func (this *LuaTable) HasData() bool {
 	return this.tbl != nil && this.tbl.Length() > 0
 }
 
-// Append 添加列表元素
+// Append 添加列表元素。
+//
+// 键类型统一为 int64：Lua 数字经 LuaToGoValue 转回 Go 侧就是 int64，
+// GetArray 也按 int64 识别数组下标。旧实现用 Go int 作键，Go 侧 Append
+// 建的表在 GetArray 里永远读回空数组。
 func (this *LuaTable) Append(val interface{}) {
 	if this.tbl == nil {
 		this.tbl = syncmap.NewAny()
 	}
-	this.Set(this.tbl.Length()+1, val)
+	this.Set(int64(this.tbl.Length()+1), val)
 }
 
 // Set 设置键值对
@@ -270,23 +275,45 @@ func (this *LuaTable) GetTable(key interface{}) (*LuaTable, bool) {
 	return nil, false
 }
 
-// GetArray 获取数组形式的值
+// GetArray 获取数组形式的值。
+//
+// 两遍法保证顺序与 syncmap.Range 的遍历顺序无关：第一遍把 int/int64 下标收进
+// map（Append 统一用 int64，Set 是公开入口、历史调用可能传 int，一并识别），
+// 第二遍从 1 开始顺次取出，遇空洞即止（Lua 数组语义）。
 func (this *LuaTable) GetArray() []interface{} {
 	if this.tbl == nil {
 		return nil
 	}
 
-	arr := make([]interface{}, 0, this.tbl.Length())
+	entries := make(map[int64]interface{})
+	var maxIdx int64
 	this.tbl.Range(func(key, value interface{}) bool {
-		if idx, ok := key.(int64); ok && idx > 0 {
-			if int(idx-1) < len(arr) {
-				arr[idx-1] = value
-			} else {
-				arr = append(arr, value)
+		var idx int64
+		switch k := key.(type) {
+		case int64:
+			idx = k
+		case int:
+			idx = int64(k)
+		default:
+			return true
+		}
+		if idx > 0 {
+			entries[idx] = value
+			if idx > maxIdx {
+				maxIdx = idx
 			}
 		}
 		return true
 	})
+
+	arr := make([]interface{}, 0, maxIdx)
+	for i := int64(1); i <= maxIdx; i++ {
+		v, ok := entries[i]
+		if !ok {
+			break
+		}
+		arr = append(arr, v)
+	}
 	return arr
 }
 

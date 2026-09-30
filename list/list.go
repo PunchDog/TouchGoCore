@@ -176,6 +176,14 @@ var rangeBufPool = sync.Pool{
 }
 
 // 遍历（优化：使用快照遍历，避免遍历期间持锁导致死锁和竞态条件）
+//
+// 延迟删除清理的不变量：只有「最后一个退出且确认没有新 Range 已计数」的遍历
+// 才把 delPending 节点归还对象池。Add(-1)==0 与取得 mu 之间存在窗口：新 Range B
+// 可能已 Add(1) 并在 RLock 下把仍挂在链上的 delPending 节点收进快照；若 A 此时
+// 照常 cleanup，B 手里的快照就指向已归还池、随时被 NewNode 复用的节点
+// （use-after-free 到池）。因此 A 拿到 mu 后必须复查 rangeCount：仍为 0 才清理；
+// 否则保留 rangeDelList 原样退出——B（或更后的最后一个 Range）结束时计数归 0，
+// 由它完成清理，节点不会漏收。
 func (l *List) Range(f func(INode) bool) {
 	// 标记遍历进行中（原子计数，支持嵌套/并发遍历）
 	l.rangeCount.Add(1)
@@ -184,6 +192,11 @@ func (l *List) Range(f func(INode) bool) {
 		if l.rangeCount.Add(-1) == 0 {
 			l.mu.Lock()
 			defer l.mu.Unlock()
+			// 复查：Add(-1) 到取锁之间可能有新 Range 已计数并快照了 delPending
+			// 节点，此时跳过清理，交给最后退出的那个 Range（见函数头不变量）。
+			if l.rangeCount.Load() != 0 {
+				return
+			}
 			for _, node := range l.rangeDelList {
 				n := node.GetNode()
 				if n == nil {

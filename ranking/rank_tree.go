@@ -106,8 +106,16 @@ func (rt *RankTree) UpdateRankInfo(uid int64, val int64, timestamp int64) {
 	rt.AddRankInfo(uid, val, timestamp)
 }
 
-// 查询用户排名
+// 查询用户排名。
+//
+// 返回值是内部条目的【值拷贝】：
+//  1. 读锁下绝不写共享的 *RankInfo（旧实现 info.Rank = ... 与并发查询/持久化
+//     构成数据竞争），Rank 只写在副本上；
+//  2. 不外泄内部指针，调用方修改返回值不会破坏树内状态。
 func (rt *RankTree) QueryRankInfo(uid int64) *RankInfo {
+	if rt == nil {
+		return nil
+	}
 	// 读操作，需要读锁
 	rt.rwMutex.RLock()
 	defer rt.rwMutex.RUnlock()
@@ -119,16 +127,24 @@ func (rt *RankTree) QueryRankInfo(uid int64) *RankInfo {
 	if !has {
 		return nil
 	}
-	info.Rank = rt.Sl.rank(info.Value, info) + 1
-	return info
+	rank := rt.Sl.rank(info.Value, info)
+	cp := *info
+	cp.Rank = rank + 1
+	return &cp
 }
 
-// 查询指定范围排名
+// 查询指定范围排名（返回元素为值拷贝，见 searchByRankRange）
 func (rt *RankTree) QueryByRankRange(min, max int32) []*RankInfo {
+	if rt == nil {
+		return nil
+	}
 	// 读操作，需要读锁
 	rt.rwMutex.RLock()
 	defer rt.rwMutex.RUnlock()
 
+	if rt.Sl == nil {
+		return nil
+	}
 	if min > max {
 		return nil
 	}
@@ -141,24 +157,37 @@ func (rt *RankTree) QueryByRankRange(min, max int32) []*RankInfo {
 	return rt.Sl.searchByRankRange(min, max)
 }
 
-// 根据排名查询信息
+// 根据排名查询信息（返回值拷贝，避免外泄内部指针）
 func (rt *RankTree) QueryByRank(rank int32) *RankInfo {
+	if rt == nil {
+		return nil
+	}
 	// 读操作，需要读锁
 	rt.rwMutex.RLock()
 	defer rt.rwMutex.RUnlock()
 
-	key, val := rt.Sl.searchByRank(rank)
-	if key < 0 {
+	if rt.Sl == nil {
 		return nil
 	}
-	return val
+	key, val := rt.Sl.searchByRank(rank)
+	if key < 0 || val == nil {
+		return nil
+	}
+	cp := *val
+	return &cp
 }
 
 // 获取排名长度
 func (rt *RankTree) RankLength() int32 {
+	if rt == nil {
+		return 0
+	}
 	// 读操作，需要读锁
 	rt.rwMutex.RLock()
 	defer rt.rwMutex.RUnlock()
 
+	if rt.Sl == nil {
+		return 0
+	}
 	return rt.Sl.Length
 }

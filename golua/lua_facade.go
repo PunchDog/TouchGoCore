@@ -110,16 +110,24 @@ func RunLua() error {
 	return nil
 }
 
-// StopLua 关闭所有的定时器
+// StopLua 关闭所有的定时器。
+//
+// 先在锁内摘走整张登记表并置 nil，再在锁外逐个 Close：Close 内部会经
+// unregisterLuaInstance 取 luaInstancesMu 摘除自己的条目，若持锁调用 Close
+// 就是同锁重入死锁（sync.RWMutex 不可重入）。
 func StopLua() {
 	luaInstancesMu.Lock()
-	defer luaInstancesMu.Unlock()
-
+	snapshot := make([]*LuaScript, 0, len(luaInstances))
 	for _, ls := range luaInstances {
-		ls.Close()
+		snapshot = append(snapshot, ls)
 	}
 	luaInstances = nil
 	defaultLua = nil
+	luaInstancesMu.Unlock()
+
+	for _, ls := range snapshot {
+		ls.Close()
+	}
 }
 
 // Run 启动 Lua 服务（公开接口）

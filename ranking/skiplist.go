@@ -337,8 +337,10 @@ func (sl *SkipList) searchByRankRange(min, max int32) []*RankInfo {
 
 	rank := min
 	for i := st; rank <= max && i != nil; i = i.Level[0].Forward {
-		i.Value.Rank = rank
+		// Rank 只写在拷贝上：searchByRankRange 在调用方的读锁下执行，
+		// 直接写共享的 i.Value.Rank 就是读锁下改共享状态（数据竞争）。
 		val := copyValue(i.Value)
+		val.Rank = rank
 		res = append(res, val)
 		rank++
 	}

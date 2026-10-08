@@ -134,6 +134,7 @@ const (
 	// 一个供应商的凭证只有一份，按动作重复注入迟早「只注了三个、 Mint 用空密钥」。
 	CallNftSDKMsg = "NftSDK"
 	CallLoadIni   = "loadini"
+	CallGin       = "gin"
 )
 
 var DefaultCallFunc = &CallFunction{

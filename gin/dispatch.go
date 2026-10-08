@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"touchgocore/util"
 	"touchgocore/vars"
 
 	"github.com/gin-gonic/gin"
@@ -292,6 +293,10 @@ func newRootHandler(staticDir *string) gin.HandlerFunc {
 		if allow := allowedMethods(p); len(allow) > 0 {
 			c.Header("Allow", strings.Join(allow, ", "))
 			vars.Debug("HTTP 405 方法未注册: %s %s (允许: %v)", c.Request.Method, p, allow)
+			//如果 DefaultCallFunc 包含 CallGin，则调用 CallGin
+			if util.DefaultCallFunc.Do(util.CallGin, c) {
+				return
+			}
 			c.JSON(http.StatusMethodNotAllowed, gin.H{"error": "method not allowed", "code": 405})
 			return
 		}

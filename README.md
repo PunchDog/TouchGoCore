@@ -42,12 +42,20 @@ Go 游戏服务框架：WebSocket、gRPC、定时器、Lua、Telegram、Gin、Re
   `UsdtWithdraw` / `TonAccount` 等），不必先知道配置里写的是哪家 SDK；`driver` 标记由
   `paysdk` 读表后交给 `pay.Open` 解析成实现。接一家新供应商 = 在它自己的包里
   `pay.Register("驱动名", 构造函数)` + 配置里改 `driver`，通道包与上游都不动。
+- NFT 资产通道：代码在 `nft` 包，四件事——查询持有 `NftHoldings`、单币详情 `NftToken`、
+  铸造 `NftMint`、转账 `NftTransfer`，外加查单 `NftQuery` 与对账 `NftReconcile`。它与数字货币资金链路刻意不耦合：
+  凭证登记在独立的顶层 `nft_sdks` 表（不复用 `pay_sdks`——两张表的端点逻辑名与驱动命名空间不同域，
+  混用会让「换资金供应商」与「换 NFT 供应商」互相牵连），驱动走 `nft.Register`（内置 `nft_generic_md5`），
+  密钥注入钩子是 `util.CallNftSDKMsg+"<段名>"`，与 `CallPaySDKMsg` 各注各的；同一供应商两边都供时凭证仍只各自注入、不落版本库。
+  通道段 `nft` 用 `{sdk, account}` 引用 `nft_sdks` 一段，`chain`（eth/bsc/tron/sol/ton）与 `network` 参与签名。
+  `token_id`、总量这类链上大整数一律十进制字符串，禁 float64。落库、额度与市场撮合（上架交易）归下游业务工程，
+  本包不碰 SQL——与资金侧同一分层口径。接一家新 NFT 供应商 = 在它自己的包里 `nft.Register` + 配置改 `driver`。
 
 ## 开发
 
 ```bash
 go build ./... && go vet ./...
-go test ./config ./corectx ./db ./rpc ./util ./websocket ./telegram ./whatsapp ./zalo ./facebook ./instagram .
+go test ./config ./corectx ./db ./rpc ./util ./websocket ./telegram ./whatsapp ./zalo ./facebook ./instagram ./nft .
 ```
 
 `go build ./...` 会连带编译 `example/` 的 3 个包（同属主模块），那里的编译错误是真错误。

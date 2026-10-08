@@ -2,6 +2,8 @@ package config
 
 import (
 	"fmt"
+	"net"
+	"net/url"
 	"sort"
 	"strings"
 )
@@ -142,6 +144,10 @@ func (c *Cfg) Validate() error {
 
 	err := validatePayChannels(c)
 	if err != nil {
+		return err
+	}
+
+	if err := validateNftChannels(c); err != nil {
 		return err
 	}
 
@@ -289,6 +295,119 @@ func validatePayChannels(c *Cfg) error {
 		}
 	}
 	return nil
+}
+
+// validateNftChannels 校验 NFT 资产通道的 SDK 引用与登记段是否指得通（对 validatePayChannels 同构）。
+//
+// 与资金侧的差别只在驱动名空间与 endpoints 键集（§6.3）：这里钉死 endpoints 的合法键是
+// holdings/token/mint/transfer/query 五个，把「把 recharge 抄进 nft 段」这种复用惯性钉在
+// 校验期。至于驱动名有没有登记，不在 config 校验（本包不引 nft，避免配置层依赖资产契约层），
+// 由 nft.NftStart 装配时判定。
+//
+// 判定范围同样只有「已经开启的部分」：enable 不为 on 的段整体跳过；唯一例外是段名本身
+// 指不到——那是纯拼写错，与开没开无关，趁启动报出来。
+func validateNftChannels(c *Cfg) error {
+	refs := map[string]*NftSDKRef{}
+	if c.Nft != nil {
+		refs["nft.provider"] = c.Nft.Provider
+	}
+	for _, name := range sortedMapKeys(refs) {
+		ref := refs[name]
+		if ref.Empty() {
+			continue // 没引用即不启用，属正常缺省
+		}
+		section := c.NftSDks[strings.TrimSpace(ref.SDK)]
+		if section == nil {
+			// 段名打错一个字母是纯配置错，无论开没开都要当场报出来。
+			return fmt.Errorf("%s: nft_sdks 里没有名为 %s 的 SDK 段", name, strings.TrimSpace(ref.SDK))
+		}
+		if !section.Enabled() {
+			continue // 段没开＝这条引用当前不参与判定，属合法的「写好待开」
+		}
+		if _, _, err := ref.Resolve(c.NftSDks); err != nil {
+			return fmt.Errorf("%s: %w", name, err)
+		}
+	}
+	// nft endpoints 的合法逻辑名（§5.4/§6.2）：值与本包固定常量一致，config 不引 nft 故就地登记。
+	legalEndpoints := map[string]bool{
+		"holdings": true, "token": true, "mint": true, "transfer": true, "query": true,
+	}
+	for _, name := range sortedMapKeys(c.NftSDks) {
+		sdk := c.NftSDks[name]
+		if !sdk.Enabled() {
+			continue // enable 不为 on 的段整体不参与判定
+		}
+		if strings.TrimSpace(sdk.Driver) == "" {
+			return fmt.Errorf("nft_sdks.%s 缺 sdk 驱动标记（应为 nft 包登记过的驱动名）", name)
+		}
+		if strings.TrimSpace(sdk.BaseURL) == "" {
+			return fmt.Errorf("nft_sdks.%s 已登记但 base_url 为空", name)
+		}
+		// base_url 形态与数值上限（NF-F7/F8 的启动期那一半）：明文通道会把签名头与会话
+		// 凭证摆到可被链路监听的链路上，内嵌 userinfo 的基址会原样出现在传输层错误文案里，
+		// 而 timeout_sec/max_retries 写成天量时，一次抖动就能被放大成小时级自 DDoS。
+		// nft.NewClient 运行期同样拒/夹，但「配置写得出去、通道静默降级」不如启动期报错。
+		if err := checkNftBaseURL(name, sdk.BaseURL); err != nil {
+			return err
+		}
+		if sdk.TimeoutSec < 0 || sdk.TimeoutSec > nftMaxTimeoutSec {
+			return fmt.Errorf("nft_sdks.%s.timeout_sec 必须在 [0,%d]（0 表示走框架默认）", name, nftMaxTimeoutSec)
+		}
+		if sdk.MaxRetries < 0 || sdk.MaxRetries > nftMaxRetryCap {
+			return fmt.Errorf("nft_sdks.%s.max_retries 必须在 [0,%d]", name, nftMaxRetryCap)
+		}
+		for _, ep := range sortedMapKeys(sdk.Endpoints) {
+			if !legalEndpoints[ep] {
+				return fmt.Errorf("nft_sdks.%s.endpoints 出现未知键 %s（合法键: holdings/token/mint/transfer/query）", name, ep)
+			}
+		}
+		for _, alias := range sortedMapKeys(sdk.Accounts) {
+			acc := sdk.Accounts[alias]
+			if acc == nil || strings.TrimSpace(acc.MerchantID) == "" {
+				return fmt.Errorf("nft_sdks.%s.accounts.%s 缺 merchant_id", name, alias)
+			}
+		}
+	}
+	return nil
+}
+
+// nftMaxTimeoutSec / nftMaxRetryCap 与 nft 包内的硬上限同值（就地登记，理由见 checkNftBaseURL）。
+const (
+	nftMaxTimeoutSec = 120
+	nftMaxRetryCap   = 5
+)
+
+// checkNftBaseURL 校验 nft 段 base_url 的形态：完整 URL、不内嵌凭证、非本机必须 https。
+//
+// 这套判定在 nft.NewClient 里有一份同口径实现，两边各写一次是刻意的：config 不得
+// import nft（nft 的装配层 wire.go 依赖 config，反向即成环），所以这里连合法端点键名
+// 都是就地登记的常量。报错文案一律不回显原始 URL——里面可能正是凭证。
+func checkNftBaseURL(name, raw string) error {
+	trimmed := strings.TrimSpace(raw)
+	u, err := url.Parse(trimmed)
+	if err != nil {
+		return fmt.Errorf("nft_sdks.%s.base_url 无法解析（非法转义或语法错）", name)
+	}
+	if u.Host == "" {
+		return fmt.Errorf("nft_sdks.%s.base_url 解析不出主机，请写完整 URL（如 https://api.example.com）", name)
+	}
+	if u.User != nil {
+		return fmt.Errorf("nft_sdks.%s.base_url 不得内嵌凭证（userinfo 会随错误文案与日志外泄）", name)
+	}
+	if strings.EqualFold(u.Scheme, "https") {
+		return nil
+	}
+	host := strings.ToLower(u.Hostname())
+	// 明文只对本机联调放行；其它 scheme 连「通道」都算不上，一并按非法形态拒掉。
+	if strings.EqualFold(u.Scheme, "http") {
+		if host == "localhost" || host == "::1" {
+			return nil
+		}
+		if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+			return nil
+		}
+	}
+	return fmt.Errorf("nft_sdks.%s.base_url 必须 https（明文通道仅允许 http://127.0.0.1/localhost/[::1]）", name)
 }
 
 // validateCache 校验两级缓存配置的明显错误。时长类字段 <=0 一律回落框架默认，

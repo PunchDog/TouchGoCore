@@ -32,11 +32,13 @@ type Cfg struct {
 	Tron      *TronConfig      `json:"tron"`       //TRON 原生币(TRX) 通道（充值/提现）配置
 	Bsc       *BscConfig       `json:"bsc"`        //BSC 原生币(BNB) 通道（充值/提现）配置
 	Sol       *SolConfig       `json:"sol"`        //Solana 原生币(SOL) 通道（充值/提现）配置
+	Nft       *NftConfig       `json:"nft"`        // NFT 资产通道（查询持有/详情/铸造/转账/对账）配置
 	// PaySDks 是资金 SDK 集中登记表，键是 SDK 段名；whatsapp/zalo/facebook/instagram
 	// 与 usdt/telegram.ton/tron/bsc/sol 各段用 {sdk, account} 引用这里的一段。
 	// 凭证只在这里出现一次——四条社交通道尤其需要这条：它们和资金通道常常共用同一家
 	// 供应商，凭证抄四份必然改漏一处。
 	PaySDks  map[string]*PaySDKConfig `json:"pay_sdks"`
+	NftSDks  map[string]*NftSDKConfig `json:"nft_sdks"`  // NFT SDK 集中登记表，键是段名；nft.provider 用 {sdk, account} 引用这里的一段
 	Server   *ServerConfig            `json:"server"`    // 服务器全局配置
 	Metrics  *MetricsConfig           `json:"metrics"`   // Prometheus 监控配置
 	ModelAPI *ModelAPIConfig          `json:"model_api"` // 模型API接入配置（OpenAI 兼容接口）

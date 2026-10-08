@@ -126,6 +126,13 @@ const (
 	// 若让下游为 whatsapp/usdt/ton 各注册一次同一个密钥，迟早出现「只注入了两家、
 	// 第三家用空密钥出款」这种只有供应商会发现的错。
 	CallPaySDKMsg = "PaySDK"
+	// CallNftMsg 是 NFT 资产通道的回调前缀。下游按 <前缀>+<动作> 注册，
+	// 例如 NftMsg+"Mint"（载荷 *nft.NftResult）；nft 包本身不落库，结果只经这里交出去。
+	CallNftMsg = "NftMsg"
+	// CallNftSDKMsg + nft_sdks 的段名 = 该段签名密钥的注入钩子，载荷是 *string
+	// （指向该段的 secret_key 字段本身）。钩子按 SDK 段而不是按动作命名，口径同 CallPaySDKMsg：
+	// 一个供应商的凭证只有一份，按动作重复注入迟早「只注了三个、 Mint 用空密钥」。
+	CallNftSDKMsg = "NftSDK"
 	CallLoadIni   = "loadini"
 )
 

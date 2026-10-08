@@ -288,6 +288,38 @@
             }
         }
     },
+    "nft_sdks说明": "NFT 资产链路的 SDK 集中登记表，代码在 nft 包。与 pay_sdks 刻意分开两张表：NFT 的驱动登记在 nft.Register（内置 nft_generic_md5），端点逻辑名是 holdings/token/mint/transfer/query 五个，与资金契约的 recharge/withdraw 不同域；混用一张表会让「换资金供应商」与「换 NFT 供应商」两个互不相关的运维动作互相牵连。同一供应商既供资金又供 NFT 时，密钥由下游对 util.CallPaySDKMsg+段名 与 util.CallNftSDKMsg+段名 两个钩子各注一次，配置里 secret_key 保持留空、不进版本库",
+    "nft_sdks": {
+        "mynft": {
+            "enable": "off",
+            "enable说明": "必须显式为 on。SDK 段决定这套凭证能不能用，nft.provider 决定这条资产链路用不用它，两处都到位才是开",
+            "driver": "nft_generic_md5",
+            "driver说明": "驱动标记，须在 nft.Register 登记过；真实供应商形态不同时由那个 SDK 包在自己 init 里 Register 一个名字，这里改标记即可，nft 包与门面签名都不动",
+            "base_url": "https://nft-provider.example.com",
+            "app_id": "CHANGE-ME",
+            "secret_key": "",
+            "secret_key说明": "只经配置注入或启动前的 util.CallNftSDKMsg+mynft 钩子写入；禁入日志、error 文案与 RawNote",
+            "auth_header": "X-Sign",
+            "token_header": "Authorization",
+            "timeout_sec": 30,
+            "max_retries": 2,
+            "notify_url": "",
+            "endpoints说明": "五个逻辑名在 nft/types.go 权威登记（holdings/token/mint/transfer/query），这里只填实际路径；缺一个键则该动作在启动装配时报错",
+            "endpoints": {
+                "holdings": "/v1/holdings",
+                "token": "/v1/token",
+                "mint": "/v1/mint",
+                "transfer": "/v1/transfer",
+                "query": "/v1/query"
+            },
+            "accounts": {
+                "default": {
+                    "enable": "on",
+                    "merchant_id": "m-1"
+                }
+            }
+        }
+    },
     "telegram": {
         "telegram说明": "Telegram 机器人配置（可选，不填 Cfg.Telegram 为 nil 则不启用）",
         "bot_token": "000000:CHANGE-ME",
@@ -420,6 +452,20 @@
         "provider说明": "资金链路的 SDK 引用",
         "provider": {
             "sdk": "supplier_a",
+            "account": "default"
+        }
+    },
+    "nft说明": "NFT 资产通道（查询持有/铸造/转账/对账），代码在 nft 包。独立于数字货币资金链路：凭证登记在 nft_sdks、驱动走 nft.Register，与大整数字段（token_id/总量）一律十进制字符串；落库与上架交易归下游业务工程",
+    "nft": {
+        "chain说明": "默认链标识（eth/bsc/tron/sol/ton），单里未填链时由装配层补进去",
+        "chain": "eth",
+        "network说明": "网络标识（mainnet 与各链测试网专名：chapel/devnet/shasta/nile），随报文交给供应商并参与签名；留空按供应商默认",
+        "network": "mainnet",
+        "contract说明": "NFT 合约地址（ERC-721/1155、SPL 集合、TRC-721 各自的形态由驱动侧校验）；平台代持、无合约概念时留空",
+        "contract": "",
+        "provider说明": "资产链路的 SDK 引用（指向 nft_sdks 的段名）",
+        "provider": {
+            "sdk": "mynft",
             "account": "default"
         }
     },

@@ -259,6 +259,7 @@ func (app *App) registerServices() {
 		&tronService{},
 		&bscService{},
 		&solService{},
+		&nftService{},
 		&ginService{},
 		&modelAPIService{},
 		// 缓存层放最后：Shutdown 反序停止 ⇒ 它最先停，

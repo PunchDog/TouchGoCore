@@ -13,6 +13,7 @@ import (
 	"touchgocore/instagram"
 	"touchgocore/localtimer"
 	"touchgocore/mapmanager"
+	"touchgocore/nft"
 	"touchgocore/rpc"
 	"touchgocore/sol"
 	"touchgocore/telegram"
@@ -205,6 +206,20 @@ func (s *solService) Start(ctx context.Context) error {
 }
 func (s *solService) Stop(ctx context.Context) error {
 	sol.SolStop(ctx)
+	return nil
+}
+
+// nftService NFT 查询/铸造/转账/对账服务适配器（口径同 bscService：Start 返回 nil，
+// nft 段没配好只记日志、不阻断整机；它是资产通道，不与数字货币资金链路共用配置）。
+type nftService struct{}
+
+func (s *nftService) Name() string { return "nft" }
+func (s *nftService) Start(ctx context.Context) error {
+	nft.NftStart(ctx)
+	return nil
+}
+func (s *nftService) Stop(ctx context.Context) error {
+	nft.NftStop(ctx)
 	return nil
 }
 

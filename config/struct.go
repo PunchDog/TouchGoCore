@@ -579,3 +579,136 @@ func (c *ModelAPIConfig) StrategyValid() bool {
 		return false
 	}
 }
+
+// NftConfig 是 NFT 通道段。开不开有两处真相、必须都开：
+// ref 留空即本通道不启用；nft_sdks 段 enable 不为 "on" 即凭证不可用（口径对 PaySDKRef 注释）。
+//
+// 配置结构体刻意留在 config 包而不是 nft 包：本包的 Cfg 要引用它，而 nft 只认与配置无关的
+// ProviderOptions（端点表也是以取值函数的形式交进去）。若把结构体挪到 nft，
+// config→nft 与 nft→config 两头引用就成环了（硬约束 4）。
+type NftConfig struct {
+	Provider *NftSDKRef `json:"provider"` // 五动作共同引用的 SDK 段
+	// Chain 是默认链标识（eth/bsc/tron/sol/ton），单里未填时由装配层补进去。
+	Chain string `json:"chain"`
+	// Network 是默认网络标识（mainnet/testnet/chapel/devnet），留空按供应商默认。
+	// 「在哪条链上铸」必须是配置里看得出来的字段值，不能靠基址猜（pay/types.go:28-44 论证同构）。
+	Network string `json:"network"`
+	// Contract 是默认代币合约地址；留空表示铸造走「供应商部署新合约」形态。
+	Contract string `json:"contract"`
+}
+
+// NftSDKConfig 是一段 NFT SDK 配置：字段形态对 PaySDKConfig 同构复刻，类型独立。
+// 与资金段的差别只在 driver 名空间与 endpoints 键集（§6.3）。
+//
+// Enable 必须显式为 "on" 才启动。资产通道的新配置段默认不启动，比「写了 base_url 就
+// 以为开了」更安全：漏一个开关的代价是少一条通道，多开一条通道的代价是真资产动作。
+type NftSDKConfig struct {
+	Enable      string `json:"enable"`       // 显式 "on" 才启动
+	Driver      string `json:"driver"`       // nft.Register 登记过的驱动名（内置 "nft_generic_md5"）
+	BaseURL     string `json:"base_url"`     // 不含末尾斜杠
+	AppID       string `json:"app_id"`       // 参与签名域
+	SecretKey   string `json:"secret_key"`   // 只经配置或 CallNftSDKMsg 钩子注入；禁入日志/error
+	AuthHeader  string `json:"auth_header"`  // 留空按驱动默认 X-Sign
+	TokenHeader string `json:"token_header"` // 留空按驱动默认 Authorization
+	TimeoutSec  int    `json:"timeout_sec"`  // <=0 用 nft.DefaultTimeout
+	MaxRetries  int    `json:"max_retries"`  // <0 用 nft.DefaultMaxRetry
+	NotifyURL   string `json:"notify_url"`
+	// Endpoints 键是本包固定的五个逻辑名：holdings/token/mint/transfer/query。
+	// 缺某个键 ⇒ 对应操作返回明确错误，不发请求。
+	Endpoints map[string]string `json:"endpoints"`
+	// Accounts 是我方在该供应商名下的签发主体表，键是本地别名。
+	// 「这一单从哪个主体签发」在配置解析期由装配层定死，报文里没有二次改口余地。
+	Accounts map[string]*NftMerchantAccount `json:"accounts"`
+}
+
+// Enabled 该 NFT SDK 段是否被显式开启（enable 大小写不敏感的 "on"）。
+func (p *NftSDKConfig) Enabled() bool {
+	return p != nil && strings.EqualFold(strings.TrimSpace(p.Enable), "on")
+}
+
+// Endpoint 按逻辑名取供应商路径。未登记时 ok=false——配置不全的操作必须在发请求之前就拒掉。
+func (p *NftSDKConfig) Endpoint(name string) (string, bool) {
+	if p == nil {
+		return "", false
+	}
+	v := strings.TrimSpace(p.Endpoints[name])
+	if v == "" {
+		return "", false
+	}
+	if !strings.HasPrefix(v, "/") {
+		v = "/" + v
+	}
+	return v, true
+}
+
+// Account 按别名取签发主体。别名留空且表中只有一个账户时取那一个；多于一个则报错要求点名
+// ——静默挑一个主体铸币是不可接受的歧义。
+func (p *NftSDKConfig) Account(alias string) (*NftMerchantAccount, error) {
+	if p == nil || len(p.Accounts) == 0 {
+		return nil, errors.New("未配置 accounts 签发主体")
+	}
+	if alias == "" {
+		if len(p.Accounts) > 1 {
+			return nil, fmt.Errorf("accounts 里有 %d 个签发主体，通道段必须用 account 点名", len(p.Accounts))
+		}
+		for k := range p.Accounts {
+			alias = k
+		}
+	}
+	a, ok := p.Accounts[alias]
+	if !ok {
+		return nil, fmt.Errorf("accounts 里没有名为 %s 的签发主体", alias)
+	}
+	if !a.Enabled() {
+		return nil, fmt.Errorf("accounts.%s 未显式开启（enable 需为 on）", alias)
+	}
+	if strings.TrimSpace(a.MerchantID) == "" {
+		return nil, fmt.Errorf("accounts.%s 缺 merchant_id", alias)
+	}
+	return a, nil
+}
+
+// NftMerchantAccount 是「我方在 NFT 供应商侧的一个签发主体」。
+// 余额类事实不写在这里（由查询动作当场读回），抄进来就是会过期的假账（PayMerchantAccount 论证同构）。
+type NftMerchantAccount struct {
+	Enable     string `json:"enable"`      // 显式 "on"
+	MerchantID string `json:"merchant_id"` // 进报文并参与签名域；是路由信息不是凭证，可进日志
+}
+
+// Enabled 该签发主体是否可用（口径与 SDK 段一致：显式 "on" 才算开）。
+func (a *NftMerchantAccount) Enabled() bool {
+	return a != nil && strings.EqualFold(strings.TrimSpace(a.Enable), "on")
+}
+
+// NftSDKRef 是 nft.provider 段对 nft_sdks 的引用：只留两个名字，不留凭证。
+type NftSDKRef struct {
+	SDK     string `json:"sdk"`     // nft_sdks 的键名
+	Account string `json:"account"` // 段内 accounts 的键名；单账户可留空，多账户必须点名
+}
+
+// Empty 该通道是否未绑定任何 SDK（未绑定即不启用）。
+func (r *NftSDKRef) Empty() bool { return r == nil || strings.TrimSpace(r.SDK) == "" }
+
+// Resolve 在全表里取被引用的 SDK 段与签发主体。五动作都会动资产（连只读侧也按主体口径走），
+// nft 不需要 ResolveService 形态——这是与 pay 的显式差异（§6.2）。
+//
+// 报错文案只说名字与缺项，绝不带出基址之外的敏感值；SDK 段里可能的密钥一旦顺着 error
+// 扩散，就会出现在日志和上层包装里。
+func (r *NftSDKRef) Resolve(sdks map[string]*NftSDKConfig) (*NftSDKConfig, *NftMerchantAccount, error) {
+	if r.Empty() {
+		return nil, nil, errors.New("未配置 sdk 引用，该通道不启用")
+	}
+	name := strings.TrimSpace(r.SDK)
+	cfg := sdks[name]
+	if cfg == nil {
+		return nil, nil, fmt.Errorf("nft_sdks 里没有名为 %s 的 SDK 段", name)
+	}
+	if !cfg.Enabled() {
+		return nil, nil, fmt.Errorf("nft_sdks.%s 未显式开启（enable 需为 on）", name)
+	}
+	acc, err := cfg.Account(strings.TrimSpace(r.Account))
+	if err != nil {
+		return nil, nil, fmt.Errorf("nft_sdks.%s: %w", name, err)
+	}
+	return cfg, acc, nil
+}

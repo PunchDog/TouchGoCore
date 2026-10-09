@@ -28,6 +28,8 @@ type cloudTextPayload struct {
 }
 
 type cloudTextBody struct {
+	// PreviewURL 由配置段 Whatsapp.Cloud.preview_url 驱动（见 SendText），不是调用方可
+	// 逐个指定的参数；false 时因 omitempty 整键不出现在报文里，等同 Meta 的缺省行为。
 	PreviewURL bool   `json:"preview_url,omitempty"`
 	Body       string `json:"body"`
 }
@@ -134,13 +136,16 @@ func newCloudClient(cfg *config.WhatsappCloudConfig) *cloudClient {
 }
 
 // SendText 发送一条纯文本消息；to 为目标号码（E.164，纯数字）。返回 wamid。
+//
+// 是否带链接预览只读配置段 preview_url（cfg.PreviewURL），签名不带开关：Meta 把该参数
+// 定为 per-message，但本包按「一处配置一处行为」收口，调用方要差异就分实例或后补参数。
 func (c *cloudClient) SendText(ctx context.Context, to, body string) (string, error) {
 	return c.send(ctx, &cloudTextPayload{
 		MessagingProduct: "whatsapp",
 		RecipientType:    "individual",
 		To:               to,
 		Type:             "text",
-		Text:             &cloudTextBody{Body: body},
+		Text:             &cloudTextBody{Body: body, PreviewURL: c.cfg.PreviewURL},
 	})
 }
 
@@ -240,6 +245,8 @@ func (c *cloudClient) send(ctx context.Context, p *cloudTextPayload) (string, er
 }
 
 // WhatsappCloudSendText 经 Cloud 能力发送纯文本；未启动返回明确错误。
+//
+// 签名冻结，行为随配置：报文中是否带 preview_url 取决于启动时的 Whatsapp.Cloud.preview_url。
 func WhatsappCloudSendText(ctx context.Context, to, body string) (string, error) {
 	c, err := currentCloud()
 	if err != nil {

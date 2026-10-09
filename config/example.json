@@ -358,6 +358,21 @@
         "templates": {
             "auth_verify": "tpl_auth_verify",
             "bind_notice": "tpl_bind_notice"
+        },
+        "cloud说明": "WhatsApp Business Cloud API（Meta Graph API 直连）配置，与上面走 pay_sdks 的两段无关，凭证由部署配置注入、示例一律留空。access_token 或 phone_number_id 为空时 Cloud 能力不启动：WhatsappCloud() 返回 nil，调用门面直接报错，不会带着半截配置去连 Meta",
+        "cloud": {
+            "access_token": "",
+            "phone_number_id": "",
+            "waba_id": "",
+            "verify_token": "",
+            "app_secret": "",
+            "base_url": "https://graph.facebook.com",
+            "api_version": "v23.0",
+            "code_ttl_sec": 300,
+            "bind_template": "bind_otp",
+            "preview_url说明": "文本消息是否附链接预览，对应 Graph API 的 text.preview_url。只有发送文本读这个键，模板与交互式消息没有该参数；签名里不带开关，行为随配置。false 时报文连这个键都不出现，与 Meta 缺省一致",
+            "preview_url": false,
+            "onboarding说明": "引导步骤数组，每项 body 加 buttons（按钮含 id 与 title，Meta 限制 id 不超过 256 字节、title 不超过 20 字符）；整段不写即回落内置两步。进度计到第几步是业务方的状态，框架只按序号渲染文案"
         }
     },
     "zalo说明": "Zalo 通道（登录/充值/提现），代码在 zalo 包。Zalo 是越南的即时通讯 App，我方登录的是供应商代持的账号，账号归属与凭证有效期都由那家供应商定，本层不为这几件事加字段。登录与资金各引用一个 SDK 段，与 whatsapp 同一口径：验证码走消息网关、充值提现走支付网关是常见形态，两段独立开关",

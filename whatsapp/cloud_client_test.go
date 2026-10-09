@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -71,6 +72,45 @@ func TestSendText(t *testing.T) {
 	}
 	if !strings.Contains(gotBody, `"to":"86138"`) || !strings.Contains(gotBody, `"body":"hello"`) {
 		t.Fatalf("报文不符: %s", gotBody)
+	}
+}
+
+// TestSendTextPreviewURLFromConfig 钉 preview_url 的唯一来源是配置段：门面签名不带开关，
+// 关掉时整个键不得出现在报文里（等同 Meta 缺省），打开时必须为 true。
+// 配置从 JSON 起步，顺带钉住 json 键名——键名写错时 encoding/json 静默丢弃，运行期毫无痕迹。
+func TestSendTextPreviewURLFromConfig(t *testing.T) {
+	var gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		io.WriteString(w, `{"messaging_product":"whatsapp","messages":[{"id":"wamid.p"}]}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	for _, on := range []bool{false, true} {
+		gotBody = ""
+		raw := fmt.Sprintf(`{"whatsapp":{"cloud":{"access_token":"tok","phone_number_id":"PNID","base_url":%q,"api_version":"vTest","preview_url":%v}}}`, srv.URL, on)
+		var cfg config.Cfg
+		if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
+			t.Fatalf("preview_url=%v 时示例配置反序列化失败: %v", on, err)
+		}
+		if cfg.Whatsapp.Cloud.PreviewURL != on {
+			t.Fatalf("preview_url=%v 没被读进配置段，实得 %v（json 键名与结构体不符）", on, cfg.Whatsapp.Cloud.PreviewURL)
+		}
+		startWith(t, &cfg)
+		if _, err := WhatsappCloudSendText(context.Background(), "86138", "hello"); err != nil {
+			t.Fatalf("preview_url=%v 发送失败: %v", on, err)
+		}
+		// 先证明请求真打出去了：没有这条，下面「不含 preview_url」的断言会因为压根没发而空跑。
+		if !strings.Contains(gotBody, `"body":"hello"`) {
+			t.Fatalf("preview_url=%v 时未看到发出的文本报文: %q", on, gotBody)
+		}
+		if on && !strings.Contains(gotBody, `"preview_url":true`) {
+			t.Fatalf("配置开了链接预览，报文里却没有: %s", gotBody)
+		}
+		if !on && strings.Contains(gotBody, "preview_url") {
+			t.Fatalf("配置未开链接预览，报文不得带 preview_url: %s", gotBody)
+		}
 	}
 }
 

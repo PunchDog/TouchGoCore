@@ -378,6 +378,9 @@ type WhatsappCloudConfig struct {
 	CodeTTLSec    int                   `json:"code_ttl_sec"`    // 绑定验证码有效期（秒），缺省 300
 	BindTemplate  string                `json:"bind_template"`   // 绑定验证码模板名，缺省 bind_otp
 	Onboarding    []WhatsappOnboardStep `json:"onboarding"`      // 引导流程步骤；nil 时回落内置默认两步
+	// PreviewURL 控制文本消息是否附链接预览（Graph API 的 text.preview_url）。
+	// Meta 语义：只对 type=text 生效，缺省 false；模板与交互式消息无此参数。
+	PreviewURL bool `json:"preview_url"`
 }
 
 // WhatsappOnboardStep 是引导流程的一步（文案 + 按钮）。

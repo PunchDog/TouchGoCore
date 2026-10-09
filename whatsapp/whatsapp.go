@@ -85,7 +85,8 @@ func WhatsappStart(ctx context.Context) {
 	if p, ok := openLogin(all, cfg.Login); ok {
 		login.Store(p)
 	}
-	if fund.Load() == nil && login.Load() == nil {
+	startCloud(all, cfg.Cloud)
+	if fund.Load() == nil && login.Load() == nil && cloud.Load() == nil {
 		vars.Info("不启动Whatsapp")
 	}
 }
@@ -94,6 +95,7 @@ func WhatsappStart(ctx context.Context) {
 func WhatsappStop(ctx context.Context) {
 	fund.Store(nil)
 	login.Store(nil)
+	stopCloud()
 }
 
 // currentFund 取资金链路客户端；未启动时返回明确错误而不是 panic。

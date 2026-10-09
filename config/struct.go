@@ -358,6 +358,38 @@ type WhatsappConfig struct {
 	Provider *PaySDKRef `json:"provider"` // 充值/提现通道引用的 SDK
 	// Templates 是消息模板名表，键为逻辑名（auth_verify/bind_notice）。
 	Templates map[string]string `json:"templates"`
+	// Cloud 是 WhatsApp Business Cloud API（Meta Graph API 直连）配置。
+	Cloud *WhatsappCloudConfig `json:"cloud"`
+}
+
+// WhatsappCloudConfig 是 WhatsApp Business Cloud API（Meta Graph API）直连接入所需的全部事实。
+//
+// 与 WhatsappConfig 里登录/资金走 pay_sdks 供应商的口径不同：Cloud API 是 Meta 直连，
+// 凭证（access_token / app_secret）由本段直接持有，不进 pay_sdks。
+// 配置约定：JSON 不反序列化 time.Duration，有效期用秒（CodeTTLSec），由 CodeTTL() 折算。
+type WhatsappCloudConfig struct {
+	AccessToken   string                `json:"access_token"`    // 系统用户永久 token 或 24h 临时 token
+	PhoneNumberID string                `json:"phone_number_id"` // 发送号码的 Phone Number ID（API 路径用）
+	WABAID        string                `json:"waba_id"`         // WhatsApp Business Account ID
+	VerifyToken   string                `json:"verify_token"`    // Webhook 验证挑战时回比的自定义串
+	AppSecret     string                `json:"app_secret"`      // 用于对入站 Webhook 载荷做 HMAC-SHA256 验签
+	BaseURL       string                `json:"base_url"`        // Graph API 基址，缺省 https://graph.facebook.com
+	APIVersion    string                `json:"api_version"`     // 图 API 版本，缺省 v23.0
+	CodeTTLSec    int                   `json:"code_ttl_sec"`    // 绑定验证码有效期（秒），缺省 300
+	BindTemplate  string                `json:"bind_template"`   // 绑定验证码模板名，缺省 bind_otp
+	Onboarding    []WhatsappOnboardStep `json:"onboarding"`      // 引导流程步骤；nil 时回落内置默认两步
+}
+
+// WhatsappOnboardStep 是引导流程的一步（文案 + 按钮）。
+type WhatsappOnboardStep struct {
+	Body    string                  `json:"body"`
+	Buttons []WhatsappOnboardButton `json:"buttons"`
+}
+
+// WhatsappOnboardButton 是引导步骤里的一个按钮（id 与 title 受 Meta 长度限制）。
+type WhatsappOnboardButton struct {
+	ID    string `json:"id"`
+	Title string `json:"title"`
 }
 
 // ZaloConfig 是 Zalo 通道配置，与 WhatsappConfig 同构，差异只在供应商口径：

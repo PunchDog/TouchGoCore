@@ -36,6 +36,9 @@ type Cache[K comparable, V any] struct {
 	sq SeqKV      // KV 支持「按 seq 条件写」时的 CAS 句柄；nil=退回无条件 Set/Del
 	js JournalSeq // KV 支持「按 seq 条件记账」时的句柄；nil=退回 JAddUpsert/JAddDelete
 
+	lock    Locker       // KV 支持 Locker 时的分布式锁句柄；nil=锁自动禁用
+	lockSeq atomic.Uint64 // 锁持有者 token 的进程内单调序号
+
 	fails sync.Map // string(keyString) → time.Time，回源失败退避（防打穿 DB）
 	seq   atomic.Int64
 	st    Stats
@@ -62,12 +65,15 @@ type Stats struct {
 	RecoverMiss atomic.Int64 // 账本在但 envelope 已过期/坏值/键解不开——不可恢复，已告警
 	JournalErr  atomic.Int64 // 账本操作失败（尽力而为路径，不阻断读写）
 	Superseded  atomic.Int64 // 并发写被更大 seq 超越而丢弃（Redis CAS 未生效/缓冲保留新值）
+
+	LockTimeout atomic.Int64 // 分布式锁等待超时（ErrLockTimeout 返回次数）
+	LockErr     atomic.Int64 // 分布式锁自身操作失败（降级无锁执行次数）
 }
 
 // StatsSnapshot 计数快照
 type StatsSnapshot struct {
 	Hits, Miss, Loads, LoadErr, KVErr, Prefetch, Dropped, FlushOK, FlushErr, Dirty int64
-	Recovered, RecoverMiss, JournalErr, Superseded                                 int64
+	Recovered, RecoverMiss, JournalErr, Superseded, LockTimeout, LockErr         int64
 }
 
 func (s *Stats) Snapshot() StatsSnapshot {
@@ -77,7 +83,8 @@ func (s *Stats) Snapshot() StatsSnapshot {
 		Dropped: s.Dropped.Load(), FlushOK: s.FlushOK.Load(), FlushErr: s.FlushErr.Load(),
 		Dirty: s.Dirty.Load(), Recovered: s.Recovered.Load(),
 		RecoverMiss: s.RecoverMiss.Load(), JournalErr: s.JournalErr.Load(),
-		Superseded: s.Superseded.Load(),
+		Superseded: s.Superseded.Load(), LockTimeout: s.LockTimeout.Load(),
+		LockErr: s.LockErr.Load(),
 	}
 }
 
@@ -120,6 +127,21 @@ func WithStalePolicy[K comparable, V any](p StalePolicy) Option[K, V] {
 }
 func WithRequireRedis[K comparable, V any](b bool) Option[K, V] {
 	return func(cc *Cache[K, V]) { cc.cfg.RequireRedis = b }
+}
+
+// WithLockTTL 设置分布式锁持有时长；<=0 禁用分布式锁（读回源/写路径退回无锁）。
+func WithLockTTL[K comparable, V any](d time.Duration) Option[K, V] {
+	return func(cc *Cache[K, V]) { cc.cfg.LockTTL = d }
+}
+
+// WithLockWait 设置未抢到分布式锁的最大等待时长；超时返回 ErrLockTimeout。
+func WithLockWait[K comparable, V any](d time.Duration) Option[K, V] {
+	return func(cc *Cache[K, V]) { cc.cfg.LockWait = d }
+}
+
+// WithLockPollInterval 设置未抢到锁时的轮询间隔（默认 20ms）。
+func WithLockPollInterval[K comparable, V any](d time.Duration) Option[K, V] {
+	return func(cc *Cache[K, V]) { cc.cfg.LockPollInterval = d }
 }
 func WithEnabled[K comparable, V any](b bool) Option[K, V] {
 	return func(cc *Cache[K, V]) { cc.cfg.Enabled = b }
@@ -186,6 +208,9 @@ func New[K comparable, V any](name string, kv KV, opts ...Option[K, V]) (*Cache[
 	}
 	if s, ok := c.kv.(SeqKV); ok {
 		c.sq = s
+	}
+	if lk, ok := c.kv.(Locker); ok {
+		c.lock = lk
 	}
 	if c.sn != nil {
 		c.buf = newBuffer[K, V](c.cfg.Shards)

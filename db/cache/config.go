@@ -63,6 +63,16 @@ type Config struct {
 	// Redis 写不进则本次请求报错——不回退透传数据库值；写线 Write 同理先写 Redis 成功才入缓冲。
 	RequireRedis bool
 
+	// LockTTL 分布式锁（SETNX）的持有时长；读线 miss 回源与写路径都会先抢这把锁，
+	// 让同 key 的「回源/写入」跨进程只落在一个实例上（防击穿 + 写串行）。
+	// <=0 禁用分布式锁（KV 不支持 Locker 时也自动禁用）。默认 5s。
+	LockTTL time.Duration
+	// LockWait 未抢到分布式锁时的最大轮询等待时长；超时返回 ErrLockTimeout。
+	// <=0 视为立即放弃（等同于禁用锁的等待语义，直接降级无锁执行）。默认 2s。
+	LockWait time.Duration
+	// LockPollInterval 未抢到锁时的轮询间隔（重读 Redis 看值是否已回填），默认 20ms。
+	LockPollInterval time.Duration
+
 	// FlushInterval 写线定时器间隔，默认 2s
 	FlushInterval time.Duration
 	// BatchSize 单次落库批量上限，默认 200
@@ -105,6 +115,9 @@ func DefaultConfig() Config {
 		WriteTimeout:    300 * time.Millisecond,
 		FailBackoff:     2 * time.Second,
 		RequireRedis:    true,
+		LockTTL:         5 * time.Second,
+		LockWait:        2 * time.Second,
+		LockPollInterval: 20 * time.Millisecond,
 		FlushInterval:   2 * time.Second,
 		BatchSize:       200,
 		MaxDirtyKeys:    100000,
@@ -132,6 +145,15 @@ func (c Config) Validate() error {
 	}
 	if c.ReadTimeout <= 0 || c.WriteTimeout <= 0 {
 		return fmt.Errorf("cache: ReadTimeout/WriteTimeout 必须大于 0")
+	}
+	if c.LockTTL < 0 {
+		return fmt.Errorf("cache: LockTTL 不能为负")
+	}
+	if c.LockWait < 0 {
+		return fmt.Errorf("cache: LockWait 不能为负")
+	}
+	if c.LockPollInterval < 0 {
+		return fmt.Errorf("cache: LockPollInterval 不能为负")
 	}
 	if c.FlushInterval <= 0 {
 		return fmt.Errorf("cache: FlushInterval 必须大于 0")

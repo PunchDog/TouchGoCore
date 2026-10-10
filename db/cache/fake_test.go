@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -67,6 +68,7 @@ var (
 	_ Journaler  = (*fakeKV)(nil)
 	_ SeqKV      = (*fakeKV)(nil)
 	_ JournalSeq = (*fakeKV)(nil)
+	_ Locker     = (*fakeKV)(nil)
 )
 
 // envelopeSeqOf 取 envelope 顶层 seq（JSON 字段名固定 "s"，见 envelope.go）。
@@ -140,6 +142,37 @@ func (f *fakeKV) Del(_ context.Context, keys ...string) error {
 		delete(f.m, k)
 	}
 	return f.delErr
+}
+
+// ---------- fakeKV 的 Locker 实现（内存版 SETNX + 比较删除） ----------
+
+func (f *fakeKV) SetNX(_ context.Context, key, value string, ttl time.Duration) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.record("setnx", key)
+	// 与真实 Redis SETNX 一致：键已存在且未过期才算抢锁失败；过期键视为不存在，
+	// 可被重新获取——这是「持有者崩溃后锁 TTL 到期，其他进程能接管」的测试前提。
+	if e, ok := f.m[key]; ok && !f.clk.Now().After(e.exp) {
+		return false, nil
+	}
+	f.m[key] = fakeEntry{val: value, exp: f.clk.Now().Add(ttl)}
+	return true, nil
+}
+
+// Eval 仅支持释放锁脚本（比较 token 后 DEL）；其余脚本返回错误让调用方降级。
+func (f *fakeKV) Eval(_ context.Context, script string, keys []string, args ...any) (any, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(keys) != 1 || len(args) < 1 {
+		return nil, errors.New("fakeKV: unsupported script")
+	}
+	e, ok := f.m[keys[0]]
+	if !ok || e.val != fmt.Sprint(args[0]) {
+		return int64(0), nil
+	}
+	delete(f.m, keys[0])
+	f.record("del", keys[0])
+	return int64(1), nil
 }
 
 // opsOf 返回操作序列快照（用于断言 set→get 顺序）
@@ -520,6 +553,10 @@ func testConfig() Config {
 	c.WriteTimeout = 200 * time.Millisecond
 	c.FailBackoff = 100 * time.Millisecond
 	c.NegativeTTL = 500 * time.Millisecond
+	// 既有用例大多聚焦 seq CAS / singleflight 的并发语义，分布式锁会把这些并发
+	// 串行化并破坏注入的交错（seqGate 在持锁回调里等另一个被锁挡住的写协程 → 死锁）。
+	// 因此共享基线默认关闭分布式锁；锁的专项用例（lock_test.go）再显式开启。
+	c.LockTTL = 0
 	return c
 }
 

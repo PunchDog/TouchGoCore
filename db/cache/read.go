@@ -96,7 +96,7 @@ func (c *Cache[K, V]) GetOrLoadWith(ctx context.Context, key K, ld Loader[K, V])
 
 	// 3) 单飞同步链路：回源(受控协程) → 写 Redis → 读回返回
 	v, err, _ := c.g.Do(ks, func() (any, error) {
-		return c.reload(ks, key, ld)
+		return c.reloadGuarded(ks, key, ld)
 	})
 	if err != nil {
 		return nil, err
@@ -218,7 +218,7 @@ func (c *Cache[K, V]) prefetch(ctx context.Context, key K, ks string, ld Loader[
 	c.runWg.Add(1)
 	go func() {
 		defer c.runWg.Done()
-		_, err, _ := c.g.Do(ks, func() (any, error) { return c.reload(ks, key, ld) })
+		_, err, _ := c.g.Do(ks, func() (any, error) { return c.reloadGuarded(ks, key, ld) })
 		if err != nil && !errors.Is(err, ErrNotFound) {
 			vars.Warning("cache[%s] 异步预热失败 key=%s: %v", c.name, ks, err)
 		}

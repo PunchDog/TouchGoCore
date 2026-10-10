@@ -56,6 +56,7 @@ var (
 	ErrCacheNotFound     = cachepkg.ErrNotFound          // 源确认不存在
 	ErrCacheMiss         = cachepkg.ErrMiss              // 只查缓存未命中
 	ErrSourceUnavailable = cachepkg.ErrSourceUnavailable // 回源失败退避中
+	ErrLockTimeout       = cachepkg.ErrLockTimeout       // 分布式锁等待超时（跨进程回源/写被占用）
 
 	ErrNoPostCommitSink = cachepkg.ErrNoPostCommitSink // ctx 未挂 post-commit 队列
 	ErrPostCommitNested = cachepkg.ErrPostCommitNested // 重复挂载（嵌套事务失效归属不明）
@@ -71,6 +72,18 @@ func WithLayerConfig(c CacheConfig) LayerOption { return cachepkg.WithLayerConfi
 
 // NewJSONCodec 标准库 JSON 编解码
 func NewJSONCodec() Codec { return cachepkg.NewJSONCodec() }
+
+// WithLockTTL 设置分布式锁持有时长（<=0 禁用）；WithLockWait 设置抢锁最大等待。
+// 读线 miss 回源与写路径都会先抢这把锁（SETNX），未抢到则轮询等待，超时 ErrLockTimeout。
+func WithLockTTL[K comparable, V any](d time.Duration) CacheOption[K, V] {
+	return cachepkg.WithLockTTL[K, V](d)
+}
+func WithLockWait[K comparable, V any](d time.Duration) CacheOption[K, V] {
+	return cachepkg.WithLockWait[K, V](d)
+}
+func WithLockPollInterval[K comparable, V any](d time.Duration) CacheOption[K, V] {
+	return cachepkg.WithLockPollInterval[K, V](d)
+}
 
 // ==================== 构造 ====================
 
@@ -235,6 +248,15 @@ func CacheConfigFrom(cc *config.CacheConfig) CacheConfig {
 	ms(cc.FailBackoffMS, &cfg.FailBackoff)
 	ms(cc.FlushIntervalMS, &cfg.FlushInterval)
 	ms(cc.MaxDirtyAgeMS, &cfg.MaxDirtyAge)
+	ms(cc.LockTTLMS, &cfg.LockTTL)
+	ms(cc.LockWaitMS, &cfg.LockWait)
+	ms(cc.LockPollIntervalMS, &cfg.LockPollInterval)
+	if cc.LockTTLMS < 0 {
+		cfg.LockTTL = 0 // 负值显式禁用分布式锁
+	}
+	if cc.LockWaitMS < 0 {
+		cfg.LockWait = 0 // 负值显式禁用锁等待（立即降级无锁执行）
+	}
 	if cc.LogicalPct != 0 {
 		cfg.LogicalPct = cc.LogicalPct
 	}

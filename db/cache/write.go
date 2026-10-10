@@ -178,12 +178,17 @@ func (c *Cache[K, V]) Write(ctx context.Context, key K, val *V) error {
 	seq := c.seq.Add(1)
 
 	if c.cfg.Enabled {
-		wctx, cancel := context.WithTimeout(ctx, c.cfg.WriteTimeout)
-		written, err := c.writeRedis(wctx, ks, key, val, seq)
-		cancel()
+		var written bool
+		var err error
+		if c.lockEnabled() {
+			// 跨进程写串行：抢到锁才写 Redis，防止多实例同时写同 key 互相覆盖
+			written, err = c.writeWithLock(ctx, ks, func() (bool, error) {
+				return c.writeLocked(ctx, ks, key, val, seq)
+			})
+		} else {
+			written, err = c.writeLocked(ctx, ks, key, val, seq)
+		}
 		if err != nil {
-			c.st.KVErr.Add(1)
-			vars.Error("cache[%s] Write 同步写Redis失败 key=%s: %v", c.name, ks, err)
 			return err
 		}
 		if !written {
@@ -216,6 +221,20 @@ func (c *Cache[K, V]) Write(ctx context.Context, key K, val *V) error {
 	}
 	c.enforceCapacity(ctx)
 	return nil
+}
+
+// writeLocked 写线「同步写 Redis」一步（seq CAS / 无条件 Set 按 KV 能力退阶）。
+// written=false 表示 Redis 已有更大 seq 的值，本次为过期写。
+func (c *Cache[K, V]) writeLocked(ctx context.Context, ks string, key K, val *V, seq int64) (bool, error) {
+	wctx, cancel := context.WithTimeout(ctx, c.cfg.WriteTimeout)
+	written, err := c.writeRedis(wctx, ks, key, val, seq)
+	cancel()
+	if err != nil {
+		c.st.KVErr.Add(1)
+		vars.Error("cache[%s] Write 同步写Redis失败 key=%s: %v", c.name, ks, err)
+		return false, err
+	}
+	return written, nil
 }
 
 // repairRedisToBuffered 用缓冲里更新条目 cur 的值按 CAS 重写 Redis，
@@ -284,23 +303,37 @@ func (c *Cache[K, V]) WriteSync(ctx context.Context, key K, val *V) error {
 		return errNoSaver
 	}
 	ks := c.KeyOf(key)
-	var seq int64
-	if c.cfg.Enabled {
-		seq = c.seq.Add(1)
-		wctx, cancel := context.WithTimeout(ctx, c.cfg.WriteTimeout)
-		written, err := c.setEnvelopeSeq(wctx, ks, val, c.jitteredTTL(ks), seq, false)
-		cancel()
-		if err != nil {
-			c.st.KVErr.Add(1)
-			return err
-		}
-		if !written {
-			c.st.Superseded.Add(1)
-			return nil
-		}
+	if !c.cfg.Enabled {
+		sctx, cancel := context.WithTimeout(ctx, c.cfg.ReadTimeout*10)
+		defer cancel()
+		return c.sn.Save(sctx, key, val)
 	}
-	sctx, cancel := context.WithTimeout(ctx, c.cfg.ReadTimeout*10)
-	defer cancel()
+	if c.lockEnabled() {
+		_, err := c.writeWithLock(ctx, ks, func() (bool, error) {
+			return true, c.writeSyncLocked(ctx, ks, key, val)
+		})
+		return err
+	}
+	return c.writeSyncLocked(ctx, ks, key, val)
+}
+
+// writeSyncLocked WriteSync 的主体：seq CAS 写 Redis → 同步落库 → 成功后踢旧缓冲并销账。
+// 落库失败会把刚写的缓存失效掉——不留「Redis 有、库里没有」的展示态。
+func (c *Cache[K, V]) writeSyncLocked(ctx context.Context, ks string, key K, val *V) error {
+	seq := c.seq.Add(1)
+	wctx, cancel := context.WithTimeout(ctx, c.cfg.WriteTimeout)
+	written, err := c.setEnvelopeSeq(wctx, ks, val, c.jitteredTTL(ks), seq, false)
+	cancel()
+	if err != nil {
+		c.st.KVErr.Add(1)
+		return err
+	}
+	if !written {
+		c.st.Superseded.Add(1)
+		return nil
+	}
+	sctx, scancel := context.WithTimeout(ctx, c.cfg.ReadTimeout*10)
+	defer scancel()
 	if err := c.sn.Save(sctx, key, val); err != nil {
 		// 落库失败：Del 刚写的 Redis；不复活此前已踢掉的旧缓冲（此处尚未踢）
 		if c.cfg.Enabled {
@@ -336,9 +369,16 @@ func (c *Cache[K, V]) Remove(ctx context.Context, key K) error {
 	}
 	ks := c.KeyOf(key)
 	seq := c.seq.Add(1)
-	wctx, cancel := context.WithTimeout(ctx, c.cfg.WriteTimeout)
-	written, err := c.removeRedis(wctx, ks, key, seq)
-	cancel()
+
+	var written bool
+	var err error
+	if c.lockEnabled() {
+		written, err = c.writeWithLock(ctx, ks, func() (bool, error) {
+			return c.removeLocked(ctx, ks, key, seq)
+		})
+	} else {
+		written, err = c.removeLocked(ctx, ks, key, seq)
+	}
 	if err != nil {
 		c.st.KVErr.Add(1)
 		return err
@@ -362,6 +402,19 @@ func (c *Cache[K, V]) Remove(ctx context.Context, key K) error {
 	}
 	c.enforceCapacity(ctx)
 	return nil
+}
+
+// removeLocked Remove 的「同步 DEL Redis」一步（按 seq 条件化）。
+func (c *Cache[K, V]) removeLocked(ctx context.Context, ks string, key K, seq int64) (bool, error) {
+	wctx, cancel := context.WithTimeout(ctx, c.cfg.WriteTimeout)
+	written, err := c.removeRedis(wctx, ks, key, seq)
+	cancel()
+	if err != nil {
+		c.st.KVErr.Add(1)
+		vars.Error("cache[%s] Remove 同步删Redis失败 key=%s: %v", c.name, ks, err)
+		return false, err
+	}
+	return written, nil
 }
 
 // removeRedis Remove 的 Redis 那一步，按 KV 能力依次退阶（与 writeRedis 对称）。

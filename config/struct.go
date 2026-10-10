@@ -75,6 +75,13 @@ type CacheConfig struct {
 	// 重启扫账恢复，防非优雅退出丢写缓冲。指针区分未配置(默认 true)与显式 false。
 	// 仅当一级缓存支持账本（内置 Redis store）才生效。
 	Journal *bool `json:"journal"`
+
+	// LockTTLMS 分布式锁（SETNX）持有时长毫秒，默认 5000；<=0 禁用跨进程锁。
+	LockTTLMS int `json:"lock_ttl_ms"`
+	// LockWaitMS 未抢到分布式锁的最大等待毫秒，默认 2000；超时返回 ErrLockTimeout。
+	LockWaitMS int `json:"lock_wait_ms"`
+	// LockPollIntervalMS 未抢到锁时的轮询间隔毫秒，默认 20。
+	LockPollIntervalMS int `json:"lock_poll_interval_ms"`
 }
 
 // TLSConfig 通用服务端 TLS（Gin / WebSocket 直连场景；前置反代可保持 enable=false）

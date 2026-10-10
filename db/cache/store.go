@@ -25,6 +25,18 @@ type KV interface {
 	Del(ctx context.Context, keys ...string) error
 }
 
+// Locker 是 KV 可选实现的「分布式锁」能力（SETNX + 原子释放脚本）。
+//
+// 跨进程防缓存击穿：读线 miss 回源前先抢这把锁，只允许一个进程实例真正打 DB，
+// 其余进程轮询 Redis 直到锁持有者回填完成；写线写 Redis 前同样抢锁串行。
+// Cache 构造时类型断言探测；KV 不实现则锁自动禁用（读回源/写路径退回无锁旧行为）。
+type Locker interface {
+	// SetNX 仅当 key 不存在时写入 value 并返回 true；已存在返回 false（抢锁失败）。
+	SetNX(ctx context.Context, key, value string, ttl time.Duration) (bool, error)
+	// Eval 执行 Lua 脚本（释放锁的「比较 token 再 DEL」必须原子），返回脚本返回值。
+	Eval(ctx context.Context, script string, keys []string, args ...any) (any, error)
+}
+
 // SeqKV 是 KV 可选实现的「按 seq 条件写」窄接口（Redis 侧 Lua CAS）。
 //
 // 动机：写线的三步「seq 自增 → Redis 写 → 入写缓冲」并非原子，同键并发写时
@@ -129,6 +141,17 @@ func (s *redisStore) Del(ctx context.Context, keys ...string) error {
 		return nil
 	}
 	return s.cmd.Del(ctx, keys...).Err()
+}
+
+func (s *redisStore) SetNX(ctx context.Context, key, value string, ttl time.Duration) (bool, error) {
+	if ttl <= 0 {
+		ttl = 5 * time.Minute // 锁同样禁止永不过期
+	}
+	return s.cmd.SetNX(ctx, key, value, ttl).Result()
+}
+
+func (s *redisStore) Eval(ctx context.Context, script string, keys []string, args ...any) (any, error) {
+	return s.cmd.Eval(ctx, script, keys, args...).Result()
 }
 
 // ---------- SeqKV：按 seq 条件写（Lua CAS） ----------

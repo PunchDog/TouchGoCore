@@ -196,6 +196,15 @@ func FlushNow[K comparable, V any](ctx context.Context, c *Cache[K, V], keys ...
 	return c.FlushNow(ctx, keys...)
 }
 
+// FlushAll 立即把 Layer 上全部 Cache 的写缓冲落库（同步，聚合错误）。
+// l 为 nil（缓存层未启用）时是空操作。
+func FlushAll(ctx context.Context, l *CacheLayer) error {
+	if l == nil {
+		return nil
+	}
+	return l.FlushAll(ctx)
+}
+
 // Pending 报告指定键是否仍有未落库脏条目（观测/断言用）。
 func Pending[K comparable, V any](c *Cache[K, V], keys ...K) bool {
 	return c.Pending(keys...)

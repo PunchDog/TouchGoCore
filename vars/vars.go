@@ -270,14 +270,10 @@ func consoleLevelPrefix(level slog.Level) string {
 }
 
 // printToConsole 将日志同步输出到命令行。
-// Debug 受日志级别约束（高并发下每条请求打 Debug 会把输出锁打满）；
-// Info/Warn/Error 仍始终打到命令行，便于实时观察。
+// 命令行不做级别过滤：所有级别（含低于文件落盘级别的 Debug）一律实时打印，
+// 便于开发/运维随时观察现场；文件落盘的级别过滤由 writeToFile → ShouldWriteFile 负责。
+// 完全静默（off）由门面函数的 IsOff 早退统一处理，这里不再重复判断。
 func printToConsole(level slog.Level, msg string) {
-	if level <= slog.LevelDebug {
-		if ch := GetChannelLogger(); ch != nil && !ch.ShouldWriteFile(level) {
-			return
-		}
-	}
 	ts := time.Now().Format("15:04:05")
 	writeConsoleLine(fmt.Sprintf("%s %s %s\n", ts, consoleLevelPrefix(level), msg))
 }

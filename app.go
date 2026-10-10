@@ -221,7 +221,9 @@ func (app *App) initDatabase() error {
 	// 注意 app.Redis 是具体类型断言进 KV 门面（db.NewRedisKV），Layer 不感知连接来源。
 	if app.Cfg.Cache != nil && app.Cfg.Cache.Enabled {
 		if app.Redis == nil {
-			vars.Warning("cache 段已启用但无 Redis 连接，缓存层不启动（读写线降级为直连数据库）")
+			// app.Cache 保持 nil：缓存层未创建。业务此时不能经 db.OpenCache 注册缓存类型
+			// （nil Layer 会报错），需要读写只能自行直连数据库——并非「读写线自动降级」。
+			vars.Warning("cache 段已启用但无 Redis 连接，缓存层未创建（app.Cache 为 nil，业务无法注册缓存类型）")
 		} else {
 			kv := db.NewRedisKV(app.Redis)
 			if kv == nil {

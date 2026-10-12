@@ -240,6 +240,11 @@ func (c *Cache[K, V]) Name() string { return c.name }
 // Stats 返回计数器（原子字段，可 Snapshot）
 func (c *Cache[K, V]) Stats() *Stats { return &c.st }
 
+// KeyBase 导出的命名空间段：{prefix}:{group}:{name}。
+// 供应用层拼 SCAN 匹配串（`KeyBase()+":*"`）做「窗口键无法枚举的聚合缓存」
+// 的整片失效——窗口键形如 d:<start>:<end> 不可枚举，只能按前缀扫删。
+func (c *Cache[K, V]) KeyBase() string { return c.keyBase() }
+
 // keyBase 键的命名空间段：{prefix}:{group}:{name} 或 {prefix}:{name}
 func (c *Cache[K, V]) keyBase() string {
 	if c.cfg.Group != "" {

@@ -39,6 +39,7 @@ type App struct {
 	// 服务实例（按需初始化）
 	Redis    *db.Redis
 	MySQL    *db.Client
+	Postgres *db.PostgresClient
 	MongoDB  *db.DbOperate
 	Cache    *db.CacheLayer // 两级缓存层（Redis+DB 回源）；cache 段未配置/未启用时为 nil
 	TimerMgr *localtimer.TimerManager
@@ -204,6 +205,18 @@ func (app *App) initDatabase() error {
 		}
 		app.MySQL = mysql
 		vars.Info("加载MySql数据成功")
+	}
+
+	// PostgreSQL（可选）
+	if app.Cfg.Postgre != nil {
+		vars.Info("开启PostgreSQL功能")
+		pgOpts := []db.PostgresOption{db.WithPostgresMetricsHook(db.NewPostgresMetricsAdapter())}
+		pg, err := db.NewPostgres(app.Cfg.Postgre, pgOpts...)
+		if err != nil {
+			return fmt.Errorf("加载PostgreSQL配置出错: %w", err)
+		}
+		app.Postgres = pg
+		vars.Info("加载PostgreSQL数据成功")
 	}
 
 	// MongoDB（可选）
@@ -399,6 +412,12 @@ func (app *App) closeDatabase() {
 			vars.Error("关闭MySQL失败: %v", err)
 		}
 		app.MySQL = nil
+	}
+	if app.Postgres != nil {
+		if err := app.Postgres.Close(); err != nil {
+			vars.Error("关闭PostgreSQL失败: %v", err)
+		}
+		app.Postgres = nil
 	}
 	if app.Redis != nil {
 		util.StopVirtualTime()

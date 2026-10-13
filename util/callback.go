@@ -113,9 +113,11 @@ const (
 	// 广播口径与 CallWhatsappMsg 一致：按 <前缀>+<动作> 注册，载荷是 *pay.PayResult，
 	// 通道包本身不落库。
 	//
-	// 这四条各自占一个前缀，而不是共用一个「社交类」前缀：它们不止走资金，还各有一条
-	// 登录链路，下游对「会话失效要重登」和「充值到账要加积分」的处理本就不同，合到
-	// 一个前缀等于让订阅方在回调里靠载荷猜通道——猜错就是把 A 家的单记到 B 家头上。
+	// 这四条各自占一个前缀，而不是共用一个「社交类」前缀：它们不止走资金，还各有
+	// 资金之外的链路（whatsapp 是 whatsmeow 协议消息事件，kind=Inbound/Receipt/
+	// Connection/QR；其余三条是 HTTP 登录链路），下游对「会话失效要重登」和「充值
+	// 到账要加积分」的处理本就不同，合到一个前缀等于让订阅方在回调里靠载荷猜通道——
+	// 猜错就是把 A 家的单记到 B 家头上。
 	CallZaloMsg      = "ZaloMsg"
 	CallFacebookMsg  = "FacebookMsg"
 	CallInstagramMsg = "InstagramMsg"

@@ -19,6 +19,23 @@ type MySqlDBConfig struct {
 	Loc          string `json:"db_loc"`            //连接时区（如 "UTC"、"Local"、"+08:00"）；为空时沿用默认 loc=Local
 }
 
+// PostgreDBConfig 是 PostgreSQL 连接配置。与 MySqlDBConfig 同构，差异在于
+// PG 用 host+port 而非 host:port 拼地址，且带 sslmode/时区两个 PG 特有维度。
+// <=0 的池字段与 ConnMaxLifetime 在装配时回落 db/postgres 框架默认值。
+type PostgreDBConfig struct {
+	Host            string `json:"pg_host"`              //连接地址（不含端口）
+	Port            int    `json:"pg_port"`              //端口，<=0 时用默认 5432
+	Username        string `json:"pg_username"`          //用户名
+	Password        string `json:"pg_password"`          //用户密码
+	DBName          string `json:"pg_dbname"`            //数据库名
+	SSLMode         string `json:"pg_sslmode"`           //disable/require/verify-ca/verify-full，为空时默认 disable
+	TimeZone        string `json:"pg_timezone"`          //连接时区，为空时默认 UTC
+	MaxIdleConns    int    `json:"pg_max_idle_conns"`    //连接池最大空闲连接数
+	MaxOpenConns    int    `json:"pg_max_open_conns"`    //连接池最大连接数
+	ConnMaxLifetime int    `json:"pg_conn_max_lifetime"` //连接最大存活秒数，<=0 时用默认 24h
+	Schema          string `json:"pg_schema"`            //PG schema 名，为空时默认 public
+}
+
 type MongoTableIndex struct {
 	TableName string   `json:"table"` //数据表名
 	Index     []string `json:"index"` //哪些关键字设置查询索引
@@ -256,7 +273,7 @@ func (a *PayMerchantAccount) Enabled() bool {
 
 // PaySDKRef 是通道段对 pay_sdks 表的引用：只留两个名字，不留任何凭证。
 //
-// 通道段（whatsapp.login / whatsapp.provider / usdt.provider / telegram.ton）
+// 通道段（whatsapp.provider / zalo.login / usdt.provider / telegram.ton）
 // 各自的开关就是这里填不填名字：留空即该通道不启用。之所以不再单独放一个
 // enable，是为了让「开不开」只有一处真相——SDK 段的 enable 决定凭证能不能用，
 // 这里的 sdk 决定这条通道用不用它；两处都开才是开。
@@ -358,65 +375,57 @@ func (p *PaySDKConfig) Endpoint(name string) (string, bool) {
 	return v, true
 }
 
-// WhatsappConfig 是 WhatsApp 通道配置。登录与资金走两家供应商是常见形态
-// （验证码走消息网关、充值提现走支付网关），所以两段各自引用一个 SDK。
-type WhatsappConfig struct {
-	Login    *PaySDKRef `json:"login"`    // 登录/验证码下发通道引用的 SDK
-	Provider *PaySDKRef `json:"provider"` // 充值/提现通道引用的 SDK
-	// Templates 是消息模板名表，键为逻辑名（auth_verify/bind_notice）。
-	Templates map[string]string `json:"templates"`
-	// Cloud 是 WhatsApp Business Cloud API（Meta Graph API 直连）配置。
-	Cloud *WhatsappCloudConfig `json:"cloud"`
-}
-
-// WhatsappCloudConfig 是 WhatsApp Business Cloud API（Meta Graph API）直连接入所需的全部事实。
+// WhatsappConfig 是 WhatsApp 通道配置。
 //
-// 与 WhatsappConfig 里登录/资金走 pay_sdks 供应商的口径不同：Cloud API 是 Meta 直连，
-// 凭证（access_token / app_secret）由本段直接持有，不进 pay_sdks。
-// 配置约定：JSON 不反序列化 time.Duration，有效期用秒（CodeTTLSec），由 CodeTTL() 折算。
-type WhatsappCloudConfig struct {
-	AccessToken   string                `json:"access_token"`    // 系统用户永久 token 或 24h 临时 token
-	PhoneNumberID string                `json:"phone_number_id"` // 发送号码的 Phone Number ID（API 路径用）
-	WABAID        string                `json:"waba_id"`         // WhatsApp Business Account ID
-	VerifyToken   string                `json:"verify_token"`    // Webhook 验证挑战时回比的自定义串
-	AppSecret     string                `json:"app_secret"`      // 用于对入站 Webhook 载荷做 HMAC-SHA256 验签
-	BaseURL       string                `json:"base_url"`        // Graph API 基址，缺省 https://graph.facebook.com
-	APIVersion    string                `json:"api_version"`     // 图 API 版本，缺省 v23.0
-	CodeTTLSec    int                   `json:"code_ttl_sec"`    // 绑定验证码有效期（秒），缺省 300
-	BindTemplate  string                `json:"bind_template"`   // 绑定验证码模板名，缺省 bind_otp
-	Onboarding    []WhatsappOnboardStep `json:"onboarding"`      // 引导流程步骤；nil 时回落内置默认两步
-	// PreviewURL 控制文本消息是否附链接预览（Graph API 的 text.preview_url）。
-	// Meta 语义：只对 type=text 生效，缺省 false；模板与交互式消息无此参数。
-	PreviewURL bool `json:"preview_url"`
+// 与其它三条社交通道不同，这里**没有 login/templates**：消息侧（QR 配对、发信、
+// 删会话）已改由 go.mau.fi/whatsmeow 直连 WhatsApp 多设备协议，不再经 HTTP 消息网关，
+// 会话本体（含 NoiseKey/IdentityKey 等密钥材料）持久化在本仓的 Postgres 会话库里。
+// 资金动作必须有持牌主体，仍留在 pay_sdks 供应商侧，所以只有 provider 与 sessions 两段。
+type WhatsappConfig struct {
+	Provider *PaySDKRef `json:"provider"` // 充值/提现通道引用的 SDK
+	// Sessions 是 whatsmeow 消息侧的会话库与连接参数。留空（或不填 dsn）即消息侧
+	// 不启动，不影响资金链路——「只跑钱、不跑协议」仍是合法形态。
+	Sessions *WhatsappSessionsConfig `json:"sessions"`
 }
 
-// WhatsappOnboardStep 是引导流程的一步（文案 + 按钮）。
-type WhatsappOnboardStep struct {
-	Body    string                  `json:"body"`
-	Buttons []WhatsappOnboardButton `json:"buttons"`
+// WhatsappSessionsConfig 是 whatsmeow 消息侧的运行参数。
+//
+// 这里只放 DSN、不放任何凭证字段：账号密钥材料（NoiseKey/IdentityKey/SignedPreKey/
+// AdvSecretKey）由 whatsmeow 的 sqlstore 直接管在数据库表里，配进启动配置等于把账号
+// 本体抄进版本库。代价是 DSN 本身成了敏感值（它含数据库口令）：只经部署配置注入，
+// 禁入日志与 error 文案（whatsapp 包侧对含 DSN 的错误做脱敏）。
+// 配置约定：JSON 不反序列化 time.Duration，时长一律用秒，由 Effective* 折算。
+type WhatsappSessionsConfig struct {
+	// DSN 是 Postgres 连接串（whatsmeow sqlstore 经 database/sql 访问，
+	// URL 形态 postgres://user:pass@host:5432/db 与 keyword/value 形态都收）。
+	// 留空即消息侧不启动。
+	DSN string `json:"dsn"`
+	// MaxConcurrent 是在跑 Client 数的软上限，<=0 不限制（用户裁决：来一个配一个，
+	// 不设硬上限；填了正数才生效，用于给内存/连接数增长设一道闸）。
+	MaxConcurrent int `json:"max_concurrent"`
+	// ConnectTimeoutSec 是一次连接（含握手）的超时，<=0 折算成 15 秒。
+	ConnectTimeoutSec int `json:"connect_timeout_sec"`
+	// ReconnectMinSec 是断线重连的退避下界，<=0 折算成 3 秒。
+	ReconnectMinSec int `json:"reconnect_min_sec"`
+	// ReconnectMaxSec 是退避上界，<=0 折算成 60 秒；下界大于上界时按上界取。
+	ReconnectMaxSec int `json:"reconnect_max_sec"`
 }
 
-// WhatsappOnboardButton 是引导步骤里的一个按钮（id 与 title 受 Meta 长度限制）。
-type WhatsappOnboardButton struct {
-	ID    string `json:"id"`
-	Title string `json:"title"`
-}
-
-// ZaloConfig 是 Zalo 通道配置，与 WhatsappConfig 同构，差异只在供应商口径：
+// ZaloConfig 是 Zalo 通道配置，与 FacebookConfig 同构，差异只在供应商口径：
 // Zalo 是越南的即时通讯 App，我方登录的是供应商代持的账号，账号归属与凭证有效期
 // 都由那家供应商定，本层不为这几件事加字段——多一个字段就多一处和供应商口径打架的地方。
 type ZaloConfig struct {
 	Login    *PaySDKRef `json:"login"`    // 登录/验证码下发通道引用的 SDK
 	Provider *PaySDKRef `json:"provider"` // 充值/提现通道引用的 SDK
-	// Templates 是消息模板名表，逻辑名口径与 WhatsappConfig 一致。
+	// Templates 是消息模板名表，逻辑名口径与 zalo/facebook/instagram 三条通道一致。
 	Templates map[string]string `json:"templates"`
 }
 
-// FacebookConfig 是 Facebook 通道配置，与 WhatsappConfig 同构，差异只在供应商口径。
+// FacebookConfig 是 Facebook 通道配置，与 ZaloConfig 同构，差异只在供应商口径。
 //
 // 真实世界 Facebook 走 OAuth 跳转授权，但本包登录的是供应商代持账号，登录链路仍然只有
 // 「下发一次性凭证、拿凭证换会话」两步。那个 code 到底是短信验证码、OAuth 授权码还是
-// 回调 ticket，由供应商在 pay_sdks 里的登记口径决定，本层不猜：签名形状保持与 whatsapp
+// 回调 ticket，由供应商在 pay_sdks 里的登记口径决定，本层不猜：签名形状保持与另两条通道
 // 同构，换成 OAuth 形态改的是 SDK 段与供应商适配代码，不是这里的一个字段。
 //
 // 供应商压根没有「下发验证码」这一环时，就在该 SDK 段的 endpoints 里不登记 send_code：
@@ -425,7 +434,7 @@ type ZaloConfig struct {
 type FacebookConfig struct {
 	Login    *PaySDKRef `json:"login"`    // 登录/验证码下发通道引用的 SDK
 	Provider *PaySDKRef `json:"provider"` // 充值/提现通道引用的 SDK
-	// Templates 是消息模板名表，逻辑名口径与 WhatsappConfig 一致。
+	// Templates 是消息模板名表，逻辑名口径与 zalo/facebook/instagram 三条通道一致。
 	Templates map[string]string `json:"templates"`
 }
 
@@ -436,12 +445,12 @@ type FacebookConfig struct {
 // code 形态的口径同 FacebookConfig 所述，也不在这里区分。
 //
 // Instagram 没有「好友」概念，好友列表操作的逻辑名仍沿用 friend_list，读作「按账号
-// 返回的关联账号列表」：四条社交通道各起一个逻辑名的话，端点表就散成四个名字，
+// 返回的关联账号列表」：三条社交通道各起一个逻辑名的话，端点表就散成三个名字，
 // 而取路径那侧只按逻辑名查，多一个名字就是多一处配漏了静默失败的地方。
 type InstagramConfig struct {
 	Login    *PaySDKRef `json:"login"`    // 登录/验证码下发通道引用的 SDK
 	Provider *PaySDKRef `json:"provider"` // 充值/提现通道引用的 SDK
-	// Templates 是消息模板名表，逻辑名口径与 WhatsappConfig 一致。
+	// Templates 是消息模板名表，逻辑名口径与 zalo/facebook/instagram 三条通道一致。
 	Templates map[string]string `json:"templates"`
 }
 

@@ -162,6 +162,36 @@ func NewMysqlCacheBatchSink[T any, K comparable](r *Repository[T], keyToID func(
 	return cachepkg.MysqlBatchSink[T, K](r, keyToID, idCols...)
 }
 
+// NewPostgresCacheSource PostgreSQL 主键回源（gorm 未命中 → ErrCacheNotFound）。
+// 与 NewMysqlCacheSource 同构，实体类型是 PostgresRepository[T]（与 MySQL 的
+// Repository[T] 是不同类型，故函数名单列 Postgres 前缀）。
+func NewPostgresCacheSource[T any, K comparable](r *PostgresRepository[T], keyToID func(K) any) Loader[K, T] {
+	return cachepkg.PostgresSource[T, K](r, keyToID)
+}
+
+// NewPostgresCacheBatchSource PostgreSQL 多主键一次回源（FindAll + IN）。
+// keyFn 必须与该 Cache 的 WithKeyFunc 逐字一致，idOf 从实体取回业务键——
+// 三者错位会让批量结果对不上键，退化成「命中即 miss」的静默低效。
+func NewPostgresCacheBatchSource[T any, K comparable](
+	r *PostgresRepository[T],
+	keyToID func(K) any,
+	idCol string,
+	keyFn func(K) string,
+	idOf func(*T) K,
+) BatchLoader[K, T] {
+	return cachepkg.PostgresBatchSource[T, K](r, keyToID, idCol, keyFn, idOf)
+}
+
+// NewPostgresCacheSink PostgreSQL 单条落库（Save→Upsert，Delete→软删）
+func NewPostgresCacheSink[T any, K comparable](r *PostgresRepository[T], keyToID func(K) any, idCols ...string) Saver[K, T] {
+	return cachepkg.PostgresSink[T, K](r, keyToID, idCols...)
+}
+
+// NewPostgresCacheBatchSink PostgreSQL 批量落库（UpsertBatch 一条 SQL 搞定 upsert 集）
+func NewPostgresCacheBatchSink[T any, K comparable](r *PostgresRepository[T], keyToID func(K) any, idCols ...string) BatchSaver[K, T] {
+	return cachepkg.PostgresBatchSink[T, K](r, keyToID, idCols...)
+}
+
 // ==================== 强一致写 / 事务边界（资金级路径用这组） ====================
 //
 // 写线 Write 是「同步写 Redis + 缓冲异步落库」，对资金表不可接受（丢失窗口 = flush 间隔，

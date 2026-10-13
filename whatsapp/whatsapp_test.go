@@ -17,11 +17,9 @@ const (
 	testSection = "test_a"
 	testAccount = "default"
 	merchantID  = "MCH-TEST"
-	// loginSection 是只做验证码下发、没有商户账户的 SDK 段名。
-	loginSection = "test_wa"
 )
 
-// recorder 收集 publish 广播出去的回执。
+// recorder 收集 publish 广播出去的资金回执。
 var recorder = struct {
 	mu    sync.Mutex
 	calls []*pay.PayResult
@@ -47,10 +45,10 @@ func recorded() []*pay.PayResult {
 	return got
 }
 
-// payCfg 组一份「pay_sdks 登记一段 + login/provider 都引用它」的完整配置。
+// payCfg 组一份「pay_sdks 登记一段 + provider 引用它」的完整配置。
 //
-// 两段引用同一段是刻意的：同一家的登录网关与支付网关指向同一供应商是最常见形态，
-// 装配出的是两个 Provider 对象，会话凭证能不能带过去由 syncSession 的基址规则决定。
+// 消息侧改走 whatsmeow 之后本包只剩 provider 一段引用：登录/发码链路已随
+// HTTP 供应商一起撤掉（扫码配对不经过任何供应商），资金链路不变。
 func payCfg(baseURL string, endpoints map[string]string) *config.Cfg {
 	return &config.Cfg{
 		PaySDks: map[string]*config.PaySDKConfig{
@@ -63,32 +61,8 @@ func payCfg(baseURL string, endpoints map[string]string) *config.Cfg {
 			},
 		},
 		Whatsapp: &config.WhatsappConfig{
-			Login:     &config.PaySDKRef{SDK: testSection, Account: testAccount},
-			Provider:  &config.PaySDKRef{SDK: testSection, Account: testAccount},
-			Templates: map[string]string{"auth_verify": "tpl_verify"},
+			Provider: &config.PaySDKRef{SDK: testSection, Account: testAccount},
 		},
-	}
-}
-
-// TestSignValuesMatchPayloadOrder 签名域顺序必须与报文里登记的字段的先后一致。
-// 报文加了字段而签名域漏掉，供应商会全量拒签，且本地永远查不出来。
-func TestSignValuesMatchPayloadOrder(t *testing.T) {
-	cases := []struct {
-		name string
-		got  []string
-		want []string
-	}{
-		{"下发验证码",
-			(&sendCodeRequest{AppID: "app1", Phone: "86138", Template: "tpl"}).signValues(),
-			[]string{"app1", "86138", "tpl"}},
-		{"登录",
-			(&loginRequest{AppID: "app1", Phone: "86138", Code: "123456"}).signValues(),
-			[]string{"app1", "86138", "123456"}},
-	}
-	for _, cs := range cases {
-		if strings.Join(cs.got, "|") != strings.Join(cs.want, "|") {
-			t.Errorf("%s 签名域=%v，期望 %v", cs.name, cs.got, cs.want)
-		}
 	}
 }
 
@@ -129,49 +103,8 @@ func TestOpenFundFailClosed(t *testing.T) {
 	}
 }
 
-// TestLoginChainNeedsNoMerchantAccount 只做验证码下发的 SDK 本就没有商户账户：
-// 按资金链路口径要求它填一个，只会逼配置里写个假商户号。
-func TestLoginChainNeedsNoMerchantAccount(t *testing.T) {
-	cfg := payCfg("https://pay.invalid", nil)
-	delete(cfg.PaySDks, testSection)
-	cfg.PaySDks[loginSection] = &config.PaySDKConfig{
-		Enable: "on", Driver: pay.DriverGeneric, BaseURL: "https://pay.invalid",
-		AppID: "app1", SecretKey: testSecret,
-	}
-	cfg.Whatsapp.Login = &config.PaySDKRef{SDK: loginSection}
-	if _, ok := openLogin(cfg, cfg.Whatsapp.Login); !ok {
-		t.Error("无商户账户的下发链路应当可启动")
-	}
-	// 同一段拿去做出款链路就不行了：出账主体必须明确。
-	cfg.Whatsapp.Provider = &config.PaySDKRef{SDK: loginSection}
-	if _, ok := openFund(cfg, cfg.Whatsapp.Provider); ok {
-		t.Error("没有商户账户的链路不得用于出款")
-	}
-}
-
-// TestLoginSectionPassesCfgValidation 是 L0 口径的补测：config 的校验把 whatsapp.login 标为
-// service 类引用（验证码下发/登录换会话，不动资金），它引用的 SDK 段即使没有商户账户，
-// 也应通过 (*config.Cfg).Validate()（走 ResolveService 分支）并被本包成功装配出登录链路。
-// zalo/facebook/instagram 三胞胎已有同构用例，范本这里缺一条反向漂移的钉子，
-// 免得某次改 config 时把 whatsapp.login 漏出 service 名单、只在部署期才炸。
-func TestLoginSectionPassesCfgValidation(t *testing.T) {
-	cfg := payCfg("https://pay.invalid", nil)
-	delete(cfg.PaySDks, testSection)
-	cfg.PaySDks[loginSection] = &config.PaySDKConfig{
-		Enable: "on", Driver: pay.DriverGeneric, BaseURL: "https://pay.invalid",
-		AppID: "app1", SecretKey: testSecret,
-	}
-	// 只留登录引用：provider 为 nil 即不参与校验，否则缺 accounts 会被出款口径拦下。
-	cfg.Whatsapp = &config.WhatsappConfig{Login: &config.PaySDKRef{SDK: loginSection}}
-	if err := cfg.Validate(); err != nil {
-		t.Fatalf("whatsapp.login 引用无账户的 SDK 段应通过配置校验（service 分支）: %v", err)
-	}
-	if _, ok := openLogin(cfg, cfg.Whatsapp.Login); !ok {
-		t.Error("校验放行的下发链路应能被本包装配起来")
-	}
-}
-
-// TestOperationsRefuseWhenNotStarted 未启动时门面函数返回错误而不是 panic。
+// TestOperationsRefuseWhenNotStarted 未启动时资金门面返回错误而不是 panic，
+// 且不得广播任何回执。消息侧门面的同型断言在 wa_client_test.go。
 func TestOperationsRefuseWhenNotStarted(t *testing.T) {
 	WhatsappStop(nil)
 	recorded()
@@ -186,15 +119,6 @@ func TestOperationsRefuseWhenNotStarted(t *testing.T) {
 	}
 	if _, err := WhatsappAccount(nil, nil); err == nil {
 		t.Error("未启动时账户查询应当被拒")
-	}
-	if err := WhatsappSendCode(nil, "86138"); err == nil {
-		t.Error("未启动时发码应当被拒")
-	}
-	if _, err := WhatsappFriends(nil, "86138"); err == nil {
-		t.Error("未启动时查好友列表应当被拒")
-	}
-	if _, err := WhatsappLogin(nil, "86138", "123456"); err == nil {
-		t.Error("未启动时登录应当被拒")
 	}
 	if got := recorded(); len(got) != 0 {
 		t.Errorf("未启动却广播了回执: %+v", got)

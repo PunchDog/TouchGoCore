@@ -15,6 +15,7 @@ import (
 type Cfg struct {
 	Redis     *RedisConfig     `json:"redis"`
 	MySql     *MySqlDBConfig   `json:"mysql"`
+	Postgre   *PostgreDBConfig `json:"postgres"`
 	Mongo     *MongoDBConfig   `json:"mongo"`
 	Cache     *CacheConfig     `json:"cache"`      // 两级缓存（Redis+DB 回源）；nil=不启用
 	Ws        *WebsocketConfig `json:"ws"`         //websocket启动模式:off不启动;:1234启动监听详细配置
@@ -35,7 +36,7 @@ type Cfg struct {
 	Nft       *NftConfig       `json:"nft"`        // NFT 资产通道（查询持有/详情/铸造/转账/对账）配置
 	// PaySDks 是资金 SDK 集中登记表，键是 SDK 段名；whatsapp/zalo/facebook/instagram
 	// 与 usdt/telegram.ton/tron/bsc/sol 各段用 {sdk, account} 引用这里的一段。
-	// 凭证只在这里出现一次——四条社交通道尤其需要这条：它们和资金通道常常共用同一家
+	// 凭证只在这里出现一次——三条社交通道尤其需要这条：它们和资金通道常常共用同一家
 	// 供应商，凭证抄四份必然改漏一处。
 	PaySDks  map[string]*PaySDKConfig `json:"pay_sdks"`
 	NftSDks  map[string]*NftSDKConfig `json:"nft_sdks"`  // NFT SDK 集中登记表，键是段名；nft.provider 用 {sdk, account} 引用这里的一段

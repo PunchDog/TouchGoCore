@@ -90,8 +90,9 @@ const (
 	// EndpointAccount 是查商户账户的逻辑名。它排在下单之前是有原因的：
 	// 提现前先看一眼可用余额与账户状态，比把单发出去再等供应商拒要省一次资金动作。
 	EndpointAccount = "account"
-	// EndpointFriendList 是按账号查好友列表的逻辑名（whatsapp/zalo/facebook/instagram 四条登录链路的消息侧；
+	// EndpointFriendList 是按账号查好友列表的逻辑名（zalo/facebook/instagram 三条登录链路的消息侧；
 	// Instagram 没有好友概念，同名沿用，读作按账号返回的关联账号列表）。
+	// whatsapp 不再用它：消息侧已改由 whatsmeow 直连 WhatsApp 协议，没有 HTTP 好友接口。
 	// 它不在资金契约里流转——报文形态由通道包给出，pay 只登记逻辑名，
 	// 与 send_code/login 同一个口径：代码里固定名字、配置里填实际路径。
 	EndpointFriendList = "friend_list"

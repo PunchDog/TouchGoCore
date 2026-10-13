@@ -122,7 +122,7 @@ func TestValidatePayChannels(t *testing.T) {
 					Accounts: map[string]*PayMerchantAccount{"default": {Enable: "on", MerchantID: "M1"}}},
 			},
 			Usdt:     &UsdtConfig{Provider: &PaySDKRef{SDK: "a"}},
-			Whatsapp: &WhatsappConfig{Login: &PaySDKRef{}, Provider: nil},
+			Whatsapp: &WhatsappConfig{Provider: nil},
 			Telegram: &TelegramConfig{TonNetwork: "mainnet"},
 		}
 	}
@@ -156,10 +156,10 @@ func TestValidatePayChannels(t *testing.T) {
 	if err := off.Validate(); err != nil {
 		t.Errorf("未开启的段不应参与判定: %v", err)
 	}
-	// 只有验证码下发的段没有商户账户是常态。
+	// 只有验证码下发的段没有商户账户是常态（whatsapp 不再有下发链路，改由 zalo 承载这条判定）。
 	loginOnly := base()
 	loginOnly.PaySDks["wa"] = &PaySDKConfig{Enable: "on", Driver: "generic_md5", BaseURL: "https://wa.example"}
-	loginOnly.Whatsapp.Login = &PaySDKRef{SDK: "wa"}
+	loginOnly.Zalo = &ZaloConfig{Login: &PaySDKRef{SDK: "wa"}}
 	if err := loginOnly.Validate(); err != nil {
 		t.Errorf("下发链路引用无账户的段应当放行: %v", err)
 	}

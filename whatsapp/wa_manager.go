@@ -1,0 +1,403 @@
+package whatsapp
+
+// 本文件是消息侧的多账号会话管理器：一个已配对账号对应一个 whatsmeow.Client，
+// 每个 Client 由一条常驻协程守着（连接、断线退避重连、logged_out 收手），
+// 生命周期范式照抄 telegram/telegram.go——每轮连接独立 cancel、停机走 stop/done
+// 双通道、等待有上限，不被一条外队长连接拖死整机退出。
+//
+// 并发口径（写死在这里，门面注释同步引用）：同一个 Client 的 SendText/SendAppState
+// 可并发调用（whatsmeow 底层有请求表锁与 socket 锁，实践可行；但库对多 goroutine
+// 安全零表述，这不是契约）；StartClient/StopClient/StartPairing 属改状态动作，
+// 管理器内部用 sync.Map 的原子 LoadOrStore/LoadAndDelete 兜住「不 panic、不双启」，
+// 但「先停再启」这类跨调用时序仍要调用方自己串行化。
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"sort"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"go.mau.fi/whatsmeow/store"
+	"go.mau.fi/whatsmeow/types"
+	"go.mau.fi/whatsmeow/types/events"
+	waLog "go.mau.fi/whatsmeow/util/log"
+
+	"touchgocore/config"
+	"touchgocore/vars"
+)
+
+// waStopWaitBudget 是停机等待单个常驻协程退出的上限。
+//
+// 压在框架给单个服务的 2 秒最小停机预算（app.go:325 minServiceStopBudget）之内：
+// 超了就记日志放手，让整机继续走完退出路。
+const waStopWaitBudget = 1500 * time.Millisecond
+
+// waDeviceStore 是管理器对会话存储的全部期望面（未导出 seam）。
+//
+// 存在的理由与 waSession 相同：测试不连真 Postgres 也能把管理器跑完；
+// 真实现是 *WAStore（store_postgres.go），方法签名逐字照抄 sqlstore.Container
+// 的查证结果（GetDevice 查无返回 nil,nil；DeleteDevice 收 *store.Device）。
+type waDeviceStore interface {
+	GetDevice(ctx context.Context, jid types.JID) (*store.Device, error)
+	AllDevices(ctx context.Context) ([]*store.Device, error)
+	NewDevice() *store.Device
+	DeleteDevice(ctx context.Context, dev *store.Device) error
+	Close() error
+}
+
+// SessionInfo 是一个在跑会话的可公开事实（扩展集）。
+//
+// 字段表即纪律：只有账号标识与连接状态，没有任何密钥材料。
+// LastSeen 的口径是「本进程最近一次收到该账号任何事件的时刻」，不是 WhatsApp 的
+// 在线状态：库里 events.Presence 有 LastSeen 字段（查自 WM/types/events/events.go:470-477），
+// 但它只在订阅了对端 presence 且对端没隐藏最后在线时间时才有值，拿它当「会话活着」
+// 的判据会大面积零值；events.Battery 在这一版库里根本不存在（全仓 grep 无此类型），
+// 计划里的 Battery/UnreadCount 两项因此不落地——库里没有消息表，未读数无源可查。
+type SessionInfo struct {
+	JID      string
+	Platform string
+	PushName string
+	// IsConnected 取自 Client.IsLoggedIn()（底层是 atomic.Bool，查自 WM/client.go:66）。
+	IsConnected bool
+	LastSeen    time.Time
+}
+
+// waManager 管理一组 whatsmeow Client 与进行中的 QR 配对会话。
+type waManager struct {
+	store waDeviceStore
+	cfg   *config.WhatsappSessionsConfig
+	log   waLog.Logger
+	// runCtx 是整机运行上下文（WhatsappStart 传入）：只用于查库这类短操作，
+	// 连接循环每轮自建带超时的 ctx，不共享这一份（照 telegram 的每轮独立 cancel 纪律）。
+	runCtx context.Context
+
+	clients sync.Map // map[jid string]*waClientWrapper
+	qr      sync.Map // map[sessionID string]*QRSession
+
+	// wg 覆盖全部常驻协程：每 Client 一条 run + 每配对会话一条 pump。
+	// StopAll 关完信号后按预算等它归零，等不到就放手（协程会自行收尾）。
+	wg sync.WaitGroup
+
+	// afterFor 是退避时钟的注入点：nil 时用 time.After，测试塞假时钟断言退避序列。
+	// 挂在管理器上而不是 wrapper 上：wrapper 由 StartClient 构造，测试没有别的时机递进去。
+	afterFor func(time.Duration) <-chan time.Time
+}
+
+// waClientWrapper 包住一个 Client 的会话与常驻协程控制。
+type waClientWrapper struct {
+	jid  types.JID
+	dev  *store.Device
+	sess waSession
+	cfg  *config.WhatsappSessionsConfig
+
+	stop   chan struct{} // 关闭即要求常驻协程退出
+	done   chan struct{} // 常驻协程已退出
+	kick   chan struct{} // 催一次立即重连（备用挂点，当前无门面消费）
+	downed chan struct{} // 事件回调塞断线令牌，常驻协程据此进入退避重连
+	// loggedOut 置位后不再重连：会话已被吊销，重试只会一直失败，等重新扫码配对。
+	loggedOut atomic.Bool
+
+	closeOnce sync.Once
+
+	mu          sync.Mutex
+	lastEventAt time.Time
+
+	// after 是退避睡眠的时钟挂点：生产为 time.After，测试注入假时钟断言退避序列。
+	after func(time.Duration) <-chan time.Time
+}
+
+// newWaManager 构造管理器。cfg 允许为 nil（Effective* 全部 nil 安全）。
+func newWaManager(st waDeviceStore, cfg *config.WhatsappSessionsConfig, log waLog.Logger, runCtx context.Context) *waManager {
+	if runCtx == nil {
+		runCtx = context.Background()
+	}
+	if log == nil {
+		log = waLog.Noop
+	}
+	return &waManager{store: st, cfg: cfg, log: log, runCtx: runCtx}
+}
+
+// StartClient 为指定 JID 启动一个 Client（该账号必须已配对，即库里有设备行）。
+//
+// 幂等：同一 JID 已在跑时直接返回 nil，不起第二条协程、不建第二个连接——
+// 两个 Client 抢同一个 Device 会互踢会话（WhatsApp 侧表现为 stream_replaced）。
+func (m *waManager) StartClient(jid types.JID) error {
+	key := jid.String()
+	if _, running := m.clients.Load(key); running {
+		return nil
+	}
+	dev, err := m.store.GetDevice(m.runCtx, jid)
+	if err != nil {
+		return fmt.Errorf("whatsapp 读取会话库失败: %w", err)
+	}
+	// 已配对的判定口径是 dev.ID != nil：sqlstore 对 ID 为 nil 的设备拒绝落库
+	//（PutDevice 返回 ErrDeviceIDMustBeSet，查自 WM/store/sqlstore/container.go:239-241），
+	// 因此库里查得到的行必带 ID；Initialized 只是「本进程是否已接上内部 store」的
+	// 内存标记，不表示配对态，不拿它当判据。
+	if dev == nil || dev.ID == nil {
+		return fmt.Errorf("whatsapp 账号 %s 未配对（会话库里没有设备），先走 WhatsappStartPairing 扫码", key)
+	}
+	if max := m.cfg.EffectiveMaxConcurrent(); max > 0 && m.countClients() >= max {
+		return fmt.Errorf("whatsapp 在跑会话数已达上限 %d（max_concurrent），先停一个再启新的", max)
+	}
+	w := &waClientWrapper{
+		jid:    jid,
+		dev:    dev,
+		sess:   waSessionFactory(dev, m.log.Sub(jid.User)),
+		cfg:    m.cfg,
+		stop:   make(chan struct{}),
+		done:   make(chan struct{}),
+		kick:   make(chan struct{}, 1),
+		downed: make(chan struct{}, 1),
+		after:  m.afterFor,
+	}
+	w.sess.OnEvent(w.onEvent)
+	if _, loaded := m.clients.LoadOrStore(key, w); loaded {
+		// 并发窗口里另一个调用已经启动了这个账号：丢弃自己这份，幂等返回。
+		return nil
+	}
+	m.wg.Add(1)
+	go func() {
+		defer m.wg.Done()
+		w.run()
+	}()
+	vars.Info("WhatsApp 会话已启动: jid=%s platform=%s", key, dev.Platform)
+	return nil
+}
+
+// countClients 数当前在跑的 Client（MaxConcurrent 闸用）。
+func (m *waManager) countClients() int {
+	n := 0
+	m.clients.Range(func(_, _ any) bool { n++; return true })
+	return n
+}
+
+// StopClient 停掉指定账号的常驻协程并断开连接，等 done 或超时。
+// 未启动返回明确错误而不是静默成功——调用方拿它做「确保停了」的判据。
+func (m *waManager) StopClient(jid types.JID) error {
+	key := jid.String()
+	v, ok := m.clients.LoadAndDelete(key)
+	if !ok {
+		return fmt.Errorf("whatsapp 账号 %s 没有在跑的会话", key)
+	}
+	w := v.(*waClientWrapper)
+	w.closeOnce.Do(func() { close(w.stop) })
+	select {
+	case <-w.done:
+		return nil
+	case <-time.After(waStopWaitBudget):
+		vars.Warning("WhatsApp[%s] 未在 %s 内退出，放弃等待（常驻协程会自行收尾）", key, waStopWaitBudget)
+		return fmt.Errorf("whatsapp 账号 %s 停机等待超时", key)
+	}
+}
+
+// StopAll 停掉全部 Client 与进行中的配对会话，按预算等所有常驻协程退出。
+//
+// 先把所有 stop 一次性关完再统一等：逐个「关一个等一个」在 N 个账号时
+// 会把 N×预算烧完，整机 2 秒的服务停机预算根本不够分。
+func (m *waManager) StopAll(budget time.Duration) {
+	m.clients.Range(func(_, v any) bool {
+		if w, ok := v.(*waClientWrapper); ok {
+			w.closeOnce.Do(func() { close(w.stop) })
+		}
+		return true
+	})
+	m.clients.Range(func(k, _ any) bool { m.clients.Delete(k); return true })
+	m.qr.Range(func(_, v any) bool {
+		if s, ok := v.(*QRSession); ok {
+			s.Cancel()
+		}
+		return true
+	})
+	done := make(chan struct{})
+	go func() { m.wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(budget):
+		vars.Warning("WhatsApp 消息侧未在 %s 内全部退出，放弃等待（协程会自行收尾）", budget)
+	}
+}
+
+// ListClients 返回全部在跑会话的公开事实，按 JID 排序（sync.Map 遍历序是乱的，
+// 不排序则同一份状态两次调用给出两种顺序，下游没法做快照比对）。
+func (m *waManager) ListClients() []SessionInfo {
+	out := make([]SessionInfo, 0)
+	m.clients.Range(func(_, v any) bool {
+		w := v.(*waClientWrapper)
+		w.mu.Lock()
+		last := w.lastEventAt
+		w.mu.Unlock()
+		out = append(out, SessionInfo{
+			JID:         w.jid.String(),
+			Platform:    w.dev.Platform,
+			PushName:    w.dev.PushName,
+			IsConnected: w.sess.LoggedIn(),
+			LastSeen:    last,
+		})
+		return true
+	})
+	sort.Slice(out, func(i, j int) bool { return out[i].JID < out[j].JID })
+	return out
+}
+
+// client 按 JID 串取在跑的 wrapper；未启动返回明确错误（fail-closed，不 panic）。
+func (m *waManager) client(fromJID string) (*waClientWrapper, error) {
+	jid, err := waJID(fromJID)
+	if err != nil {
+		return nil, fmt.Errorf("whatsapp 账号 JID 不可用: %w", err)
+	}
+	v, ok := m.clients.Load(jid.String())
+	if !ok {
+		return nil, fmt.Errorf("whatsapp 账号 %s 没有在跑的会话（先 WhatsappStartClient，未配对先 WhatsappStartPairing）", jid.String())
+	}
+	return v.(*waClientWrapper), nil
+}
+
+// run 是单个 Client 的常驻协程：连上就守着，断了按退避重连，logged_out 收手。
+func (w *waClientWrapper) run() {
+	defer close(w.done)
+	defer w.sess.Disconnect()
+
+	minBackoff := w.cfg.EffectiveReconnectMin()
+	maxBackoff := w.cfg.EffectiveReconnectMax()
+	backoff := minBackoff
+
+	for {
+		select {
+		case <-w.stop:
+			return
+		default:
+		}
+		if w.loggedOut.Load() {
+			// 会话已被吊销（重新配对前不可能再连上）：留一条日志收手，别把退避循环烧成噪音。
+			vars.Info("WhatsApp[%s] 会话已吊销，常驻协程退出，不再重连", w.jid.String())
+			return
+		}
+
+		// 每轮连接独立 cancel：Stop 只作废当前这一轮，
+		// 旧协程不会改盯新一轮的信号而永久泄漏（telegram.go 同款纪律）。
+		ctx, cancel := context.WithTimeout(context.Background(), w.cfg.EffectiveConnectTimeout())
+		err := w.sess.Login(ctx)
+		cancel()
+		if err != nil {
+			vars.Warning("WhatsApp[%s] 连接失败: %v（%s 后重试）", w.jid.String(), err, backoff)
+		} else if w.sess.LoggedIn() {
+			backoff = minBackoff
+			vars.Info("WhatsApp[%s] 会话已连接", w.jid.String())
+			// 连上之后守到「停 / 断线 / 催一次重连」三者之一。
+			w.waitUntilDown()
+			continue
+		}
+
+		// 没连上：按退避等下一轮，期间可被 stop 终止或被 kick 提前催。
+		if w.sleepBackoff(backoff) {
+			return
+		}
+		backoff = waNextBackoff(backoff, minBackoff, maxBackoff)
+	}
+}
+
+// waNextBackoff 翻倍退避并夹在上界内（纯函数，测试直接断言序列，不依赖时钟）。
+func waNextBackoff(cur, min, max time.Duration) time.Duration {
+	next := cur * 2
+	if next > max {
+		next = max
+	}
+	if next < min {
+		next = min
+	}
+	return next
+}
+
+// waitUntilDown 阻塞到断线、被催重连、或收到停机信号。
+func (w *waClientWrapper) waitUntilDown() {
+	select {
+	case <-w.stop:
+	case <-w.downed:
+	case <-w.kick:
+	}
+}
+
+// sleepBackoff 睡一个退避周期；返回 true 表示期间收到停机信号，调用方应立即收尾。
+func (w *waClientWrapper) sleepBackoff(d time.Duration) bool {
+	after := w.after
+	if after == nil {
+		after = time.After
+	}
+	select {
+	case <-w.stop:
+		return true
+	case <-w.kick:
+		return false
+	case <-after(d):
+		return false
+	}
+}
+
+// onEvent 是事件回调的总入口：先记 LastSeen 时刻，再翻成本包的广播载荷。
+// 回调里绝不阻塞（whatsmeow 在事件派发协程里同步调用它）。
+func (w *waClientWrapper) onEvent(evt any) {
+	w.mu.Lock()
+	w.lastEventAt = time.Now()
+	w.mu.Unlock()
+	w.dispatch(evt)
+}
+
+// dispatch 把库事件翻成广播载荷，并给常驻协程递信号。
+//
+// 库侧多数事件以指针派发（查自 WM/client.go、connectionevents.go），值形态也一并接住：
+// 这里漏一类不会编译报错，只会让业务方收不到本该广播的事件，是难查的静默失败。
+func (w *waClientWrapper) dispatch(evt any) {
+	account := w.jid.String()
+	switch e := evt.(type) {
+	case *events.Message:
+		publishWA("Inbound", waInbound(account, e))
+	case events.Message:
+		publishWA("Inbound", waInbound(account, &e))
+	case *events.Receipt:
+		publishWA("Receipt", waReceipt(account, e))
+	case events.Receipt:
+		publishWA("Receipt", waReceipt(account, &e))
+	case *events.Connected:
+		publishWA("Connection", &ConnEvent{Account: account, State: "connected"})
+	case events.Connected:
+		publishWA("Connection", &ConnEvent{Account: account, State: "connected"})
+	case *events.Disconnected:
+		w.markDown()
+		publishWA("Connection", &ConnEvent{Account: account, State: "disconnected"})
+	case events.Disconnected:
+		w.markDown()
+		publishWA("Connection", &ConnEvent{Account: account, State: "disconnected"})
+	case *events.StreamReplaced:
+		// 同一会话被另一端顶替：不重连也连不上旧账号，先记原因。
+		w.markDown()
+		publishWA("Connection", &ConnEvent{Account: account, State: "stream_replaced", Reason: "同一会话被另一端顶替"})
+	case events.StreamReplaced:
+		w.markDown()
+		publishWA("Connection", &ConnEvent{Account: account, State: "stream_replaced", Reason: "同一会话被另一端顶替"})
+	case *events.LoggedOut:
+		w.loggedOut.Store(true)
+		w.markDown()
+		publishWA("Connection", &ConnEvent{Account: account, State: "logged_out", Reason: e.Reason.String()})
+	case events.LoggedOut:
+		w.loggedOut.Store(true)
+		w.markDown()
+		publishWA("Connection", &ConnEvent{Account: account, State: "logged_out", Reason: e.Reason.String()})
+	}
+}
+
+// markDown 非阻塞地给常驻协程递一个断线令牌。
+//
+// 用带缓冲的 1 号通道而不是广播：一个令牌足够唤醒一次重连，事件回调里绝不能阻塞。
+func (w *waClientWrapper) markDown() {
+	select {
+	case w.downed <- struct{}{}:
+	default:
+	}
+}
+
+// errWaNotStarted 是消息侧未启动时的统一错误（门面 fail-closed 用）。
+var errWaNotStarted = errors.New("whatsapp 消息侧未启动（未配置 whatsapp.sessions.dsn 或会话库不可达）")

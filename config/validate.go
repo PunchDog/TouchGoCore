@@ -214,7 +214,6 @@ func validatePayChannels(c *Cfg) error {
 	// service 标记这条引用只做验证码下发/登录换会话，不动资金：
 	// 这样的 SDK 本就没有商户账户，按资金链路口径要求它等于逼配置里填个假商户号。
 	service := map[string]bool{
-		"whatsapp.login":  true,
 		"zalo.login":      true,
 		"facebook.login":  true,
 		"instagram.login": true,
@@ -235,7 +234,6 @@ func validatePayChannels(c *Cfg) error {
 		refs["sol.provider"] = c.Sol.Provider
 	}
 	if c.Whatsapp != nil {
-		refs["whatsapp.login"] = c.Whatsapp.Login
 		refs["whatsapp.provider"] = c.Whatsapp.Provider
 	}
 	if c.Zalo != nil {

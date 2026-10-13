@@ -25,6 +25,8 @@ import (
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
 	waLog "go.mau.fi/whatsmeow/util/log"
+
+	"touchgocore/vars"
 )
 
 // WAStore 封装 sqlstore 的 Postgres 容器。
@@ -71,33 +73,114 @@ func (s *WAStore) Close() error {
 	return s.container.Close()
 }
 
+// waPinnedContainer 是设备行的「删除闸门」：把库侧对 *store.Device 的自动删行拦下来。
+//
+// 拦的是哪两条路（whatsmeow 自己动钥匙，全仓只有 Device.Delete 一个入口，查自
+// WM/store/store.go:286-298 —— 它唯一的写动作就是 device.Container.DeleteDevice）：
+//   - 收到 401 device_removed 流错误：WM/connectionevents.go:40-47；
+//   - 收到登出型 connect failure：WM/connectionevents.go:126-132。
+// 两处都紧跟着 `cli.Store.Delete(ctx)`，即「服务端一句话就把本机的配对凭据抹掉」。
+//
+// 为什么要拦：删行等于业务侧那个号从此无法再被认出来（重新扫码前 StartClient 必失败），
+// 而吊销配对是数据完整性动作，必须由调用方显式发起。本包的契约口径是
+// 「删设备行只经 WhatsappDeleteDevice 这一条路」（见 wa_delete_device.go 的编排与
+// wa_client.go:279 的门面注释），库侧自删会让这条契约只对一半。
+//
+// 代价写在明面上：被拦下的那一刻会话确实已经死了（服务端不再认这套钥匙），
+// 行留着只是留着密钥材料——密钥进不了日志/错误文案的纪律不变（见文件头），
+// 清掉它的唯一时机是后台点「解绑」。
+//
+// PutDevice 原样转发：配对成功落库走的就是它（WM/store/sqlstore/container.go:208-224），
+// 拦这条路等于不让扫码配对生效。
+type waPinnedContainer struct {
+	inner store.DeviceContainer
+	jid   string
+}
+
+// 编译期钉住：包装仍是库要求的 DeviceContainer 两方法形态。
+var _ store.DeviceContainer = waPinnedContainer{}
+
+func (p waPinnedContainer) PutDevice(ctx context.Context, dev *store.Device) error {
+	return p.inner.PutDevice(ctx, dev)
+}
+
+// DeleteDevice 拦下删行：只记日志并返回 nil。
+//
+// 返回 nil 而不是错误，是让库把自己那套「已删除」的内存收尾走完（置 ID=nil、
+// 把各子存储换成 NoopStore，查自 WM/store/store.go:293-297）——死会话在本进程内
+// 不该再写任何库表；真要恢复由调用方重新 GetDevice 拿到带 ID 的新对象。
+// 返回错误反而会让库把失败往上抛进它自己的日志与重试分支。
+func (p waPinnedContainer) DeleteDevice(_ context.Context, dev *store.Device) error {
+	jid := p.jid
+	if dev != nil && dev.ID != nil {
+		jid = dev.ID.String()
+	}
+	vars.Warning("WhatsApp[%s] 拦下库侧的自动删行：设备行保留，账号需重新扫码配对；要连行一并吊销用 WhatsappDeleteDevice", jid)
+	return nil
+}
+
+// pinWADevice 给一个从库里出来的设备套上删除闸门，幂等且对 nil 安全。
+//
+// 只碰 Container 字段：sqlstore 在 GetDevice/NewDevice 里把 device.Container 指回
+// container 自身（查自 WM/store/sqlstore/container.go:257-263 的 initializeDevice 与
+// :212-215 的 NewDevice 字面量），库后面只能经由这个字段删行，
+// 所以换掉它就等价于掐断全部自删路。
+// WAStore.DeleteDevice 走的是 s.container 上的方法、不看这个字段，显式吊销因此照旧生效。
+func pinWADevice(dev *store.Device) *store.Device {
+	if dev == nil || dev.Container == nil {
+		return dev
+	}
+	if _, ok := dev.Container.(waPinnedContainer); ok {
+		return dev
+	}
+	jid := ""
+	if dev.ID != nil {
+		jid = dev.ID.String()
+	}
+	dev.Container = waPinnedContainer{inner: dev.Container, jid: jid}
+	return dev
+}
+
 // GetDevice 按 JID 取一个已配对设备；不存在返回 (nil, nil)。
 // 「查无」不是错误是 sqlstore 的口径（查自 WM/store/sqlstore/container.go:182-188，
 // sql.ErrNoRows 被归一成 nil, nil），消费侧要把 nil 设备与查询失败分开处理。
+// 返回的设备已套删除闸门（waPinnedContainer）。
 func (s *WAStore) GetDevice(ctx context.Context, jid types.JID) (*store.Device, error) {
-	return s.container.GetDevice(ctx, jid)
+	dev, err := s.container.GetDevice(ctx, jid)
+	return pinWADevice(dev), err
 }
 
 // AllDevices 返回库里全部已配对设备。
 // 真实方法名是 container.GetAllDevices(ctx) ([]*store.Device, error)
 // （查自 WM/store/sqlstore/container.go:157）——带 ctx、带 error，与旧文档里的
 // 无参形态不同；本门面改成 AllDevices 只为与本仓命名一致，签名照抄库侧。
+// 每个设备都已套删除闸门。
 func (s *WAStore) AllDevices(ctx context.Context) ([]*store.Device, error) {
-	return s.container.GetAllDevices(ctx)
+	devs, err := s.container.GetAllDevices(ctx)
+	for _, dev := range devs {
+		pinWADevice(dev)
+	}
+	return devs, err
 }
 
 // NewDevice 在内存里造一个未配对设备（ID 为 nil）。
 // 不写库：配对成功时库自动调 Save 落盘（查自 WM/store/sqlstore/container.go:208-224
 // 的注释「the pairing process will automatically call Save after a successful pairing」），
 // QR 配对流程据此不需要手动 PutDevice。
+//
+// 同样套删除闸门：库在配对失败的两条分支上也会调 Store.Delete
+//（查自 WM/pair.go:234 与 :262），拦下来与上面同一套理由。
 func (s *WAStore) NewDevice() *store.Device {
-	return s.container.NewDevice()
+	return pinWADevice(s.container.NewDevice())
 }
 
 // DeleteDevice 从库里删除一个设备（等价于移除配对，之后必须重新扫码）。
 // 参数是 *store.Device 而不是 JID——库侧真实签名
 // container.DeleteDevice(ctx, *store.Device) error（查自 container.go:266），
 // 它要用设备本体上的 jid 定位行；调用方先 GetDevice 再删。
+//
+// 这是本包唯一真正删行的出口：它直接打在 container 上，不经 waPinnedContainer，
+// 所以设备对象带着闸门进来也照删（对照 wa_delete_device.go ⑤ 的重读守卫）。
 func (s *WAStore) DeleteDevice(ctx context.Context, dev *store.Device) error {
 	if dev == nil {
 		return errors.New("whatsapp 删除设备失败: 设备为空")

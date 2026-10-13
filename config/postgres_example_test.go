@@ -29,8 +29,8 @@ func TestExampleJsonPostgresBinds(t *testing.T) {
 	}{
 		{"pg_host", pg.Host, "127.0.0.1"},
 		{"pg_port", pg.Port, 5432},
-		{"pg_username", pg.Username, "postgres"},
-		{"pg_password", pg.Password, "change-me"},
+		{"pg_username", pg.Username, "root"},
+		{"pg_password", pg.Password, "123456"},
 		{"pg_dbname", pg.DBName, "example"},
 		{"pg_sslmode", pg.SSLMode, "disable"},
 		{"pg_timezone", pg.TimeZone, "UTC"},

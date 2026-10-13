@@ -7,9 +7,9 @@ package whatsapp
 //
 // 并发口径（写死在这里，门面注释同步引用）：同一个 Client 的 SendText/SendAppState
 // 可并发调用（whatsmeow 底层有请求表锁与 socket 锁，实践可行；但库对多 goroutine
-// 安全零表述，这不是契约）；StartClient/StopClient/StartPairing 属改状态动作，
-// 管理器内部用 sync.Map 的原子 LoadOrStore/LoadAndDelete 兜住「不 panic、不双启」，
-// 但「先停再启」这类跨调用时序仍要调用方自己串行化。
+// 安全零表述，这不是契约）；StartClient/StopClient/StartPairing/DeleteDevice
+// 属改状态动作，管理器内部用 sync.Map 的原子 LoadOrStore/LoadAndDelete 兜住
+// 「不 panic、不双启」，但「先停再启」这类跨调用时序仍要调用方自己串行化。
 
 import (
 	"context"
@@ -33,6 +33,9 @@ import (
 //
 // 压在框架给单个服务的 2 秒最小停机预算（app.go:325 minServiceStopBudget）之内：
 // 超了就记日志放手，让整机继续走完退出路。
+//
+// DeleteDevice（wa_delete_device.go）复用 StopClient，因此也吃这一个预算；
+// 但那条路不在整机停机路径上，超时只当「非致命残留」上报，不必再对 2 秒做算术。
 const waStopWaitBudget = 1500 * time.Millisecond
 
 // waDeviceStore 是管理器对会话存储的全部期望面（未导出 seam）。
@@ -104,6 +107,14 @@ type waClientWrapper struct {
 
 	mu          sync.Mutex
 	lastEventAt time.Time
+	// sendWindow 是滚动一小时的发送时刻表（小时闸记账），与 lastEventAt 共用 mu。
+	sendWindow []time.Time
+
+	// gate 是 antiban 防封闸（wa_antiban.go）；nil 表示未启用，发送路径零变化。
+	// gateMu 把「问闸→睡眠→真发→记账」整段串成单行道：库的 GroupRate 无自带锁、
+	// BeforeSend/AfterSend 跨调用不原子，并发穿透会写错账。
+	gate   waSendGate
+	gateMu sync.Mutex
 
 	// after 是退避睡眠的时钟挂点：生产为 time.After，测试注入假时钟断言退避序列。
 	after func(time.Duration) <-chan time.Time
@@ -153,6 +164,9 @@ func (m *waManager) StartClient(jid types.JID) error {
 		kick:   make(chan struct{}, 1),
 		downed: make(chan struct{}, 1),
 		after:  m.afterFor,
+	}
+	if m.cfg.EffectiveAntibanEnabled() {
+		w.gate = waGateFactory(m.cfg, key)
 	}
 	w.sess.OnEvent(w.onEvent)
 	if _, loaded := m.clients.LoadOrStore(key, w); loaded {
@@ -243,9 +257,11 @@ func (m *waManager) ListClients() []SessionInfo {
 	return out
 }
 
-// client 按 JID 串取在跑的 wrapper；未启动返回明确错误（fail-closed，不 panic）。
+// client 按账号 JID 串取在跑的 wrapper；未启动返回明确错误（fail-closed，不 panic）。
+// 账号侧口径是 waAccountJID：配套设备形态的 "号码:1@s.whatsapp.net" 必须放行，
+// 设备行主键与 wrapper 键都带设备段，这里抹掉就再也查不到行。
 func (m *waManager) client(fromJID string) (*waClientWrapper, error) {
-	jid, err := waJID(fromJID)
+	jid, err := waAccountJID(fromJID)
 	if err != nil {
 		return nil, fmt.Errorf("whatsapp 账号 JID 不可用: %w", err)
 	}
@@ -257,6 +273,12 @@ func (m *waManager) client(fromJID string) (*waClientWrapper, error) {
 }
 
 // run 是单个 Client 的常驻协程：连上就守着，断了按退避重连，logged_out 收手。
+//
+// ctx 生命周期口径（真机实测出的坑）：whatsmeow 的 ConnectContext 把传入 ctx 直接
+// 绑给 keepAliveLoop 与 handlerQueueLoop（WM/client.go:582-583），即这个 ctx 活多久
+// 连接就活多久。所以这里只能用 WithCancel、在「本轮连接确认断开」之后才 cancel——
+// Login 返回当场就 cancel 会把手势还没走完的连接立刻拆掉，WithTimeout 则会把
+// 健康连接在超时点准时掐死，两者都不是「每轮独立」的本意。
 func (w *waClientWrapper) run() {
 	defer close(w.done)
 	defer w.sess.Disconnect()
@@ -277,19 +299,26 @@ func (w *waClientWrapper) run() {
 			return
 		}
 
-		// 每轮连接独立 cancel：Stop 只作废当前这一轮，
+		// 每轮连接一个独立 ctx：本轮确认断开后才 cancel，
 		// 旧协程不会改盯新一轮的信号而永久泄漏（telegram.go 同款纪律）。
-		ctx, cancel := context.WithTimeout(context.Background(), w.cfg.EffectiveConnectTimeout())
+		ctx, cancel := context.WithCancel(context.Background())
 		err := w.sess.Login(ctx)
-		cancel()
 		if err != nil {
+			cancel()
 			vars.Warning("WhatsApp[%s] 连接失败: %v（%s 后重试）", w.jid.String(), err, backoff)
-		} else if w.sess.LoggedIn() {
+		} else if w.waitLoggedIn(ctx) {
 			backoff = minBackoff
 			vars.Info("WhatsApp[%s] 会话已连接", w.jid.String())
-			// 连上之后守到「停 / 断线 / 催一次重连」三者之一。
+			// 连上之后守到「停 / 断线 / 催一次重连」三者之一，再作废本轮 ctx。
 			w.waitUntilDown()
+			cancel()
 			continue
+		} else {
+			// socket 连上了但登录没在预算内确认（或中途被拆）：主动断开走退避，
+			// 不留半开连接占着设备会话。
+			w.sess.Disconnect()
+			cancel()
+			vars.Warning("WhatsApp[%s] 连接后 %s 内未完成登录（%s 后重试）", w.jid.String(), w.cfg.EffectiveConnectTimeout(), backoff)
 		}
 
 		// 没连上：按退避等下一轮，期间可被 stop 终止或被 kick 提前催。
@@ -297,6 +326,32 @@ func (w *waClientWrapper) run() {
 			return
 		}
 		backoff = waNextBackoff(backoff, minBackoff, maxBackoff)
+	}
+}
+
+// waitLoggedIn 等库把登录（ref iq 回执）落定：ConnectContext 返回 nil 只代表
+// socket 与 Noise 握手完成，IsLoggedIn 要等服务器接受凭据才翻真（真机实测
+// connect ok 时 loggedin=false，约 1 秒后才 Connected 事件）。
+// 返回 false 表示登录预算内没等到、或本轮期间收到断线/停机/吊销信号。
+func (w *waClientWrapper) waitLoggedIn(ctx context.Context) bool {
+	deadline := time.After(w.cfg.EffectiveConnectTimeout())
+	tick := time.NewTicker(100 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		if w.sess.LoggedIn() {
+			return true
+		}
+		select {
+		case <-w.stop:
+			return false
+		case <-w.downed:
+			return false
+		case <-ctx.Done():
+			return false
+		case <-deadline:
+			return false
+		case <-tick.C:
+		}
 	}
 }
 
@@ -397,6 +452,28 @@ func (w *waClientWrapper) markDown() {
 	case w.downed <- struct{}{}:
 	default:
 	}
+}
+
+// takeSendSlot 是单账号滚动一小时发送闸：窗口内已记账数 < max 才放行并记上 now。
+//
+// max<=0 读作「不限」（调用方已用 Effective* 归一，正常不会走到）；
+// 拒绝时不记账，超限的那条就地失败，排队等下一小时不属于本包语义。
+func (w *waClientWrapper) takeSendSlot(now time.Time, max int) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	cutoff := now.Add(-time.Hour)
+	kept := w.sendWindow[:0]
+	for _, t := range w.sendWindow {
+		if t.After(cutoff) {
+			kept = append(kept, t)
+		}
+	}
+	w.sendWindow = kept
+	if max > 0 && len(w.sendWindow) >= max {
+		return false
+	}
+	w.sendWindow = append(w.sendWindow, now)
+	return true
 }
 
 // errWaNotStarted 是消息侧未启动时的统一错误（门面 fail-closed 用）。

@@ -53,3 +53,33 @@ func TestWhatsappSessionsMinOverMaxClamps(t *testing.T) {
 		t.Errorf("max=%s", got)
 	}
 }
+
+// TestEffectiveAntiban 防封闸三项的缺省折算：档位空串→moderate 原样透传（兜底在库
+// Resolve 侧）、状态目录空→antiban_state、nil 接收者不 panic。
+func TestEffectiveAntiban(t *testing.T) {
+	var nilCfg *WhatsappSessionsConfig
+	if got := nilCfg.EffectiveAntibanPreset(); got != "moderate" {
+		t.Errorf("nil 档位=%q", got)
+	}
+	if got := nilCfg.EffectiveAntibanStateDir(); got != "antiban_state" {
+		t.Errorf("nil 目录=%q", got)
+	}
+	c := &WhatsappSessionsConfig{AntibanPreset: "strict", AntibanStateDir: `D:\data\ab`}
+	if got := c.EffectiveAntibanPreset(); got != "strict" {
+		t.Errorf("档位=%q", got)
+	}
+	if got := c.EffectiveAntibanStateDir(); got != `D:\data\ab` {
+		t.Errorf("目录=%q", got)
+	}
+	// 三态开关：段在而键缺省 → 开；显式 false → 关；整段 nil → 关。
+	if !c.EffectiveAntibanEnabled() {
+		t.Error("段在而键缺省该读作开")
+	}
+	off := false
+	if (&WhatsappSessionsConfig{AntibanEnabled: &off}).EffectiveAntibanEnabled() {
+		t.Error("显式 false 该读作关")
+	}
+	if nilCfg.EffectiveAntibanEnabled() {
+		t.Error("整段缺失该读作关")
+	}
+}

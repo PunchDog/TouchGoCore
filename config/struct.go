@@ -409,6 +409,26 @@ type WhatsappSessionsConfig struct {
 	ReconnectMinSec int `json:"reconnect_min_sec"`
 	// ReconnectMaxSec 是退避上界，<=0 折算成 60 秒；下界大于上界时按上界取。
 	ReconnectMaxSec int `json:"reconnect_max_sec"`
+	// SendMinDelaySec 是异步批量发信两条消息之间的最小间隔，<=0 折算成 1 秒。
+	SendMinDelaySec int `json:"send_min_delay_sec"`
+	// SendMaxDelaySec 是批内消息间隔的上界（每条在 [min,max] 内随机取值），
+	// <=0 折算成 5 秒；下界大于上界时按上界取。
+	SendMaxDelaySec int `json:"send_max_delay_sec"`
+	// SendMaxPerHour 是单账号滚动一小时内的发送闸（异步批量发信路径记账），
+	// <=0 折算成 30 条。非官方客户端发得越密越容易被风控，这条是封号风险的软闸。
+	SendMaxPerHour int `json:"send_max_per_hour"`
+	// AntibanEnabled 给该通道的发送路径挂 whatsmeow-antiban 防封闸（11 道独立
+	// 风控门的中间件）。指针区分「未配置(默认开)」与「显式 false 关」：开了之后
+	// 同账号发送串成单行道，且闸可能直接拦截某条发送（错误串含「防封闸拦截」），
+	// 不想要这个结果形态就显式配 false；整段 sessions 缺失读作关（消息侧本来不启动）。
+	AntibanEnabled *bool `json:"antiban_enabled"`
+	// AntibanPreset 是防封闸档位：relaxed / moderate / conservative / aggressive /
+	// high-volume 等，留空或写错名一律折算成 moderate（库 Resolve 的兜底口径）。
+	AntibanPreset string `json:"antiban_preset"`
+	// AntibanStateDir 是防封闸的持久化状态目录（warm-up 进度、已知会话集等，
+	// 每账号一个文件）。留空折算成相对工作目录的 antiban_state；重启丢档等于
+	// 新配对的 warm-up 进度归零重来，生产要指到随部署卷持久化的路径。
+	AntibanStateDir string `json:"antiban_state_dir"`
 }
 
 // ZaloConfig 是 Zalo 通道配置，与 FacebookConfig 同构，差异只在供应商口径：

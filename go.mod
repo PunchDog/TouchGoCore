@@ -3,6 +3,7 @@ module touchgocore
 go 1.26.0
 
 require (
+	github.com/TA-rathnayaka/whatsmeow-antiban v0.1.0
 	github.com/arnodel/golua v0.2.0
 	github.com/gin-contrib/cors v1.7.7
 	github.com/gin-gonic/gin v1.12.0

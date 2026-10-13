@@ -4,13 +4,14 @@
 // 「把资金请求送到供应商、把回执读成 pay.PayResult」，不碰业务积分与额度账本。
 // 落库、风控由下游业务工程负责，它可以在启动前后按 util.CallWhatsappMsg+"Xxx"
 // 注册回调接手结果（资金回执 kind=Recharge/Withdraw/Query；消息事件
-// kind=Inbound/Receipt/Connection/QR，载荷形态见 wa_client.go 与 wa_pairing.go）。
+// kind=Inbound/Receipt/Connection/QR/SendResult，载荷形态见 wa_client.go 与 wa_pairing.go）。
 //
 // 两条链路用的是两套传输，别混：
 //   - 消息侧走 go.mau.fi/whatsmeow 直连 WhatsApp 多设备协议（wa_client.go 门面 +
-//     wa_manager.go 会话管理 + wa_pairing.go 扫码配对 + store_postgres.go 存储）：
-//     QR 配对、发文本、删会话框都在这里；会话密钥材料持久化在**本仓的 Postgres**
-//     会话库里（whatsapp.sessions.dsn），多账号一个 Client 一条常驻协程。
+//     wa_manager.go 会话管理 + wa_pairing.go 扫码配对 + wa_delete_device.go 吊销配对 +
+//     store_postgres.go 存储）：
+//     QR 配对、发文本、删会话框、吊销设备配对都在这里；会话密钥材料持久化在
+//     **本仓的 Postgres** 会话库里（whatsapp.sessions.dsn），多账号一个 Client 一条常驻协程。
 //     非官方客户端有封号风险，责任与风控归业务方。
 //   - 资金侧走 pay_sdks 供应商链路（fund.go），仍是 HTTP + MD5 签名 + 商户账户那一套。
 //     提现这类动作必须有持牌主体出账，而 WhatsApp 协议里没有任何可发起转账的 API

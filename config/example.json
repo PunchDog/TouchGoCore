@@ -362,7 +362,19 @@
             "reconnect_min_sec说明": "断线重连的退避下界秒数，<=0 折算 3 秒；下界大于上界时按上界取",
             "reconnect_min_sec": 3,
             "reconnect_max_sec说明": "退避上界秒数，<=0 折算 60 秒",
-            "reconnect_max_sec": 60
+            "reconnect_max_sec": 60,
+            "send_min_delay_sec说明": "异步批量发信（WhatsappSendBatchAsync）两条消息之间的最小间隔秒数，<=0 折算 1 秒；下界大于上界时按上界取",
+            "send_min_delay_sec": 1,
+            "send_max_delay_sec说明": "批内消息间隔上界秒数，每条在 [min,max] 内随机取值，<=0 折算 5 秒。固定节奏比随机间隔更容易被风控识别，所以取随机",
+            "send_max_delay_sec": 5,
+            "send_max_per_hour说明": "单账号滚动一小时内的发送软闸（条数），<=0 折算 30 条；与 max_concurrent 的「<=0 即不限」刻意相反——这条防的是非官方客户端封号，没配读作保守缺省而不是裸奔。超限的那条就地拒绝并广播失败结果，不会排队等下一小时",
+            "send_max_per_hour": 30,
+            "antiban_enabled说明": "给发送路径挂 github.com/TA-rathnayaka/whatsmeow-antiban 防封闸（11 道风控门：限速窗口、新号 warm-up、冷启动外联、回复率等）。缺省即开（键不写=true）：开了之后同账号发送串成单行道，且闸可能直接拦截某条发送（错误串含「防封闸拦截」）；业务不接受这个结果形态才显式配 false",
+            "antiban_enabled": true,
+            "antiban_preset说明": "防封闸档位：relaxed / moderate / conservative / aggressive / high-volume；留空或写错名折算 moderate",
+            "antiban_preset": "moderate",
+            "antiban_state_dir说明": "防封闸状态目录（每账号一个 json：warm-up 进度、已知会话集）。重启丢档等于 warm-up 归零重来，生产要指到随部署卷持久化的路径；留空折算工作目录下 antiban_state",
+            "antiban_state_dir": "antiban_state"
         }
     },
     "zalo说明": "Zalo 通道（登录/充值/提现），代码在 zalo 包。Zalo 是越南的即时通讯 App，我方登录的是供应商代持的账号，账号归属与凭证有效期都由那家供应商定，本层不为这几件事加字段。登录与资金各引用一个 SDK 段：验证码走消息网关、充值提现走支付网关是常见形态，两段独立开关（facebook/instagram 同构；whatsapp 不在此列——它的消息侧走 whatsmeow 协议直连，没有登录段）",

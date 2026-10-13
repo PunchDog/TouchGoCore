@@ -35,12 +35,28 @@ type fakeSession struct {
 	disconnects int
 	logouts     int
 
+	// logoutErr：服务端 unlink 谈不成时的兜底路径注入点（照 loginErr 那一族写法）。
+	logoutErr error
+	// deleteOnLogout：仿真库侧 Logout 成功时顺带走的 Device.Delete——它把 dev.ID 置 nil
+	//（WM/store/store.go 的 Delete），用来钉住「绝不能把 ID 已空的设备再递给 DeleteDevice」。
+	deleteOnLogout bool
+	// fireDisconnectedOnLogout：仿真「unlink 没谈成、socket 已被远端拆掉」——库在这种
+	// 情形下确实派发 events.Disconnected（手动断开才不派，WM/client.go 的 onDisconnect），
+	// 常驻协程收到它就会从 waitUntilDown 醒来重连，正是 latch 必须在 Logout 之前的理由。
+	fireDisconnectedOnLogout bool
+
 	sendID   string // SendText 返回的消息 id；空串模拟「服务端没给 id」
 	sendErr  error
 	stateErr error
 	sent     []fakeText
 	patches  []appstate.PatchInfo
 	handler  func(any)
+
+	// 好友列表与群组查询的预置返回值（查好友 / 查可发言群 / 发群消息用例用）。
+	contacts    map[types.JID]types.ContactInfo
+	contactsErr error
+	groups      []*types.GroupInfo
+	groupsErr   error
 }
 
 type fakeText struct{ to, body string }
@@ -71,10 +87,29 @@ func (f *fakeSession) Disconnect() {
 
 func (f *fakeSession) Logout(ctx context.Context) error {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.logouts++
+	if !f.loggedIn {
+		// 库侧此时快速失败而不是静默成功：socket 已为 nil 就返回 ErrNotConnected
+		//（WM/client.go），且 unlink 失败即提前返回、不会走到删自己那一步。
+		// 假件照做，「先收协程再解绑」这种调序才会被测红而不是蒙混过去。
+		f.mu.Unlock()
+		return fmt.Errorf("whatsapp 假件: 连接已断，无法 unlink")
+	}
 	f.loggedIn = false
-	return nil
+	if f.deleteOnLogout && f.dev != nil {
+		f.dev.ID = nil
+		f.dev.Deleted = true
+	}
+	h := f.handler
+	err := f.logoutErr
+	fire := f.fireDisconnectedOnLogout
+	f.mu.Unlock()
+	// 回调一律在 mu 之外触发（与 fire 同纪律）：onEvent 要拿 wrapper 自己的锁，
+	// 在假会话锁内调用会把两个不相干的锁绑出一条锁序。
+	if fire && h != nil {
+		h(events.Disconnected{})
+	}
+	return err
 }
 
 func (f *fakeSession) SendText(ctx context.Context, to string, body string) (string, time.Time, error) {
@@ -89,6 +124,18 @@ func (f *fakeSession) SendAppState(ctx context.Context, patch appstate.PatchInfo
 	defer f.mu.Unlock()
 	f.patches = append(f.patches, patch)
 	return f.stateErr
+}
+
+func (f *fakeSession) GetContacts(ctx context.Context) (map[types.JID]types.ContactInfo, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.contacts, f.contactsErr
+}
+
+func (f *fakeSession) GetJoinedGroups(ctx context.Context) ([]*types.GroupInfo, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.groups, f.groupsErr
 }
 
 func (f *fakeSession) OnEvent(handler func(any)) {
@@ -113,6 +160,20 @@ func (f *fakeSession) snapshot() (loginCalls, disconnects int, loggedIn bool, se
 	sent = append([]fakeText(nil), f.sent...)
 	patches = append([]appstate.PatchInfo(nil), f.patches...)
 	return f.loginCalls, f.disconnects, f.loggedIn, sent, patches
+}
+
+// countLogins/countLogouts 单独读这两个计数器：吊销用例要断言「设备没被重连回去」，
+// 而 snapshot() 的五值形态已有十余处调用方，不为一个新断言去扩签名。
+func (f *fakeSession) countLogins() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.loginCalls
+}
+
+func (f *fakeSession) countLogouts() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.logouts
 }
 
 var _ waSession = (*fakeSession)(nil)
@@ -194,6 +255,14 @@ func (f *fakeStore) savedList() []string {
 	return append([]string(nil), f.saved...)
 }
 
+// deletedList 读出假件收到过哪些 DeleteDevice 调用（与 savedList 同形，
+// 吊销用例要靠它区分「行是本包删的」与「库侧 Logout 已经删过、本包没再递设备」）。
+func (f *fakeStore) deletedList() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.deleted...)
+}
+
 var _ waDeviceStore = (*fakeStore)(nil)
 
 // fakeDevice 造一个已配对形态的设备（ID 非 nil，即库里可查到的行）。
@@ -254,6 +323,9 @@ func waitUntil(t *testing.T, timeout time.Duration, what string, cond func() boo
 	}
 	t.Fatalf("等待 %s 超时（%s）", what, timeout)
 }
+
+// waBool 取 bool 的地址：antiban_enabled 是 *bool 三态，测试里要显式开/关时用它。
+func waBool(b bool) *bool { return &b }
 
 // jidOf 是测试内构造 JID 的短手。
 func jidOf(t *testing.T, raw string) types.JID {
@@ -339,7 +411,7 @@ func TestStartClientMaxConcurrentGate(t *testing.T) {
 	b := fakeDevice(t, "8613800000002@s.whatsapp.net", "android", "B")
 	st := newFakeStore(a, b)
 	installFakeSessionFactory(t, nil)
-	m := newTestManager(t, st, &config.WhatsappSessionsConfig{MaxConcurrent: 1})
+	m := newTestManager(t, st, &config.WhatsappSessionsConfig{MaxConcurrent: 1, AntibanEnabled: waBool(false)})
 
 	if err := m.StartClient(*a.ID); err != nil {
 		t.Fatalf("第一个应当启动: %v", err)
@@ -394,7 +466,7 @@ func TestListClientsFields(t *testing.T) {
 			s.loginErr = fmt.Errorf("模拟连不上")
 		}
 	})
-	m := newTestManager(t, st, &config.WhatsappSessionsConfig{ReconnectMinSec: 60})
+	m := newTestManager(t, st, &config.WhatsappSessionsConfig{ReconnectMinSec: 60, AntibanEnabled: waBool(false)})
 
 	if err := m.StartClient(*a.ID); err != nil {
 		t.Fatal(err)
@@ -434,7 +506,7 @@ func TestLoggedOutStopsReconnect(t *testing.T) {
 	dev := fakeDevice(t, "8613800000000@s.whatsapp.net", "android", "A")
 	st := newFakeStore(dev)
 	get := installFakeSessionFactory(t, nil)
-	m := newTestManager(t, st, &config.WhatsappSessionsConfig{ReconnectMinSec: 1})
+	m := newTestManager(t, st, &config.WhatsappSessionsConfig{ReconnectMinSec: 1, AntibanEnabled: waBool(false)})
 
 	if err := m.StartClient(*dev.ID); err != nil {
 		t.Fatal(err)
@@ -463,7 +535,7 @@ func TestBackoffSequenceWithFakeClock(t *testing.T) {
 	dev := fakeDevice(t, "8613800000000@s.whatsapp.net", "android", "A")
 	st := newFakeStore(dev)
 	get := installFakeSessionFactory(t, func(s *fakeSession) { s.loginErr = fmt.Errorf("模拟连不上") })
-	m := newTestManager(t, st, &config.WhatsappSessionsConfig{ReconnectMinSec: 1, ReconnectMaxSec: 4})
+	m := newTestManager(t, st, &config.WhatsappSessionsConfig{ReconnectMinSec: 1, ReconnectMaxSec: 4, AntibanEnabled: waBool(false)})
 
 	closed := make(chan time.Time)
 	close(closed)
@@ -517,7 +589,7 @@ func TestConcurrentStartStopNoPanic(t *testing.T) {
 	b := fakeDevice(t, "8613800000002@s.whatsapp.net", "android", "B")
 	st := newFakeStore(a, b)
 	installFakeSessionFactory(t, nil)
-	m := newTestManager(t, st, &config.WhatsappSessionsConfig{ReconnectMinSec: 60})
+	m := newTestManager(t, st, &config.WhatsappSessionsConfig{ReconnectMinSec: 60, AntibanEnabled: waBool(false)})
 
 	var wg sync.WaitGroup
 	for g := 0; g < 8; g++ {

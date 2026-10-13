@@ -4,6 +4,7 @@ package whatsapp
 // 删会话 patch 的逐字断言、事件翻译（值/指针双形态）。全部走 seam，不联网。
 
 import (
+	"context"
 	"strings"
 	"sync"
 	"testing"
@@ -55,7 +56,7 @@ func captureKinds(t *testing.T, kinds ...string) func() []string {
 	}
 }
 
-// TestFacadesFailClosedWhenNotStarted 未启动时五条门面全部就地拒绝、列表为空，
+// TestFacadesFailClosedWhenNotStarted 未启动时九条门面全部就地拒绝、列表为空，
 // 且**不得广播任何回调**——「没启动却发了事件」意味着有代码绕过了快照判空。
 func TestFacadesFailClosedWhenNotStarted(t *testing.T) {
 	WhatsappStop(nil)
@@ -63,6 +64,15 @@ func TestFacadesFailClosedWhenNotStarted(t *testing.T) {
 
 	if id, err := WhatsappSendMessage(nil, "8613800000000", "8613900000000", "hi"); err == nil || id != "" {
 		t.Errorf("未启动时发送应当被拒: id=%q err=%v", id, err)
+	}
+	if id, err := WhatsappSendGroupMessage(nil, "8613800000000", "12345@g.us", "hi"); err == nil || id != "" {
+		t.Errorf("未启动时群发应当被拒: id=%q err=%v", id, err)
+	}
+	if got, err := WhatsappListContacts(nil, "8613800000000"); err == nil || got != nil {
+		t.Errorf("未启动时查好友应当被拒: got=%+v err=%v", got, err)
+	}
+	if got, err := WhatsappListSpeakableGroups(nil, "8613800000000"); err == nil || got != nil {
+		t.Errorf("未启动时查群组应当被拒: got=%+v err=%v", got, err)
 	}
 	if err := WhatsappDeleteChat(nil, "8613800000000", "8613900000000", "M1", time.Time{}, false); err == nil {
 		t.Error("未启动时删会话应当被拒")
@@ -72,6 +82,9 @@ func TestFacadesFailClosedWhenNotStarted(t *testing.T) {
 	}
 	if err := WhatsappStopClient("8613800000000"); err == nil {
 		t.Error("未启动时 StopClient 应当被拒")
+	}
+	if err := WhatsappDeleteDevice(nil, "8613800000000"); err == nil {
+		t.Error("未启动时删设备应当被拒")
 	}
 	if id, err := WhatsappStartPairing(nil); err == nil || id != "" {
 		t.Errorf("未启动时 StartPairing 应当被拒: id=%q err=%v", id, err)
@@ -201,6 +214,87 @@ func TestWhatsappNormalizePhone(t *testing.T) {
 	if got := WhatsappNormalizePhone("abc"); got != "" {
 		t.Errorf("无数字应当洗成空串，实得 %q", got)
 	}
+}
+
+// TestWaAccountJID 账号侧归一：配套设备形态的 :N 设备段必须放行且原样保留
+// （会话库设备行主键逐字含设备段，抹掉即查不到行）；
+// 群组域与设备号之外的形态仍拒。
+func TestWaAccountJID(t *testing.T) {
+	cases := []struct {
+		raw    string
+		want   string // 空表示期望报错
+		errSub string
+	}{
+		{"447378157347:1@s.whatsapp.net", "447378157347:1@s.whatsapp.net", ""},
+		{" 8613800000000@s.whatsapp.net ", "8613800000000@s.whatsapp.net", ""},
+		{"8613800000000", "8613800000000@s.whatsapp.net", ""},
+		{"12345@g.us", "", "域不是"},
+		{"", "", "账号为空"},
+		{"abc", "", "没有任何数字"},
+	}
+	for _, cs := range cases {
+		jid, err := waAccountJID(cs.raw)
+		if cs.want == "" {
+			if err == nil {
+				t.Errorf("%q 应当被拒，实得 %s", cs.raw, jid.String())
+			} else if cs.errSub != "" && !strings.Contains(err.Error(), cs.errSub) {
+				t.Errorf("%q 错误文案应含 %q: %v", cs.raw, cs.errSub, err)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("%q 不应被拒: %v", cs.raw, err)
+		} else if jid.String() != cs.want {
+			t.Errorf("%q 归一成 %s，期望 %s", cs.raw, jid.String(), cs.want)
+		}
+	}
+}
+
+// TestDeviceSuffixedAccountThroughFacades 真实现里绑定账号普遍是 "号码:1@s.whatsapp.net"
+// （配套设备，wa_pairing 落库与业务侧 wa_jid 存的就是这个形态）：
+// 启动、发信、列好友、列群组、停号整条链路必须以带设备段的账号 JID 走通，
+// 收件人侧仍按会话 JID 口径（带设备号拒）。
+func TestDeviceSuffixedAccountThroughFacades(t *testing.T) {
+	const acct = "447378157347:1@s.whatsapp.net"
+	dev := fakeDevice(t, acct, "android", "A")
+	m, _, get := startFakeWA(t, nil, nil, dev)
+	if err := WhatsappStartClient(acct); err != nil {
+		t.Fatalf("带设备段的账号应当能启动: %v", err)
+	}
+	if err := WhatsappStartClient("447378157347"); err == nil {
+		t.Error("纯号码补成主设备 JID，库里没有这一行，应当报未配对")
+	}
+	s := get(acct)
+
+	if _, err := WhatsappSendMessage(nil, acct, "8613900000000", "hi"); err != nil {
+		t.Fatalf("带设备段账号发信失败: %v", err)
+	}
+	if _, err := WhatsappSendMessage(nil, acct, "8613900000000:2@s.whatsapp.net", "hi"); err == nil ||
+		!strings.Contains(err.Error(), "具体设备") {
+		t.Errorf("带设备段的收件人应当被拒: %v", err)
+	}
+	s.mu.Lock()
+	s.contacts = map[types.JID]types.ContactInfo{jidOf(t, "8613900000000@s.whatsapp.net"): {PushName: "F"}}
+	s.groups = []*types.GroupInfo{{JID: jidOf(t, "100@g.us"),
+		Participants:  []types.GroupParticipant{{JID: jidOf(t, acct), IsAdmin: true}},
+		GroupAnnounce: types.GroupAnnounce{IsAnnounce: true}}}
+	s.mu.Unlock()
+	contacts, err := WhatsappListContacts(nil, acct)
+	if err != nil || len(contacts) != 1 {
+		t.Fatalf("带设备段账号列好友: n=%d err=%v", len(contacts), err)
+	}
+	groups, err := WhatsappListSpeakableGroups(nil, acct)
+	if err != nil || len(groups) != 1 || !groups[0].IsAdmin {
+		t.Fatalf("仅管理员可发言群应按本人（带设备段账号）命中管理员: %+v err=%v", groups, err)
+	}
+	if _, err = WhatsappSendGroupMessage(nil, acct, "100@g.us", "hi"); err != nil {
+		t.Fatalf("带设备段账号群发失败: %v", err)
+	}
+	if err := WhatsappStopClient(acct); err != nil {
+		t.Fatalf("带设备段账号停号失败: %v", err)
+	}
+	_ = m
+	_ = s
 }
 
 // TestDeleteChatPatchVerbatim 删会话 patch 的逐字断言。
@@ -430,4 +524,284 @@ func TestPublishWANoSubscriberIsNotFailure(t *testing.T) {
 	// 没有注册任何 Inbound 订阅者：dispatch 必须安静跑完。
 	w.dispatch(&events.Message{Message: &waE2E.Message{Conversation: proto.String("nobody listens")}})
 	publishWA("ZzNoSubscriberKind", &ConnEvent{State: "connected"})
+}
+
+// TestSendGroupMessage 群组发信门面：@g.us 目标走通并原样送达会话；
+// 单聊号码与设备 JID 都在触达会话之前被拒（「不是群组 JID」/ waJID 归一错误）；
+// 空正文、未启动账号、空 id 契约与 WhatsappSendMessage 同口径。
+func TestSendGroupMessage(t *testing.T) {
+	dev := fakeDevice(t, "8613800000000@s.whatsapp.net", "android", "A")
+	m, _, get := startFakeWA(t, nil, nil, dev)
+	if err := m.StartClient(*dev.ID); err != nil {
+		t.Fatal(err)
+	}
+	s := get(dev.ID.String())
+
+	id, err := WhatsappSendGroupMessage(nil, "8613800000000", "1234567890@g.us", "hi group")
+	if err != nil || id != "MSG-1" {
+		t.Fatalf("群组发信正常路径: id=%q err=%v", id, err)
+	}
+	_, _, _, sent, _ := s.snapshot()
+	if len(sent) != 1 || sent[0].to != "1234567890@g.us" || sent[0].body != "hi group" {
+		t.Fatalf("群组收件人/正文不符: %+v", sent)
+	}
+
+	// 单聊写法必须在触达会话之前被拒：sent 不能多出一条。
+	if _, err = WhatsappSendGroupMessage(nil, "8613800000000", "8613900000000", "not a group"); err == nil ||
+		!strings.Contains(err.Error(), "不是群组 JID") {
+		t.Errorf("非群组目标应当被拒: %v", err)
+	}
+	if _, _, _, sent, _ := s.snapshot(); len(sent) != 1 {
+		t.Errorf("被拒的目标不应触达会话: %+v", sent)
+	}
+	if _, err = WhatsappSendGroupMessage(nil, "8613800000000", "1234567890@g.us", ""); err == nil ||
+		!strings.Contains(err.Error(), "消息内容为空") {
+		t.Errorf("空正文应当被拒: %v", err)
+	}
+	if _, err = WhatsappSendGroupMessage(nil, "8613711111111", "1234567890@g.us", "hi"); err == nil ||
+		!strings.Contains(err.Error(), "没有在跑") {
+		t.Errorf("未启动账号应当被拒: %v", err)
+	}
+
+	s.mu.Lock()
+	s.sendID = ""
+	s.mu.Unlock()
+	if id, err = WhatsappSendGroupMessage(nil, "8613800000000", "1234567890@g.us", "hi"); id != "" || err == nil {
+		t.Fatalf("空 id 必须伴随错误: id=%q err=%v", id, err)
+	}
+}
+
+// TestListContactsFacade 好友列表门面：map 摊平成按 JID 排序的切片、字段逐一对应；
+// 底层报错带通道前缀上抛；未启动账号在触达会话之前被拒。
+func TestListContactsFacade(t *testing.T) {
+	dev := fakeDevice(t, "8613800000000@s.whatsapp.net", "android", "A")
+	m, _, get := startFakeWA(t, nil, nil, dev)
+	if err := m.StartClient(*dev.ID); err != nil {
+		t.Fatal(err)
+	}
+	s := get(dev.ID.String())
+	self := jidOf(t, "8613800000000@s.whatsapp.net")
+	friend := jidOf(t, "8613900000000@s.whatsapp.net")
+	s.mu.Lock()
+	s.contacts = map[types.JID]types.ContactInfo{
+		friend: {FirstName: "Fern", FullName: "Fernando", PushName: "Fer", BusinessName: "FerShop"},
+		self:   {PushName: "Me"},
+	}
+	s.mu.Unlock()
+
+	got, err := WhatsappListContacts(nil, "8613800000000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].JID != self.String() || got[1].JID != friend.String() {
+		t.Fatalf("列表应当按 JID 排序且两条: %+v", got)
+	}
+	if got[1].FirstName != "Fern" || got[1].FullName != "Fernando" ||
+		got[1].PushName != "Fer" || got[1].BusinessName != "FerShop" {
+		t.Fatalf("联系人字段映射不符: %+v", got[1])
+	}
+
+	s.mu.Lock()
+	s.contactsErr = errBoom
+	s.mu.Unlock()
+	if _, err = WhatsappListContacts(nil, "8613800000000"); err == nil ||
+		!strings.Contains(err.Error(), "whatsapp 获取好友列表失败") {
+		t.Fatalf("底层报错应当带通道前缀: %v", err)
+	}
+	if _, err = WhatsappListContacts(nil, "8613711111111"); err == nil ||
+		!strings.Contains(err.Error(), "没有在跑") {
+		t.Fatalf("未启动账号应当被拒: %v", err)
+	}
+}
+
+// TestListSpeakableGroupsFilter 可发言群组闸的四种剔除形态与两种保留形态：
+// 普通群保留；仅管理员可发言群里本人是管理员的保留（JID 直命中或经 PhoneNumber 命中）、
+// 是普通成员的剔除、名单里找不到本人的剔除（fail-closed）；已暂停群剔除。
+// IsLocked 只限改群设置，不影响入选。
+func TestListSpeakableGroupsFilter(t *testing.T) {
+	dev := fakeDevice(t, "8613800000000@s.whatsapp.net", "android", "A")
+	m, _, get := startFakeWA(t, nil, nil, dev)
+	if err := m.StartClient(*dev.ID); err != nil {
+		t.Fatal(err)
+	}
+	s := get(dev.ID.String())
+	self := jidOf(t, "8613800000000@s.whatsapp.net")
+	other := jidOf(t, "8613900000000@s.whatsapp.net")
+	lid := jidOf(t, "123456789@lid")
+
+	p := func(jid types.JID, admin, super bool) types.GroupParticipant {
+		return types.GroupParticipant{JID: jid, PhoneNumber: jid, IsAdmin: admin, IsSuperAdmin: super}
+	}
+	lidMember := types.GroupParticipant{JID: lid, PhoneNumber: self, IsSuperAdmin: true}
+
+	s.mu.Lock()
+	s.groups = []*types.GroupInfo{
+		{JID: jidOf(t, "600@g.us"), GroupName: types.GroupName{Name: "locked-normal"},
+			GroupLocked:  types.GroupLocked{IsLocked: true},
+			Participants: []types.GroupParticipant{p(self, false, false)}, ParticipantCount: 2},
+		{JID: jidOf(t, "100@g.us"), GroupName: types.GroupName{Name: "plain"},
+			Participants: []types.GroupParticipant{p(self, false, false), p(other, true, false)}, ParticipantCount: 2},
+		{JID: jidOf(t, "200@g.us"), GroupName: types.GroupName{Name: "announce-admin"},
+			GroupAnnounce: types.GroupAnnounce{IsAnnounce: true},
+			Participants:  []types.GroupParticipant{p(self, true, false)}, ParticipantCount: 1},
+		{JID: jidOf(t, "300@g.us"), GroupName: types.GroupName{Name: "announce-member"},
+			GroupAnnounce: types.GroupAnnounce{IsAnnounce: true},
+			Participants:  []types.GroupParticipant{p(self, false, false)}, ParticipantCount: 1},
+		{JID: jidOf(t, "400@g.us"), GroupName: types.GroupName{Name: "announce-stranger"},
+			GroupAnnounce: types.GroupAnnounce{IsAnnounce: true},
+			Participants:  []types.GroupParticipant{p(other, true, false)}, ParticipantCount: 1},
+		{JID: jidOf(t, "500@g.us"), GroupName: types.GroupName{Name: "suspended"}, Suspended: true,
+			Participants: []types.GroupParticipant{p(self, false, false)}},
+		{JID: jidOf(t, "700@g.us"), GroupName: types.GroupName{Name: "announce-lid-super"},
+			GroupAnnounce: types.GroupAnnounce{IsAnnounce: true},
+			Participants:  []types.GroupParticipant{lidMember}, ParticipantCount: 1},
+	}
+	s.mu.Unlock()
+
+	got, err := WhatsappListSpeakableGroups(nil, "8613800000000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantIDs := []string{"100@g.us", "200@g.us", "600@g.us", "700@g.us"}
+	if len(got) != len(wantIDs) {
+		t.Fatalf("入选群组=%+v，期望 id %v", got, wantIDs)
+	}
+	for i, want := range wantIDs {
+		if got[i].JID != want {
+			t.Fatalf("排序后 id[%d]=%s，期望 %s", i, got[i].JID, want)
+		}
+	}
+	plain := got[0]
+	if plain.Name != "plain" || plain.MemberCount != 2 || plain.IsAdmin || plain.IsAnnounce {
+		t.Fatalf("普通群字段不符: %+v", plain)
+	}
+	if admin := got[1]; !admin.IsAnnounce || !admin.IsAdmin {
+		t.Fatalf("仅管理员可发言群的本人管理员标记不符: %+v", admin)
+	}
+	if lidSuper := got[3]; !lidSuper.IsSuperAdmin {
+		t.Fatalf("经 PhoneNumber 命中本人的超级管理员应保留: %+v", lidSuper)
+	}
+
+	s.mu.Lock()
+	s.groupsErr = errBoom
+	s.mu.Unlock()
+	if _, err = WhatsappListSpeakableGroups(nil, "8613800000000"); err == nil ||
+		!strings.Contains(err.Error(), "whatsapp 获取可发言群组列表失败") {
+		t.Fatalf("底层报错应当带通道前缀: %v", err)
+	}
+	if _, err = WhatsappListSpeakableGroups(nil, "8613711111111"); err == nil ||
+		!strings.Contains(err.Error(), "没有在跑") {
+		t.Fatalf("未启动账号应当被拒: %v", err)
+	}
+}
+
+// TestSendBatchAsync 异步批量发信：门面当场返回，批内逐条广播 SendResult；
+// 第一条不等待、其后每条前睡一次注入的间隔；小时闸超限的那条被拒且不触达会话，
+// 整批不中止；空正文/坏目标逐条带错误广播且不占闸额度。
+func TestSendBatchAsync(t *testing.T) {
+	dev := fakeDevice(t, "8613800000000@s.whatsapp.net", "android", "A")
+	cfg := &config.WhatsappSessionsConfig{SendMaxPerHour: 2, AntibanEnabled: waBool(false)}
+	m, _, get := startFakeWA(t, cfg, nil, dev)
+	if err := m.StartClient(*dev.ID); err != nil {
+		t.Fatal(err)
+	}
+	s := get(dev.ID.String())
+
+	var mu sync.Mutex
+	var sleeps []time.Duration
+	oldSleep, oldDelay := waBatchSleep, waBatchDelay
+	waBatchSleep = func(d time.Duration) { mu.Lock(); sleeps = append(sleeps, d); mu.Unlock() }
+	waBatchDelay = func(min, max time.Duration) time.Duration { return min }
+	t.Cleanup(func() { waBatchSleep, waBatchDelay = oldSleep, oldDelay })
+
+	var results []*SendResult
+	id := util.DefaultCallFunc.Register(util.CallWhatsappMsg+"SendResult", func(r *SendResult) {
+		mu.Lock()
+		results = append(results, r)
+		mu.Unlock()
+	})
+	t.Cleanup(func() { util.DefaultCallFunc.Unregister(util.CallWhatsappMsg+"SendResult", id) })
+
+	if err := WhatsappSendBatchAsync(nil, "8613800000000", []OutboundMessage{
+		{To: "8613900000000", Body: "m1"},
+		{To: "12345@g.us", Body: "m2"},
+		{To: "8613910000000", Body: "m3"}, // 第 3 条撞小时闸（max=2）
+		{To: "8613920000000", Body: ""},   // 空正文：拒绝且不占闸额度
+		{To: "abc", Body: "m5"},           // 拼不出号码
+	}); err != nil {
+		t.Fatal(err)
+	}
+	waitUntil(t, 3*time.Second, "五条 SendResult", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(results) == 5
+	})
+	// 断言段必须整体出锁再往下走：waitUntil 的条件函数也要拿这把 mu，
+	// 在这里 defer mu.Unlock() 挂到函数尾会让下一段 waitUntil 自死锁。
+	mu.Lock()
+	gotSleeps := len(sleeps)
+	gotResults := append([]*SendResult(nil), results...)
+	mu.Unlock()
+	if gotSleeps != 4 {
+		t.Errorf("5 条消息之间应睡 4 次，实得 %d", gotSleeps)
+	}
+	wantErr := []string{"", "", "每小时", "消息内容为空", "没有任何数字"}
+	for i, sub := range wantErr {
+		r := gotResults[i]
+		if sub == "" && (r.Err != "" || r.MsgID != "MSG-1") {
+			t.Errorf("结果[%d]=%+v，期望成功带 id", i, r)
+		}
+		if sub != "" && !strings.Contains(r.Err, sub) {
+			t.Errorf("结果[%d].Err=%q，期望含 %q", i, r.Err, sub)
+		}
+		if r.Account != "8613800000000@s.whatsapp.net" {
+			t.Errorf("结果[%d].Account=%q", i, r.Account)
+		}
+	}
+	_, _, _, sent, _ := s.snapshot()
+	if len(sent) != 2 || sent[0].to != "8613900000000@s.whatsapp.net" || sent[1].to != "12345@g.us" {
+		t.Errorf("只有前两条该触达会话: %+v", sent)
+	}
+
+	// 已取消的 ctx：每条都广播「发送已取消」而不是静默蒸发，且零发送。
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	mu.Lock()
+	results = nil
+	mu.Unlock()
+	if err := WhatsappSendBatchAsync(canceled, "8613800000000", []OutboundMessage{
+		{To: "8613900000000", Body: "x"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	waitUntil(t, 3*time.Second, "取消的 SendResult", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(results) == 1
+	})
+	if !strings.Contains(results[0].Err, "发送已取消") {
+		t.Errorf("取消形态 Err=%q", results[0].Err)
+	}
+
+	// 空列表与未启动账号在接走之前就地拒绝（不产生广播）。
+	if err := WhatsappSendBatchAsync(nil, "8613800000000", nil); err == nil ||
+		!strings.Contains(err.Error(), "消息列表为空") {
+		t.Errorf("空列表应当被拒: %v", err)
+	}
+	if err := WhatsappSendBatchAsync(nil, "8613711111111", []OutboundMessage{{To: "8613900000000", Body: "x"}}); err == nil ||
+		!strings.Contains(err.Error(), "没有在跑") {
+		t.Errorf("未启动账号应当被拒: %v", err)
+	}
+}
+
+// TestWaBatchDelayRange 随机间隔取值器：min==max 塌成定值，正常区间落在 [min,max]。
+func TestWaBatchDelayRange(t *testing.T) {
+	if got := waBatchDelay(2*time.Second, 2*time.Second); got != 2*time.Second {
+		t.Errorf("塌成区间外: %v", got)
+	}
+	for i := 0; i < 200; i++ {
+		if got := waBatchDelay(time.Second, 5*time.Second); got < time.Second || got > 5*time.Second {
+			t.Fatalf("取值 %v 越界 [1s,5s]", got)
+		}
+	}
 }

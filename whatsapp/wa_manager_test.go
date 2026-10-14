@@ -51,12 +51,20 @@ type fakeSession struct {
 	sent     []fakeText
 	patches  []appstate.PatchInfo
 	handler  func(any)
+	// downAfterSends>0 时，发满该条数就把登录态按回 false（批量发信逐条自愈的用例用）。
+	downAfterSends int
 
 	// 好友列表与群组查询的预置返回值（查好友 / 查可发言群 / 发群消息用例用）。
 	contacts    map[types.JID]types.ContactInfo
 	contactsErr error
 	groups      []*types.GroupInfo
 	groupsErr   error
+
+	// LID 映射的预置返回值（删框 PN→LID 改写 / SendResult.Chat 用例用）：
+	// lidMap 没有该 PN 时返回空 JID，与真库「查不到映射」的形态一致。
+	lidMap   map[types.JID]types.JID
+	lidErr   error
+	lidCalls int
 }
 
 type fakeText struct{ to, body string }
@@ -126,7 +134,17 @@ func (f *fakeSession) Logout(ctx context.Context) error {
 func (f *fakeSession) SendText(ctx context.Context, to string, body string) (string, time.Time, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	// 真库在 LID 解析与会话库读写上都用调用方 ctx，取消时当场返回 ctx.Err()
+	//（错误串形如 "failed to get LID for PN ...: context canceled"）。假件照做，
+	// 门面那句「调用方上下文已结束」的折算才有活闸可测。
+	if ctx != nil && ctx.Err() != nil {
+		return "", time.Time{}, ctx.Err()
+	}
 	f.sent = append(f.sent, fakeText{to: to, body: body})
+	// downAfterSends：发满第 N 条就把登录态按回 false，仿「批跑到一半 socket 掉了」。
+	if f.downAfterSends > 0 && len(f.sent) >= f.downAfterSends {
+		f.loggedIn = false
+	}
 	return f.sendID, time.Now(), f.sendErr
 }
 
@@ -147,6 +165,16 @@ func (f *fakeSession) GetJoinedGroups(ctx context.Context) ([]*types.GroupInfo, 
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.groups, f.groupsErr
+}
+
+func (f *fakeSession) GetLIDForPN(ctx context.Context, pn types.JID) (types.JID, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.lidCalls++
+	if f.lidErr != nil {
+		return types.JID{}, f.lidErr
+	}
+	return f.lidMap[pn], nil
 }
 
 func (f *fakeSession) OnEvent(handler func(any)) {
@@ -185,6 +213,13 @@ func (f *fakeSession) countLogouts() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.logouts
+}
+
+// countLidLookups 读 GetLIDForPN 的调用次数（群组目标「不改写、不查询」的断言用）。
+func (f *fakeSession) countLidLookups() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lidCalls
 }
 
 var _ waSession = (*fakeSession)(nil)

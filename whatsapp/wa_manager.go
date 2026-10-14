@@ -112,6 +112,10 @@ type waClientWrapper struct {
 	lastEventAt time.Time
 	// sendWindow 是滚动一小时的发送时刻表（小时闸记账），与 lastEventAt 共用 mu。
 	sendWindow []time.Time
+	// lastSends 是本账号自己的发送账：会话 JID 串 → 最近一条发往该会话的 id+时间。
+	// 删框时调用方留空 lastMsgID 就回退到这里（WhatsappDeleteChat）；只记本包
+	// 发送路径发出去的消息，入站与其他端发的不在账上。
+	lastSends map[string]waLastSend
 
 	// gate 是 antiban 防封闸（wa_antiban.go）；nil 表示未启用，发送路径零变化。
 	// gateMu 把「问闸→睡眠→真发→记账」整段串成单行道：库的 GroupRate 无自带锁、
@@ -260,21 +264,6 @@ func (m *waManager) ListClients() []SessionInfo {
 	return out
 }
 
-// client 按账号 JID 串取在跑的 wrapper；未启动返回明确错误（fail-closed，不 panic）。
-// 账号侧口径是 waAccountJID：配套设备形态的 "号码:1@s.whatsapp.net" 必须放行，
-// 设备行主键与 wrapper 键都带设备段，这里抹掉就再也查不到行。
-func (m *waManager) client(fromJID string) (*waClientWrapper, error) {
-	jid, err := waAccountJID(fromJID)
-	if err != nil {
-		return nil, fmt.Errorf("whatsapp 账号 JID 不可用: %w", err)
-	}
-	v, ok := m.clients.Load(jid.String())
-	if !ok {
-		return nil, fmt.Errorf("whatsapp 账号 %s 没有在跑的会话（先 WhatsappStartClient，未配对先 WhatsappStartPairing）", jid.String())
-	}
-	return v.(*waClientWrapper), nil
-}
-
 // restartLock 取（并惰性建）某个账号的重建锁。
 func (m *waManager) restartLock(key string) *sync.Mutex {
 	if v, ok := m.restarts.Load(key); ok {
@@ -285,8 +274,9 @@ func (m *waManager) restartLock(key string) *sync.Mutex {
 	return v.(*sync.Mutex)
 }
 
-// ensureReady 取一个「现在就能发信」的 wrapper：连着就返，断了就催一轮立即重连，
-// 僵尸（常驻协程已收手或已落 logged_out 标记）就先摘掉再重建，最后等它连上。
+// ensureReady 取一个「现在就能发信/需要在线才能办成事」的 wrapper：连着就返，
+// 断了就催一轮立即重连，僵尸（常驻协程已收手或已落 logged_out 标记）就先摘掉再重建，
+// 最后等它连上。
 //
 // 为什么必须有这一步：常驻协程在 logged_out 之后会退出（wa_manager.go run() 的闸门），
 // 而 sync.Map 里那份 wrapper 还占着 key——此时 StartClient 的幂等分支会把这具死对象
@@ -297,23 +287,34 @@ func (m *waManager) restartLock(key string) *sync.Mutex {
 // 预算口径：催重连是即时的（退避睡眠被 kick 提前叫醒），等待上限取
 // EffectiveConnectTimeout（缺省 15 秒），调用方的 ctx 一到就撒手，不留悬挂等待。
 func (m *waManager) ensureReady(ctx context.Context, fromJID string) (*waClientWrapper, error) {
-	jid, err := waAccountJID(fromJID)
-	if err != nil {
-		return nil, fmt.Errorf("whatsapp 账号 JID 不可用: %w", err)
-	}
-	key := jid.String()
-	w, err := m.liveWrapper(key, jid)
+	w, err := m.ensureAlive(fromJID)
 	if err != nil {
 		return nil, err
 	}
-	if err := w.waitConnected(ctx); err != nil {
+	if err := w.reconnectAndAwait(ctx); err != nil {
 		return nil, err
 	}
 	return w, nil
 }
 
-// liveWrapper 返回一份「还活着」的 wrapper：健康就原样返回，断开就催一次重连，
-// 死透就摘掉重建。等待连接由调用方的 waitConnected 负责。
+// ensureAlive 只保证端出来的不是死对象（僵尸就复活重建），**不等连接建立**。
+//
+// 给「读本地会话库、不需要活 socket」的门面用（查好友）：这类调用也去等 15 秒登录，
+// 等于把一次本地读换成网络等待；但死对象上的子存储已被库换成 NoopStore
+// （WM/store/store.go 的 Delete 收尾），不复活就连本地读都做不了。
+//
+// 入参一律先过 waAccountJID：配套设备形态的 "号码:1@s.whatsapp.net" 必须放行，
+// 设备行主键与 wrapper 键都带设备段，抹掉就再也查不到行。
+func (m *waManager) ensureAlive(fromJID string) (*waClientWrapper, error) {
+	jid, err := waAccountJID(fromJID)
+	if err != nil {
+		return nil, fmt.Errorf("whatsapp 账号 JID 不可用: %w", err)
+	}
+	return m.liveWrapper(jid.String(), jid)
+}
+
+// liveWrapper 返回一份「还活着」的 wrapper：健康就原样返回，死透就摘掉重建。
+// 不催连、不等连——那两件事分别归 reconnectAndAwait 与调用方。
 func (m *waManager) liveWrapper(key string, jid types.JID) (*waClientWrapper, error) {
 	v, ok := m.clients.Load(key)
 	if !ok {
@@ -321,9 +322,6 @@ func (m *waManager) liveWrapper(key string, jid types.JID) (*waClientWrapper, er
 	}
 	w := v.(*waClientWrapper)
 	if !w.retired() {
-		if !w.sess.LoggedIn() {
-			w.kickNow()
-		}
 		return w, nil
 	}
 
@@ -368,6 +366,19 @@ func (w *waClientWrapper) retired() bool {
 	default:
 		return false
 	}
+}
+
+// reconnectAndAwait 是「要在线才能办成事」的门面共用的自愈前奏：
+// 已经连着就直接返回（快路，零成本），否则催一次立即重连再等连上。
+//
+// 批量发信在每条之前都调它一次：一批几十条的时间里 socket 可能中途掉，
+// 逐条自愈才能让后面的条目不必全部撞在同一个断口上。
+func (w *waClientWrapper) reconnectAndAwait(ctx context.Context) error {
+	if w.sess.LoggedIn() {
+		return nil
+	}
+	w.kickNow()
+	return w.waitConnected(ctx)
 }
 
 // kickNow 非阻塞地催常驻协程立刻试一轮连接（退避睡眠会被这个令牌提前叫醒）。
@@ -615,6 +626,33 @@ func (w *waClientWrapper) takeSendSlot(now time.Time, max int) bool {
 	}
 	w.sendWindow = append(w.sendWindow, now)
 	return true
+}
+
+// waLastSend 是发送账的一条：最近一次经本包发往某会话的消息 id 与服务器时间戳。
+type waLastSend struct {
+	msgID string
+	ts    time.Time
+}
+
+// recordLastSend 记一笔发送账（发信成功后调，键为解析后的会话 JID 串）。
+func (w *waClientWrapper) recordLastSend(chat, msgID string, ts time.Time) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.lastSends == nil {
+		w.lastSends = make(map[string]waLastSend)
+	}
+	w.lastSends[chat] = waLastSend{msgID: msgID, ts: ts}
+}
+
+// lastSend 取某会话最近一条经本包发出的消息的 id+时间；没有记录时 ok=false。
+func (w *waClientWrapper) lastSend(chat string) (string, time.Time, bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	v, ok := w.lastSends[chat]
+	if !ok || v.msgID == "" {
+		return "", time.Time{}, false
+	}
+	return v.msgID, v.ts, true
 }
 
 // errWaNotStarted 是消息侧未启动时的统一错误（门面 fail-closed 用）。

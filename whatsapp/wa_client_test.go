@@ -377,6 +377,174 @@ func TestDeleteChatThroughFacade(t *testing.T) {
 	}
 }
 
+// TestDeleteChatRewritesPNToLID 交接文档（2026-10-14 wa-delete-chat-after-send）的活闸：
+// 删框必须走发送同款的 PN→LID 改写——送进 SendAppState 的 patch Index[1] 与
+// MessageKey.RemoteJID 都是 LID 串；退回「Index 仍是 PN」⇒ 红（patch 会落在一个
+// 并不存在的会话上，变异被对端丢掉而 SendAppState 假绿）。查不到映射/查询失败退回 PN；
+// 群组 @g.us 不改写、连查询都不发起。
+func TestDeleteChatRewritesPNToLID(t *testing.T) {
+	dev := fakeDevice(t, "8613800000000@s.whatsapp.net", "android", "A")
+	m, _, get := startFakeWA(t, nil, nil, dev)
+	if err := m.StartClient(*dev.ID); err != nil {
+		t.Fatal(err)
+	}
+	s := get(dev.ID.String())
+	pn := jidOf(t, "447723171050@s.whatsapp.net")
+	lid := jidOf(t, "54246208704608@lid")
+	ts := time.Unix(1700000000, 0)
+
+	s.mu.Lock()
+	s.lidMap = map[types.JID]types.JID{pn: lid}
+	s.mu.Unlock()
+
+	if err := WhatsappDeleteChat(nil, "8613800000000", pn.String(), "3EB087FD71978BFA7E32D9", ts, false); err != nil {
+		t.Fatalf("删除会话失败: %v", err)
+	}
+	_, _, _, _, patches := s.snapshot()
+	mut := patches[len(patches)-1].Mutations[0]
+	if mut.Index[1] != lid.String() {
+		t.Fatalf("删框 patch.Index[1]=%s，期望 %s（退回 PN 即红）", mut.Index[1], lid.String())
+	}
+	key := mut.Value.GetDeleteChatAction().GetMessageRange().GetMessages()[0].GetKey()
+	if key.GetRemoteJID() != lid.String() || key.GetID() != "3EB087FD71978BFA7E32D9" || !key.GetFromMe() {
+		t.Fatalf("MessageKey 不符: remote=%s id=%s fromMe=%v", key.GetRemoteJID(), key.GetID(), key.GetFromMe())
+	}
+
+	// 查不到映射（老会话未迁 LID / NoopStore）退回 PN，删除照旧提交。
+	s.mu.Lock()
+	s.lidMap = nil
+	s.mu.Unlock()
+	if err := WhatsappDeleteChat(nil, "8613800000000", pn.String(), "M2", ts, false); err != nil {
+		t.Fatal(err)
+	}
+	_, _, _, _, patches = s.snapshot()
+	if got := patches[len(patches)-1].Mutations[0].Index[1]; got != pn.String() {
+		t.Fatalf("查不到映射应退回 PN，实得 %s", got)
+	}
+
+	// 查询报错同样退回 PN，而不是把删除拒掉。
+	s.mu.Lock()
+	s.lidErr = errBoom
+	s.mu.Unlock()
+	if err := WhatsappDeleteChat(nil, "8613800000000", pn.String(), "M3", ts, false); err != nil {
+		t.Fatalf("LID 查询失败应退回 PN 而不是拒绝删除: %v", err)
+	}
+	_, _, _, _, patches = s.snapshot()
+	if got := patches[len(patches)-1].Mutations[0].Index[1]; got != pn.String() {
+		t.Fatalf("查询失败应退回 PN，实得 %s", got)
+	}
+
+	// 群组会话不改写，也不该为它发起 LID 查询。
+	before := s.countLidLookups()
+	if err := WhatsappDeleteChat(nil, "8613800000000", "12345@g.us", "M4", ts, false); err != nil {
+		t.Fatal(err)
+	}
+	_, _, _, _, patches = s.snapshot()
+	if got := patches[len(patches)-1].Mutations[0].Index[1]; got != "12345@g.us" {
+		t.Fatalf("群组删框目标应保持 12345@g.us，实得 %s", got)
+	}
+	if n := s.countLidLookups() - before; n != 0 {
+		t.Errorf("群组目标不该发起 LID 查询（多查 %d 次）", n)
+	}
+}
+
+// TestDeleteChatBackfillsFromSendLedger 发信后立刻删框（运营刚需）：调用方留空
+// lastMsgID 时回退本包发送账，消息键带最近一条实际发出的 id、挂在实际会话 JID（LID）上；
+// 发送账没有记录时不拒、不带键，维持库侧退化语义。
+func TestDeleteChatBackfillsFromSendLedger(t *testing.T) {
+	dev := fakeDevice(t, "8613800000000@s.whatsapp.net", "android", "A")
+	m, _, get := startFakeWA(t, nil, nil, dev)
+	if err := m.StartClient(*dev.ID); err != nil {
+		t.Fatal(err)
+	}
+	s := get(dev.ID.String())
+	pn := jidOf(t, "447723171050@s.whatsapp.net")
+	lid := jidOf(t, "54246208704608@lid")
+	s.mu.Lock()
+	s.lidMap = map[types.JID]types.JID{pn: lid}
+	s.sendID = "3EB0AA"
+	s.mu.Unlock()
+
+	if id, err := WhatsappSendMessage(nil, "8613800000000", pn.String(), "hi"); err != nil || id != "3EB0AA" {
+		t.Fatalf("前置发信失败: id=%q err=%v", id, err)
+	}
+
+	if err := WhatsappDeleteChat(nil, "8613800000000", pn.String(), "", time.Time{}, false); err != nil {
+		t.Fatalf("删除会话失败: %v", err)
+	}
+	_, _, _, _, patches := s.snapshot()
+	mr := patches[len(patches)-1].Mutations[0].Value.GetDeleteChatAction().GetMessageRange()
+	msgs := mr.GetMessages()
+	if len(msgs) != 1 {
+		t.Fatalf("发送账应回填出消息键，实得 %d 条", len(msgs))
+	}
+	key := msgs[0].GetKey()
+	if key.GetID() != "3EB0AA" || key.GetRemoteJID() != lid.String() || !key.GetFromMe() {
+		t.Fatalf("回填的消息键不符: id=%s remote=%s fromMe=%v", key.GetID(), key.GetRemoteJID(), key.GetFromMe())
+	}
+	if mr.GetLastMessageTimestamp() == 0 {
+		t.Error("发送账的时间戳应一并回填")
+	}
+
+	// 没发过、调用方也没传 id：不拒绝，不带消息键（删除范围交由对端判定）。
+	if err := WhatsappDeleteChat(nil, "8613800000000", "8613920000000", "", time.Time{}, false); err != nil {
+		t.Fatalf("发送账无记录不该拒绝删除: %v", err)
+	}
+	_, _, _, _, patches = s.snapshot()
+	if got := patches[len(patches)-1].Mutations[0].Value.GetDeleteChatAction().GetMessageRange().GetMessages(); len(got) != 0 {
+		t.Errorf("发送账无记录时不该带消息键，实得 %v", got)
+	}
+}
+
+// TestSendResultChatResolved 批量广播的 SendResult：To 保持调用方原文，Chat 是实际
+// 落点的会话 JID——单聊按库同款改写落 LID，群组原样；这样后台群发后删框不必猜 LID。
+func TestSendResultChatResolved(t *testing.T) {
+	dev := fakeDevice(t, "8613800000000@s.whatsapp.net", "android", "A")
+	cfg := &config.WhatsappSessionsConfig{AntibanEnabled: waBool(false)}
+	m, _, get := startFakeWA(t, cfg, nil, dev)
+	if err := m.StartClient(*dev.ID); err != nil {
+		t.Fatal(err)
+	}
+	s := get(dev.ID.String())
+	s.mu.Lock()
+	s.lidMap = map[types.JID]types.JID{jidOf(t, "8613900000000@s.whatsapp.net"): jidOf(t, "54246208704608@lid")}
+	s.mu.Unlock()
+
+	oldSleep, oldDelay := waBatchSleep, waBatchDelay
+	waBatchSleep = func(time.Duration) {}
+	waBatchDelay = func(min, _ time.Duration) time.Duration { return min }
+	t.Cleanup(func() { waBatchSleep, waBatchDelay = oldSleep, oldDelay })
+
+	var mu sync.Mutex
+	var results []*SendResult
+	id := util.DefaultCallFunc.Register(util.CallWhatsappMsg+"SendResult", func(r *SendResult) {
+		mu.Lock()
+		results = append(results, r)
+		mu.Unlock()
+	})
+	t.Cleanup(func() { util.DefaultCallFunc.Unregister(util.CallWhatsappMsg+"SendResult", id) })
+
+	if err := WhatsappSendBatchAsync(nil, "8613800000000", []OutboundMessage{
+		{To: "8613900000000", Body: "m1"},
+		{To: "12345@g.us", Body: "m2"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	waitUntil(t, 3*time.Second, "两条 SendResult", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(results) == 2
+	})
+	mu.Lock()
+	defer mu.Unlock()
+	if r := results[0]; r.To != "8613900000000" || r.Chat != "54246208704608@lid" || r.Err != "" {
+		t.Errorf("单聊结果不符: %+v（期望 To 原文、Chat 落 LID）", r)
+	}
+	if r := results[1]; r.Chat != "12345@g.us" {
+		t.Errorf("群组结果 Chat=%q，期望原样 12345@g.us", r.Chat)
+	}
+}
+
 // collectEvent 是一次事件翻译断言收到的载荷。
 type collectEvent struct {
 	mu       *sync.Mutex
@@ -763,25 +931,8 @@ func TestSendBatchAsync(t *testing.T) {
 		t.Errorf("只有前两条该触达会话: %+v", sent)
 	}
 
-	// 已取消的 ctx：每条都广播「发送已取消」而不是静默蒸发，且零发送。
-	canceled, cancel := context.WithCancel(context.Background())
-	cancel()
-	mu.Lock()
-	results = nil
-	mu.Unlock()
-	if err := WhatsappSendBatchAsync(canceled, "8613800000000", []OutboundMessage{
-		{To: "8613900000000", Body: "x"},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	waitUntil(t, 3*time.Second, "取消的 SendResult", func() bool {
-		mu.Lock()
-		defer mu.Unlock()
-		return len(results) == 1
-	})
-	if !strings.Contains(results[0].Err, "发送已取消") {
-		t.Errorf("取消形态 Err=%q", results[0].Err)
-	}
+	// 调用方 cancel / deadline 对批次的影响另立用例（TestSendBatchAsyncCtxContract），
+	// 这里不测：本用例的 cfg 把小时闸压到 2 条，额度已被上面五条吃掉。
 
 	// 空列表与未启动账号在接走之前就地拒绝（不产生广播）。
 	if err := WhatsappSendBatchAsync(nil, "8613800000000", nil); err == nil ||
@@ -792,6 +943,75 @@ func TestSendBatchAsync(t *testing.T) {
 		!strings.Contains(err.Error(), "没有在跑") {
 		t.Errorf("未启动账号应当被拒: %v", err)
 	}
+}
+
+// TestSendBatchAsyncCtxContract 批次终止条件的两向闸：调用方 cancel 不传导（已受理的
+// 消息不因客户端挂断而蒸发），调用方 deadline 传导（预算用尽逐条给落点）。
+//
+// 变异对照：把 waBatchCtx 退回「直接用调用方 ctx」⇒ 第一段红（cancel 掐死批次）；
+// 退回「WithoutCancel 且不取 deadline」⇒ 第二段红（过期预算不再中止剩余条目）。
+func TestSendBatchAsyncCtxContract(t *testing.T) {
+	dev := fakeDevice(t, "8613800000000@s.whatsapp.net", "android", "A")
+	cfg := &config.WhatsappSessionsConfig{AntibanEnabled: waBool(false), SendMaxPerHour: 30}
+	m, _, get := startFakeWA(t, cfg, nil, dev)
+	if err := m.StartClient(*dev.ID); err != nil {
+		t.Fatal(err)
+	}
+	s := get(dev.ID.String())
+
+	var mu sync.Mutex
+	var results []*SendResult
+	id := util.DefaultCallFunc.Register(util.CallWhatsappMsg+"SendResult", func(r *SendResult) {
+		mu.Lock()
+		results = append(results, r)
+		mu.Unlock()
+	})
+	t.Cleanup(func() { util.DefaultCallFunc.Unregister(util.CallWhatsappMsg+"SendResult", id) })
+	one := func(ctx context.Context, body string) *SendResult {
+		t.Helper()
+		mu.Lock()
+		results = nil
+		mu.Unlock()
+		if err := WhatsappSendBatchAsync(ctx, "8613800000000", []OutboundMessage{
+			{To: "8613900000000", Body: body},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		waitUntil(t, 3*time.Second, "一条 SendResult (body="+body+")", func() bool {
+			mu.Lock()
+			defer mu.Unlock()
+			return len(results) == 1
+		})
+		mu.Lock()
+		defer mu.Unlock()
+		return results[0]
+	}
+
+	t.Run("调用方已 cancel 仍照常发出", func(t *testing.T) {
+		canceled, cancel := context.WithCancel(context.Background())
+		cancel()
+		r := one(canceled, "x")
+		if r.Err != "" || r.MsgID != "MSG-1" {
+			t.Fatalf("cancel 传导进了批次（已受理的消息被掐死）: %+v", r)
+		}
+		_, _, _, sent, _ := s.snapshot()
+		if len(sent) != 1 {
+			t.Fatalf("应真发 1 条，实得 %d", len(sent))
+		}
+	})
+
+	t.Run("调用方 deadline 过期则中止", func(t *testing.T) {
+		expired, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+		defer cancel()
+		r := one(expired, "y")
+		if !strings.Contains(r.Err, "发送已取消") {
+			t.Fatalf("过期预算该逐条广播取消，实得 Err=%q", r.Err)
+		}
+		_, _, _, sent, _ := s.snapshot()
+		if len(sent) != 1 {
+			t.Fatalf("过期批次不该再触达会话，sent 总数=%d", len(sent))
+		}
+	})
 }
 
 // TestWaBatchDelayRange 随机间隔取值器：min==max 塌成定值，正常区间落在 [min,max]。

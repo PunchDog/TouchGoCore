@@ -12,12 +12,15 @@ package whatsapp
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 
 	"touchgocore/config"
+	"touchgocore/util"
 )
 
 // waitWrapperExited 等某个账号的常驻协程收手（wrapper 的 done 关闭）。
@@ -133,6 +136,192 @@ func TestSendRefusesWhenRowGone(t *testing.T) {
 	}
 	if n := m.countClients(); n != 0 {
 		t.Fatalf("重建失败后不该留下在跑会话，实得 %d", n)
+	}
+}
+
+// TestListGroupsReconnectsBeforeQuery 列可发言群组要向服务器实时查询，旧形态在断线时
+// 直接抛「websocket not connected」，把后台群发卡死在这一步（现场日志实证）。
+// 现在必须先自愈再查：断了就催连并等连上。
+func TestListGroupsReconnectsBeforeQuery(t *testing.T) {
+	dev := fakeDevice(t, "8613800000000@s.whatsapp.net", "android", "A")
+	_, _, get := startFakeWA(t, nil, nil, dev)
+	if err := WhatsappStartClient(dev.ID.String()); err != nil {
+		t.Fatal(err)
+	}
+	s := get(dev.ID.String())
+	waitUntil(t, 2*time.Second, "首次连上", s.LoggedIn)
+
+	before := s.countLogins()
+	s.setDown()
+	if _, err := WhatsappListSpeakableGroups(nil, "8613800000000@s.whatsapp.net"); err != nil {
+		t.Fatalf("断线时列群组应先重连再查，实得 %v", err)
+	}
+	if got := s.countLogins(); got <= before {
+		t.Fatalf("Login 调用数 %d → %d，列群组没有触发自愈", before, got)
+	}
+}
+
+// TestDeleteChatReconnectsBeforeQuery 删会话框同样是要在线才办得成的动作，口径与发信一致。
+func TestDeleteChatReconnectsBeforeQuery(t *testing.T) {
+	dev := fakeDevice(t, "8613800000000@s.whatsapp.net", "android", "A")
+	_, _, get := startFakeWA(t, nil, nil, dev)
+	if err := WhatsappStartClient(dev.ID.String()); err != nil {
+		t.Fatal(err)
+	}
+	s := get(dev.ID.String())
+	waitUntil(t, 2*time.Second, "首次连上", s.LoggedIn)
+
+	before := s.countLogins()
+	s.setDown()
+	if err := WhatsappDeleteChat(nil, "8613800000000@s.whatsapp.net", "8613900000000@s.whatsapp.net", "", time.Time{}, false); err != nil {
+		t.Fatalf("断线时删框应先重连，实得 %v", err)
+	}
+	if got := s.countLogins(); got <= before {
+		t.Fatalf("Login 调用数 %d → %d，删框没有触发自愈", before, got)
+	}
+}
+
+// TestBatchHealsEveryItem 批跑到一半掉线时，剩余条目要逐条自愈而不是全部撞在同一个断口上：
+// 假会话在第 1 条发出后就把登录态按回 false，第 2 条必须靠 reconnectAndAwait 重新连上。
+func TestBatchHealsEveryItem(t *testing.T) {
+	dev := fakeDevice(t, "8613800000000@s.whatsapp.net", "android", "A")
+	// 防封闸显式关掉：配了 sessions 段就等于开防封（EffectiveAntibanEnabled 的 nil 三态
+	// 读作 true），闸门会给首条 15 秒延迟，把这条用例的节奏整个吞掉。
+	cfg := &config.WhatsappSessionsConfig{
+		SendMinDelaySec: 1, SendMaxDelaySec: 1, AntibanEnabled: waBool(false),
+	}
+	_, _, get := startFakeWA(t, cfg, func(s *fakeSession) { s.downAfterSends = 1 }, dev)
+	if err := WhatsappStartClient(dev.ID.String()); err != nil {
+		t.Fatal(err)
+	}
+	s := get(dev.ID.String())
+	waitUntil(t, 2*time.Second, "首次连上", s.LoggedIn)
+
+	var mu sync.Mutex
+	var results []*SendResult
+	rid := util.DefaultCallFunc.Register(util.CallWhatsappMsg+"SendResult", func(r *SendResult) {
+		mu.Lock()
+		results = append(results, r)
+		mu.Unlock()
+	})
+	t.Cleanup(func() { util.DefaultCallFunc.Unregister(util.CallWhatsappMsg+"SendResult", rid) })
+
+	if err := WhatsappSendBatchAsync(context.Background(), "8613800000000", []OutboundMessage{
+		{To: "8613900000000", Body: "a"},
+		{To: "8613900000001", Body: "b"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	waitUntil(t, 8*time.Second, "两条 SendResult 都落账", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(results) == 2
+	})
+	mu.Lock()
+	last := append([]*SendResult(nil), results...)
+	mu.Unlock()
+	if last[0].MsgID == "" || last[1].MsgID == "" {
+		t.Fatalf("两条都应发出去，实得 %+v", last)
+	}
+	if got := s.countLogins(); got < 2 {
+		t.Fatalf("Login 调用数=%d，期望 ≥2（第 2 条之前应催过一次重连）", got)
+	}
+}
+
+// TestListContactsRevivesWithoutWaiting 查好友读的是本地会话库：死对象要复活
+// （库把子存储换成了 NoopStore），但不许等登录建立——这条假件永远连不上，
+// 若误用了等连接的分支，用例会烧满 5 秒预算并报「未能连上」。
+func TestListContactsRevivesWithoutWaiting(t *testing.T) {
+	dev := fakeDevice(t, "8613800000000@s.whatsapp.net", "android", "A")
+	other := jidOf(t, "8613900000000@s.whatsapp.net")
+	cfg := &config.WhatsappSessionsConfig{ConnectTimeoutSec: 5}
+	_, _, get := startFakeWA(t, cfg, func(s *fakeSession) {
+		s.loginErr = errBoom
+		s.contacts = map[types.JID]types.ContactInfo{other: {FirstName: "F"}}
+	}, dev)
+	if err := WhatsappStartClient(dev.ID.String()); err != nil {
+		t.Fatal(err)
+	}
+	old := get(dev.ID.String())
+	// 吊销标记在 dispatch 里当场落位（同步于这次 fire 调用），retired() 即刻为真；
+	// 不必再等常驻协程真的睡完一轮退避——复活由 ensureAlive 触发，它会先摘死对象。
+	old.fire(events.LoggedOut{})
+
+	start := time.Now()
+	list, err := WhatsappListContacts(nil, dev.ID.String())
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("复活后的本地读应当直接成功，实得 %v", err)
+	}
+	if len(list) != 1 || list[0].JID != other.String() {
+		t.Fatalf("好友列表不符: %+v", list)
+	}
+	if elapsed > 3*time.Second {
+		t.Fatalf("查好友竟等了 %s（本地读不该等登录）", elapsed)
+	}
+	if get(dev.ID.String()) == old {
+		t.Fatal("死对象没有被复活")
+	}
+}
+
+// TestSendContextCanceledIsNamed 调用方 ctx 已结束时，错误必须点名「上下文已结束」，
+// 而不是把库那串「failed to get LID for PN ...: context canceled」原样递出去——
+// 后者看起来像号码没注册/LID 查不到，值班会照字面去查号码，而真因是请求早就断了。
+func TestSendContextCanceledIsNamed(t *testing.T) {
+	dev := fakeDevice(t, "8613800000000@s.whatsapp.net", "android", "A")
+	_, _, get := startFakeWA(t, nil, nil, dev)
+	if err := WhatsappStartClient(dev.ID.String()); err != nil {
+		t.Fatal(err)
+	}
+	s := get(dev.ID.String())
+	waitUntil(t, 2*time.Second, "首次连上", s.LoggedIn)
+
+	cctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := WhatsappSendMessage(cctx, "8613800000000", "8613900000000", "hi")
+	if err == nil || !strings.Contains(err.Error(), "调用方上下文已结束") ||
+		!strings.Contains(err.Error(), "本条未发出") {
+		t.Fatalf("取消类错误要单独点名，实得 %v", err)
+	}
+	if _, _, _, sent, _ := s.snapshot(); len(sent) != 0 {
+		t.Fatalf("上下文已结束却仍递出了 %d 条", len(sent))
+	}
+}
+
+// TestGateSleepHonorsContext 防封延迟可达数秒到十几秒：只 time.Sleep 的话，请求断了
+// 这里还在睡，醒来又往已取消的 ctx 上发一条注定失败的发送。睡眠必须可被打断，
+// 且打断要记进闸的失败账（AfterSendFailed），不然 Health 看不到这一格。
+func TestGateSleepHonorsContext(t *testing.T) {
+	dev := fakeDevice(t, "8613800000000@s.whatsapp.net", "android", "A")
+	fg := installFakeGate(t)
+	fg.delayMs = 40_000
+	cfg := &config.WhatsappSessionsConfig{AntibanEnabled: waBool(true)}
+	_, _, get := startFakeWA(t, cfg, nil, dev)
+	if err := WhatsappStartClient(dev.ID.String()); err != nil {
+		t.Fatal(err)
+	}
+	s := get(dev.ID.String())
+	waitUntil(t, 2*time.Second, "首次连上", s.LoggedIn)
+
+	cctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	start := time.Now()
+	_, err := WhatsappSendMessage(cctx, "8613800000000", "8613900000000", "hi")
+	elapsed := time.Since(start)
+	if err == nil || !strings.Contains(err.Error(), "调用方上下文已结束") {
+		t.Fatalf("应报上下文已结束，实得 %v", err)
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("没有打断 %dms 的防封睡眠，耗时 %s", fg.delayMs, elapsed)
+	}
+	fg.mu.Lock()
+	failed := fg.failed
+	fg.mu.Unlock()
+	if failed != 1 {
+		t.Fatalf("AfterSendFailed 记账=%d，期望 1（被打断的发送要进 Health 的失败信号）", failed)
+	}
+	if _, _, _, sent, _ := s.snapshot(); len(sent) != 0 {
+		t.Fatalf("睡眠被打断后不应发出，实得 %d 条", len(sent))
 	}
 }
 

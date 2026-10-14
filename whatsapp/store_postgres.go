@@ -79,6 +79,7 @@ func (s *WAStore) Close() error {
 // WM/store/store.go:286-298 —— 它唯一的写动作就是 device.Container.DeleteDevice）：
 //   - 收到 401 device_removed 流错误：WM/connectionevents.go:40-47；
 //   - 收到登出型 connect failure：WM/connectionevents.go:126-132。
+//
 // 两处都紧跟着 `cli.Store.Delete(ctx)`，即「服务端一句话就把本机的配对凭据抹掉」。
 //
 // 为什么要拦：删行等于业务侧那个号从此无法再被认出来（重新扫码前 StartClient 必失败），
@@ -169,7 +170,7 @@ func (s *WAStore) AllDevices(ctx context.Context) ([]*store.Device, error) {
 // QR 配对流程据此不需要手动 PutDevice。
 //
 // 同样套删除闸门：库在配对失败的两条分支上也会调 Store.Delete
-//（查自 WM/pair.go:234 与 :262），拦下来与上面同一套理由。
+// （查自 WM/pair.go:234 与 :262），拦下来与上面同一套理由。
 func (s *WAStore) NewDevice() *store.Device {
 	return pinWADevice(s.container.NewDevice())
 }

@@ -79,6 +79,9 @@ type waManager struct {
 
 	clients sync.Map // map[jid string]*waClientWrapper
 	qr      sync.Map // map[sessionID string]*QRSession
+	// restarts 是「僵尸会话重建」的按键互斥锁：ensureReady 会摘掉死对象再起一个新的，
+	// 而门面是并发可调的（同账号可并发发信），不锁住就会有两个重建者互相抢 key。
+	restarts sync.Map // map[jid string]*sync.Mutex
 
 	// wg 覆盖全部常驻协程：每 Client 一条 run + 每配对会话一条 pump。
 	// StopAll 关完信号后按预算等它归零，等不到就放手（协程会自行收尾）。
@@ -270,6 +273,144 @@ func (m *waManager) client(fromJID string) (*waClientWrapper, error) {
 		return nil, fmt.Errorf("whatsapp 账号 %s 没有在跑的会话（先 WhatsappStartClient，未配对先 WhatsappStartPairing）", jid.String())
 	}
 	return v.(*waClientWrapper), nil
+}
+
+// restartLock 取（并惰性建）某个账号的重建锁。
+func (m *waManager) restartLock(key string) *sync.Mutex {
+	if v, ok := m.restarts.Load(key); ok {
+		return v.(*sync.Mutex)
+	}
+	mu := &sync.Mutex{}
+	v, _ := m.restarts.LoadOrStore(key, mu)
+	return v.(*sync.Mutex)
+}
+
+// ensureReady 取一个「现在就能发信」的 wrapper：连着就返，断了就催一轮立即重连，
+// 僵尸（常驻协程已收手或已落 logged_out 标记）就先摘掉再重建，最后等它连上。
+//
+// 为什么必须有这一步：常驻协程在 logged_out 之后会退出（wa_manager.go run() 的闸门），
+// 而 sync.Map 里那份 wrapper 还占着 key——此时 StartClient 的幂等分支会把这具死对象
+// 原样端出来并返回 nil，调用方以为「已在跑」，实际 SendText 只能撞在一个已拆的 socket 上。
+// 拦了库侧自动删行（store_postgres.go waPinnedContainer）之后，「行还在、会话已死」
+// 成了常态，所以这个复活步骤是发信面的必需环节，不是优化项。
+//
+// 预算口径：催重连是即时的（退避睡眠被 kick 提前叫醒），等待上限取
+// EffectiveConnectTimeout（缺省 15 秒），调用方的 ctx 一到就撒手，不留悬挂等待。
+func (m *waManager) ensureReady(ctx context.Context, fromJID string) (*waClientWrapper, error) {
+	jid, err := waAccountJID(fromJID)
+	if err != nil {
+		return nil, fmt.Errorf("whatsapp 账号 JID 不可用: %w", err)
+	}
+	key := jid.String()
+	w, err := m.liveWrapper(key, jid)
+	if err != nil {
+		return nil, err
+	}
+	if err := w.waitConnected(ctx); err != nil {
+		return nil, err
+	}
+	return w, nil
+}
+
+// liveWrapper 返回一份「还活着」的 wrapper：健康就原样返回，断开就催一次重连，
+// 死透就摘掉重建。等待连接由调用方的 waitConnected 负责。
+func (m *waManager) liveWrapper(key string, jid types.JID) (*waClientWrapper, error) {
+	v, ok := m.clients.Load(key)
+	if !ok {
+		return nil, fmt.Errorf("whatsapp 账号 %s 没有在跑的会话（先 WhatsappStartClient，未配对先 WhatsappStartPairing）", key)
+	}
+	w := v.(*waClientWrapper)
+	if !w.retired() {
+		if !w.sess.LoggedIn() {
+			w.kickNow()
+		}
+		return w, nil
+	}
+
+	// 死对象重建：先锁后双检——并发里可能已经有别人换过一份活的，那就不必再摘。
+	mu := m.restartLock(key)
+	mu.Lock()
+	defer mu.Unlock()
+	if v2, ok := m.clients.Load(key); ok {
+		w2 := v2.(*waClientWrapper)
+		if !w2.retired() {
+			return w2, nil
+		}
+		// StopClient 对已退出的 wrapper 是即刻返回的（done 已关），
+		// 对「刚收到吊销事件、协程还在收尾」的则按 1.5 秒预算等它把 socket 拆干净。
+		if serr := m.StopClient(jid); serr != nil {
+			return nil, fmt.Errorf("whatsapp 账号 %s 摘除旧会话失败: %w", key, serr)
+		}
+	}
+	if err := m.StartClient(jid); err != nil {
+		return nil, fmt.Errorf("whatsapp 账号 %s 重登失败: %w", key, err)
+	}
+	v3, ok := m.clients.Load(key)
+	if !ok {
+		return nil, fmt.Errorf("whatsapp 账号 %s 重登后会话不在册（并发被摘除，请重试）", key)
+	}
+	return v3.(*waClientWrapper), nil
+}
+
+// retired 报告这具 wrapper 是否已经不可能再自己连上：已落 logged_out 标记，
+// 或常驻协程已退出（done 关闭）。
+//
+// 「主动停掉的账号」不会走到这里：StopClient 是 LoadAndDelete 先摘 key 再关 stop，
+// 所以还挂在 map 上却已经 done 关闭的，只可能是吊销或协程自己收手——正是发信面需要
+// 复活的那一档。
+func (w *waClientWrapper) retired() bool {
+	if w.loggedOut.Load() {
+		return true
+	}
+	select {
+	case <-w.done:
+		return true
+	default:
+		return false
+	}
+}
+
+// kickNow 非阻塞地催常驻协程立刻试一轮连接（退避睡眠会被这个令牌提前叫醒）。
+func (w *waClientWrapper) kickNow() {
+	select {
+	case w.kick <- struct{}{}:
+	default:
+	}
+}
+
+// waitConnected 等本账号进入登录态，上限 EffectiveConnectTimeout。
+//
+// 判据用 sess.LoggedIn() 而不是「Login 返回 nil」：ConnectContext 只代表 socket 与
+// Noise 握手完成，凭据要被服务端接受才算连上（见 waitLoggedIn 的真机实测注）。
+// 每 100ms 轮询：登录本身是库的异步事件派发，没有可等的通道。
+func (w *waClientWrapper) waitConnected(ctx context.Context) error {
+	if w.sess.LoggedIn() {
+		return nil
+	}
+	if ctx == nil {
+		ctx = runCtx()
+	}
+	deadline := time.NewTimer(w.cfg.EffectiveConnectTimeout())
+	defer deadline.Stop()
+	tick := time.NewTicker(100 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("whatsapp 账号 %s 等待连上时被取消: %w", w.jid.String(), ctx.Err())
+		case <-w.done:
+			if w.loggedOut.Load() {
+				return fmt.Errorf("whatsapp 账号 %s 会话已被服务端吊销（logged_out），需重新扫码配对", w.jid.String())
+			}
+			return fmt.Errorf("whatsapp 账号 %s 的常驻协程已退出", w.jid.String())
+		case <-deadline.C:
+			return fmt.Errorf("whatsapp 账号 %s 在 %s 内未能连上", w.jid.String(), w.cfg.EffectiveConnectTimeout())
+		case <-tick.C:
+			if w.sess.LoggedIn() {
+				return nil
+			}
+		}
+	}
 }
 
 // run 是单个 Client 的常驻协程：连上就守着，断了按退避重连，logged_out 收手。

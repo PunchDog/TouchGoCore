@@ -353,14 +353,19 @@ func WhatsappStartPairing(ctx context.Context) (string, error) {
 //
 // 正文里的链接不会自动带预览：库侧没有 preview_url 这一层，需要预览就发富媒体形态，
 // 那不在本门面里。
+//
+// 连接态自愈：这个账号的会话断开时，本门面会先催一轮重连（退避睡眠被立即叫醒），
+// 僵尸会话（常驻协程已收手或已收 logged_out）则先摘掉再重建，连上才发；
+// 等待上限 EffectiveConnectTimeout（缺省 15 秒），到点或调用方 ctx 取消即返回错误，
+// 不会把发信请求挂在无限等待上。会话真被服务端吊销了，错误文案是「需重新扫码配对」。
 func WhatsappSendMessage(ctx context.Context, fromJID, to, body string) (string, error) {
 	m, err := currentWA()
 	if err != nil {
 		return "", err
 	}
-	w, err := m.client(fromJID)
+	w, err := m.ensureReady(ctx, fromJID)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("whatsapp 发送消息失败: %w", err)
 	}
 	jid, err := waJID(to)
 	if err != nil {
@@ -376,14 +381,15 @@ func WhatsappSendMessage(ctx context.Context, fromJID, to, body string) (string,
 //
 // 能不能发（仅管理员可发言群、被禁言等）不在这里判定，先用
 // WhatsappListSpeakableGroups 拿可发言清单；真发出去被服务器拒了会原样带错误上抛。
+// 连接态自愈与等待上限同 WhatsappSendMessage。
 func WhatsappSendGroupMessage(ctx context.Context, fromJID, groupJID, body string) (string, error) {
 	m, err := currentWA()
 	if err != nil {
 		return "", err
 	}
-	w, err := m.client(fromJID)
+	w, err := m.ensureReady(ctx, fromJID)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("whatsapp 发送群组消息失败: %w", err)
 	}
 	jid, err := waJID(groupJID)
 	if err != nil {

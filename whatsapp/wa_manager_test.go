@@ -85,6 +85,17 @@ func (f *fakeSession) Disconnect() {
 	f.loggedIn = false
 }
 
+// setDown 只把登录态按回 false，不记 disconnect 次数、不派发任何事件。
+//
+// 它仿真的是发信自愈要治的那一档窗口：socket 已经掉了、但库还没来得及派发
+// events.Disconnected（或派发到了但登录态尚未刷新）。用 Disconnect() 造这个状态会
+// 顺带把 downed 令牌递进去，常驻协程立刻自己重连，测不出 ensureReady 的催连是否真生效。
+func (f *fakeSession) setDown() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.loggedIn = false
+}
+
 func (f *fakeSession) Logout(ctx context.Context) error {
 	f.mu.Lock()
 	f.logouts++

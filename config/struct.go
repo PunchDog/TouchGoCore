@@ -382,10 +382,23 @@ func (p *PaySDKConfig) Endpoint(name string) (string, bool) {
 // 会话本体（含 NoiseKey/IdentityKey 等密钥材料）持久化在本仓的 Postgres 会话库里。
 // 资金动作必须有持牌主体，仍留在 pay_sdks 供应商侧，所以只有 provider 与 sessions 两段。
 type WhatsappConfig struct {
-	Provider *PaySDKRef `json:"provider"` // 充值/提现通道引用的 SDK
-	// Sessions 是 whatsmeow 消息侧的会话库与连接参数。留空（或不填 dsn）即消息侧
-	// 不启动，不影响资金链路——「只跑钱、不跑协议」仍是合法形态。
+	// Enable 是通道总闸：显式为 "on" 才装配本通道，消息侧（whatsmeow）与资金侧一起闸。
+	// 整段不写、键不写、写成 off 或任何别的值都读作「不开」——口径与 pay_sdks/nft_sdks
+	// 段一致：默认不启动。whatsmeow 是非官方协议客户端，「没配即不连 WhatsApp 服务器」
+	// 必须是缺省，而不是靠「记得别填 dsn」。
+	Enable string `json:"enable"`
+	// Provider 是充值/提现通道引用的 SDK。Enable 不为 on 时整段不参与装配，
+	// 这一项填不填都不生效。
+	Provider *PaySDKRef `json:"provider"`
+	// Sessions 是 whatsmeow 消息侧的会话库与连接参数。Enable 为 on 但整段留空
+	//（或 dsn 为空）即只装资金侧，不影响 provider——「只跑钱、不跑协议」仍是合法形态。
 	Sessions *WhatsappSessionsConfig `json:"sessions"`
+}
+
+// Enabled 该通道是否被显式开启（口径与 PaySDKConfig.Enabled 一致：enable 大小写
+// 不敏感的 "on"，nil 接收者可安全调用）。段缺失即未开，调用侧不必先判 nil。
+func (c *WhatsappConfig) Enabled() bool {
+	return c != nil && strings.EqualFold(strings.TrimSpace(c.Enable), "on")
 }
 
 // WhatsappSessionsConfig 是 whatsmeow 消息侧的运行参数。

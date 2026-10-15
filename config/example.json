@@ -346,12 +346,14 @@
     },
     "whatsapp说明": "WhatsApp 通道（消息/充值/提现），代码在 whatsapp 包。消息侧走 go.mau.fi/whatsmeow 直连 WhatsApp 多设备协议（QR 扫码配对、发文本、删会话框），会话密钥材料存在 sessions.dsn 指向的 Postgres 库里，不经任何 HTTP 消息网关；资金侧（充值/提现）仍引用一个 pay_sdks 段——提现必须有持牌主体出账，而 WhatsApp 协议里没有任何可发起转账的 API",
     "whatsapp": {
+        "enable说明": "通道总闸：必须显式为 on 才装配本通道，且一支管两支——whatsmeow 消息侧与资金侧一起开或一起关。整段不写、键不写、写成 off 或任何别的值都读作不开，启动日志留痕「不启动Whatsapp（无 whatsapp 段或 whatsapp.enable 不为 on）」，本包所有门面调用就地拒绝。示例写 off：消息侧直连的是 WhatsApp 官方服务器（非官方客户端，账号有封号风险），资金侧会真的出款，两支都不该是「复制示例即生效」的形态",
+        "enable": "off",
         "provider说明": "充值/提现链路的 SDK 引用；漏一个开关的代价是少一条通道，多开一条的代价是真金出款，所以默认不启用",
         "provider": {
             "sdk": "supplier_a",
             "account": "default"
         },
-        "sessions说明": "whatsmeow 消息侧的会话库与连接参数。这一段刻意不放任何凭证字段：账号密钥材料（NoiseKey/IdentityKey/SignedPreKey/AdvSecretKey）由 sqlstore 直接管在数据库表里，配进启动配置等于把账号本体抄进版本库。整段不写或 dsn 留空即消息侧不启动（资金侧不受影响）；非官方协议客户端有封号风险，部署前想清楚",
+        "sessions说明": "whatsmeow 消息侧的会话库与连接参数（只在 enable 为 on 时参与装配）。这一段刻意不放任何凭证字段：账号密钥材料（NoiseKey/IdentityKey/SignedPreKey/AdvSecretKey）由 sqlstore 直接管在数据库表里，配进启动配置等于把账号本体抄进版本库。整段不写或 dsn 留空即消息侧不启动（资金侧不受影响）；非官方协议客户端有封号风险，部署前想清楚",
         "sessions": {
             "dsn说明": "Postgres 连接串，whatsmeow 会话表建在这个库里；它本身含数据库口令，属敏感值——只经部署配置注入、不进版本库，禁入日志与错误文案（whatsapp 包对含 DSN 的错误做脱敏）。示例值不可直接使用",
             "dsn": "postgres://CHANGE-ME:CHANGE-ME@127.0.0.1:5432/whatsapp_sessions?sslmode=disable",

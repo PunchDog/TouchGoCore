@@ -83,3 +83,23 @@ func TestEffectiveAntiban(t *testing.T) {
 		t.Error("整段缺失该读作关")
 	}
 }
+
+// TestWhatsappConfigEnabled 通道总闸读数：显式 "on"（大小写与首尾空白不敏感）才算开，
+// 段缺失/键缺失/off/其它值一律关。口径与 PaySDKConfig.Enabled 一致——whatsmeow 是非官方
+// 协议客户端，「没显式开即不连 WhatsApp 服务器」必须是缺省。
+func TestWhatsappConfigEnabled(t *testing.T) {
+	for _, v := range []string{"on", "ON", "On", " on ", "\ton\n"} {
+		if !(&WhatsappConfig{Enable: v}).Enabled() {
+			t.Errorf("enable=%q 该读作开", v)
+		}
+	}
+	for _, v := range []string{"", "  ", "off", "true", "1", "yes"} {
+		if (&WhatsappConfig{Enable: v}).Enabled() {
+			t.Errorf("enable=%q 该读作关", v)
+		}
+	}
+	var nilCfg *WhatsappConfig
+	if nilCfg.Enabled() {
+		t.Error("整段缺失该读作关")
+	}
+}

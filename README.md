@@ -36,11 +36,15 @@ Go 游戏服务框架：WebSocket、gRPC、定时器、Lua、Telegram、Gin、Re
   QR 扫码配对在本仓（`WhatsappStartPairing` + WebSocket 端点 `GET /whatsapp/qr/{session_id}`），
   多账号会话密钥材料存 `whatsapp.sessions.dsn` 指向的 Postgres（sqlstore 管表），发消息/删会话框/
   吊销配对（`WhatsappDeleteDevice`：在跑先向服务端解绑再删设备行，没在跑只删行）
-  直连 WhatsApp 多设备协议；只有资金侧（充值/提现）仍引用 `pay_sdks`。whatsmeow 是非官方客户端，
-  用它收发违反 WhatsApp 服务条款、**账号可被封**，框架不为此担保，风控与责任归业务方。
+  直连 WhatsApp 多设备协议；只有资金侧（充值/提现）仍引用 `pay_sdks`。整通道另有一支总闸
+  `whatsapp.enable`：**显式为 `on` 才装配**，值不为 on（或压根没有 whatsapp 段）时消息侧与
+  资金侧一起不启动，本包所有门面调用就地拒绝——默认不开是刻意的，见下条封号风险。
+  whatsmeow 是非官方客户端，用它收发违反 WhatsApp 服务条款、**账号可被封**，
+  框架不为此担保，风控与责任归业务方。
   「开不开」有两处真相：SDK 段的 `enable` 决定这套凭证能不能用，通道段的 `sdk` 决定这条通道用不用它，
   两处都到位才是开；缺段或写 `off` 都不阻断整机。出款引用必须点到一个 `enable: "on"` 的商户账户
-  （只有验证码链路可以没有账户）。键名与逐项说明见 [config/example.json](config/example.json)。
+  （只有验证码链路可以没有账户）；whatsapp 通道在这两处之前还要先过 `whatsapp.enable` 总闸。
+  键名与逐项说明见 [config/example.json](config/example.json)。
   `secret_key` 建议留空，由下游按 SDK 段名注册 `util.CallPaySDKMsg+"<段名>"` 钩子在启动前注入，
   不写进版本库；金额一律整数最小单位、手续费走万分比整数，全链路禁浮点。
 - 资金动作的调用面：`pay.Channel` 四件事——查商户账户 `QueryAccount`、充值 `Recharge`、

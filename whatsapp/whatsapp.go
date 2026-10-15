@@ -6,6 +6,9 @@
 // 注册回调接手结果（资金回执 kind=Recharge/Withdraw/Query；消息事件
 // kind=Inbound/Receipt/Connection/QR/SendResult，载荷形态见 wa_client.go 与 wa_pairing.go）。
 //
+// 整通道由 whatsapp.enable 总闸控制：值不为 "on"（或压根没有 whatsapp 段）时
+// WhatsappStart 两支都不装配，本包所有门面调用就地拒绝。
+//
 // 两条链路用的是两套传输，别混：
 //   - 消息侧走 go.mau.fi/whatsmeow 直连 WhatsApp 多设备协议（wa_client.go 门面 +
 //     wa_manager.go 会话管理 + wa_pairing.go 扫码配对 + wa_delete_device.go 吊销配对 +
@@ -82,23 +85,28 @@ func whatsappCfg() *config.WhatsappConfig {
 
 // WhatsappStart 装配消息侧与资金链路。
 //
-// 两边的判定各自独立：资金侧引用缺失、SDK 段没开、密钥未注入，都只记日志并返回，
-// 不该阻断整机启动；消息侧只看 whatsapp.sessions.dsn 配没配、Postgres 连不连得上，
-// 连不上同样只记日志——「只跑钱、不跑协议」是常见形态，反过来「只跑协议」也是。
+// 总闸先看 whatsapp.enable：整段没配或值不为 "on"（大小写不敏感，两侧空白忽略）即
+// 两支都不装配、直接返回——whatsmeow 是非官方客户端，不该因为「dsn 恰好写了」就连上
+// WhatsApp 服务器。闸打开后两边的判定各自独立：资金侧引用缺失、SDK 段没开、密钥未注入，
+// 都只记日志并返回，不该阻断整机启动；消息侧只看 whatsapp.sessions.dsn 配没配、
+// Postgres 连不连得上，连不上同样只记日志——「只跑钱、不跑协议」是常见形态，反过来「只跑协议」也是。
 func WhatsappStart(ctx context.Context) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	setRunCtx(ctx)
 	all := allCfg()
+	wcfg := whatsappCfg()
+	if !wcfg.Enabled() {
+		vars.Info("不启动Whatsapp（无 whatsapp 段或 whatsapp.enable 不为 on）")
+		return
+	}
 	startWA(all)
-	if cfg := whatsappCfg(); cfg != nil {
-		if p, ok := openFund(all, cfg.Provider); ok {
-			fund.Store(p)
-		}
+	if p, ok := openFund(all, wcfg.Provider); ok {
+		fund.Store(p)
 	}
 	if fund.Load() == nil && waMgr.Load() == nil {
-		vars.Info("不启动Whatsapp")
+		vars.Info("不启动Whatsapp（enable 为 on 但两支都没装起来：sessions.dsn 没配或会话库不可用、provider 引用不通）")
 	}
 }
 
@@ -122,6 +130,7 @@ func WhatsappStop(ctx context.Context) {
 // 既绕过了显式启动的裁决，也是封号检测最敏感的形态。代价是重启后业务方要自己
 // 把该上线的账号逐个 WhatsappStartClient——启动日志里把库里设备数报出来，方便对账。
 //
+// 只在 whatsapp.enable 为 on 时被调用（总闸在 WhatsappStart）。
 // 没配 DSN 或库连不上只记日志返回，不阻断整机（资金侧照常装配）。
 func startWA(all *config.Cfg) {
 	var scfg *config.WhatsappSessionsConfig

@@ -1,11 +1,13 @@
 package whatsapp
 
 import (
+	"context"
 	"strings"
 	"sync"
 	"testing"
 
 	"touchgocore/config"
+	"touchgocore/corectx"
 	"touchgocore/pay"
 	"touchgocore/util"
 )
@@ -45,7 +47,7 @@ func recorded() []*pay.PayResult {
 	return got
 }
 
-// payCfg 组一份「pay_sdks 登记一段 + provider 引用它」的完整配置。
+// payCfg 组一份「通道已开启 + pay_sdks 登记一段 + provider 引用它」的完整配置。
 //
 // 消息侧改走 whatsmeow 之后本包只剩 provider 一段引用：登录/发码链路已随
 // HTTP 供应商一起撤掉（扫码配对不经过任何供应商），资金链路不变。
@@ -61,6 +63,7 @@ func payCfg(baseURL string, endpoints map[string]string) *config.Cfg {
 			},
 		},
 		Whatsapp: &config.WhatsappConfig{
+			Enable:   "on",
 			Provider: &config.PaySDKRef{SDK: testSection, Account: testAccount},
 		},
 	}
@@ -101,6 +104,73 @@ func TestOpenFundFailClosed(t *testing.T) {
 	if _, ok := openFund(ready, ready.Whatsapp.Provider); !ok {
 		t.Error("引用齐备时应当启动")
 	}
+}
+
+// TestChannelEnableGateBlocksStart whatsapp.enable 不为 on 时两支都不装配：
+// 消息侧不开会话库、不建管理器（因此绝不会去连 WhatsApp 服务器），资金侧不挂 provider。
+//
+// 用例特意配上 provider 与一个 sessions.dsn：闸失效时资金链路会当场装配起来
+// （fund 非空即红），这是本用例的判据；waStore/waMgr 两项是兜底——dsn 指向 127.0.0.1:1
+// 本来就连不上，单靠它证不了消息侧没被装配。
+// enable 缺失与显式 off 必须同一个结果——「忘了开」不该表现成「连上了但发不出去」。
+func TestChannelEnableGateBlocksStart(t *testing.T) {
+	cfgOf := func(wa *config.WhatsappConfig) *config.Cfg {
+		c := payCfg("https://pay.invalid", allEndpoints())
+		c.Whatsapp = wa
+		return c
+	}
+	sessions := func() *config.WhatsappSessionsConfig {
+		return &config.WhatsappSessionsConfig{DSN: "postgres://u:p@127.0.0.1:1/ghost?sslmode=disable"}
+	}
+	off := []struct {
+		name string
+		wa   *config.WhatsappConfig
+	}{
+		{"没有 whatsapp 段", nil},
+		{"enable 键没写", &config.WhatsappConfig{Provider: &config.PaySDKRef{SDK: testSection, Account: testAccount}, Sessions: sessions()}},
+		{"enable 为空串", &config.WhatsappConfig{Enable: "  ", Sessions: sessions()}},
+		{"enable 为 off", &config.WhatsappConfig{Enable: "off", Sessions: sessions()}},
+		{"enable 写了非 on 的值", &config.WhatsappConfig{Enable: "true", Sessions: sessions()}},
+	}
+	for _, cs := range off {
+		WhatsappStop(nil)
+		WhatsappStart(corectx.WithCfg(context.Background(), cfgOf(cs.wa)))
+		if p := fund.Load(); p != nil {
+			t.Errorf("%s：资金链路却装配了", cs.name)
+		}
+		if m := waMgr.Load(); m != nil {
+			t.Errorf("%s：消息侧管理器却装配了（enable 闸失效）", cs.name)
+		}
+		if s := waStore.Load(); s != nil {
+			t.Errorf("%s：会话库却打开了（enable 闸失效）", cs.name)
+		}
+		if got := WhatsappListClients(); len(got) != 0 {
+			t.Errorf("%s：未启动却有 %d 个在跑会话", cs.name, len(got))
+		}
+		if err := WhatsappStartClient("8613800000000@s.whatsapp.net"); err == nil {
+			t.Errorf("%s：未启动时启动账号应当被拒", cs.name)
+		}
+		if _, err := WhatsappQuery(nil, "O1"); err == nil {
+			t.Errorf("%s：未启动时查询应当被拒", cs.name)
+		}
+	}
+	WhatsappStop(nil)
+
+	// 正向对照：enable 为 on（大小写与首尾空白不敏感）才装配资金侧。
+	// sessions 留空，消息侧仍按「没配 dsn 即不启动」独立判定。
+	for _, on := range []string{"on", "ON", "On", " on "} {
+		WhatsappStop(nil)
+		cfg := cfgOf(&config.WhatsappConfig{Enable: on, Provider: &config.PaySDKRef{SDK: testSection, Account: testAccount}})
+		WhatsappStart(corectx.WithCfg(context.Background(), cfg))
+		if fund.Load() == nil {
+			t.Errorf("enable=%q 应当装配资金链路", on)
+		}
+		if waMgr.Load() != nil {
+			t.Errorf("enable=%q 但 sessions 未配，消息侧不该装配", on)
+		}
+	}
+	WhatsappStop(nil)
+	recorded()
 }
 
 // TestOperationsRefuseWhenNotStarted 未启动时资金门面返回错误而不是 panic，

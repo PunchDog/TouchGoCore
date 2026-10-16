@@ -104,8 +104,17 @@ func (s *QRSession) hasIssuedPairCode() bool {
 	return s.pairIssued
 }
 
-// completePairCode 把码配对结果写入同步通道，只生效一次。
-func (s *QRSession) completePairCode(code string, err error) {
+// completePairCode 结算一次码配对：落「已出码」记账 → 扇出这条终帧 → 把结果交给同步门面。
+//
+// 三步顺序都不能倒：
+//   - 记账先于扇出：同号第二呼靠 hasIssuedPairCode 判「码已交出、允许替换」，
+//     反了会把已拿到码的号码继续当成「握手未完成」而拒绝替换；
+//   - 扇出先于交付：门面一返回就对业务方宣告「码已到手／已失败」，此时终帧必须
+//     已经进了事件流。否则迟到订阅者补投到的是上一条二维码帧，而业务方「先收到
+//     同步返回、后收到 QR 帧」的次序会随调度抖动（真机 -race 连跑可复现）。
+//
+// 只生效一次（pairIssued 闸门）。扫码会话没有同步通道（pairResult==nil），不在本函数范围内。
+func (s *QRSession) completePairCode(ev QREvent, code string, err error) {
 	if s.pairResult == nil {
 		return
 	}
@@ -116,6 +125,7 @@ func (s *QRSession) completePairCode(code string, err error) {
 	}
 	s.pairIssued = true
 	s.mu.Unlock()
+	s.emit(ev)
 	select {
 	case s.pairResult <- pairCodeResult{code: code, err: err}:
 	default:
@@ -335,8 +345,7 @@ func (m *waManager) runPairing(s *QRSession, sess waPairSession, qrChan <-chan w
 			return
 		}
 		err := fmt.Errorf("whatsapp 配对码失败: 配对会话在首个二维码项之前结束（digits=%s）", s.pairMasked)
-		s.completePairCode("", err)
-		s.emit(QREvent{Event: whatsmeow.QRChannelEventError, Error: err.Error()})
+		s.completePairCode(QREvent{Event: whatsmeow.QRChannelEventError, Error: err.Error()}, "", err)
 	}()
 
 	if err := sess.Connect(); err != nil {
@@ -355,20 +364,14 @@ func (m *waManager) runPairing(s *QRSession, sess waPairSession, qrChan <-chan w
 			s.emit(ev)
 			if s.pairPhone != "" && !firstCode {
 				firstCode = true
-				ctx := s.pairCtx
-				if ctx == nil {
-					ctx = context.Background()
-				}
-				code, err := sess.PairPhone(ctx, s.pairPhone, waPairCodeShowPushNotification,
+				code, err := sess.PairPhone(ctxOrBackground(s.pairCtx), s.pairPhone, waPairCodeShowPushNotification,
 					waPairCodeClientType, waPairCodeClientDisplayName)
 				if err != nil {
-					err = waMaskErr(fmt.Errorf("whatsapp 配对码失败: PairPhone 被拒（digits=%s）: %w", s.pairMasked, err), s.pairPhone, s.pairMasked)
-					s.completePairCode("", err)
-					s.emit(QREvent{Event: whatsmeow.QRChannelEventError, Error: err.Error()})
+					err = waMaskErr(fmt.Errorf("whatsapp 配对码失败: PairPhone 被拒（digits=%s）: %w", s.pairMasked, err), s.pairPhone)
+					s.completePairCode(QREvent{Event: whatsmeow.QRChannelEventError, Error: err.Error()}, "", err)
 					return
 				}
-				s.completePairCode(code, nil)
-				s.emit(QREvent{Event: QREventPairCode, Code: code})
+				s.completePairCode(QREvent{Event: QREventPairCode, Code: code}, code, nil)
 				vars.Info("WhatsApp 配对码已生成: session=%s phone=%s（用户在手机上输码，与扫码共用同一条事件流）", s.ID, s.pairMasked)
 			}
 			continue

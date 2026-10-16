@@ -79,7 +79,7 @@ type waManager struct {
 
 	clients sync.Map // map[jid string]*waClientWrapper
 	qr      sync.Map // map[sessionID string]*QRSession
-	// restarts 是「僵尸会话重建」的按键互斥锁：ensureReady 会摘掉死对象再起一个新的，
+	// restarts 是「僵尸会话重建」的按键互斥锁：liveWrapper 会摘掉死对象再起一个新的，
 	// 而门面是并发可调的（同账号可并发发信），不锁住就会有两个重建者互相抢 key。
 	restarts sync.Map // map[jid string]*sync.Mutex
 
@@ -219,10 +219,29 @@ func (m *waManager) StartClient(jid types.JID) error {
 }
 
 // countClients 数当前在跑的 Client（MaxConcurrent 闸用）。
-func (m *waManager) countClients() int {
+func (m *waManager) countClients() int { return waMapLen(&m.clients) }
+
+// waMapLen 数 sync.Map 的条目（标准库没有 Len）。
+func waMapLen(sm *sync.Map) int {
 	n := 0
-	m.clients.Range(func(_, _ any) bool { n++; return true })
+	sm.Range(func(_, _ any) bool { n++; return true })
 	return n
+}
+
+// waGetOrNew 取 key 上的 T，缺失时建一份；并发下返回抢到先手的那一份
+// （sync.Map.LoadOrStore 的既有语义，不重复建）。
+func waGetOrNew[T any](sm *sync.Map, key string, mk func() T) T {
+	if v, ok := sm.Load(key); ok {
+		return v.(T)
+	}
+	v, _ := sm.LoadOrStore(key, mk())
+	return v.(T)
+}
+
+// withinWindow 报告「距 t 还没过 window」；t 为零时刻视为从没做过，返回 false，
+// 所以各节流账的零值天然放行第一次动作。
+func withinWindow(t time.Time, window time.Duration) bool {
+	return !t.IsZero() && time.Since(t) < window
 }
 
 // StopClient 停掉指定账号的常驻协程并断开连接，等 done 或超时。
@@ -295,44 +314,13 @@ func (m *waManager) ListClients() []SessionInfo {
 
 // restartLock 取（并惰性建）某个账号的重建锁。
 func (m *waManager) restartLock(key string) *sync.Mutex {
-	if v, ok := m.restarts.Load(key); ok {
-		return v.(*sync.Mutex)
-	}
-	mu := &sync.Mutex{}
-	v, _ := m.restarts.LoadOrStore(key, mu)
-	return v.(*sync.Mutex)
-}
-
-// ensureReady 取一个「现在就能发信/需要在线才能办成事」的 wrapper：连着就返，
-// 断了就催一轮立即重连，僵尸（常驻协程已收手或已落 logged_out 标记）就先摘掉再重建，
-// 最后等它连上。
-//
-// 为什么必须有这一步：常驻协程在 logged_out 之后会退出（wa_manager.go run() 的闸门），
-// 而 sync.Map 里那份 wrapper 还占着 key——此时 StartClient 的幂等分支会把这具死对象
-// 原样端出来并返回 nil，调用方以为「已在跑」，实际 SendText 只能撞在一个已拆的 socket 上。
-// 拦了库侧自动删行（store_postgres.go waPinnedContainer）之后，「行还在、会话已死」
-// 成了常态，所以这个复活步骤是发信面的必需环节，不是优化项。
-//
-// 预算口径：催重连是即时的（退避睡眠被 kick 提前叫醒），等待上限取
-// EffectiveConnectTimeout（缺省 15 秒），调用方的 ctx 一到就撒手，不留悬挂等待。
-//
-// 门面不再直接调它：读写面统一走 ensureLoggedIn（比这一层多兜「压根不在册」那一档），
-// 本函数原样保留给「已在册账号」这条既有语义与钉它的用例。
-func (m *waManager) ensureReady(ctx context.Context, fromJID string) (*waClientWrapper, error) {
-	w, err := m.ensureAlive(fromJID)
-	if err != nil {
-		return nil, err
-	}
-	if err := w.reconnectAndAwait(ctx); err != nil {
-		return nil, err
-	}
-	return w, nil
+	return waGetOrNew(&m.restarts, key, func() *sync.Mutex { return &sync.Mutex{} })
 }
 
 // ensureLoggedIn 是全部读写门面在非登录态下的第三层自愈：在册且活着就等连上，
 // 僵尸由 liveWrapper 复活，**压根不在册的账号先按需 StartClient 再等连上**。
 //
-// 前两层（ensureAlive / ensureReady）都只管「已经在 clients 表里」的账号，而下游
+// ensureAlive 那一层只管「已经在 clients 表里」的账号，而下游
 // 普遍是先绑定账号、后续直接调门面，中间并没有「显式启动」这一步：
 // liveWrapper 对不在册的 key 直接报「没有在跑的会话」，而 StartClient 的幂等分支
 // 对「在册但未连」又什么都不做，两头都接不住，外部仓的 ensureClient 因此空转
@@ -373,9 +361,9 @@ func (m *waManager) ensureLoggedIn(ctx context.Context, fromJID string) (*waClie
 // 网络等待；但死对象上的子存储已被库换成 NoopStore（WM/store/store.go 的 Delete 收尾），
 // 不复活就连本地读都做不了。
 //
-// 需要在线才能办成事的读写面走 ensureLoggedIn（不在册会先按需启动），本函数与
-// ensureReady 原样保留：wa_reconnect_test.go 的 TestListContactsRevivesWithoutWaiting
-// 钉着「本地读不等登录」，发信面的 ensureReady 钉着「在册账号断了要催连并等」。
+// 需要在线才能办成事的读写面走 ensureLoggedIn（不在册会先按需启动）。
+// wa_reconnect_test.go 的 TestListContactsRevivesWithoutWaiting 钉着本函数这条
+// 「摘死对象但不等登录」的语义。
 //
 // 入参一律先过 waAccountJID：配套设备形态的 "号码:1@s.whatsapp.net" 必须放行，
 // 设备行主键与 wrapper 键都带设备段，抹掉就再也查不到行。
@@ -486,9 +474,7 @@ func (w *waClientWrapper) waitConnected(ctx context.Context) error {
 	if sessionReady(w.sess) {
 		return nil
 	}
-	if ctx == nil {
-		ctx = runCtx()
-	}
+	ctx = ctxOrRun(ctx)
 	deadline := time.NewTimer(w.cfg.EffectiveConnectTimeout())
 	defer deadline.Stop()
 	tick := time.NewTicker(100 * time.Millisecond)
@@ -658,8 +644,11 @@ func (w *waClientWrapper) onEvent(evt any) {
 
 // dispatch 把库事件翻成广播载荷，并给常驻协程递信号。
 //
-// 库侧多数事件以指针派发（查自 WM/client.go、connectionevents.go），值形态也一并接住：
-// 这里漏一类不会编译报错，只会让业务方收不到本该广播的事件，是难查的静默失败。
+// 库侧同一类事件既可能以指针派发也可能以值派发（查自 WM/client.go、
+// connectionevents.go），这里每种事件的处置只写一份、两种形态共用一个 case：
+// 漏接一类不会编译报错，只会让业务方收不到本该广播的事件，是难查的静默失败，
+// 处置写两遍更容易改一漏一。只有需要读事件字段的几类才按形态分岔，
+// 分岔两支仍落到同一个处置上（wa_client_test.go 的双形态用例钉这一点）。
 func (w *waClientWrapper) dispatch(evt any) {
 	account := w.jid.String()
 	switch e := evt.(type) {
@@ -671,50 +660,36 @@ func (w *waClientWrapper) dispatch(evt any) {
 		publishWA("Receipt", waReceipt(account, e))
 	case events.Receipt:
 		publishWA("Receipt", waReceipt(account, &e))
-	case *events.Connected:
+	case *events.Connected, events.Connected:
 		publishWA("Connection", &ConnEvent{Account: account, State: "connected"})
-	case events.Connected:
-		publishWA("Connection", &ConnEvent{Account: account, State: "connected"})
-	case *events.OfflineSyncPreview:
+	case *events.OfflineSyncPreview, events.OfflineSyncPreview:
 		w.offlinePending.Store(true)
-	case events.OfflineSyncPreview:
-		w.offlinePending.Store(true)
-	case *events.OfflineSyncCompleted:
+	case *events.OfflineSyncCompleted, events.OfflineSyncCompleted:
 		w.offlinePending.Store(false)
-	case events.OfflineSyncCompleted:
-		w.offlinePending.Store(false)
-	case *events.HistorySync:
+	case *events.HistorySync, events.HistorySync:
 		w.histSeen.Add(1)
 		vars.Info("WhatsApp[%s] 收到历史同步（对方 tctoken/外联盐可能随之落地）", account)
-	case events.HistorySync:
-		w.histSeen.Add(1)
-		vars.Info("WhatsApp[%s] 收到历史同步（对方 tctoken/外联盐可能随之落地）", account)
-	case *events.Disconnected:
+	case *events.Disconnected, events.Disconnected:
 		w.saltSynced.Store(false)
 		w.offlinePending.Store(false)
 		w.markDown()
 		publishWA("Connection", &ConnEvent{Account: account, State: "disconnected"})
-	case events.Disconnected:
-		w.saltSynced.Store(false)
-		w.offlinePending.Store(false)
-		w.markDown()
-		publishWA("Connection", &ConnEvent{Account: account, State: "disconnected"})
-	case *events.StreamReplaced:
+	case *events.StreamReplaced, events.StreamReplaced:
 		// 同一会话被另一端顶替：不重连也连不上旧账号，先记原因。
 		w.markDown()
 		publishWA("Connection", &ConnEvent{Account: account, State: "stream_replaced", Reason: "同一会话被另一端顶替"})
-	case events.StreamReplaced:
-		w.markDown()
-		publishWA("Connection", &ConnEvent{Account: account, State: "stream_replaced", Reason: "同一会话被另一端顶替"})
 	case *events.LoggedOut:
-		w.loggedOut.Store(true)
-		w.markDown()
-		publishWA("Connection", &ConnEvent{Account: account, State: "logged_out", Reason: e.Reason.String()})
+		w.evLoggedOut(account, e)
 	case events.LoggedOut:
-		w.loggedOut.Store(true)
-		w.markDown()
-		publishWA("Connection", &ConnEvent{Account: account, State: "logged_out", Reason: e.Reason.String()})
+		w.evLoggedOut(account, &e)
 	}
+}
+
+// evLoggedOut 处置吊销：落标记后常驻协程不再重连，终态广播带出库给的吊销原因。
+func (w *waClientWrapper) evLoggedOut(account string, e *events.LoggedOut) {
+	w.loggedOut.Store(true)
+	w.markDown()
+	publishWA("Connection", &ConnEvent{Account: account, State: "logged_out", Reason: e.Reason.String()})
 }
 
 // markDown 非阻塞地给常驻协程递一个断线令牌。

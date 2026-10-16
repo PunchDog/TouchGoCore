@@ -92,9 +92,10 @@ func (c *klClock) rounds() int {
 	return len(c.requested)
 }
 
-// klWrapper 取 clients 表里那具 wrapper。三条用例钉的是「同一条常驻协程被催醒」，
-// 所以对象身份本身也是断言的一部分（复活重建会换对象，那种形态归 wa_reconnect_test.go）。
-func klWrapper(t *testing.T, m *waManager, key string) *waClientWrapper {
+// mustWrapper 取 clients 表里那具 wrapper（不在册即判前置不成立）。
+// kick 用例钉的是「同一条常驻协程被催醒」，所以对象身份本身也是断言的一部分
+//（复活重建会换对象，那种形态归 wa_reconnect_test.go）。
+func mustWrapper(t *testing.T, m *waManager, key string) *waClientWrapper {
 	t.Helper()
 	v, ok := m.clients.Load(key)
 	if !ok {
@@ -106,9 +107,9 @@ func klWrapper(t *testing.T, m *waManager, key string) *waClientWrapper {
 // klPendingKicks 读 kick 通道里还没被消费的令牌数（len 对通道是合法的非破坏性观测）。
 func klPendingKicks(w *waClientWrapper) int { return len(w.kick) }
 
-// klWaitManagerWG 等管理器上的全部常驻协程归零（每 Client 一条 run + 每配对会话一条 pump）。
+// waitManagerWG 等管理器上的全部常驻协程归零（每 Client 一条 run + 每配对会话一条 pump）。
 // 停机后 clients 已被摘，waitWrapperExited 对「不在册」直接判真，所以这里必须看 wg 本身。
-func klWaitManagerWG(m *waManager, budget time.Duration) bool {
+func waitManagerWG(m *waManager, budget time.Duration) bool {
 	done := make(chan struct{})
 	go func() { m.wg.Wait(); close(done) }()
 	select {
@@ -164,7 +165,7 @@ func klStartPending(t *testing.T, m *waManager, get func(string) *fakeSession, k
 	}
 	waitUntil(t, 3*time.Second, "首轮 Login 发生", func() bool { return s.countLogins() >= 1 })
 	t0 := time.Now()
-	w := klWrapper(t, m, key)
+	w := mustWrapper(t, m, key)
 	klAssertWindowOpen(t, s, w, time.Since(t0))
 	return s, w
 }
@@ -210,7 +211,7 @@ func TestKickDuringLoginPendingReconnects(t *testing.T) {
 	if got := klPendingKicks(w); got != 0 {
 		t.Fatalf("kick 令牌未被消费干净，残留 %d 个（会把下一轮唤醒逻辑打乱）", got)
 	}
-	if w2 := klWrapper(t, m, key); w2 != w {
+	if w2 := mustWrapper(t, m, key); w2 != w {
 		t.Fatal("被催之后换了一具 wrapper：常驻协程被丢弃或重建，而不是弃连重连")
 	}
 	_, _, _, sent, _ := s.snapshot()
@@ -249,7 +250,7 @@ func TestKickDuringLoginPendingNoGoroutineLoss(t *testing.T) {
 		t.Fatal("①被催之后常驻协程退出了（应为弃连重连，不是收手）")
 	default:
 	}
-	if w2 := klWrapper(t, m, key); w2 != w {
+	if w2 := mustWrapper(t, m, key); w2 != w {
 		t.Fatal("①常驻协程被换成另一具 wrapper（协程丢了）")
 	}
 
@@ -270,7 +271,7 @@ func TestKickDuringLoginPendingNoGoroutineLoss(t *testing.T) {
 	if err := WhatsappStopClient(key); err != nil {
 		t.Fatal(err)
 	}
-	if !klWaitManagerWG(m, 2*time.Second) {
+	if !waitManagerWG(m, 2*time.Second) {
 		t.Fatalf("③停机后仍有常驻协程未退出（协程泄漏）：kick=%d downed=%d",
 			klPendingKicks(w), len(w.downed))
 	}
@@ -311,7 +312,7 @@ func TestKickNotConsumedWhenAlreadyLoggedIn(t *testing.T) {
 	}
 	s := get(key)
 	waitUntil(t, 2*time.Second, "首次连上", s.LoggedIn)
-	w := klWrapper(t, m, key)
+	w := mustWrapper(t, m, key)
 	// 前置：Login 恰 1 次、登录态已落定、没要求过退避 ⇒ 常驻协程此刻只能守在
 	// waitUntilDown（run() 里除了这条没有别处可停留），这正是「不该被弃连」的那一档。
 	if got := s.countLogins(); got != 1 {
@@ -342,7 +343,7 @@ func TestKickNotConsumedWhenAlreadyLoggedIn(t *testing.T) {
 	if got := klPendingKicks(w); got != 0 {
 		t.Fatalf("kick 通道残留 %d 个令牌（门面在已登录时本就不该催连）", got)
 	}
-	if w2 := klWrapper(t, m, key); w2 != w {
+	if w2 := mustWrapper(t, m, key); w2 != w {
 		t.Fatal("已登录态的门面把 wrapper 换成了另一具")
 	}
 }

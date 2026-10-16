@@ -35,15 +35,8 @@ func setReachoutClocks(t *testing.T, wait, tick time.Duration) {
 	t.Cleanup(func() { waReachoutWait, waReachoutPollTick = oldWait, oldTick })
 }
 
-// wrapperOf 取门面快照里某账号的 wrapper（落空账等内部账直接读它）。
-func wrapperOf(t *testing.T, m *waManager, jid string) *waClientWrapper {
-	t.Helper()
-	v, ok := m.clients.Load(jid)
-	if !ok {
-		t.Fatalf("账号 %s 不在册", jid)
-	}
-	return v.(*waClientWrapper)
-}
+// 取某账号的 wrapper 复用 wa_kick_liveness_test.go 的 mustWrapper（同包共享），
+// 落空账等内部账直接读它。
 
 // startReachWA 装配门闸测试用的门面快照：单账号、假会话按 configure 预置。
 func startReachWA(t *testing.T, configure func(*fakeSession)) (*waManager, func() *fakeSession) {
@@ -216,7 +209,7 @@ func TestReachoutMissLedgerFailsFastAndRevives(t *testing.T) {
 	if err1 == nil || !strings.Contains(err1.Error(), "463") {
 		t.Fatalf("无凭证时首条应报 463: err=%v", err1)
 	}
-	w := wrapperOf(t, m, reachAccount)
+	w := mustWrapper(t, m, reachAccount)
 	missAfterFirst := w.pollMissAt
 	if missAfterFirst.IsZero() {
 		t.Fatal("首条恢复档等满落空后应记落空账")

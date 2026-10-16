@@ -130,7 +130,7 @@ func (w *waClientWrapper) syncRegularHighOnce(ctx context.Context) {
 func (w *waClientWrapper) refreshRegularHigh(ctx context.Context, force bool) {
 	w.reachMu.Lock()
 	defer w.reachMu.Unlock()
-	if !force && !w.lastRefreshAt.IsZero() && time.Since(w.lastRefreshAt) < waReachoutRefreshMinInterval {
+	if !force && withinWindow(w.lastRefreshAt, waReachoutRefreshMinInterval) {
 		return
 	}
 	if err := w.sess.SyncRegularHigh(ctx, false, false); err != nil {
@@ -141,7 +141,7 @@ func (w *waClientWrapper) refreshRegularHigh(ctx context.Context, force bool) {
 	if !force {
 		return
 	}
-	if !w.lastFullAt.IsZero() && time.Since(w.lastFullAt) < waReachoutFullMinInterval {
+	if withinWindow(w.lastFullAt, waReachoutFullMinInterval) {
 		return
 	}
 	if err := w.sess.SyncRegularHigh(ctx, true, false); err != nil {
@@ -160,7 +160,7 @@ func (w *waClientWrapper) requestHistory(ctx context.Context) {
 }
 
 func (w *waClientWrapper) requestHistoryLocked(ctx context.Context) {
-	if !w.lastHistAt.IsZero() && time.Since(w.lastHistAt) < waReachoutHistoryMinInterval {
+	if withinWindow(w.lastHistAt, waReachoutHistoryMinInterval) {
 		return
 	}
 	asker, ok := w.sess.(interface {
@@ -189,7 +189,7 @@ func (w *waClientWrapper) pullHistoryAndWait(ctx context.Context, target types.J
 	w.reachMu.Lock()
 	defer w.reachMu.Unlock()
 	seen := w.histSeen.Load()
-	if !w.pollMissAt.IsZero() && time.Since(w.pollMissAt) < waReachoutHistoryMinInterval && seen == w.pollMissSeen {
+	if withinWindow(w.pollMissAt, waReachoutHistoryMinInterval) && seen == w.pollMissSeen {
 		return false
 	}
 	w.requestHistoryLocked(ctx)

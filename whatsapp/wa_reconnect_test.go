@@ -1,6 +1,6 @@
 package whatsapp
 
-// 本文件是发信面「断开先自愈」的活闸（wa_manager.go 的 ensureReady/liveWrapper/
+// 本文件是发信面「断开先自愈」的活闸（wa_manager.go 的 ensureLoggedIn/liveWrapper/
 // waitConnected，消费点在 wa_client.go 的 WhatsappSendMessage / WhatsappSendGroupMessage）。
 //
 // 钉住的四件事：
@@ -41,7 +41,7 @@ func waitWrapperExited(t *testing.T, m *waManager, key string) {
 	})
 }
 
-// TestSendKicksReconnectWhenSocketDown 掉线窗口里发信：ensureReady 必须把常驻协程从
+// TestSendKicksReconnectWhenSocketDown 掉线窗口里发信：自愈链必须把常驻协程从
 // 「守着一条自以为还在的连接」的状态里催醒去重连，连上后把这条发出去。
 //
 // 变异对照：把 liveWrapper 里的 kickNow 摘掉，run() 会一直卡在 waitUntilDown，

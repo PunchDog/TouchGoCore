@@ -454,9 +454,7 @@ func TestPairCodeInvalidPhoneZeroNetwork(t *testing.T) {
 // （文案含「配对码握手超时」）、error 事件经同一会话广播、会话出活动表、
 // 单飞记账被清（契约 ④），且事件/文案不露完整号码（契约 ⑧）。
 func TestPairCodeHandshakeTimeout(t *testing.T) {
-	old := waPairCodeHandshakeTimeout
-	waPairCodeHandshakeTimeout = 80 * time.Millisecond
-	defer func() { waPairCodeHandshakeTimeout = old }()
+	setPairCodeHandshakeTimeout(t, 80*time.Millisecond)
 
 	m, st, _ := startFakeWA(t, nil, nil)
 	tr := pcInstallPairFactory(t, st, func(f *pcFakePairSession) { f.holdCode = true })
@@ -563,9 +561,7 @@ func TestPairCodePairPhoneErrorAndRetry(t *testing.T) {
 // TestPairCodeSingleFlight 同号码单飞（契约 ⑥）：第一个码配对进行中时，
 // 同号第二呼直接拒绝且不得建第二个会话。
 func TestPairCodeSingleFlight(t *testing.T) {
-	old := waPairCodeHandshakeTimeout
-	waPairCodeHandshakeTimeout = 30 * time.Second
-	defer func() { waPairCodeHandshakeTimeout = old }()
+	setPairCodeHandshakeTimeout(t, 30*time.Second)
 
 	_, st, _ := startFakeWA(t, nil, nil)
 	tr := pcInstallPairFactory(t, st, func(f *pcFakePairSession) { f.holdCode = true })

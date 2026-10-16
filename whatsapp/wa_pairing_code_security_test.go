@@ -43,7 +43,7 @@ func pcsReleaseAll(tr *pchPairTracker) {
 func TestPairCodeSInflightCapRejectsExtraNumber(t *testing.T) {
 	_, st, _ := startFakeWA(t, nil, nil)
 	// 在飞会话必须真的停在握手等待里，上限判定才有可观察的稳态。
-	pchSetHandshakeTimeout(t, 30*time.Second)
+	setPairCodeHandshakeTimeout(t, 30*time.Second)
 	pcsSetMaxInflight(t, 2)
 	tr := pchInstallPairFactory(t, st, func(f *pchFakePairSession) { f.holdCode = true })
 
@@ -86,7 +86,7 @@ func TestPairCodeSInflightCapRejectsExtraNumber(t *testing.T) {
 	pcsReleaseAll(tr)
 	wg.Wait()
 	waitUntil(t, 3*time.Second, "上限闸随会话收场放号", func() bool { return pchActiveCount() == 0 })
-	pchSetHandshakeTimeout(t, 80*time.Millisecond)
+	setPairCodeHandshakeTimeout(t, 80*time.Millisecond)
 	if _, _, err = WhatsappGetPairingCode(context.Background(), d3); err == nil ||
 		strings.Contains(err.Error(), "在飞配对码会话已达上限") {
 		t.Fatalf("放号后应越过上限闸进入握手（这里的错应是握手超时），实得 err=%v", err)
@@ -105,7 +105,7 @@ func TestPairCodeSInflightCapRejectsExtraNumber(t *testing.T) {
 // 的观测峰值越过 2，本用例红。
 func TestPairCodeSCapHoldsUnderConcurrentBurst(t *testing.T) {
 	_, st, _ := startFakeWA(t, nil, nil)
-	pchSetHandshakeTimeout(t, 30*time.Second)
+	setPairCodeHandshakeTimeout(t, 30*time.Second)
 	pcsSetMaxInflight(t, 2)
 	tr := pchInstallPairFactory(t, st, func(f *pchFakePairSession) { f.holdCode = true })
 
@@ -170,7 +170,7 @@ func TestPairCodeSCapHoldsUnderConcurrentBurst(t *testing.T) {
 func TestPairCodeSSanitizesLibraryErrorText(t *testing.T) {
 	_, st, _ := startFakeWA(t, nil, nil)
 	pcsSetMaxInflight(t, 5)
-	pchSetHandshakeTimeout(t, 2*time.Second)
+	setPairCodeHandshakeTimeout(t, 2*time.Second)
 
 	const digits = "8613800000091"
 	masked := waMaskPhone(digits)
@@ -232,7 +232,7 @@ func TestPairCodeSSanitizesLibraryErrorText(t *testing.T) {
 // 「中间项后不得取码」与「码值必须为 K3PD-7MZA」两条同时红。
 func TestPairCodeSOnlyCodeItemTriggersPairPhone(t *testing.T) {
 	_, st, _ := startFakeWA(t, nil, nil)
-	pchSetHandshakeTimeout(t, 30*time.Second)
+	setPairCodeHandshakeTimeout(t, 30*time.Second)
 	pcsSetMaxInflight(t, 5)
 	tr := pchInstallPairFactory(t, st, func(f *pchFakePairSession) { f.holdCode = true })
 

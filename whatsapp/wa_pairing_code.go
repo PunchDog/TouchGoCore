@@ -42,12 +42,15 @@ import (
 // timeout/error/err-*）仍用库原值，本包不改既有语义。
 const QREventPairCode = "pair_code"
 
-// 码配对的固定参数放包级 var：便于测试逐字断言，也便于后续按业务口径调整
-// （displayName 受服务器白名单校验，改动前先看 pair-code.go:87-89 的注释）。
-var (
+// 码配对的固定参数：displayName 受服务器白名单校验，改动前先看 pair-code.go:87-89
+// 的注释；用例逐字断言这三个实参（wa_pairing_code_test.go 的 PairPhone 五实参闸）。
+const (
 	waPairCodeClientType           = whatsmeow.PairClientChrome
 	waPairCodeClientDisplayName    = "Chrome (Windows)"
 	waPairCodeShowPushNotification = true
+)
+
+var (
 	// waPairCodeHandshakeTimeout 是「Connect 之后等 QR 通道首个 code 项」的上限。
 	// 到点没等到即判终局 error（库侧首个 QR 项正常在连接建立后秒级到达，10 秒
 	// 已远超观测值）；测试注入短值断言超时清理路径。
@@ -73,14 +76,7 @@ var waPairCodeMaxInflight = 5
 var waPairCodeClaimMu sync.Mutex
 
 // waPairCodeInflight 数在飞的码配对会话（记账条目即在册会话）。
-func waPairCodeInflight() int {
-	n := 0
-	waPairCodeActive.Range(func(_, _ any) bool {
-		n++
-		return true
-	})
-	return n
-}
+func waPairCodeInflight() int { return waMapLen(&waPairCodeActive) }
 
 // waMaskedErr 是「文案消毒、分类保留」的错误：Error() 给出号码已掩码的文本，
 // Unwrap() 仍交回原错误，errors.Is/As 的判定能力不受影响。
@@ -97,21 +93,21 @@ func (e *waMaskedErr) Unwrap() error { return e.inner }
 // 非做不可的理由：库的 IQError 在 Code==0 时把整个 error/raw 节点回显进 Error()
 // （errors.go:214-222），而 PairPhone 的请求节点带着明文 jid（pair-code.go:111）——
 // 用 %w 原样上抛就等于把本包的掩码承诺交给服务器决定（T8 WA-PC-03）。
-func waMaskErr(err error, digits, masked string) error {
+func waMaskErr(err error, digits string) error {
 	if err == nil {
 		return nil
 	}
 	text := err.Error()
 	if digits != "" {
-		text = strings.ReplaceAll(text, digits, masked)
+		text = strings.ReplaceAll(text, digits, waMaskPhone(digits))
 	}
 	return &waMaskedErr{inner: err, text: text}
 }
 
 // waMaskPhone 号码脱敏：长度 ≥7 时保留前 2 后 2、中间逐位以 * 填充，否则全 *。
-// 门面自己写入的错误文案、日志与事件载荷一律走掩码。两处既有例外按裁决保留、
-// 不在本批改动：配对成功事件的 JID 字段与本包 success 日志（wa_pairing.go:292）、
-// 以及库侧日志（pair.go:155）——码配对成功后 JID 本就是该号码，业务方要靠它显式启动账号。
+// 门面自己写入的错误文案、日志与事件载荷一律走掩码。两处既有例外按裁决保留：
+// 配对成功事件的 JID 字段与本包 success 日志（wa_pairing.go:292）、以及库侧日志
+// （pair.go:155）——码配对成功后 JID 本就是该号码，业务方要靠它显式启动账号。
 func waMaskPhone(digits string) string {
 	if len(digits) >= 7 {
 		return digits[:2] + strings.Repeat("*", len(digits)-4) + digits[len(digits)-2:]
@@ -160,7 +156,7 @@ func WhatsappGetPairingCode(ctx context.Context, phone string) (code, sessionID 
 		if replace == nil {
 			waPairCodeActive.CompareAndDelete(digits, "")
 		}
-		return "", "", waMaskErr(fmt.Errorf("whatsapp 配对码失败: %w", err), digits, masked)
+		return "", "", waMaskErr(fmt.Errorf("whatsapp 配对码失败: %w", err), digits)
 	}
 	waPairCodeActive.Store(digits, s.ID)
 	if replace != nil {
@@ -245,8 +241,7 @@ func waWaitPairCode(ctx context.Context, s *QRSession, masked string) (string, e
 		} else {
 			err = fmt.Errorf("whatsapp 配对码失败: 配对码握手被取消（调用方 ctx 已结束，非 WhatsApp 侧故障，digits=%s）: %w", masked, handshakeCtx.Err())
 		}
-		s.completePairCode("", err)
-		s.emit(QREvent{Event: "error", Error: err.Error()})
+		s.completePairCode(QREvent{Event: "error", Error: err.Error()}, "", err)
 		s.Cancel()
 		return "", err
 	}

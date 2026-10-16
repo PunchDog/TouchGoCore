@@ -24,10 +24,10 @@ import (
 	"touchgocore/config"
 )
 
-// alSetSyncWindow 临时改「全量重拉的最小间隔」这个注入点，用完还原。
+// setContactSyncWindow 临时改「全量重拉的最小间隔」这个注入点，用完还原。
 // 窗口的两边都要有活闸：压到 1 小时证明「窗口内绝不擦版本」，压到 0 证明
 // 「窗口外确实会升级 full=true」（不是把 full 恒关掉蒙过去）。
-func alSetSyncWindow(t *testing.T, d time.Duration) {
+func setContactSyncWindow(t *testing.T, d time.Duration) {
 	t.Helper()
 	old := waContactSyncFullMinInterval
 	waContactSyncFullMinInterval = d
@@ -349,7 +349,7 @@ func TestContactSyncSingleFlight(t *testing.T) {
 // 变异对照 ME：把 SyncContactAppState 的 full 实参恒传 true ⇒ 序列变成 [true, ...]，
 // 第一条 alWantSeq 就红；把窗口判断删掉 ⇒ fullCalls 涨到 2，第二条断言红。
 func TestContactFullSyncThrottledByWindow(t *testing.T) {
-	alSetSyncWindow(t, time.Hour)
+	setContactSyncWindow(t, time.Hour)
 	dev := fakeDevice(t, "447378152319:1@s.whatsapp.net", "android", "P")
 	// 同步成功但补不进联系人：仿真「服务器快照本就为空」，逼出升级分支。
 	_, _, get := startFakeWA(t, nil, func(s *fakeSession) {}, dev)
@@ -384,7 +384,7 @@ func TestContactFullSyncThrottledByWindow(t *testing.T) {
 // 变异对照：把升级分支（ListContacts 里 full=true 那一次调用）整段删掉 ⇒
 // 这里的序列只有 [false, false]、fullCalls=0，红。
 func TestContactFullSyncAllowedWhenWindowPassed(t *testing.T) {
-	alSetSyncWindow(t, 0)
+	setContactSyncWindow(t, 0)
 	dev := fakeDevice(t, "447378152319:1@s.whatsapp.net", "android", "P")
 	_, _, get := startFakeWA(t, nil, func(s *fakeSession) {}, dev)
 	if err := WhatsappStartClient(dev.ID.String()); err != nil {
@@ -413,7 +413,7 @@ func TestContactFullSyncAllowedWhenWindowPassed(t *testing.T) {
 // 变异对照：把 WhatsappSyncContacts 的返回值写成同步前的条数 ⇒ 第一条 n=0 红；
 // 把窗口判断去掉 ⇒ 第二次仍 full=true，full 计数红。
 func TestSyncContactsFacadeCountsAndThrottles(t *testing.T) {
-	alSetSyncWindow(t, time.Hour)
+	setContactSyncWindow(t, time.Hour)
 	dev := fakeDevice(t, "447378152319:1@s.whatsapp.net", "android", "P")
 	a, ia := alContact(t, "442071234567@s.whatsapp.net", "Alice")
 	b, ib := alContact(t, "442071234568@s.whatsapp.net", "Beno")

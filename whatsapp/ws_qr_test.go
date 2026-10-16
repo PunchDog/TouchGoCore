@@ -131,40 +131,44 @@ func asCloseError(err error, target **websocket.CloseError) bool {
 	return ok
 }
 
-// TestQRWSRejectsForeignOrigin 白名单外的 Origin 必须被握手层拒掉（403）：
-// 跨域判定的反面断言。CheckOrigin 写 return true 会让任何网页都能连进来偷二维码——
-// 二维码等于配对凭据，谁扫上谁就是账号的联合设备。
-func TestQRWSRejectsForeignOrigin(t *testing.T) {
-	env := startQREnv(t, []string{"https://ok.example"})
-	conn, resp, err := env.dial(t, "https://evil.example")
-	if err == nil {
-		conn.Close()
-		t.Fatal("白名单外 Origin 竟然握手成功")
+// TestQRWSOriginPolicy 跨域白名单的三档裁决，三条原用例并成一张表（同一条
+// CheckOrigin 分支，只差「白名单 + 握手 Origin」两个输入）：
+//   - 白名单外拒 403：CheckOrigin 写 return true 会让任何网页连进来偷二维码，
+//     而二维码等于配对凭据，谁扫上谁就是账号的联合设备；
+//   - 不带 Origin 放行：原生客户端/服务间调用不发 Origin，浏览器跨站握手必带，
+//     与 websocket 包 originPolicy 的口径一致；
+//   - 白名单显式 "*" 放行任意 Origin：配置口径与 web.allow_origins 一致。
+func TestQRWSOriginPolicy(t *testing.T) {
+	cases := []struct {
+		name   string
+		allow  []string
+		origin string
+		wantOK bool
+	}{
+		{"白名单外拒绝", []string{"https://ok.example"}, "https://evil.example", false},
+		{"不带 Origin 放行", nil, "", true},
+		{"通配放行任意 Origin", []string{"*"}, "https://anywhere.example", true},
 	}
-	if resp == nil || resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("拒绝应当是 403，实得 resp=%v err=%v", resp, err)
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			env := startQREnv(t, c.allow)
+			conn, resp, err := env.dial(t, c.origin)
+			if c.wantOK {
+				if err != nil {
+					t.Fatalf("Origin %q 应当放行: %v", c.origin, err)
+				}
+				conn.Close()
+				return
+			}
+			if err == nil {
+				conn.Close()
+				t.Fatal("白名单外 Origin 竟然握手成功")
+			}
+			if resp == nil || resp.StatusCode != http.StatusForbidden {
+				t.Fatalf("拒绝应当是 403，实得 resp=%v err=%v", resp, err)
+			}
+		})
 	}
-}
-
-// TestQRWSNoOriginAllowed 不带 Origin 的握手放行：原生客户端/服务间调用不发 Origin，
-// 浏览器跨站握手必带——与 websocket 包 originPolicy 的口径一致。
-func TestQRWSNoOriginAllowed(t *testing.T) {
-	env := startQREnv(t, nil) // 白名单为空：只放行不带 Origin 的握手
-	conn, _, err := env.dial(t, "")
-	if err != nil {
-		t.Fatalf("不带 Origin 的握手被拒: %v", err)
-	}
-	conn.Close()
-}
-
-// TestQRWSWildcardOrigin 白名单显式 "*" 时放行任意 Origin（配置口径与 web.allow_origins 一致）。
-func TestQRWSWildcardOrigin(t *testing.T) {
-	env := startQREnv(t, []string{"*"})
-	conn, _, err := env.dial(t, "https://anywhere.example")
-	if err != nil {
-		t.Fatalf("通配白名单应当放行: %v", err)
-	}
-	conn.Close()
 }
 
 // TestQRWSUnknownSession404 查无会话按 404 JSON 拒绝，且响应体干净

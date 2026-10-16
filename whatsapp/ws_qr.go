@@ -124,8 +124,8 @@ func originHostOf(raw string) string {
 // 读泵独占读侧，读到错误（对端关闭/半开断裂）即散场。
 func (r *waQRRouter) Stream(c *gin.Context) {
 	sid := c.Param("session_id")
-	mgr := waMgr.Load()
-	if mgr == nil {
+	mgr, err := currentWA()
+	if err != nil {
 		respondRaw(c, http.StatusServiceUnavailable, gin.H{"error": "whatsapp 消息侧未启动"})
 		return
 	}

@@ -17,7 +17,6 @@ import (
 	"encoding/json"
 	"errors"
 	"regexp"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -281,8 +280,10 @@ func pchInstallPairFactory(t *testing.T, st *fakeStore, configure func(*pchFakeP
 	return tr
 }
 
-// pchSetHandshakeTimeout 注入握手上限，t.Cleanup 还原（t.Fatalf 路径也能还原）。
-func pchSetHandshakeTimeout(t *testing.T, d time.Duration) {
+// setPairCodeHandshakeTimeout 注入握手上限，t.Cleanup 还原（t.Fatalf 路径也能还原）。
+// 码配对三支用例（T5/T7/T8）统一走这里，不再手搓「换-还原」——手搓的 defer 在
+// t.Fatalf 路径上不还原，会把窗口留给后续用例。
+func setPairCodeHandshakeTimeout(t *testing.T, d time.Duration) {
 	t.Helper()
 	old := waPairCodeHandshakeTimeout
 	waPairCodeHandshakeTimeout = d
@@ -315,49 +316,12 @@ func pchSessionCount(m *waManager) int {
 	return n
 }
 
-// pchAllStacks 抓全进程 goroutine 栈（自增长的缓冲，直到一次装得下）。
-func pchAllStacks(t *testing.T) string {
-	t.Helper()
-	buf := make([]byte, 8192)
-	for {
-		n := runtime.Stack(buf, true)
-		if n < len(buf) {
-			return string(buf[:n])
-		}
-		if len(buf) >= 1<<24 {
-			t.Fatalf("goroutine 栈抓不完（缓冲已 %d 字节）", len(buf))
-		}
-		buf = make([]byte, 2*len(buf))
-	}
-}
-
 // pchCodeGoroutines 数出当前仍停在 wa_pairing_code.go 里的协程条数。
 // 判据按「协程块」计数而不是字符串出现次数：一条协程在同一文件里可能有多个帧。
+// 抓栈本身复用 wa_contacts_hardening_test.go 的 goroutinesInFile（同包共享）。
 func pchCodeGoroutines(t *testing.T) int {
 	t.Helper()
-	n := 0
-	for _, block := range strings.Split(pchAllStacks(t), "\n\ngoroutine ") {
-		if strings.Contains(block, "wa_pairing_code.go") {
-			n++
-		}
-	}
-	return n
-}
-
-// pchWaitManagerWG 在给定预算内等管理器常驻协程归零（泵协程泄漏判据）。
-// 返回 false 表示还没归零——与 StopAll 的等待口径同形，只是给测试用。
-func pchWaitManagerWG(m *waManager, budget time.Duration) bool {
-	done := make(chan struct{})
-	go func() {
-		m.wg.Wait()
-		close(done)
-	}()
-	select {
-	case <-done:
-		return true
-	case <-time.After(budget):
-		return false
-	}
+	return goroutinesInFile(t, "wa_pairing_code.go")
 }
 
 // pchWaitNoPhone 断言错误文案里没有完整号码、且掩码形态逐字在内。
@@ -384,7 +348,7 @@ func pchWaitNoPhone(t *testing.T, err error, digits, masked string) {
 // （丢掉调用方取消信号）→ 门面要等注入的 30s 上限才返回，5s 内的等待断言直接红。
 func TestPairCodeHCallerCtxCancel(t *testing.T) {
 	// 上限取得远长于下面的等待闸：返回慢就说明握手没接调用方 ctx。
-	pchSetHandshakeTimeout(t, 30*time.Second)
+	setPairCodeHandshakeTimeout(t, 30*time.Second)
 
 	m, st, _ := startFakeWA(t, nil, nil)
 	tr := pchInstallPairFactory(t, st, func(f *pchFakePairSession) { f.holdCode = true })
@@ -487,7 +451,7 @@ func TestPairCodeHTerminalBeforeCode(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			pchSetHandshakeTimeout(t, 15*time.Second)
+			setPairCodeHandshakeTimeout(t, 15*time.Second)
 			m, st, _ := startFakeWA(t, nil, nil)
 			closeFirst, terminalFirst := tc.close, tc.termin
 			tr := pchInstallPairFactory(t, st, func(f *pchFakePairSession) {
@@ -597,7 +561,7 @@ func TestPairCodeHPreCodeItems(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			pchSetHandshakeTimeout(t, 15*time.Second)
+			setPairCodeHandshakeTimeout(t, 15*time.Second)
 			m, st, _ := startFakeWA(t, nil, nil)
 			pre := tc.item
 			tr := pchInstallPairFactory(t, st, func(f *pchFakePairSession) {
@@ -631,6 +595,22 @@ func TestPairCodeHPreCodeItems(t *testing.T) {
 			}
 
 			// 中间帧必须由泵原样扇出，且严格排在 pair_code 之前。
+			// 帧是泵协程扇出的，收集器读到它们与门面返回之间没有 happens-before，
+			// 立刻快照会随调度漂（HEAD 上 -race 连跑约 1/3 命中，命中的行也不固定），
+			// 所以按「应有帧到齐」有界等待后再逐字断言：等到才判、等不到响亮红。
+			// 生产侧 completePairCode 已把扇出排在交付门面之前，正常路径第一轮即过。
+			waitUntil(t, 2*time.Second, "泵扇出中间项与 pair_code 帧", func() bool {
+				var pre, pair bool
+				for _, ev := range events() {
+					if ev.Event == tc.wantEvent && (tc.wantError == "" || ev.Error == tc.wantError) {
+						pre = true
+					}
+					if ev.Event == QREventPairCode && ev.Code == code {
+						pair = true
+					}
+				}
+				return pre && pair
+			})
 			var sawPre, sawPairCode bool
 			preIndex, pairCodeIndex := -1, -1
 			for i, ev := range events() {
@@ -848,7 +828,7 @@ func TestPairCodeHEventJSONShape(t *testing.T) {
 // B 侧拒绝断言与「放号后可重发」红；A 侧若实现加了全局互斥锁，第二条号码拿不到码即红。
 func TestPairCodeHConcurrentPhones(t *testing.T) {
 	t.Run("不同号码并发互不锁死", func(t *testing.T) {
-		pchSetHandshakeTimeout(t, 15*time.Second)
+		setPairCodeHandshakeTimeout(t, 15*time.Second)
 		m, st, _ := startFakeWA(t, nil, nil)
 		tr := pchInstallPairFactory(t, st, nil)
 		if n := pchActiveCount(); n != 0 {
@@ -928,7 +908,7 @@ func TestPairCodeHConcurrentPhones(t *testing.T) {
 	})
 
 	t.Run("同号并发第二呼被拒且不留第二个会话", func(t *testing.T) {
-		pchSetHandshakeTimeout(t, 30*time.Second)
+		setPairCodeHandshakeTimeout(t, 30*time.Second)
 		m, st, _ := startFakeWA(t, nil, nil)
 		tr := pchInstallPairFactory(t, st, func(f *pchFakePairSession) { f.holdCode = true })
 		if n := pchActiveCount(); n != 0 {
@@ -985,7 +965,7 @@ func TestPairCodeHConcurrentPhones(t *testing.T) {
 
 		// 放号后同号立即可重发（记账没漏删才走得通）。
 		// 重发段用短上限：只要证明它越过了单飞闸、进到握手等待即可，不必真等 30s。
-		pchSetHandshakeTimeout(t, 80*time.Millisecond)
+		setPairCodeHandshakeTimeout(t, 80*time.Millisecond)
 		tr2 := pchInstallPairFactory(t, st, func(f *pchFakePairSession) { f.holdCode = true })
 		_, _, err = WhatsappGetPairingCode(context.Background(), "+86 138-0000-0043")
 		if err == nil || !strings.Contains(err.Error(), "配对码握手超时") {
@@ -1047,7 +1027,7 @@ func TestPairCodeHStopAllReleasesNumber(t *testing.T) {
 
 		// 停机收场后同号可重发（换一台进程继续配对不该被记账卡住）。
 		tr2 := pchInstallPairFactory(t, st, func(f *pchFakePairSession) { f.holdCode = true })
-		pchSetHandshakeTimeout(t, 60*time.Millisecond)
+		setPairCodeHandshakeTimeout(t, 60*time.Millisecond)
 		_, _, err = WhatsappGetPairingCode(context.Background(), "+86 138-0000-0051")
 		if err == nil || !strings.Contains(err.Error(), "配对码握手超时") {
 			t.Fatalf("停机后同号应能重新发起握手，实得 err=%v", err)
@@ -1059,7 +1039,7 @@ func TestPairCodeHStopAllReleasesNumber(t *testing.T) {
 	})
 
 	t.Run("握手等待中停机", func(t *testing.T) {
-		pchSetHandshakeTimeout(t, 30*time.Second)
+		setPairCodeHandshakeTimeout(t, 30*time.Second)
 		m, st, _ := startFakeWA(t, nil, nil)
 		tr := pchInstallPairFactory(t, st, func(f *pchFakePairSession) { f.holdCode = true })
 
@@ -1131,9 +1111,9 @@ func TestPairCodeHGoroutineLifecycle(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.timeout {
-				pchSetHandshakeTimeout(t, 80*time.Millisecond)
+				setPairCodeHandshakeTimeout(t, 80*time.Millisecond)
 			} else {
-				pchSetHandshakeTimeout(t, 15*time.Second)
+				setPairCodeHandshakeTimeout(t, 15*time.Second)
 			}
 			m, st, _ := startFakeWA(t, nil, nil)
 			configure := tc.configure
@@ -1173,7 +1153,7 @@ func TestPairCodeHGoroutineLifecycle(t *testing.T) {
 			waitUntil(t, 3*time.Second, "三态收场后无停在配对码门面的协程", func() bool {
 				return pchCodeGoroutines(t) == 0
 			})
-			if !pchWaitManagerWG(m, 3*time.Second) {
+			if !waitManagerWG(m, 3*time.Second) {
 				t.Error("泵协程未全部退出（管理器 wg 没归零）")
 			}
 			if n := pchActiveCount(); n != 0 {
@@ -1235,7 +1215,7 @@ func TestPairCodeHMaskBoundaries(t *testing.T) {
 	})
 
 	t.Run("门面错误文案与号码隔离", func(t *testing.T) {
-		pchSetHandshakeTimeout(t, 60*time.Millisecond)
+		setPairCodeHandshakeTimeout(t, 60*time.Millisecond)
 		// 5 位以上连续数字段：掩码形态里不可能出现（前 2 后 2 之间全是 *），
 		// 出现即说明有完整号码或过长片段泄进文案。
 		longRun := regexp.MustCompile(`[0-9]{5,}`)

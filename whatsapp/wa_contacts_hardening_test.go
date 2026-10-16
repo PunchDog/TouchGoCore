@@ -41,15 +41,9 @@ import (
 // 用包级哨兵而不是每次现造：断言要能用 errors.Is 钉住门面的 %w 链没被折成 %v。
 var chContactsErr = errors.New("假件：好友表读取炸了")
 
-// chSetSyncWindow 注入「同一账号两次全量重拉的最小间隔」，t.Cleanup 还原。
-// 与 alSetSyncWindow 同形，但本文件的用例要在**一条用例中途**翻窗口（0 → 生效），
-// 中途那次直接赋值、由这里登记的 cleanup 统一还原，避免嵌套 cleanup 把窗口留在 0。
-func chSetSyncWindow(t *testing.T, d time.Duration) {
-	t.Helper()
-	old := waContactSyncFullMinInterval
-	waContactSyncFullMinInterval = d
-	t.Cleanup(func() { waContactSyncFullMinInterval = old })
-}
+// 窗口注入用 wa_autologin_test.go 的 setContactSyncWindow（同包共享）：本文件的
+// 用例要在**一条用例中途**翻窗口（0 → 生效），中途那次直接赋值、由它登记的
+// cleanup 统一还原，避免嵌套 cleanup 把窗口留在 0。
 
 // chStateSyncEntry 只读地取某账号在 m.stateSync 里的单飞条目，不在册返回 nil。
 // 绝不能用 m.stateSyncLock(key)：那个函数会惰性建条目，用它当判据会把「没建」测成「建了」。
@@ -80,9 +74,9 @@ func chStateSyncCount(m *waManager) int {
 	return n
 }
 
-// chStacks 抓全进程 goroutine 栈（缓冲自增长直到一次装得下）。
+// allGoroutineStacks 抓全进程 goroutine 栈（缓冲自增长直到一次装得下）。
 // 协程泄漏计数一律用 runtime.Stack，不引 goleak 之类要改 go.mod 的依赖。
-func chStacks(t *testing.T) string {
+func allGoroutineStacks(t *testing.T) string {
 	t.Helper()
 	buf := make([]byte, 8192)
 	for {
@@ -97,12 +91,12 @@ func chStacks(t *testing.T) string {
 	}
 }
 
-// chGoroutinesIn 按「协程块」数出仍停在某个源文件里的协程条数
+// goroutinesInFile 按「协程块」数出仍停在某个源文件里的协程条数
 // （一条协程在同一文件可能有多个栈帧，故按块计数而不是按出现次数）。
-func chGoroutinesIn(t *testing.T, file string) int {
+func goroutinesInFile(t *testing.T, file string) int {
 	t.Helper()
 	n := 0
-	for _, block := range strings.Split(chStacks(t), "\n\ngoroutine ") {
+	for _, block := range strings.Split(allGoroutineStacks(t), "\n\ngoroutine ") {
 		if strings.Contains(block, file) {
 			n++
 		}
@@ -150,7 +144,7 @@ func chWantReadContactsError(t *testing.T, err error) {
 //     （显式请求被本地缓存短路，一次都不发）。
 func TestChExplicitFullInWindowStillSendsOnce(t *testing.T) {
 	t.Run("窗口内显式full=true仍真发一次", func(t *testing.T) {
-		chSetSyncWindow(t, time.Hour)
+		setContactSyncWindow(t, time.Hour)
 		dev := fakeDevice(t, "447378152319:1@s.whatsapp.net", "android", "P")
 		a, ia := alContact(t, "442071234567@s.whatsapp.net", "Alice")
 		b, ib := alContact(t, "442071234568@s.whatsapp.net", "Beno")
@@ -191,7 +185,7 @@ func TestChExplicitFullInWindowStillSendsOnce(t *testing.T) {
 	})
 
 	t.Run("窗口内升级一次都不发", func(t *testing.T) {
-		chSetSyncWindow(t, time.Hour)
+		setContactSyncWindow(t, time.Hour)
 		dev := fakeDevice(t, "8618608008318:9@s.whatsapp.net", "android", "C")
 		// 同步成功但一条联系人也补不进来：仿真服务器快照本就为空，逼出第二段的升级分支。
 		_, _, get := startFakeWA(t, nil, func(s *fakeSession) {}, dev)
@@ -703,8 +697,8 @@ func TestChNoStateOrGoroutineLeak(t *testing.T) {
 		if calls, _, _ := alCountSyncs(t, s); calls != 1 {
 			t.Fatalf("重复调用把同账号同步了 %d 次，期望 1（本地已有数据后双检命中）", calls)
 		}
-		if n := chGoroutinesIn(t, "wa_contacts.go"); n != 0 {
-			t.Fatalf("残留 %d 条协程停在 wa_contacts.go：\n%s", n, chStacks(t))
+		if n := goroutinesInFile(t, "wa_contacts.go"); n != 0 {
+			t.Fatalf("残留 %d 条协程停在 wa_contacts.go：\n%s", n, allGoroutineStacks(t))
 		}
 	})
 
@@ -728,8 +722,8 @@ func TestChNoStateOrGoroutineLeak(t *testing.T) {
 				t.Fatalf("第 %d 轮失败后单飞账条目数=%d，期望恒为 1", i+1, got)
 			}
 		}
-		if n := chGoroutinesIn(t, "wa_contacts.go"); n != 0 {
-			t.Fatalf("失败路径残留 %d 条协程停在 wa_contacts.go：\n%s", n, chStacks(t))
+		if n := goroutinesInFile(t, "wa_contacts.go"); n != 0 {
+			t.Fatalf("失败路径残留 %d 条协程停在 wa_contacts.go：\n%s", n, allGoroutineStacks(t))
 		}
 	})
 
@@ -748,8 +742,8 @@ func TestChNoStateOrGoroutineLeak(t *testing.T) {
 		if n := m.countClients(); n != 0 {
 			t.Fatalf("未配对请求建出了 %d 条会话，期望 0", n)
 		}
-		if n := chGoroutinesIn(t, "wa_contacts.go"); n != 0 {
-			t.Fatalf("未配对路径残留 %d 条协程停在 wa_contacts.go：\n%s", n, chStacks(t))
+		if n := goroutinesInFile(t, "wa_contacts.go"); n != 0 {
+			t.Fatalf("未配对路径残留 %d 条协程停在 wa_contacts.go：\n%s", n, allGoroutineStacks(t))
 		}
 	})
 }
@@ -766,7 +760,7 @@ func TestChNoStateOrGoroutineLeak(t *testing.T) {
 //   - wa_client.go:735 的升级实参从 true 改成 false ⇒ 序列里出现不了 true，红；
 //   - wa_contacts.go:118-121 的 escalate 早退被删 ⇒ 第三轮多真发一次（calls 涨到 6），红。
 func TestContactChFullEscalationTwiceThenWindowBack(t *testing.T) {
-	chSetSyncWindow(t, 0) // 窗口放开：升级一律允许，先证明「每轮各一次」不是假绿
+	setContactSyncWindow(t, 0) // 窗口放开：升级一律允许，先证明「每轮各一次」不是假绿
 	dev := fakeDevice(t, "447378152319:1@s.whatsapp.net", "android", "P")
 	key := dev.ID.String()
 	_, _, get := startFakeWA(t, nil, func(s *fakeSession) {}, dev)
@@ -802,7 +796,7 @@ func TestContactChFullEscalationTwiceThenWindowBack(t *testing.T) {
 	if calls, fullCalls, seq := alCountSyncs(t, s); calls != 5 || fullCalls != 2 {
 		t.Fatalf("窗口生效后升级该被挡住：calls=%d full=%d 序列=[%s]，期望 5/2", calls, fullCalls, seq)
 	}
-	if n := chGoroutinesIn(t, "wa_contacts.go"); n != 0 {
-		t.Fatalf("三轮之后残留 %d 条协程停在 wa_contacts.go：\n%s", n, chStacks(t))
+	if n := goroutinesInFile(t, "wa_contacts.go"); n != 0 {
+		t.Fatalf("三轮之后残留 %d 条协程停在 wa_contacts.go：\n%s", n, allGoroutineStacks(t))
 	}
 }

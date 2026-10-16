@@ -80,9 +80,7 @@ func (m *waManager) DeleteDevice(ctx context.Context, jid types.JID) error {
 	if dev == nil || dev.ID == nil {
 		return fmt.Errorf("账号 %s 在会话库里没有设备行（本就未配对或已吊销过）", key)
 	}
-	if ctx == nil {
-		ctx = runCtx()
-	}
+	ctx = ctxOrRun(ctx)
 
 	var residual []string
 	reason := waReasonNotRunning

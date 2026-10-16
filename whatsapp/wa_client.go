@@ -323,8 +323,8 @@ func currentWA() (*waManager, error) {
 // 未启动返回 nil 而不是报错：列表是只读展示面，「一个都没有」与「没启动」对调用方
 // 是同一个处置——没东西可列；要区分就用任一写门面探一次错。
 func WhatsappListClients() []SessionInfo {
-	m := waMgr.Load()
-	if m == nil {
+	m, err := currentWA()
+	if err != nil {
 		return nil
 	}
 	return m.ListClients()
@@ -523,9 +523,7 @@ func waSendText(ctx context.Context, w *waClientWrapper, jid types.JID, body, la
 	if body == "" {
 		return "", "", fmt.Errorf("whatsapp %s失败: 消息内容为空", label)
 	}
-	if ctx == nil {
-		ctx = runCtx()
-	}
+	ctx = ctxOrRun(ctx)
 	target := jid.String()
 	if jid.Server == types.DefaultUserServer || jid.Server == types.HiddenUserServer {
 		w.ensureReachoutCreds(ctx, jid)
@@ -599,13 +597,19 @@ func waSleepCtx(ctx context.Context, d time.Duration) error {
 // 原始错误仍用 %w 留在链上可判。
 func waSendErr(label string, err error) error {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return fmt.Errorf("whatsapp %s失败: 调用方上下文已结束（请求超时或客户端断开），本条未发出: %w", label, err)
+		return waCtxEndedErr(label, "本条未发出", err)
 	}
 	if waIsReachout463(err) {
 		return fmt.Errorf("whatsapp %s失败: 服务器仍拒绝这条会话（463）。手机上的聊天凭证没有同步到这条配套连接，"+
 			"已向手机请求历史同步（需手机在线并打开 WhatsApp；群组发送不受这份凭证影响）", label)
 	}
 	return fmt.Errorf("whatsapp %s失败: %w", label, err)
+}
+
+// waCtxEndedErr 是「调用方 ctx 已结束」的统一文案骨架；tail 说清这条到底有没有出去过
+// （发信面「本条未发出」、登录/取会话面「本条未执行」），两类文案互斥供值班分诊。
+func waCtxEndedErr(label, tail string, err error) error {
+	return fmt.Errorf("whatsapp %s失败: 调用方上下文已结束（请求超时或客户端断开），%s: %w", label, tail, err)
 }
 
 func waIsReachout463(err error) bool {
@@ -783,9 +787,7 @@ func WhatsappListContacts(ctx context.Context, fromJID string) ([]WaContact, err
 	if err != nil {
 		return nil, err
 	}
-	if ctx == nil {
-		ctx = runCtx()
-	}
+	ctx = ctxOrRun(ctx)
 
 	// ① 本地读命中即返回，不等登录。ensureAlive 只保证端出来的是活对象（僵尸复活）。
 	// 「命中」按**过滤后的好友数**判定：本地只剩「聊过没加好友」与自己的行时不算命中，
@@ -879,9 +881,7 @@ func WhatsappListSpeakableGroups(ctx context.Context, fromJID string) ([]WaGroup
 	if err != nil {
 		return nil, waLoginErr("获取可发言群组列表", err)
 	}
-	if ctx == nil {
-		ctx = runCtx()
-	}
+	ctx = ctxOrRun(ctx)
 	groups, err := w.sess.GetJoinedGroups(ctx)
 	if err != nil {
 		return nil, waSendErr("获取可发言群组列表", err)
@@ -984,9 +984,7 @@ func WhatsappDeleteChat(ctx context.Context, fromJID, chat, lastMsgID string, la
 	if err != nil {
 		return fmt.Errorf("whatsapp 删除会话失败: %w", err)
 	}
-	if ctx == nil {
-		ctx = runCtx()
-	}
+	ctx = ctxOrRun(ctx)
 	target := waResolveChat(ctx, w.sess, jid)
 	if strings.TrimSpace(lastMsgID) == "" {
 		id, ts, ok := w.lastSend(target.String())
@@ -1112,27 +1110,16 @@ func publishWA(kind string, payload any) {
 	}
 }
 
-// waJID 把「纯数字号码」或「user@server 形态的 JID 串」归一成 types.JID。
+// waJID 把收件人写法归一成会话 JID（不带设备号）。
 //
 // 收件人口径与资金侧一致：框架不代为清洗业务方给的号码，只保证两种写法都能用。
 // Device>0 的 JID 库侧会直接拒（查自 WM/send.go:200），这里提前拒并说清是哪一段写错了。
 // 账号侧（启动/停止/吊销/查询按哪个账号执行）不要用本函数，用 waAccountJID：
 // 配套设备形态的账号 JID 本来就带 :N 设备段。
 func waJID(raw string) (types.JID, error) {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return types.JID{}, errors.New("目标为空")
-	}
-	if !strings.Contains(raw, "@") {
-		digits := WhatsappNormalizePhone(raw)
-		if digits == "" {
-			return types.JID{}, fmt.Errorf("目标 %q 里没有任何数字，拼不出 WhatsApp 号码", raw)
-		}
-		return types.NewJID(digits, waServerUser), nil
-	}
-	jid, err := types.ParseJID(raw)
+	jid, err := waParseJID(raw, "目标")
 	if err != nil {
-		return types.JID{}, fmt.Errorf("目标 %q 不是可用 JID: %w", raw, err)
+		return types.JID{}, err
 	}
 	if jid.Device != 0 {
 		return types.JID{}, fmt.Errorf("目标 %q 指向具体设备，发消息只接受会话 JID（不带设备号）", raw)
@@ -1144,26 +1131,35 @@ func waJID(raw string) (types.JID, error) {
 // 会话库的设备行主键存的就是配对时服务器分配的完整 JID，配套设备形态普遍带
 // :1 这类设备段（sqlstore 按 jid 逐字查行，查自 WM/store/sqlstore/container.go:123），
 // 所以这里必须原样放行设备段，而不是替调用方抹掉——抹掉反而查不到行。
-// 纯数字号码仍按 s.whatsapp.net 补全（设备段为 0，只命中主设备行）；
 // 群组/频道等其它服务端的 JID 不可能是账号，就地拒绝。
 func waAccountJID(raw string) (types.JID, error) {
+	jid, err := waParseJID(raw, "账号")
+	if err != nil {
+		return types.JID{}, err
+	}
+	if jid.Server != waServerUser {
+		return types.JID{}, fmt.Errorf("账号 %q 的域不是 %s，账号只能是用户 JID（可带 :N 设备段）", raw, waServerUser)
+	}
+	return jid, nil
+}
+
+// waParseJID 是两条归一共用的前半段：纯数字按 waServerUser 补全，含 @ 的原样解析。
+// label 只决定错误文案的主语；两条链路的差别全在各自的尾部设备段校验里。
+func waParseJID(raw, label string) (types.JID, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
-		return types.JID{}, errors.New("账号为空")
+		return types.JID{}, errors.New(label + "为空")
 	}
 	if !strings.Contains(raw, "@") {
 		digits := WhatsappNormalizePhone(raw)
 		if digits == "" {
-			return types.JID{}, fmt.Errorf("账号 %q 里没有任何数字，拼不出 WhatsApp 号码", raw)
+			return types.JID{}, fmt.Errorf("%s %q 里没有任何数字，拼不出 WhatsApp 号码", label, raw)
 		}
 		return types.NewJID(digits, waServerUser), nil
 	}
 	jid, err := types.ParseJID(raw)
 	if err != nil {
-		return types.JID{}, fmt.Errorf("账号 %q 不是可用 JID: %w", raw, err)
-	}
-	if jid.Server != waServerUser {
-		return types.JID{}, fmt.Errorf("账号 %q 的域不是 %s，账号只能是用户 JID（可带 :N 设备段）", raw, waServerUser)
+		return types.JID{}, fmt.Errorf("%s %q 不是可用 JID: %w", label, raw, err)
 	}
 	return jid, nil
 }

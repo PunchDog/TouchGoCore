@@ -70,6 +70,15 @@ func runCtx() context.Context {
 	return context.Background()
 }
 
+// ctxOrRun 把门面收到的 nil ctx 折到包级运行上下文：调用方没给 ctx 时，
+// 「启动时快照的配置」仍然生效，而不是产生一个永不取消的后台请求。
+func ctxOrRun(ctx context.Context) context.Context {
+	if ctx == nil {
+		return runCtx()
+	}
+	return ctx
+}
+
 // allCfg 取整机配置快照（ws_qr.go 的跨域白名单也从这里读）。
 func allCfg() *config.Cfg {
 	return corectx.CfgFrom(runCtx())
@@ -189,9 +198,7 @@ func publish(kind string, res *pay.PayResult) {
 // ctx 为 nil 时回落到包级运行上下文，让「启动时快照的配置」仍然生效。
 // 前置校验与状态归一都在 pay 侧做，这里只负责本包的留痕口径。
 func orderCall(ctx context.Context, kind string, call func(context.Context) (*pay.PayResult, error)) (*pay.PayResult, error) {
-	if ctx == nil {
-		ctx = runCtx()
-	}
+	ctx = ctxOrRun(ctx)
 	res, err := call(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("whatsapp %s 失败: %w", kind, err)

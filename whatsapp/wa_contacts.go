@@ -49,17 +49,13 @@ var (
 
 // waLoginErr 把「登录/取会话阶段的失败」折成门面错误。
 //
-// 比照 waSendErr（wa_client.go）的写法，但文案是「本条未执行」而不是「本条未发出」：
+// 比照 waSendErr（wa_client.go），但 tail 是「本条未执行」而不是「本条未发出」：
 // 这一层的失败发生在还没碰会话之前，一条都没出去过，不能与「发出去了但服务端报错」混读。
-//
-// 专治的误诊有两类，两类文案互斥，值班据此分诊：
-//   - 调用方 ctx 取消/超时 → 「调用方上下文已结束（请求超时或客户端断开），本条未执行」；
-//     原始错误仍用 %w 留在链上（waitConnected 那句「等待连上时被取消」也在里面）。
-//   - 本机 EffectiveConnectTimeout 到点没连上 → 原样带出「… 内未能连上」，
-//     这条不含「上下文已结束」，与上一条不会读成同一件事。
+// 值班据此分诊的两类文案互斥：调用方 ctx 取消/超时走 waCtxEndedErr；
+// 本机 EffectiveConnectTimeout 到点没连上则原样带出「… 内未能连上」，不含「上下文已结束」。
 func waLoginErr(label string, err error) error {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return fmt.Errorf("whatsapp %s失败: 调用方上下文已结束（请求超时或客户端断开），本条未执行: %w", label, err)
+		return waCtxEndedErr(label, "本条未执行", err)
 	}
 	return fmt.Errorf("whatsapp %s失败: %w", label, err)
 }
@@ -74,12 +70,7 @@ type waContactSync struct {
 
 // stateSyncLock 取（并惰性建）某个账号的同步锁，照 restartLock 的范式。
 func (m *waManager) stateSyncLock(key string) *waContactSync {
-	if v, ok := m.stateSync.Load(key); ok {
-		return v.(*waContactSync)
-	}
-	s := &waContactSync{}
-	v, _ := m.stateSync.LoadOrStore(key, s)
-	return v.(*waContactSync)
+	return waGetOrNew(&m.stateSync, key, func() *waContactSync { return &waContactSync{} })
 }
 
 // readWaContacts 读本地联系人区（同步产物），失败折算成门面的「获取好友列表」错误串。
@@ -109,16 +100,14 @@ func readWaContacts(ctx context.Context, w *waClientWrapper) (map[types.JID]type
 // 库侧的 appStateSyncLock 只串行化、不去重：两个并发的 full 拉取会各自擦一次版本互踩，
 // 所以单飞必须压在本包这一层。
 func (m *waManager) syncContactAppState(ctx context.Context, w *waClientWrapper, wantFull, escalate bool) (map[types.JID]types.ContactInfo, error) {
-	if ctx == nil {
-		ctx = runCtx()
-	}
+	ctx = ctxOrRun(ctx)
 	key := w.jid.String()
 	s := m.stateSyncLock(key)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	full := wantFull
-	if full && !s.lastFullAt.IsZero() && time.Since(s.lastFullAt) < waContactSyncFullMinInterval {
+	if full && withinWindow(s.lastFullAt, waContactSyncFullMinInterval) {
 		if escalate {
 			vars.Debug("WhatsApp[%s] 全量重拉处在 %s 窗口内，跳过（不擦 app state 版本）", key, waContactSyncFullMinInterval)
 			return readWaContacts(ctx, w)
@@ -259,9 +248,7 @@ func WhatsappSyncContacts(ctx context.Context, fromJID string, full bool) (int, 
 	if err != nil {
 		return 0, err
 	}
-	if ctx == nil {
-		ctx = runCtx()
-	}
+	ctx = ctxOrRun(ctx)
 	w, err := m.ensureLoggedIn(ctx, fromJID)
 	if err != nil {
 		return 0, waLoginErr("同步联系人", err)

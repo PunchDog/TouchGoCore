@@ -64,9 +64,7 @@ func WhatsappAccount(ctx context.Context, q *pay.AccountQuery) (*pay.AccountInfo
 	if q == nil {
 		q = &pay.AccountQuery{}
 	}
-	if ctx == nil {
-		ctx = runCtx()
-	}
+	ctx = ctxOrRun(ctx)
 	info, err := p.QueryAccount(ctx, q)
 	if err != nil {
 		return nil, fmt.Errorf("whatsapp 账户查询失败: %w", err)

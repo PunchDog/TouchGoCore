@@ -32,7 +32,13 @@ type fakePairSession struct {
 	connected    int
 	disconnected int
 	connectErr   error
-	ctx          context.Context
+	// secondConnectErr 复刻配对成功后 515 重连占着 socket：第二次 Connect 返回
+	// ErrAlreadyConnected，不能当成失败。loginAfter 到期后 forceLoggedIn 变真。
+	secondConnectErr error
+	loginAfter       time.Duration
+	secondUsed       bool
+	forceLoggedIn    bool
+	ctx              context.Context
 }
 
 func (f *fakePairSession) QRChannel(ctx context.Context) (<-chan whatsmeow.QRChannelItem, error) {
@@ -54,9 +60,24 @@ func (f *fakePairSession) QRChannel(ctx context.Context) (<-chan whatsmeow.QRCha
 
 func (f *fakePairSession) Connect() error {
 	f.mu.Lock()
-	defer f.mu.Unlock()
+	if f.connected >= 1 && f.secondConnectErr != nil && !f.secondUsed {
+		f.secondUsed = true
+		delay := f.loginAfter
+		f.mu.Unlock()
+		if delay > 0 {
+			go func() {
+				time.Sleep(delay)
+				f.mu.Lock()
+				f.forceLoggedIn = true
+				f.mu.Unlock()
+			}()
+		}
+		return f.secondConnectErr
+	}
 	f.connected++
-	return f.connectErr
+	err := f.connectErr
+	f.mu.Unlock()
+	return err
 }
 
 func (f *fakePairSession) Disconnect() {
@@ -66,6 +87,15 @@ func (f *fakePairSession) Disconnect() {
 }
 
 func (f *fakePairSession) Device() *store.Device { return f.dev }
+
+func (f *fakePairSession) LoggedIn() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.forceLoggedIn {
+		return true
+	}
+	return f.dev != nil && f.dev.ID != nil && f.connected >= 2
+}
 
 func (f *fakePairSession) disconnectCount() int {
 	f.mu.Lock()
@@ -128,6 +158,8 @@ func installFakePairFactory(t *testing.T, st *fakeStore, configure func(*fakePai
 	t.Helper()
 	tr := &fakePairTracker{}
 	old := waPairSessionFactory
+	oldSettle := waPairReloginSettle
+	waPairReloginSettle = 0
 	waPairSessionFactory = func(dev *store.Device, log waLog.Logger) waPairSession {
 		f := &fakePairSession{dev: dev, store: st, out: make(chan whatsmeow.QRChannelItem, 8)}
 		if configure != nil {
@@ -138,7 +170,10 @@ func installFakePairFactory(t *testing.T, st *fakeStore, configure func(*fakePai
 		tr.mu.Unlock()
 		return f
 	}
-	t.Cleanup(func() { waPairSessionFactory = old })
+	t.Cleanup(func() {
+		waPairSessionFactory = old
+		waPairReloginSettle = oldSettle
+	})
 	return tr
 }
 
@@ -202,6 +237,33 @@ func TestPairingSuccessFlow(t *testing.T) {
 	}
 	if fake.disconnectCount() == 0 {
 		t.Fatal("会话收尾应当断开配对用的一次性连接")
+	}
+}
+
+// TestPairingSuccessIgnoresAlreadyConnected 配对成功时库的 515 重连还占着 socket，
+// 补 Connect 会得到 ErrAlreadyConnected。这不能把扫码标成失败，要等到 IsLoggedIn。
+func TestPairingSuccessIgnoresAlreadyConnected(t *testing.T) {
+	st := newFakeStore()
+	m := newTestManager(t, st, nil)
+	tr := installFakePairFactory(t, st, func(f *fakePairSession) {
+		f.secondConnectErr = whatsmeow.ErrAlreadyConnected
+		f.loginAfter = 150 * time.Millisecond
+	})
+
+	sess, err := m.StartPairing(context.Background())
+	if err != nil {
+		t.Fatalf("发起配对失败: %v", err)
+	}
+	sub, unsub := sess.Subscribe()
+	defer unsub()
+	fake := tr.last()
+	waitUntil(t, 2*time.Second, "配对连接", func() bool { return fake.connectCount() >= 1 })
+
+	const newJID = "8613800000009@s.whatsapp.net"
+	fake.pairSuccess(newJID)
+	ev := readEvent(t, sub, "成功事件")
+	if ev.Event != "success" || ev.JID != newJID {
+		t.Fatalf("515 占线不应把扫码标成失败: %+v", ev)
 	}
 }
 

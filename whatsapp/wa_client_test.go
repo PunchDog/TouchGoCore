@@ -274,7 +274,8 @@ func TestDeviceSuffixedAccountThroughFacades(t *testing.T) {
 		t.Errorf("带设备段的收件人应当被拒: %v", err)
 	}
 	s.mu.Lock()
-	s.contacts = map[types.JID]types.ContactInfo{jidOf(t, "8613900000000@s.whatsapp.net"): {PushName: "F"}}
+	// FirstName 而非 PushName：列好友只认「存过通讯录」的行（waContactList 的好友闸）。
+	s.contacts = map[types.JID]types.ContactInfo{jidOf(t, "8613900000000@s.whatsapp.net"): {FirstName: "F"}}
 	s.groups = []*types.GroupInfo{{JID: jidOf(t, "100@g.us"),
 		Participants:  []types.GroupParticipant{{JID: jidOf(t, acct), IsAdmin: true}},
 		GroupAnnounce: types.GroupAnnounce{IsAnnounce: true}}}
@@ -739,8 +740,10 @@ func TestSendGroupMessage(t *testing.T) {
 	}
 }
 
-// TestListContactsFacade 好友列表门面：map 摊平成按 JID 排序的切片、字段逐一对应；
-// 底层报错带通道前缀上抛；未启动账号在触达会话之前被拒。
+// TestListContactsFacade 好友列表门面：只列「手机上存过通讯录」的好友、按 JID 排序、
+// 字段逐一对应；本人（手机也会把自己存进通讯录）、仅聊过的 pushName 行、只有企业号
+// 展示名的行一律剔除（真机实测扫码号的列表混着本人 PN 与本人 LID，2026-10-16 用户
+// 裁决「只获取好友」）；底层报错带通道前缀上抛；未启动账号在触达会话之前被拒。
 func TestListContactsFacade(t *testing.T) {
 	dev := fakeDevice(t, "8613800000000@s.whatsapp.net", "android", "A")
 	m, _, get := startFakeWA(t, nil, nil, dev)
@@ -750,10 +753,14 @@ func TestListContactsFacade(t *testing.T) {
 	s := get(dev.ID.String())
 	self := jidOf(t, "8613800000000@s.whatsapp.net")
 	friend := jidOf(t, "8613900000000@s.whatsapp.net")
+	chatted := jidOf(t, "8613722222222@s.whatsapp.net")
+	biz := jidOf(t, "8613733333333@s.whatsapp.net")
 	s.mu.Lock()
 	s.contacts = map[types.JID]types.ContactInfo{
-		friend: {FirstName: "Fern", FullName: "Fernando", PushName: "Fer", BusinessName: "FerShop"},
-		self:   {PushName: "Me"},
+		friend:  {FirstName: "Fern", FullName: "Fernando", PushName: "Fer", BusinessName: "FerShop"},
+		self:    {FullName: "Myself", PushName: "Me"},
+		chatted: {PushName: "Stranger"},
+		biz:     {BusinessName: "ShopCo"},
 	}
 	s.mu.Unlock()
 
@@ -761,12 +768,12 @@ func TestListContactsFacade(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 2 || got[0].JID != self.String() || got[1].JID != friend.String() {
-		t.Fatalf("列表应当按 JID 排序且两条: %+v", got)
+	if len(got) != 1 || got[0].JID != friend.String() {
+		t.Fatalf("列表应当只剩存过通讯录的好友一条: %+v", got)
 	}
-	if got[1].FirstName != "Fern" || got[1].FullName != "Fernando" ||
-		got[1].PushName != "Fer" || got[1].BusinessName != "FerShop" {
-		t.Fatalf("联系人字段映射不符: %+v", got[1])
+	if got[0].FirstName != "Fern" || got[0].FullName != "Fernando" ||
+		got[0].PushName != "Fer" || got[0].BusinessName != "FerShop" {
+		t.Fatalf("联系人字段映射不符: %+v", got[0])
 	}
 
 	s.mu.Lock()
@@ -779,6 +786,36 @@ func TestListContactsFacade(t *testing.T) {
 	if _, err = WhatsappListContacts(nil, "8613711111111"); err == nil ||
 		!strings.Contains(err.Error(), "没有在跑") {
 		t.Fatalf("未启动账号应当被拒: %v", err)
+	}
+}
+
+// TestListContactsNonFriendsOnlyFallsThroughToSync 两段式的「命中」按过滤后的好友数
+// 判定：本地只剩本人与「仅聊过」的行时不算命中，必须继续走同步补齐，否则真好友
+// 一条都没拉下来的账号会永远列空且不再尝试。
+func TestListContactsNonFriendsOnlyFallsThroughToSync(t *testing.T) {
+	dev := fakeDevice(t, "8613800000000@s.whatsapp.net", "android", "A")
+	m, _, get := startFakeWA(t, nil, nil, dev)
+	if err := m.StartClient(*dev.ID); err != nil {
+		t.Fatal(err)
+	}
+	s := get(dev.ID.String())
+	self := jidOf(t, "8613800000000@s.whatsapp.net")
+	chatted := jidOf(t, "8613722222222@s.whatsapp.net")
+	s.mu.Lock()
+	s.contacts = map[types.JID]types.ContactInfo{
+		self:    {FullName: "Myself"},
+		chatted: {PushName: "Stranger"},
+	}
+	s.mu.Unlock()
+	list, err := WhatsappListContacts(nil, "8613800000000")
+	if err != nil {
+		t.Fatalf("非好友行被滤空不是错误: %v", err)
+	}
+	if len(list) != 0 {
+		t.Fatalf("应当返回空好友列表: %+v", list)
+	}
+	if calls, _, _ := s.countSyncs(); calls == 0 {
+		t.Error("本地只剩非好友行时应视为未命中，走同步补齐（一次都没拉）")
 	}
 }
 

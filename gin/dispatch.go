@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 	"touchgocore/util"
 	"touchgocore/vars"
 
@@ -284,8 +285,10 @@ func newRootHandler(staticDir *string) gin.HandlerFunc {
 				serveGRPCProxy(c, e.proxy)
 				return
 			}
+			start := time.Now()
 			vars.Debug("HTTP %s %s -> %v", c.Request.Method, p, e.fn)
 			e.fn(c)
+			vars.Debug("HTTP %s %s <- %d %v", c.Request.Method, p, c.Writer.Status(), time.Since(start))
 			return
 		}
 		// 4. 路径已注册但方法不匹配：405 + Allow（恢复 gin 原生 MethodNotAllowed 语义）。

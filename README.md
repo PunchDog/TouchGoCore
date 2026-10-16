@@ -34,11 +34,21 @@ Go 游戏服务框架：WebSocket、gRPC、定时器、Lua、Telegram、Gin、Re
   下游要逐段注入，别把密钥抄进版本库。
   whatsapp 不在这三条之内：它的**消息侧已改走 `go.mau.fi/whatsmeow` 协议客户端**（非 HTTP 供应商）——
   QR 扫码配对在本仓（`WhatsappStartPairing` + WebSocket 端点 `GET /whatsapp/qr/{session_id}`），
+  不扫码改用手机号取配对码走 `WhatsappGetPairingCode(ctx, phone)`（同步回 `XXXX-XXXX` 8 位码 +
+  会话 id，配对码与终局事件复用同一条 `CallWhatsappMsg+"QR"` 广播与上面那个 WS 端点；
+  号码在错误文案与日志里一律掩码，在飞会话另有包内总量上限），
   多账号会话密钥材料存 `whatsapp.sessions.dsn` 指向的 Postgres（sqlstore 管表），发消息/删会话框/
   吊销配对（`WhatsappDeleteDevice`：在跑先向服务端解绑再删设备行，没在跑只删行）
   直连 WhatsApp 多设备协议；只有资金侧（充值/提现）仍引用 `pay_sdks`。整通道另有一支总闸
   `whatsapp.enable`：**显式为 `on` 才装配**，值不为 on（或压根没有 whatsapp 段）时消息侧与
   资金侧一起不启动，本包所有门面调用就地拒绝——默认不开是刻意的，见下条封号风险。
+  读写门面（发消息/发群消息/删框/列好友/列群组/批量发信）**自带按需登录**：账号没在跑就先拉起并
+  等到连上再办事，库里没有设备行时报错仍含「没有在跑」并带出「未配对」；「配对成功不自动上线」
+  这条裁决管的是配对那一刻不批量拉起整库账号，两者不冲突（要长期在跑仍显式 `WhatsappStartClient`）。
+  联系人另有 `WhatsappSyncContacts(ctx, fromJID, full)`：whatsmeow 的通讯录只来自
+  `critical_unblock_low` 这份 app state 快照且**连接时不会自动拉**，所以新配对账号（扫码与配对码
+  都一样）不拉一次就永远是空列表；`WhatsappListContacts` 已内置「本地为空才拉」的两段式，
+  同账号并发由包内单飞收住、`full=true` 的全量重拉按 10 分钟窗口限流（它会先擦 app state 版本）。
   whatsmeow 是非官方客户端，用它收发违反 WhatsApp 服务条款、**账号可被封**，
   框架不为此担保，风控与责任归业务方。
   「开不开」有两处真相：SDK 段的 `enable` 决定这套凭证能不能用，通道段的 `sdk` 决定这条通道用不用它，

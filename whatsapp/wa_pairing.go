@@ -76,6 +76,50 @@ type QRSession struct {
 	last      QREvent
 	hasLast   bool
 	pairedJID string
+	// sess 是本次配对持有的一次性会话（startPairing 建会话时填入）。
+	// 码配对在泵里读到首个 code 项后经它调 PairPhone；QR 扫码流程不读这个字段。
+	sess waPairSession
+
+	// pairPhone 非空即手机号配对码模式：泵在首个 code 项就地 PairPhone。
+	// pairResult 是给 WhatsappGetPairingCode 的同步出口（缓冲 1），先入通道再广播，
+	// 扇出丢帧不影响门面返回值。
+	pairPhone  string
+	pairMasked string
+	pairCtx    context.Context
+	pairResult chan pairCodeResult
+	pairIssued bool
+}
+
+// pairCodeResult 是码配对泵写给门面的一次结果。
+type pairCodeResult struct {
+	code string
+	err  error
+}
+
+// hasIssuedPairCode 码是否已经交给门面（成功或失败都算已结算）。
+// 已结算的同号会话允许被下一次 GetPairingCode 替换；未结算的第二呼仍拒绝。
+func (s *QRSession) hasIssuedPairCode() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.pairIssued
+}
+
+// completePairCode 把码配对结果写入同步通道，只生效一次。
+func (s *QRSession) completePairCode(code string, err error) {
+	if s.pairResult == nil {
+		return
+	}
+	s.mu.Lock()
+	if s.pairIssued {
+		s.mu.Unlock()
+		return
+	}
+	s.pairIssued = true
+	s.mu.Unlock()
+	select {
+	case s.pairResult <- pairCodeResult{code: code, err: err}:
+	default:
+	}
 }
 
 // Subscribe 登记一个订阅者，返回事件通道与退订函数。
@@ -167,6 +211,13 @@ type waPairSession interface {
 	Connect() error
 	Disconnect()
 	Device() *store.Device
+	// PairPhone 即库的 Client.PairPhone（pair-code.go:92）：手机号配对码入口，
+	// 前置是连接已建立且 QR 通道首个 "code" 项已出现（pair-code.go:78-81）。
+	// 只由 runPairing 在码配对模式的首个 code 项上调用。
+	PairPhone(ctx context.Context, phone string, showPushNotification bool, clientType whatsmeow.PairClientType, clientDisplayName string) (string, error)
+	// LoggedIn 即库的 IsLoggedIn：配对 socket 被服务端拆掉之后，要用已落库凭据再 Connect 一次，
+	// 这个标记变真才表示手机端会离开「正在登录」。
+	LoggedIn() bool
 }
 
 // waPairSessionFactory 是「怎么造配对会话」的挂点：默认真实现，测试整体替换、用完还原。
@@ -190,6 +241,18 @@ func (c *waPairConn) Connect() error        { return c.cli.Connect() }
 func (c *waPairConn) Disconnect()           { c.cli.Disconnect() }
 func (c *waPairConn) Device() *store.Device { return c.cli.Store }
 
+// PairPhone 转发到库的 Client.PairPhone（pair-code.go:92），本包不加任何语义。
+func (c *waPairConn) PairPhone(ctx context.Context, phone string, showPushNotification bool, clientType whatsmeow.PairClientType, clientDisplayName string) (string, error) {
+	return c.cli.PairPhone(ctx, phone, showPushNotification, clientType, clientDisplayName)
+}
+func (c *waPairConn) LoggedIn() bool { return c.cli.IsLoggedIn() }
+
+// waPairReloginSettle 是重登成功后再留一会儿才拆连接的时间。
+// 配对确认后服务端会拆掉配对 socket（pair.go 的 expectDisconnect），手机要等这只设备
+// 用落库凭据重新登录才结束「正在登录」。拆得太快，预密钥还没传完，手机就停在那一屏，
+// 之后再用数据库里的设备行去登也会失败。测试把它置 0。
+var waPairReloginSettle = 2 * time.Second
+
 var _ waPairSession = (*waPairConn)(nil)
 
 // StartPairing 起一次新的 QR 配对，返回进行中的会话。
@@ -200,6 +263,11 @@ var _ waPairSession = (*waPairConn)(nil)
 // 提前终止用 QRSession.Cancel()。
 func (m *waManager) StartPairing(ctx context.Context) (*QRSession, error) {
 	_ = ctx // 刻意不参与会话生命周期，理由见上
+	return m.startPairing("")
+}
+
+// startPairing 建一次配对会话。phone 为空走扫码；非空则同一条泵在首个 code 项就地 PairPhone。
+func (m *waManager) startPairing(phone string) (*QRSession, error) {
 	dev := m.store.NewDevice()
 	if dev == nil {
 		return nil, errors.New("whatsapp 配对失败: 会话库未能创建设备")
@@ -219,15 +287,26 @@ func (m *waManager) StartPairing(ctx context.Context) (*QRSession, error) {
 		return nil, err
 	}
 	s := &QRSession{
-		ID:     id,
-		cancel: cancel,
-		done:   make(chan struct{}),
-		subs:   make(map[chan QREvent]struct{}),
+		ID:         id,
+		cancel:     cancel,
+		done:       make(chan struct{}),
+		subs:       make(map[chan QREvent]struct{}),
+		sess:       sess,
+		pairPhone:  phone,
+		pairMasked: waMaskPhone(phone),
+		pairCtx:    sessionCtx,
+	}
+	if phone != "" {
+		s.pairResult = make(chan pairCodeResult, 1)
 	}
 	m.qr.Store(id, s)
 	m.wg.Add(1)
 	go m.runPairing(s, sess, qrChan, dev)
-	vars.Info("WhatsApp QR 配对会话已创建: session=%s（%s 内有效）", id, waQRTTL)
+	if phone != "" {
+		vars.Info("WhatsApp 配对码会话已创建: session=%s phone=%s（%s 内有效）", id, s.pairMasked, waQRTTL)
+	} else {
+		vars.Info("WhatsApp QR 配对会话已创建: session=%s（%s 内有效）", id, waQRTTL)
+	}
 	return s, nil
 }
 
@@ -251,34 +330,119 @@ func (m *waManager) runPairing(s *QRSession, sess waPairSession, qrChan <-chan w
 		m.qr.Delete(s.ID)
 		s.finish()
 	}()
+	defer func() {
+		if s.pairPhone == "" || s.hasIssuedPairCode() {
+			return
+		}
+		err := fmt.Errorf("whatsapp 配对码失败: 配对会话在首个二维码项之前结束（digits=%s）", s.pairMasked)
+		s.completePairCode("", err)
+		s.emit(QREvent{Event: whatsmeow.QRChannelEventError, Error: err.Error()})
+	}()
 
 	if err := sess.Connect(); err != nil {
 		s.emit(QREvent{Event: whatsmeow.QRChannelEventError, Error: "连接 WhatsApp 失败: " + err.Error()})
 		vars.Warning("WhatsApp QR 配对连接失败: session=%s err=%v", s.ID, err)
 		return
 	}
+	firstCode := false
+	var paired *QREvent
 	for item := range qrChan {
 		ev := QREvent{Event: item.Event}
 		switch item.Event {
 		case whatsmeow.QRChannelEventCode:
 			ev.Code = item.Code
 			ev.TimeoutMS = item.Timeout.Milliseconds()
+			s.emit(ev)
+			if s.pairPhone != "" && !firstCode {
+				firstCode = true
+				ctx := s.pairCtx
+				if ctx == nil {
+					ctx = context.Background()
+				}
+				code, err := sess.PairPhone(ctx, s.pairPhone, waPairCodeShowPushNotification,
+					waPairCodeClientType, waPairCodeClientDisplayName)
+				if err != nil {
+					err = waMaskErr(fmt.Errorf("whatsapp 配对码失败: PairPhone 被拒（digits=%s）: %w", s.pairMasked, err), s.pairPhone, s.pairMasked)
+					s.completePairCode("", err)
+					s.emit(QREvent{Event: whatsmeow.QRChannelEventError, Error: err.Error()})
+					return
+				}
+				s.completePairCode(code, nil)
+				s.emit(QREvent{Event: QREventPairCode, Code: code})
+				vars.Info("WhatsApp 配对码已生成: session=%s phone=%s（用户在手机上输码，与扫码共用同一条事件流）", s.ID, s.pairMasked)
+			}
+			continue
 		case whatsmeow.QRChannelEventError:
 			if item.Error != nil {
 				ev.Error = item.Error.Error()
 			}
 		case whatsmeow.QRChannelSuccess.Event:
-			// 配对成功：sqlstore 已自动落库（Save），dev.ID 此时已就位。
-			// 不自动 StartClient——用户裁决，业务方拿着这个 JID 显式启动。
+			// 凭据已落库，但服务端随即拆掉配对 socket（pair.go expectDisconnect）。
+			// 先别对外报成功：等用这份库数据重登完成，手机才会离开「正在登录」。
 			if dev.ID != nil {
 				ev.JID = dev.ID.String()
 				s.mu.Lock()
 				s.pairedJID = ev.JID
 				s.mu.Unlock()
-				vars.Info("WhatsApp QR 配对成功: session=%s jid=%s（账号未自动上线，需显式 WhatsappStartClient）", s.ID, ev.JID)
+				paired = &ev
+				continue
 			}
 		}
 		s.emit(ev)
+	}
+	if paired != nil {
+		if m.reloginPaired(sess, dev) {
+			vars.Info("WhatsApp 配对成功并已用落库凭据重登: session=%s jid=%s（未自动 StartClient）", s.ID, paired.JID)
+			s.emit(*paired)
+		} else {
+			s.emit(QREvent{Event: whatsmeow.QRChannelEventError, Error: "配对凭据已落库，但用数据库数据重登失败"})
+		}
+	}
+}
+
+// reloginPaired 等配对后的登录完成。
+//
+// 库在配对确认后会收到 stream error 515，并自己 Disconnect 再 connect
+//（connectionevents.go）。这段时间 socket 还在，再调 Connect 得到的是
+// ErrAlreadyConnected，不是失败。若把这次错误当成终局，二维码和配对码都会被标成失败，
+// 随后的 Disconnect 还会拆掉 515 正在进行的重连，手机就停在「正在登录」。
+// 515 没来、socket 已经拆掉时，才由这里补 Connect，并在拆线窗口内重试。
+// 不把这次连接登记进 clients 表：常驻上线仍由业务方显式 StartClient。
+func (m *waManager) reloginPaired(sess waPairSession, dev *store.Device) bool {
+	if sess == nil || dev == nil || dev.ID == nil {
+		return false
+	}
+	jid := dev.ID.String()
+	deadline := time.Now().Add(m.cfg.EffectiveConnectTimeout())
+	needConnect := true
+	var lastErr error
+	for {
+		if sess.LoggedIn() {
+			if waPairReloginSettle > 0 {
+				time.Sleep(waPairReloginSettle)
+			}
+			return true
+		}
+		if !time.Now().Before(deadline) {
+			if lastErr != nil {
+				vars.Warning("WhatsApp[%s] 用数据库凭据重登失败: %v", jid, lastErr)
+			} else {
+				vars.Warning("WhatsApp[%s] 用数据库凭据重登未在 %s 内完成", jid, m.cfg.EffectiveConnectTimeout())
+			}
+			return false
+		}
+		if needConnect {
+			err := sess.Connect()
+			switch {
+			case err == nil || errors.Is(err, whatsmeow.ErrAlreadyConnected):
+				// nil：握手已发起。AlreadyConnected：515 重连已经占着 socket。都等 IsLoggedIn。
+				needConnect = false
+				lastErr = nil
+			default:
+				lastErr = err
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
 }
 

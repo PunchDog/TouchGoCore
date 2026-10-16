@@ -6,6 +6,7 @@ package whatsapp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -65,16 +66,81 @@ type fakeSession struct {
 	lidMap   map[types.JID]types.JID
 	lidErr   error
 	lidCalls int
+
+	// 联系人 app state 同步的调用账（wa_contacts.go 的单飞与节流用例用）：
+	// syncCalls 记同步总次数，fullCalls 记其中 full=true 的次数，syncSeq 按调用顺序
+	// 记每次收到的 full 值——「快路优先、只在必要时升级」这条口径只能靠序列断言。
+	syncCalls int
+	fullCalls int
+	syncSeq   []bool
+	// syncErr：注入同步失败（appstate.ErrKeyNotFound 那一支用例用），非 nil 即不碰 contacts。
+	syncErr error
+	// syncAdds：同步「成功」时并进 contacts 的联系人，仿真库的全量快照落库
+	// （WM/appstate.go:186 PutAllContactNames）。有了它，「后进者拿锁后双检本地、
+	// 不再重复拉」的单飞语义才有可测的形态。
+	syncAdds map[types.JID]types.ContactInfo
+	// syncGate：非 nil 时同步在**拿锁之前**等它（永不关即等到 ctx 到点）。用于钉住
+	// 「本包内部同步预算到点」与「调用方断连」两种失败必须报成两件事
+	// （wa_sync_timeout_test.go，默认 nil ⇒ 既有行为逐字不变）。
+	syncGate chan struct{}
+
+	// 外联凭证门闸的预置与调用账（wa_reachout_test.go）：salt/tokens 是 NCTSalt 与
+	// PrivacyToken 的现值（零值 ⇒ 凭证缺位），rhSeq 记 SyncRegularHigh 的入参序列，
+	// histReqs 记向手机要历史的次数，onHistRequest 仿真手机推历史后的落库回调。
+	salt          []byte
+	tokens        map[types.JID][]byte
+	rhSeq         [][2]bool
+	histReqs      int
+	onHistRequest func()
+	// requireCreds：SendText 对无凭证的 DM 回 463（仿真服务器 ack）。
+	requireCreds bool
+	// requireToken：SendText 只认对方 tctoken，有盐带 cstoken 也回 463（:9 形态）。
+	requireToken bool
+
+	// ── 以下两字段是 wa_kick_liveness_test.go（前缀 kl）用的挂点，默认零值 ⇒ 既有行为逐字不变 ──
+	// holdLoginPending：Login 返回 nil 但**不**把 loggedIn 置真。
+	//
+	// 它仿真的是 whatsmeow 真机上确实存在的那一档窗口：ConnectContext 返回 nil 只代表
+	// socket 与 Noise 握手完成，IsLoggedIn 要等服务端接受凭据（ref iq 回执）才翻真
+	// ——真机实测 connect ok 时 loggedin=false，约 1 秒后才派发 Connected
+	// （口径见 wa_manager.go 的 waitLoggedIn 注释）。生产里这一档只有几十到上千毫秒，
+	// 靠既有时序撞不出来；把它做成一个可置位的稳态，「常驻协程正卡在 waitLoggedIn」
+	// 才有确定性窗口可测，而不是靠 nanosecond 级的运气（wa_reconnect_test.go 三条用例
+	// 的偶红就是撞这个运气）。
+	holdLoginPending bool
+	// releaseAfter：第 N 次 Login 起恢复正常置真（N<=0 读作「永远挂起」）。
+	// 取 2 就是「只有被催之后重连的那一轮才真正确认登录」——正好是门面等得到的那一档。
+	releaseAfter int
+	// loginSettleDelay：每轮 Login 开工前先睡这么久（0 ⇒ 既有行为逐字不变）。
+	//
+	// 仿真的是「发起连接 + Noise 握手 + 等回执」这一来一回本身要耗时：真机上一轮重连
+	// 不是当场归零的。只有把它做成可控档位，「库侧等自己到点之后才去重连」与
+	// 「被门面催之后才去重连」这两条路径的落定时刻才能差出一个可判别的量级
+	// （赛跑推导见 wa_kick_liveness_test.go 文件头）。
+	loginSettleDelay time.Duration
 }
 
 type fakeText struct{ to, body string }
 
 func (f *fakeSession) Login(ctx context.Context) error {
+	// kl 挂点（默认零值不进入）：一轮连接的来回耗时。睡在**锁外**——睡在锁内会把门面
+	// 与常驻协程两边的 LoggedIn() 轮询一起堵死，测出来的就不是赛跑而是互相阻塞。
+	if d := f.loginSettleDelay; d > 0 {
+		time.Sleep(d)
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.loginCalls++
 	if f.loginErr != nil {
 		return f.loginErr
+	}
+	// kl 挂点（wa_kick_liveness_test.go）：两个字段都是零值时**不进入**这个分支，
+	// 既有行为逐字不变。进入时仿真相机形态——ConnectContext 已返回 nil（socket 与
+	// Noise 握手完成），但登录回执还没落定，所以 loggedIn 保持 false：
+	// 常驻协程会稳稳卡在 waitLoggedIn 里，而不是靠 Login 返回与首次检查之间的
+	// nanosecond 级运气才撞上这一档。
+	if f.holdLoginPending && (f.releaseAfter <= 0 || f.loginCalls < f.releaseAfter) {
+		return nil
 	}
 	f.loggedIn = true
 	return nil
@@ -141,6 +207,25 @@ func (f *fakeSession) SendText(ctx context.Context, to string, body string) (str
 		return "", time.Time{}, ctx.Err()
 	}
 	f.sent = append(f.sent, fakeText{to: to, body: body})
+	// requireCreds（wa_reachout_test.go）：仿真服务器对「没带 tctoken/cstoken 的 DM」
+	// 在 ack 上回 463（WM/send.go:459-461）。凭证现值与门闸读的是同一份 salt/tokens。
+	// 群组不挂 token（WM/send.go 群分支），所以只拦用户域。
+	if f.requireCreds {
+		if jid, jerr := types.ParseJID(to); jerr == nil &&
+			(jid.Server == types.DefaultUserServer || jid.Server == types.HiddenUserServer) &&
+			len(f.salt) == 0 && len(f.tokens[jid]) == 0 {
+			return f.sendID, time.Now(), errors.New("server returned error 463")
+		}
+	}
+	// requireToken：更严一档的服务器形态——**有盐带 cstoken 也照样 463**，只认对方
+	// tctoken（真机 2026-10-16 :9 批次实证：已存在会话的收件人拒收 cstoken 凭证）。
+	if f.requireToken {
+		if jid, jerr := types.ParseJID(to); jerr == nil &&
+			(jid.Server == types.DefaultUserServer || jid.Server == types.HiddenUserServer) &&
+			len(f.tokens[jid]) == 0 {
+			return f.sendID, time.Now(), errors.New("server returned error 463")
+		}
+	}
 	// downAfterSends：发满第 N 条就把登录态按回 false，仿「批跑到一半 socket 掉了」。
 	if f.downAfterSends > 0 && len(f.sent) >= f.downAfterSends {
 		f.loggedIn = false
@@ -158,7 +243,18 @@ func (f *fakeSession) SendAppState(ctx context.Context, patch appstate.PatchInfo
 func (f *fakeSession) GetContacts(ctx context.Context) (map[types.JID]types.ContactInfo, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.contacts, f.contactsErr
+	// 交副本，不交内部 map：真库的 GetAllContacts 是每次从表里读出一个新 map
+	//（WM/store/sqlstore/contacts.go），调用方拿到的东西不会再被写。直接把 f.contacts
+	// 端出去会让「并发读 + 同步写」的用例报出假件自己的 data race（真库不存在这条），
+	// 反而把要测的东西盖住。
+	if f.contacts == nil {
+		return nil, f.contactsErr
+	}
+	out := make(map[types.JID]types.ContactInfo, len(f.contacts))
+	for k, v := range f.contacts {
+		out[k] = v
+	}
+	return out, f.contactsErr
 }
 
 func (f *fakeSession) GetJoinedGroups(ctx context.Context) ([]*types.GroupInfo, error) {
@@ -220,6 +316,110 @@ func (f *fakeSession) countLidLookups() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.lidCalls
+}
+
+// SyncContactAppState 记一次同步调用账，成功时把 syncAdds 并进 contacts
+// （仿真库的 PutAllContactNames 整表落库，见 wa_client.go 的真实现注释）。
+func (f *fakeSession) SyncContactAppState(ctx context.Context, full bool) error {
+	// syncGate 非空时先等它（**在拿 f.mu 之前**等）：仿「同步要往服务器发 IQ、一个来回
+	// 迟迟不回」的形态，让门面那个内部同步预算先到点。不先释放锁就等的写法会把
+	// LoggedIn() 一起堵死，测出来的就不是超时归因而是自造死锁。
+	if f.syncGate != nil {
+		select {
+		case <-f.syncGate:
+		case <-ctx.Done():
+		}
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.syncCalls++
+	if full {
+		f.fullCalls++
+	}
+	f.syncSeq = append(f.syncSeq, full)
+	// 真库在这一步用的就是调用方 ctx（同步快照要往服务器发 IQ、落库要读写会话库），
+	// 取消时当场返回 ctx.Err()——门面那句「上下文已结束」的折算靠这里才有活闸。
+	if ctx != nil && ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if f.syncErr != nil {
+		return f.syncErr
+	}
+	if len(f.syncAdds) == 0 {
+		return nil
+	}
+	if f.contacts == nil {
+		f.contacts = make(map[types.JID]types.ContactInfo, len(f.syncAdds))
+	}
+	for jid, c := range f.syncAdds {
+		f.contacts[jid] = c
+	}
+	return nil
+}
+
+// countSyncs 读同步账：总次数、其中 full=true 的次数、按调用顺序的 full 序列副本。
+func (f *fakeSession) countSyncs() (calls, fullCalls int, seq []bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.syncCalls, f.fullCalls, append([]bool(nil), f.syncSeq...)
+}
+
+// setSync 预置同步的失败注入与「成功后补进来的联系人」（与 syncAdds 合并的语义见上）。
+func (f *fakeSession) setSync(syncErr error, syncAdds map[types.JID]types.ContactInfo) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.syncErr = syncErr
+	f.syncAdds = syncAdds
+}
+
+// ── 外联凭证门闸挂点（wa_reachout_test.go 用；零值 ⇒ 凭证缺位、无历史推送，既有行为不变）──
+
+// SyncRegularHigh 记一次 (full, onlyIfNotSynced) 调用账，恒成功。
+func (f *fakeSession) SyncRegularHigh(ctx context.Context, full, onlyIfNotSynced bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.rhSeq = append(f.rhSeq, [2]bool{full, onlyIfNotSynced})
+	return nil
+}
+
+func (f *fakeSession) NCTSalt(ctx context.Context) ([]byte, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.salt, nil
+}
+
+func (f *fakeSession) PrivacyToken(ctx context.Context, jid types.JID) ([]byte, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.tokens[jid], nil
+}
+
+// RequestRecentHistory 记一次向手机要历史的调用；onHistRequest 非 nil 时在锁外回调，
+// 供用例仿真「手机推历史 → 凭证落库」（回调里再 setReachout 写盐/token）。
+func (f *fakeSession) RequestRecentHistory(ctx context.Context) error {
+	f.mu.Lock()
+	f.histReqs++
+	cb := f.onHistRequest
+	f.mu.Unlock()
+	if cb != nil {
+		cb()
+	}
+	return nil
+}
+
+// setReachout 预置凭证现值：盐与按目标 JID 的 tctoken。
+func (f *fakeSession) setReachout(salt []byte, tokens map[types.JID][]byte) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.salt = salt
+	f.tokens = tokens
+}
+
+// reachState 读门闸调用账：regular_high 的 (full, onlyIfNotSynced) 序列与要历史的次数。
+func (f *fakeSession) reachState() (rhSeq [][2]bool, histReqs int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([][2]bool(nil), f.rhSeq...), f.histReqs
 }
 
 var _ waSession = (*fakeSession)(nil)

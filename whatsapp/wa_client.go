@@ -1,10 +1,12 @@
 package whatsapp
 
 // 本文件是 whatsmeow 消息侧的门面：发一条文本消息（单聊或群组）、异步批量发信
-// （后台 goroutine 逐条、随机间隔、小时闸）、查好友列表、
-// 查可发言的群组列表、删掉代持账号客户端里那个会话框、
+// （后台 goroutine 逐条、随机间隔、小时闸）、查好友列表（本地空集时按需同步，见
+// wa_contacts.go）、查可发言的群组列表、删掉代持账号客户端里那个会话框、
 // 多账号 Client 的启停与列表、QR 配对的发起、吊销账号配对，以及把入站事件摊平成回调广播给业务方。
-// 常驻协程与会话管理在 wa_manager.go，配对泵在 wa_pairing.go，存储在 store_postgres.go，
+// 常驻协程与会话管理在 wa_manager.go，联系人 app state 同步在 wa_contacts.go，
+// 单聊发送前的外联凭证门闸与 463 恢复档在 wa_reachout.go，配对泵在 wa_pairing.go，
+// 存储在 store_postgres.go，
 // 吊销配对在 wa_delete_device.go（它要串起 latch/Logout/停机/删行/广播五步，单独成文）。
 //
 // 三条口径先写在这里：
@@ -96,8 +98,11 @@ type ConnEvent struct {
 
 // WaContact 是一个好友（通讯录联系人）的可公开事实，字段取自库的 types.ContactInfo。
 //
-// 数据源是 app state 联系人同步的落库产物（cli.Store.Contacts），不是实时向服务器查询：
-// 刚配对、同步未完成的账号列出来是空的，属正常态而不是错误。
+// 数据源是 app state 联系人同步的落库产物（cli.Store.Contacts），不是实时向服务器查询。
+// 库不会在连接时自动拉这份快照，所以 WhatsappListContacts 在本地空集时会主动同步一次
+// （见 wa_contacts.go）；同步失败一律报错，不会返回「空列表 + nil」冒充「这个账号没好友」。
+// **只列手机上存过通讯录的好友**：聊过但没加好友的（仅 pushName）、企业号展示名、
+// 以及本账号自己，都不在返回列表里（判定口径见 waContactList）。
 // Name 系四个字段是用户自设的展示名，业务侧展示前自行判空兜底。
 type WaContact struct {
 	JID          string
@@ -145,6 +150,21 @@ type waSession interface {
 	// GetContacts 读该账号在库内联系人区的全量好友（app state 联系人同步的落库产物，
 	// 不联网；真实现走 cli.Store.Contacts.GetAllContacts，WM/broadcast.go:59 同源用法）。
 	GetContacts(ctx context.Context) (map[types.JID]types.ContactInfo, error)
+	// SyncContactAppState 主动拉一次联系人 app state（critical_unblock_low）。
+	// full=false 且该账号已同步过 ⇒ 库内零网络往返直接返回；full=true 会先擦版本再全量重拉。
+	SyncContactAppState(ctx context.Context, full bool) error
+	// SyncRegularHigh 拉一次 regular_high app state。里面的 nct_salt_sync 是给没聊过的人
+	// 发消息时生成 cstoken 的盐；盐没落库就发，服务器会回 463。
+	// 实参口径与 SyncContactAppState 同款三档（fullSync, onlyIfNotSynced）：
+	//   - (false, true) 快路：该账号已同步过时库内零网络往返；
+	//   - (false, false) 增量：按当前版本拉新补丁，服务端后补/轮换盐走这一档；
+	//   - (true, false) 全量重拉：先擦版本再重付全量快照，只给 463 恢复档用，调用方节流。
+	SyncRegularHigh(ctx context.Context, full, onlyIfNotSynced bool) error
+	// NCTSalt 读本账号本地的 nct 盐（生成 cstoken 的原料）；空切片表示还没拿到。
+	NCTSalt(ctx context.Context) ([]byte, error)
+	// PrivacyToken 读目标 JID 的本地 tctoken；nil 表示还没拿到。库侧 SQL 自带
+	// PN↔LID 双向回退（WM/store/sqlstore/store.go:947-958），传号码或 LID 都命中。
+	PrivacyToken(ctx context.Context, jid types.JID) ([]byte, error)
 	// GetJoinedGroups 向服务器查询该账号已加入的群组（需在线，一次 IQ 往返，
 	// 查自 WM/group.go:535）。
 	GetJoinedGroups(ctx context.Context) ([]*types.GroupInfo, error)
@@ -174,6 +194,7 @@ func newWaConn(dev *store.Device, log waLog.Logger) waSession {
 
 func (c *waConn) Login(ctx context.Context) error  { return c.cli.ConnectContext(ctx) }
 func (c *waConn) LoggedIn() bool                   { return c.cli.IsLoggedIn() }
+func (c *waConn) Connected() bool                  { return c.cli.IsConnected() }
 func (c *waConn) Disconnect()                      { c.cli.Disconnect() }
 func (c *waConn) Logout(ctx context.Context) error { return c.cli.Logout(ctx) }
 
@@ -198,6 +219,63 @@ func (c *waConn) GetLIDForPN(ctx context.Context, pn types.JID) (types.JID, erro
 
 func (c *waConn) GetContacts(ctx context.Context) (map[types.JID]types.ContactInfo, error) {
 	return c.cli.Store.Contacts.GetAllContacts(ctx)
+}
+
+// SyncContactAppState 是 waSession 里 FetchAppState 的转发（契约见接口注释）。
+//
+// 三条反直觉的库语义钉在这里，别按想当然改实参（逐行核自 WM/appstate.go，v0.0.0-20261007111105）：
+//   - 入参口径是 (fullSync=full, onlyIfNotSynced=!full)。
+//   - version==0 时库内部**自动按 fullSync 走**（:59-60），所以首次同步不需要显式 full=true；
+//     而 full=true 会先 DeleteAppStateVersion（:50）把已同步过的账号擦成 v0、重付一次全量快照
+//     ——这就是调用方要用 waContactSyncFullMinInterval 窗口限流的原因。
+//   - version>0 且 onlyIfNotSynced=true 时零网络返回（:61-63）⇒ 快路随时可试。
+//
+// 联系人批量落库的耦合条件必须记住：PutAllContactNames 只在
+// `name==WAPatchCriticalUnblockLow && fullSync && !cli.EmitAppStateEventsOnFullSync`
+// 时发生（:182-191）。本包 newWaConn 从不设 EmitAppStateEventsOnFullSync（库零值 false）
+// ⇒ 这条分支现在是活的；后来者若为了收 events.AppState 而把那个开关打开，
+// 这里会**静默不再批量落联系人**（列好友继续返回空集），改动前先读这段。
+func (c *waConn) SyncContactAppState(ctx context.Context, full bool) error {
+	return c.cli.FetchAppState(ctx, appstate.WAPatchCriticalUnblockLow, full, !full)
+}
+
+// SyncRegularHigh 是 waSession 里 regular_high 的转发（三档语义见接口注释）。
+func (c *waConn) SyncRegularHigh(ctx context.Context, full, onlyIfNotSynced bool) error {
+	return c.cli.FetchAppState(ctx, appstate.WAPatchRegularHigh, full, onlyIfNotSynced)
+}
+
+func (c *waConn) NCTSalt(ctx context.Context) ([]byte, error) {
+	return c.cli.Store.NCTSalt.GetNCTSalt(ctx)
+}
+
+func (c *waConn) PrivacyToken(ctx context.Context, jid types.JID) ([]byte, error) {
+	t, err := c.cli.Store.PrivacyTokens.GetPrivacyToken(ctx, jid)
+	if t == nil {
+		return nil, err
+	}
+	return t.Token, err
+}
+
+// RequestRecentHistory 让手机把最近 7 天的会话推过来。历史里的 TcToken 会由库写进
+// privacy token 表。手机上已经聊过、配套设备仍 463，就是这份凭证没到这条连接上。
+func (c *waConn) RequestRecentHistory(ctx context.Context) error {
+	days := uint32(7)
+	msg := &waE2E.Message{
+		ProtocolMessage: &waE2E.ProtocolMessage{
+			Type: waE2E.ProtocolMessage_PEER_DATA_OPERATION_REQUEST_MESSAGE.Enum(),
+			PeerDataOperationRequestMessage: &waE2E.PeerDataOperationRequestMessage{
+				PeerDataOperationRequestType: waE2E.PeerDataOperationRequestType_FULL_HISTORY_SYNC_ON_DEMAND.Enum(),
+				FullHistorySyncOnDemandRequest: &waE2E.PeerDataOperationRequestMessage_FullHistorySyncOnDemandRequest{
+					HistorySyncConfig: store.DeviceProps.HistorySyncConfig,
+					FullHistorySyncOnDemandConfig: &waE2E.FullHistorySyncOnDemandConfig{
+						HistoryDurationDays: proto.Uint32(days),
+					},
+				},
+			},
+		},
+	}
+	_, err := c.cli.SendPeerMessage(ctx, msg)
+	return err
 }
 
 func (c *waConn) GetJoinedGroups(ctx context.Context) ([]*types.GroupInfo, error) {
@@ -255,7 +333,12 @@ func WhatsappListClients() []SessionInfo {
 // WhatsappStartClient 显式启动一个已配对账号（库里必须有设备行）。
 //
 // 幂等：已在跑直接返回 nil。配对成功后本包**不会**自动调它（用户裁决），
-// 账号什么时候上线由业务方决定。jid 要与会话库设备行的主键逐字一致：
+// 账号什么时候长期在跑由业务方决定。但业务方**不必**为了「让它上线」而先调它：
+// 调用任一读写门面（发消息/群发/删框/列好友/列群组）时本包会按需拉起该账号并等到连上
+// （waManager.ensureLoggedIn）——懒加载上线的是「这一次调用要用到的那一个账号」，
+// 不是整库设备，所以「配对成功不自动上线」这条裁决照常成立；
+// 要让账号常驻在跑仍需显式 WhatsappStartClient。
+// jid 要与会话库设备行的主键逐字一致：
 // 配套设备形态普遍是 "号码:1@s.whatsapp.net"（带设备段），纯数字号码只命中主设备行。
 // 与其它改状态动作一样，调用方要自己串行化「先停再启」这类时序。
 func WhatsappStartClient(jid string) error {
@@ -268,6 +351,18 @@ func WhatsappStartClient(jid string) error {
 		return fmt.Errorf("whatsapp 启动会话失败: %w", err)
 	}
 	return m.StartClient(j)
+}
+
+// WhatsappAwaitConnected 确保 fromJID 已有一条可用的 SDK 连接：不在册就按需启动，
+// 在册但 socket 已断（IsLoggedIn 可能仍为真）就催重连，等到既登录又连上才返回。
+// 发信、列好友、列群组之前由业务方调用，避免在未连接的会话上把请求耗到超时。
+func WhatsappAwaitConnected(ctx context.Context, fromJID string) error {
+	m, err := currentWA()
+	if err != nil {
+		return err
+	}
+	_, err = m.ensureLoggedIn(ctx, fromJID)
+	return err
 }
 
 // WhatsappStopClient 停掉一个在跑会话（断开连接、收掉常驻协程，等退出上限 1.5s）。
@@ -364,7 +459,8 @@ func WhatsappStartPairing(ctx context.Context) (string, error) {
 // 那不在本门面里。
 //
 // 连接态自愈：这个账号的会话断开时，本门面会先催一轮重连（退避睡眠被立即叫醒），
-// 僵尸会话（常驻协程已收手或已收 logged_out）则先摘掉再重建，连上才发；
+// 僵尸会话（常驻协程已收手或已收 logged_out）则先摘掉再重建，账号压根不在册就先按需
+// 启动（ensureLoggedIn），**等到连上才发**；
 // 等待上限 EffectiveConnectTimeout（缺省 15 秒），到点或调用方 ctx 取消即返回错误，
 // 不会把发信请求挂在无限等待上。会话真被服务端吊销了，错误文案是「需重新扫码配对」。
 func WhatsappSendMessage(ctx context.Context, fromJID, to, body string) (string, error) {
@@ -372,15 +468,11 @@ func WhatsappSendMessage(ctx context.Context, fromJID, to, body string) (string,
 	if err != nil {
 		return "", err
 	}
-	w, err := m.ensureReady(ctx, fromJID)
+	w, err := m.ensureLoggedIn(ctx, fromJID)
 	if err != nil {
-		return "", fmt.Errorf("whatsapp 发送消息失败: %w", err)
+		return "", waLoginErr("发送消息", err)
 	}
-	jid, err := waJID(to)
-	if err != nil {
-		return "", fmt.Errorf("whatsapp 发送消息失败: %w", err)
-	}
-	msgID, _, err := waSendText(ctx, w, jid, body, "发送消息")
+	msgID, _, err := deliverText(ctx, w, to, body, "发送消息", false)
 	return msgID, err
 }
 
@@ -391,25 +483,33 @@ func WhatsappSendMessage(ctx context.Context, fromJID, to, body string) (string,
 //
 // 能不能发（仅管理员可发言群、被禁言等）不在这里判定，先用
 // WhatsappListSpeakableGroups 拿可发言清单；真发出去被服务器拒了会原样带错误上抛。
-// 连接态自愈与等待上限同 WhatsappSendMessage。
+// 连接态自愈与等待上限同 WhatsappSendMessage（含「账号不在册先按需启动」）。
 func WhatsappSendGroupMessage(ctx context.Context, fromJID, groupJID, body string) (string, error) {
 	m, err := currentWA()
 	if err != nil {
 		return "", err
 	}
-	w, err := m.ensureReady(ctx, fromJID)
+	w, err := m.ensureLoggedIn(ctx, fromJID)
 	if err != nil {
-		return "", fmt.Errorf("whatsapp 发送群组消息失败: %w", err)
+		return "", waLoginErr("发送群组消息", err)
 	}
-	jid, err := waJID(groupJID)
-	if err != nil {
-		return "", fmt.Errorf("whatsapp 发送群组消息失败: %w", err)
-	}
-	if jid.Server != types.GroupServer {
-		return "", fmt.Errorf("whatsapp 发送群组消息失败: 目标 %q 不是群组 JID（服务端应为 %s）", groupJID, types.GroupServer)
-	}
-	msgID, _, err := waSendText(ctx, w, jid, body, "发送群组消息")
+	msgID, _, err := deliverText(ctx, w, groupJID, body, "发送群组消息", true)
 	return msgID, err
+}
+
+// deliverText 是单发、群发、批内逐条共用的投递：先催连，再归一目标，再 waSendText。
+func deliverText(ctx context.Context, w *waClientWrapper, rawTo, body, label string, requireGroup bool) (string, string, error) {
+	if err := w.reconnectAndAwait(ctx); err != nil {
+		return "", "", waSendErr(label, err)
+	}
+	jid, err := waJID(rawTo)
+	if err != nil {
+		return "", "", fmt.Errorf("whatsapp %s失败: %w", label, err)
+	}
+	if requireGroup && jid.Server != types.GroupServer {
+		return "", "", fmt.Errorf("whatsapp 发送群组消息失败: 目标 %q 不是群组 JID（服务端应为 %s）", rawTo, types.GroupServer)
+	}
+	return waSendText(ctx, w, jid, body, label)
 }
 
 // waSendText 是发信门面共享的发送段：空正文就地拒绝，ctx 为空退化到包级运行
@@ -427,10 +527,14 @@ func waSendText(ctx context.Context, w *waClientWrapper, jid types.JID, body, la
 		ctx = runCtx()
 	}
 	target := jid.String()
+	if jid.Server == types.DefaultUserServer || jid.Server == types.HiddenUserServer {
+		w.ensureReachoutCreds(ctx, jid)
+	}
+	var wasNew bool
 	if w.gate != nil {
 		w.gateMu.Lock()
 		defer w.gateMu.Unlock()
-		wasNew := !w.gate.IsKnownChat(target)
+		wasNew = !w.gate.IsKnownChat(target)
 		delayMs, gerr := w.gate.BeforeSend(target, body, waIsGroupOrNewsletter(jid), "", time.Now())
 		if gerr != nil {
 			return "", "", fmt.Errorf("whatsapp %s失败: 防封闸拦截: %w", label, gerr)
@@ -443,25 +547,26 @@ func waSendText(ctx context.Context, w *waClientWrapper, jid types.JID, body, la
 				return "", "", waSendErr(label, werr)
 			}
 		}
-		msgID, ts, err := w.sess.SendText(ctx, target, body)
-		if err != nil {
-			w.gate.AfterSendFailed(time.Now())
-			return "", "", waSendErr(label, err)
-		}
-		w.gate.AfterSend(target, body, waIsGroupOrNewsletter(jid), "", wasNew, time.Now())
-		if strings.TrimSpace(msgID) == "" {
-			return "", "", &pay.ProviderError{Channel: "whatsapp", Code: "no_message_id", Msg: "服务端未返回消息 id"}
-		}
-		chat := waResolveChat(ctx, w.sess, jid).String()
-		w.recordLastSend(chat, msgID, ts)
-		return msgID, chat, nil
 	}
 	msgID, ts, err := w.sess.SendText(ctx, target, body)
+	if waIsReachout463(err) {
+		// 门闸没拿到凭证仍发出去时被服务器点名：强制增量+（窗口外）全量重拉 regular_high、
+		// 向手机要历史并轮询；只有等到**新凭证**（对方 tctoken，或发送当时缺的盐落了库）
+		// 才重试——463 已证明当前凭证组合被拒，拿同一份料重发只会再吃一个 463。
+		if w.recoverReachout463(ctx, jid) {
+			msgID, ts, err = w.sess.SendText(ctx, target, body)
+		}
+	}
 	if err != nil {
+		if w.gate != nil {
+			w.gate.AfterSendFailed(time.Now())
+		}
 		return "", "", waSendErr(label, err)
 	}
+	if w.gate != nil {
+		w.gate.AfterSend(target, body, waIsGroupOrNewsletter(jid), "", wasNew, time.Now())
+	}
 	if strings.TrimSpace(msgID) == "" {
-		// 连接成功却没给消息 id：不能交空串出去冒充「已发送」。
 		return "", "", &pay.ProviderError{Channel: "whatsapp", Code: "no_message_id", Msg: "服务端未返回消息 id"}
 	}
 	chat := waResolveChat(ctx, w.sess, jid).String()
@@ -496,7 +601,15 @@ func waSendErr(label string, err error) error {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return fmt.Errorf("whatsapp %s失败: 调用方上下文已结束（请求超时或客户端断开），本条未发出: %w", label, err)
 	}
+	if waIsReachout463(err) {
+		return fmt.Errorf("whatsapp %s失败: 服务器仍拒绝这条会话（463）。手机上的聊天凭证没有同步到这条配套连接，"+
+			"已向手机请求历史同步（需手机在线并打开 WhatsApp；群组发送不受这份凭证影响）", label)
+	}
 	return fmt.Errorf("whatsapp %s失败: %w", label, err)
+}
+
+func waIsReachout463(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "server returned error 463")
 }
 
 // waIsGroupOrNewsletter 判定收件 JID 是不是群/频道形态（防封闸按这个口径走群限速门）。
@@ -551,10 +664,16 @@ var errWaSendRateLimited = errors.New("超出单账号每小时发送上限（se
 //     未发的条目逐条广播「发送已取消」而不是静默蒸发，业务方账面上每条都有落点。
 //     调用方中途 cancel 不在此列（理由见 waBatchCtx）。
 //
-// 返回的 error 只覆盖「批次根本没被接走」：消息侧未启动、账号不在跑、列表为空。
-// 接走之后单条的成败一律看广播，不看这里的返回值。
+// 返回的 error 只覆盖「批次根本没被接走」：消息侧未启动、账号取不到（含自动启动失败）、
+// 列表为空。接走之后单条的成败一律看广播，不看这里的返回值。
 // 账号在批跑完之前被 WhatsappStopClient/吊销时，剩余条目会以发送失败形态广播出来
 // （底层连接已断），本包不做跨停机的续发。
+//
+// 入口走 ensureLoggedIn：不在册的账号先按需启动并等到连上再受理，下游因此不必自己
+// 「确保在线」（旧形态下 ensureAlive 对不在册的 key 直接报错，而 StartClient 的幂等
+// 分支对在册未连又什么都不做，外部仓的 ensureClient 因此空转）。
+// 等连上用的是**批次自己的上下文**（waBatchCtx）：入口这一段等待属于「受理」的一部分，
+// 与批内逐条同一口径——调用方顺手挂断不该让一批已经答过「已受理」的消息凭空蒸发。
 //
 // ctx 的口径（2026-10-14 改，与旧版相反，理由在函数内）：**调用方的取消信号不传导**，
 // 只有调用方设的 deadline 与进程停机信号会中止剩余条目。要主动停一批就用
@@ -564,14 +683,16 @@ func WhatsappSendBatchAsync(ctx context.Context, fromJID string, msgs []Outbound
 	if err != nil {
 		return err
 	}
-	w, err := m.ensureAlive(fromJID)
-	if err != nil {
-		return err
-	}
 	if len(msgs) == 0 {
+		// 空列表先看：不然会为一批压根不存在的消息把一个账号按需拉上线。
 		return errors.New("whatsapp 批量发信失败: 消息列表为空")
 	}
 	bctx, cancel := waBatchCtx(ctx)
+	w, err := m.ensureLoggedIn(bctx, fromJID)
+	if err != nil {
+		cancel()
+		return waLoginErr("批量发信", err)
+	}
 	go func() {
 		defer cancel()
 		waRunBatch(bctx, w, msgs)
@@ -617,7 +738,7 @@ func waRunBatch(ctx context.Context, w *waClientWrapper, msgs []OutboundMessage)
 			waBatchSleep(waBatchDelay(minD, maxD))
 		}
 		res := SendResult{Account: account, To: msg.To}
-		switch jid, perr := waJID(msg.To); {
+		switch _, perr := waJID(msg.To); {
 		case ctx.Err() != nil:
 			res.Err = "whatsapp 批量发信失败: 发送已取消: " + ctx.Err().Error()
 		case perr != nil:
@@ -627,18 +748,12 @@ func waRunBatch(ctx context.Context, w *waClientWrapper, msgs []OutboundMessage)
 		case !w.takeSendSlot(time.Now(), maxHour):
 			res.Err = "whatsapp 批量发信失败: " + errWaSendRateLimited.Error()
 		default:
-			// 逐条自愈：一批几十条的时间里 socket 可能中途掉（或半途收到吊销事件），
-			// 不在这里 reconnect 的话，后面每一条都撞在同一个断口上，整批以同一条错误刷屏。
-			if rerr := w.reconnectAndAwait(ctx); rerr != nil {
-				res.Err = "whatsapp 批量发信失败: " + rerr.Error()
+			msgID, chat, serr := deliverText(ctx, w, msg.To, msg.Body, "批量发信", false)
+			if serr != nil {
+				res.Err = serr.Error()
 			} else {
-				msgID, chat, serr := waSendText(ctx, w, jid, msg.Body, "批量发信")
-				if serr != nil {
-					res.Err = serr.Error()
-				} else {
-					res.MsgID = msgID
-					res.Chat = chat
-				}
+				res.MsgID = msgID
+				res.Chat = chat
 			}
 		}
 		publishWA("SendResult", &res)
@@ -647,28 +762,88 @@ func waRunBatch(ctx context.Context, w *waClientWrapper, msgs []OutboundMessage)
 
 // WhatsappListContacts 列出 fromJID 账号的全部好友，按 JID 串排序。
 //
-// 只读本地联系人库（app state 同步产物），不产生网络往返；同步尚未完成时返回空列表
-// 而不是错误。「账号必须在跑」这条与发信门面一致——没在跑的账号先报「没有在跑」。
-// 死会话（logged_out 后常驻协程收手）在这里会被复活重建：库把已删除设备的子存储换成了
-// NoopStore，不重建就再也读不到联系人；但本门面**不等登录建立**（本地读不需要活 socket）。
+// 两段式（2026-10-15 改；旧形态「只读本地、空集也照样返回空」是新配对账号群发目标集被
+// 算成 0 条的真因——库不会在连接时自动拉联系人 app state，本包此前也没有拉的能力）：
+//
+//   - ① 本地读命中：账号在册（死会话先复活）且本地联系人 >0 ⇒ 直接返回，**不等登录**，
+//     零网络等待。这是旧语义，TestListContactsRevivesWithoutWaiting 钉着它。
+//     复活是必需环节：库把已删除设备的子存储换成了 NoopStore，不重建连本地读都做不了。
+//   - ② 不在册 **或** 本地 0 条：自动登录并等到连上（ensureLoggedIn），再做一次节流同步
+//     （先快路 full=false；仍 0 条才升级 full=true，受 waContactSyncFullMinInterval 约束），
+//     最后重读本地结果返回。
+//
+// 同步失败一律报错，**绝不返回「空列表 + nil」**（「看起来成功的 0」就是这条改动要治的病）。
+// 唯一合法的「0 条且无错」是同步成功而服务器快照本就为空，那种情况额外记一条日志。
+//
+// 耗时预算：① 本地读，零网络；② 最坏 = 连接 EffectiveConnectTimeout（缺省 15 秒）
+// + 同步 waContactSyncTimeout（20 秒），合计仍在下游 axios 40 秒之内。
+// 第一次成功同步之后，① 会长期命中，后续调用回到零等待。
 func WhatsappListContacts(ctx context.Context, fromJID string) ([]WaContact, error) {
 	m, err := currentWA()
-	if err != nil {
-		return nil, err
-	}
-	w, err := m.ensureAlive(fromJID)
 	if err != nil {
 		return nil, err
 	}
 	if ctx == nil {
 		ctx = runCtx()
 	}
-	contacts, err := w.sess.GetContacts(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("whatsapp 获取好友列表失败: %w", err)
+
+	// ① 本地读命中即返回，不等登录。ensureAlive 只保证端出来的是活对象（僵尸复活）。
+	// 「命中」按**过滤后的好友数**判定：本地只剩「聊过没加好友」与自己的行时不算命中，
+	// 继续走 ② 补一次同步——否则通讯录里真好友一条都没拉下来的账号会永远列空。
+	if w, aerr := m.ensureAlive(fromJID); aerr == nil {
+		contacts, err := readWaContacts(ctx, w)
+		if err != nil {
+			return nil, err
+		}
+		if list := waContactList(contacts, w.jid.User); len(list) > 0 {
+			return list, nil
+		}
 	}
+
+	// ② 不在册，或本地好友 0 条：登录 + 同步 + 重读。
+	w, err := m.ensureLoggedIn(ctx, fromJID)
+	if err != nil {
+		return nil, waLoginErr("获取好友列表", err)
+	}
+	contacts, err := m.syncContactAppState(ctx, w, false, false)
+	if err != nil {
+		return nil, err
+	}
+	list := waContactList(contacts, w.jid.User)
+	if len(list) == 0 {
+		// 快路拉过仍是 0 条好友——唯一可能就是「库里版本已非 0 但联系人从没落下来」，
+		// 这时才值得付一次全量重拉（会擦版本，故受窗口约束）。
+		if contacts, err = m.syncContactAppState(ctx, w, true, true); err != nil {
+			return nil, err
+		}
+		list = waContactList(contacts, w.jid.User)
+	}
+	if len(list) == 0 && len(contacts) > 0 {
+		// 分诊留痕：本地有行但全被好友闸滤掉（只有聊过的、企业号或本人）。
+		// 与「同步失败伪装成 0 条」不同，这是快照里真没有存过通讯录的人。
+		vars.Info("WhatsApp[%s] 本地联系人 %d 条全非通讯录好友（仅聊过/企业号/本人），好友列表 0 条", w.jid.String(), len(contacts))
+	}
+	return list, nil
+}
+
+// waContactList 把库的联系人 map 摊平成按 JID 串排序的切片，并只保留「手机上存过
+// 通讯录的好友」：
+//   - first/full name 只由 app state 的 contact_name_set 写入（即手机通讯录，
+//     WM/store/sqlstore/store.go:659-706 PutContactName/PutAllContactNames）；
+//   - push_name/business_name 由入站消息、presence 与历史 pushname 写入
+//     （PutPushName/PutBusinessName，:617-660）——「聊过」或「企业号」不等于加好友，
+//     这类只有 push/business 的行一律剔除；
+//   - 本账号自己剔除（号码逐字比对 waSameWaUser 口径的 User 段）：手机会把自己的
+//     号码也存进通讯录，真机实测扫码号的列表里就混着本人 PN 与本人 LID 两行。
+func waContactList(contacts map[types.JID]types.ContactInfo, selfUser string) []WaContact {
 	out := make([]WaContact, 0, len(contacts))
 	for jid, c := range contacts {
+		if jid.User == selfUser {
+			continue
+		}
+		if strings.TrimSpace(c.FirstName) == "" && strings.TrimSpace(c.FullName) == "" {
+			continue
+		}
 		out = append(out, WaContact{
 			JID:          jid.String(),
 			FirstName:    c.FirstName,
@@ -678,7 +853,7 @@ func WhatsappListContacts(ctx context.Context, fromJID string) ([]WaContact, err
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].JID < out[j].JID })
-	return out, nil
+	return out
 }
 
 // WhatsappListSpeakableGroups 列出 fromJID 账号里「当前能发言」的群组，按 JID 串排序。
@@ -693,16 +868,16 @@ func WhatsappListContacts(ctx context.Context, fromJID string) ([]WaContact, err
 // JID（LID 或号码）与 PhoneNumber 两个字段都拿来对，命中其一即视为本人。
 //
 // 连接态自愈同 WhatsappSendMessage：这条门面本身要向服务器实时查询，掉线时先催重连
-// 并等连上（上限 EffectiveConnectTimeout），死会话先复活——旧形态下断线直接报
-// 「websocket not connected」，把后台群发的整批卡在列群组这一步。
+// 并等连上（上限 EffectiveConnectTimeout），死会话先复活，账号压根不在册就先按需启动——
+// 旧形态下断线直接报「websocket not connected」，把后台群发的整批卡在列群组这一步。
 func WhatsappListSpeakableGroups(ctx context.Context, fromJID string) ([]WaGroup, error) {
 	m, err := currentWA()
 	if err != nil {
 		return nil, err
 	}
-	w, err := m.ensureReady(ctx, fromJID)
+	w, err := m.ensureLoggedIn(ctx, fromJID)
 	if err != nil {
-		return nil, err
+		return nil, waLoginErr("获取可发言群组列表", err)
 	}
 	if ctx == nil {
 		ctx = runCtx()
@@ -792,17 +967,18 @@ func waResolveChat(ctx context.Context, sess waSession, jid types.JID) types.JID
 // lastMsgID 非空时按「本人发出的那条」构造消息键（FromMe=true）；群组里若要删的是
 // 成员发的最后一条，请留空 lastMsgID，只传时间戳。
 //
-// 前置：该账号的 app state 密钥必须已同步（新配对账号首连后库会自动同步，
-// 没同步完就删会报库侧错误，这条错误不在本包兜住）。
+// 前置：该账号的 app state 密钥必须已同步（旧注释说的「首连后库会自动同步」不成立——
+// 库只在显式 FetchAppState 时同步，见 WhatsappSyncContacts；没同步完就删会报库侧错误，
+// 这条错误不在本包兜住）。
 // 连接态自愈同 WhatsappSendMessage（删框要往服务器发 app state 变异）。
 func WhatsappDeleteChat(ctx context.Context, fromJID, chat, lastMsgID string, lastMsgTime time.Time, deleteMedia bool) error {
 	m, err := currentWA()
 	if err != nil {
 		return err
 	}
-	w, err := m.ensureReady(ctx, fromJID)
+	w, err := m.ensureLoggedIn(ctx, fromJID)
 	if err != nil {
-		return err
+		return waLoginErr("删除会话", err)
 	}
 	jid, err := waJID(chat)
 	if err != nil {

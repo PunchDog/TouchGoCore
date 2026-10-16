@@ -83,6 +83,11 @@ type waManager struct {
 	// 而门面是并发可调的（同账号可并发发信），不锁住就会有两个重建者互相抢 key。
 	restarts sync.Map // map[jid string]*sync.Mutex
 
+	// stateSync 是「联系人 app state 同步」的按键单飞与节流账（wa_contacts.go）：
+	// key -> *waContactSync。库侧的 appStateSyncLock 只串行化、不去重，两个并发的
+	// full 拉取会各自 DeleteAppStateVersion 一次、互踩版本，所以本包自己在上面再压一层。
+	stateSync sync.Map // map[jid string]*waContactSync
+
 	// wg 覆盖全部常驻协程：每 Client 一条 run + 每配对会话一条 pump。
 	// StopAll 关完信号后按预算等它归零，等不到就放手（协程会自行收尾）。
 	wg sync.WaitGroup
@@ -99,12 +104,34 @@ type waClientWrapper struct {
 	sess waSession
 	cfg  *config.WhatsappSessionsConfig
 
-	stop   chan struct{} // 关闭即要求常驻协程退出
-	done   chan struct{} // 常驻协程已退出
-	kick   chan struct{} // 催一次立即重连（备用挂点，当前无门面消费）
+	stop chan struct{} // 关闭即要求常驻协程退出
+	done chan struct{} // 常驻协程已退出
+	// kick 是「催一次立即重连」的令牌：门面侧 reconnectAndAwait 在非登录态下必发
+	//（waitUntilDown 与 waitLoggedIn 两支都消费它），所以它是发信/读面自愈的承重件，
+	// 不是备用挂点。缓冲 1 ⇒ 多次催合并成一次，不会攒令牌。
+	kick   chan struct{}
 	downed chan struct{} // 事件回调塞断线令牌，常驻协程据此进入退避重连
 	// loggedOut 置位后不再重连：会话已被吊销，重试只会一直失败，等重新扫码配对。
 	loggedOut atomic.Bool
+	// saltSynced 标记本轮连接是否已经跑过 regular_high 快路同步。断线后清掉，重连再跑。
+	// 注意它只闸「同步动作」不闸「盐在不在」——凭证在不在库由 wa_reachout.go 逐次读库判定。
+	saltSynced atomic.Bool
+	// offlinePending 为真表示连接后还有离线回放（里面可能带着会话凭证）。
+	offlinePending atomic.Bool
+	// histSeen 累计收到的 HistorySync 事件数：轮询落空记账之后用它判断
+	// 「之后有没有新历史到达」，决定下一条发送值不值得再等一轮。
+	histSeen atomic.Uint64
+
+	// reachMu 串行化「外联凭证获取」的冷路径：增量/全量 regular_high 与向手机要历史
+	// 都是贵操作，并发发送不得各发一份；凭证齐备的发送不拿这把锁。
+	reachMu sync.Mutex
+	// lastRefreshAt / lastFullAt / lastHistAt 是三类贵操作的节流账，
+	// pollMissAt+pollMissSeen 是「等满一轮仍没凭证」的落空账（口径见 wa_reachout.go）。
+	lastRefreshAt time.Time
+	lastFullAt    time.Time
+	lastHistAt    time.Time
+	pollMissAt    time.Time
+	pollMissSeen  uint64
 
 	closeOnce sync.Once
 
@@ -159,18 +186,20 @@ func (m *waManager) StartClient(jid types.JID) error {
 		return fmt.Errorf("whatsapp 账号 %s 未配对（会话库里没有设备），先走 WhatsappStartPairing 扫码", key)
 	}
 	if max := m.cfg.EffectiveMaxConcurrent(); max > 0 && m.countClients() >= max {
-		return fmt.Errorf("whatsapp 在跑会话数已达上限 %d（max_concurrent），先停一个再启新的", max)
+		// 文案要与「门面按需自动拉起账号」的新语义对得上：懒加载下这个上限可能先被
+		// 业务调用撞响，而不是调用方自己 StartClient 撞的，所以处置写清楚怎么腾额度。
+		return fmt.Errorf("whatsapp 在跑会话数已达上限 %d（max_concurrent），先停一个再启新的（先用 WhatsappStopClient 停一个不用的账号）", max)
 	}
 	w := &waClientWrapper{
-		jid:    jid,
-		dev:    dev,
-		sess:   waSessionFactory(dev, m.log.Sub(jid.User)),
-		cfg:    m.cfg,
-		stop:   make(chan struct{}),
-		done:   make(chan struct{}),
-		kick:   make(chan struct{}, 1),
-		downed: make(chan struct{}, 1),
-		after:  m.afterFor,
+		jid:      jid,
+		dev:      dev,
+		sess:     waSessionFactory(dev, m.log.Sub(jid.User)),
+		cfg:      m.cfg,
+		stop:     make(chan struct{}),
+		done:     make(chan struct{}),
+		kick:     make(chan struct{}, 1),
+		downed:   make(chan struct{}, 1),
+		after:    m.afterFor,
 	}
 	if m.cfg.EffectiveAntibanEnabled() {
 		w.gate = waGateFactory(m.cfg, key)
@@ -286,6 +315,9 @@ func (m *waManager) restartLock(key string) *sync.Mutex {
 //
 // 预算口径：催重连是即时的（退避睡眠被 kick 提前叫醒），等待上限取
 // EffectiveConnectTimeout（缺省 15 秒），调用方的 ctx 一到就撒手，不留悬挂等待。
+//
+// 门面不再直接调它：读写面统一走 ensureLoggedIn（比这一层多兜「压根不在册」那一档），
+// 本函数原样保留给「已在册账号」这条既有语义与钉它的用例。
 func (m *waManager) ensureReady(ctx context.Context, fromJID string) (*waClientWrapper, error) {
 	w, err := m.ensureAlive(fromJID)
 	if err != nil {
@@ -297,11 +329,53 @@ func (m *waManager) ensureReady(ctx context.Context, fromJID string) (*waClientW
 	return w, nil
 }
 
+// ensureLoggedIn 是全部读写门面在非登录态下的第三层自愈：在册且活着就等连上，
+// 僵尸由 liveWrapper 复活，**压根不在册的账号先按需 StartClient 再等连上**。
+//
+// 前两层（ensureAlive / ensureReady）都只管「已经在 clients 表里」的账号，而下游
+// 普遍是先绑定账号、后续直接调门面，中间并没有「显式启动」这一步：
+// liveWrapper 对不在册的 key 直接报「没有在跑的会话」，而 StartClient 的幂等分支
+// 对「在册但未连」又什么都不做，两头都接不住，外部仓的 ensureClient 因此空转
+// （症状是配对码绑的号「列好友 = 0、可发 = 0」，看起来像发不出去）。
+//
+// 与「配对成功不自动上线」裁决不冲突：那条裁决的对象是「配对成功那一刻自动拉起整库
+// N 个账号」，这里是**按调用按需拉一条**，账号只在业务真要用它的时候上线，
+// 「谁该长期在跑」的决策权仍在显式 WhatsappStartClient 手上。
+//
+// 错误串口径：自动启动失败时把既有文案**前缀化**而不是替换，保留「没有在跑」子串
+// （wa_client_test.go 有六条门面断言钉这个关键词）；库里没有设备行时 StartClient 的
+// 「未配对」原文照常带出，处置仍是去扫码。
+func (m *waManager) ensureLoggedIn(ctx context.Context, fromJID string) (*waClientWrapper, error) {
+	jid, err := waAccountJID(fromJID)
+	if err != nil {
+		return nil, fmt.Errorf("whatsapp 账号 JID 不可用: %w", err)
+	}
+	key := jid.String()
+	if _, ok := m.clients.Load(key); !ok {
+		if e := m.StartClient(jid); e != nil {
+			return nil, fmt.Errorf("whatsapp 账号 %s 没有在跑的会话，自动启动失败: %w", key, e)
+		}
+	}
+	w, err := m.liveWrapper(key, jid)
+	if err != nil {
+		return nil, err
+	}
+	if err := w.reconnectAndAwait(ctx); err != nil {
+		return nil, err
+	}
+	return w, nil
+}
+
 // ensureAlive 只保证端出来的不是死对象（僵尸就复活重建），**不等连接建立**。
 //
-// 给「读本地会话库、不需要活 socket」的门面用（查好友）：这类调用也去等 15 秒登录，
-// 等于把一次本地读换成网络等待；但死对象上的子存储已被库换成 NoopStore
-// （WM/store/store.go 的 Delete 收尾），不复活就连本地读都做不了。
+// 给「读本地会话库、命中就不必等登录」的门面用（查好友的本地读那一支，见
+// WhatsappListContacts 的两段式）：这类调用也去等 15 秒登录，等于把一次本地读换成
+// 网络等待；但死对象上的子存储已被库换成 NoopStore（WM/store/store.go 的 Delete 收尾），
+// 不复活就连本地读都做不了。
+//
+// 需要在线才能办成事的读写面走 ensureLoggedIn（不在册会先按需启动），本函数与
+// ensureReady 原样保留：wa_reconnect_test.go 的 TestListContactsRevivesWithoutWaiting
+// 钉着「本地读不等登录」，发信面的 ensureReady 钉着「在册账号断了要催连并等」。
 //
 // 入参一律先过 waAccountJID：配套设备形态的 "号码:1@s.whatsapp.net" 必须放行，
 // 设备行主键与 wrapper 键都带设备段，抹掉就再也查不到行。
@@ -373,8 +447,22 @@ func (w *waClientWrapper) retired() bool {
 //
 // 批量发信在每条之前都调它一次：一批几十条的时间里 socket 可能中途掉，
 // 逐条自愈才能让后面的条目不必全部撞在同一个断口上。
+// sessionReady 是「现在就能发信」：已登录，且真连接还在。
+// 库的 IsLoggedIn 在断线后不会自动清掉（onDisconnect 不改这个标记），只看它会把
+// 一条已拆的 socket 当成在线，SendText 就挂到调用方 deadline。
+// 测试假会话没有 Connected 方法时退回只看 LoggedIn，既有用例不用逐个补方法。
+func sessionReady(s waSession) bool {
+	if s == nil || !s.LoggedIn() {
+		return false
+	}
+	if c, ok := s.(interface{ Connected() bool }); ok {
+		return c.Connected()
+	}
+	return true
+}
+
 func (w *waClientWrapper) reconnectAndAwait(ctx context.Context) error {
-	if w.sess.LoggedIn() {
+	if sessionReady(w.sess) {
 		return nil
 	}
 	w.kickNow()
@@ -395,7 +483,7 @@ func (w *waClientWrapper) kickNow() {
 // Noise 握手完成，凭据要被服务端接受才算连上（见 waitLoggedIn 的真机实测注）。
 // 每 100ms 轮询：登录本身是库的异步事件派发，没有可等的通道。
 func (w *waClientWrapper) waitConnected(ctx context.Context) error {
-	if w.sess.LoggedIn() {
+	if sessionReady(w.sess) {
 		return nil
 	}
 	if ctx == nil {
@@ -417,7 +505,7 @@ func (w *waClientWrapper) waitConnected(ctx context.Context) error {
 		case <-deadline.C:
 			return fmt.Errorf("whatsapp 账号 %s 在 %s 内未能连上", w.jid.String(), w.cfg.EffectiveConnectTimeout())
 		case <-tick.C:
-			if w.sess.LoggedIn() {
+			if sessionReady(w.sess) {
 				return nil
 			}
 		}
@@ -484,7 +572,20 @@ func (w *waClientWrapper) run() {
 // waitLoggedIn 等库把登录（ref iq 回执）落定：ConnectContext 返回 nil 只代表
 // socket 与 Noise 握手完成，IsLoggedIn 要等服务器接受凭据才翻真（真机实测
 // connect ok 时 loggedin=false，约 1 秒后才 Connected 事件）。
-// 返回 false 表示登录预算内没等到、或本轮期间收到断线/停机/吊销信号。
+// 返回 false 表示登录预算内没等到、或本轮期间收到断线/停机/吊销/催重连信号。
+//
+// 必须听 w.kick（下面那支），这不是可选优化而是门面自愈的前提：这一档状态是
+// 「socket 已连上、登录回执还没落定」，门面 reconnectAndAwait→kickNow 催的正是
+// 「别守着这条半开连接，弃了重来」。不接的话：
+//   - 门面的 waitConnected 与库侧的 waitLoggedIn 读的是同一个 EffectiveConnectTimeout，
+//     而库侧永远比门面早起跑，于是库侧先到点——门面只能干等到自己到点，
+//     白烧满预算报「未能连上」（wa_reconnect_test.go 三条用例的偶红真形：
+//     15.00s 到点 + 成对出现的「连接后 15s 内未完成登录」日志）；
+//   - 没人消费的令牌也不会丢，它一直躺在缓冲通道里，到下一轮 sleepBackoff 被白捡一次，
+//     把「催一次立即重连」变成「库侧自己到点之后顺手重连」，时机完全不由门面决定。
+//
+// 返回 false 让 run() 走既有的 Disconnect + 退避重连路径；这里绝不能 return true——
+// 半开连接不是已登录，那样会把一条没被服务端接受的连接当活的交出去。
 func (w *waClientWrapper) waitLoggedIn(ctx context.Context) bool {
 	deadline := time.After(w.cfg.EffectiveConnectTimeout())
 	tick := time.NewTicker(100 * time.Millisecond)
@@ -497,6 +598,8 @@ func (w *waClientWrapper) waitLoggedIn(ctx context.Context) bool {
 		case <-w.stop:
 			return false
 		case <-w.downed:
+			return false
+		case <-w.kick:
 			return false
 		case <-ctx.Done():
 			return false
@@ -572,10 +675,28 @@ func (w *waClientWrapper) dispatch(evt any) {
 		publishWA("Connection", &ConnEvent{Account: account, State: "connected"})
 	case events.Connected:
 		publishWA("Connection", &ConnEvent{Account: account, State: "connected"})
+	case *events.OfflineSyncPreview:
+		w.offlinePending.Store(true)
+	case events.OfflineSyncPreview:
+		w.offlinePending.Store(true)
+	case *events.OfflineSyncCompleted:
+		w.offlinePending.Store(false)
+	case events.OfflineSyncCompleted:
+		w.offlinePending.Store(false)
+	case *events.HistorySync:
+		w.histSeen.Add(1)
+		vars.Info("WhatsApp[%s] 收到历史同步（对方 tctoken/外联盐可能随之落地）", account)
+	case events.HistorySync:
+		w.histSeen.Add(1)
+		vars.Info("WhatsApp[%s] 收到历史同步（对方 tctoken/外联盐可能随之落地）", account)
 	case *events.Disconnected:
+		w.saltSynced.Store(false)
+		w.offlinePending.Store(false)
 		w.markDown()
 		publishWA("Connection", &ConnEvent{Account: account, State: "disconnected"})
 	case events.Disconnected:
+		w.saltSynced.Store(false)
+		w.offlinePending.Store(false)
 		w.markDown()
 		publishWA("Connection", &ConnEvent{Account: account, State: "disconnected"})
 	case *events.StreamReplaced:

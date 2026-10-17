@@ -3,6 +3,7 @@ package pay
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -57,6 +58,9 @@ func endpoints(missing ...string) func(string) (string, bool) {
 // TestRegistryRejectsBadRegistration 空名、nil 工厂、重名抢注都要被拒。
 // 两处实现抢同一个名字时，生效的是初始化顺序而不是配置意图。
 func TestRegistryRejectsBadRegistration(t *testing.T) {
+	// 唯一驱动名：驱动登记表同为进程级全局，-count=N 第二轮换个没用过的名字，
+	// 才不会被自己的首次登记挡住（口径同 assemble_test.go 的 spySeq）。
+	dup := fmt.Sprintf("t_dup_%d", spySeq.Add(1))
 	f := func(ProviderOptions) (Channel, error) { return nil, nil }
 	if err := Register("  ", f); err == nil {
 		t.Error("空 SDK 名应当被拒")
@@ -64,19 +68,19 @@ func TestRegistryRejectsBadRegistration(t *testing.T) {
 	if err := Register("t_nil", nil); err == nil {
 		t.Error("nil 工厂应当被拒")
 	}
-	if err := Register("t_dup", f); err != nil {
+	if err := Register(dup, f); err != nil {
 		t.Fatalf("首次登记失败: %v", err)
 	}
-	if err := Register("t_dup", f); err == nil {
+	if err := Register(dup, f); err == nil {
 		t.Error("重名登记应当被拒而不是覆盖")
 	}
-	if _, err := Open("t_dup", ProviderOptions{}); err == nil {
+	if _, err := OpenDriver(dup, ProviderOptions{}); err == nil {
 		t.Error("工厂返回 nil 通道时不得当成功")
 	}
-	if _, err := Open("  ", ProviderOptions{}); err == nil {
+	if _, err := OpenDriver("  ", ProviderOptions{}); err == nil {
 		t.Error("未指定 SDK 名应当报错")
 	}
-	if _, err := Open("no_such_sdk", ProviderOptions{}); err == nil {
+	if _, err := OpenDriver("no_such_sdk", ProviderOptions{}); err == nil {
 		t.Error("未登记的 SDK 名应当报错")
 	} else if !strings.Contains(err.Error(), DriverGeneric) {
 		t.Errorf("报错里应列出可用驱动，实得 %v", err)
@@ -101,7 +105,7 @@ func TestGenericDriverRegistered(t *testing.T) {
 func TestChannelOperationsSignAndSerialize(t *testing.T) {
 	r := newSDKServer(t)
 	r.resp.Store(`{"code":"0","data":{"order_no":"O1","trade_no":"T9","status":"success","amount":1000}}`)
-	ch, err := Open(DriverGeneric, ProviderOptions{
+	ch, err := OpenDriver(DriverGeneric, ProviderOptions{
 		Name: "usdt", BaseURL: r.srv.URL, SecretKey: "TOPSECRET",
 		AppID: "app1", MerchantID: "MCH-1", Timeout: 2 * time.Second,
 		Endpoint: endpoints(),
@@ -113,7 +117,7 @@ func TestChannelOperationsSignAndSerialize(t *testing.T) {
 	if ch.Driver() != DriverGeneric {
 		t.Fatalf("SDK 名未回填: %s", ch.Driver())
 	}
-	res, err := ch.Recharge(context.Background(), &PayOrder{OrderNo: "O1", Amount: 1000, Currency: CurrencyUSDT})
+	res, err := ch.Withdraw(context.Background(), &PayOrder{OrderNo: "O1", Amount: 1000, Currency: CurrencyUSDT, Address: "TAddr"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +125,7 @@ func TestChannelOperationsSignAndSerialize(t *testing.T) {
 		t.Fatalf("回执归一不符: %+v", res)
 	}
 	body := r.bodies.Load().(string)
-	for _, want := range []string{`"order_no":"O1"`, `"amount":1000`, `"merchant_id":"MCH-1"`, `"contract":"TR7"`, `"app_id":"app1"`} {
+	for _, want := range []string{`"order_no":"O1"`, `"amount":1000`, `"merchant_id":"MCH-1"`, `"contract":"TR7"`, `"app_id":"app1"`, `"address":"TAddr"`} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("报文缺 %s，实得 %s", want, body)
 		}
@@ -129,9 +133,9 @@ func TestChannelOperationsSignAndSerialize(t *testing.T) {
 	if strings.Contains(body, ".") {
 		t.Fatalf("金额出现浮点形态: %s", body)
 	}
-	// 签名域：十个定长标量（此单只有币种有值）+ 按登记顺序追加的通道特有字段。
+	// 签名域：十个定长标量（此单币种与地址有值）+ 按登记顺序追加的通道特有字段。
 	want := SignMD5("TOPSECRET",
-		"app1", "MCH-1", "O1", "1000", CurrencyUSDT, "", "", "", "", "",
+		"app1", "MCH-1", "O1", "1000", CurrencyUSDT, "", "TAddr", "", "", "",
 		"TR7")
 	if got := r.signs.Load().(string); got != want {
 		t.Fatalf("签名=%s，期望 %s（签名域=通用字段+Extras 登记顺序）", got, want)
@@ -148,7 +152,7 @@ func TestChannelOperationsSignAndSerialize(t *testing.T) {
 
 	// 账户端点未配置：查账户应在发请求前被拒。
 	r2 := newSDKServer(t)
-	ch2, err := Open(DriverGeneric, ProviderOptions{
+	ch2, err := OpenDriver(DriverGeneric, ProviderOptions{
 		Name: "ton", BaseURL: r2.srv.URL, SecretKey: "s", Endpoint: endpoints(EndpointAccount),
 	})
 	if err != nil {
@@ -201,7 +205,7 @@ func TestQueryAccountNormalizes(t *testing.T) {
 	for _, cs := range cases {
 		r := newSDKServer(t)
 		r.resp.Store(`{"code":"0","data":` + cs.data + `}`)
-		ch, err := Open(DriverGeneric, ProviderOptions{
+		ch, err := OpenDriver(DriverGeneric, ProviderOptions{
 			Name: "usdt", BaseURL: r.srv.URL, SecretKey: "s", AppID: "app1", MerchantID: "MCH-1",
 			Endpoint: endpoints(),
 		})
@@ -229,7 +233,7 @@ func TestQueryAccountNormalizes(t *testing.T) {
 // 报文展开成 map 再回序列化时若用了默认解码，2^53 以上的金额会静默变形。
 func TestMerchantIDPrecisionKept(t *testing.T) {
 	r := newSDKServer(t)
-	ch, err := Open(DriverGeneric, ProviderOptions{
+	ch, err := OpenDriver(DriverGeneric, ProviderOptions{
 		Name: "usdt", BaseURL: r.srv.URL, SecretKey: "s",
 		Endpoint: endpoints(),
 		Extras:   []ExtraField{{Name: "remark", Value: "x"}},
@@ -238,7 +242,7 @@ func TestMerchantIDPrecisionKept(t *testing.T) {
 		t.Fatal(err)
 	}
 	const big int64 = 9_007_199_254_740_993 // 2^53 + 1
-	if _, err := ch.Recharge(context.Background(), &PayOrder{OrderNo: "O9", Amount: big}); err != nil {
+	if _, err := ch.Withdraw(context.Background(), &PayOrder{OrderNo: "O9", Amount: big, Address: "TAddr"}); err != nil {
 		t.Fatal(err)
 	}
 	body := r.bodies.Load().(string)

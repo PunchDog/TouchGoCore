@@ -204,26 +204,18 @@ type TelegramConfig struct {
 	GameBannerUrl   string            `json:"game_banner_url"`
 	GameDescription string            `json:"game_description"`
 	GameToShort     map[string]string `json:"game_to_short"`
-	// Ton 是 TON 币充值/提现对本 SDK 的引用。代码归在 telegram 包（TON 的
-	// 收付入口在 Telegram 侧），但资金接口的凭证域与 Bot 长连接完全不同，
-	// 所以凭证集中在 pay_sdks，这里只留「用哪个 SDK、用哪个商户账户」。
-	Ton *PaySDKRef `json:"ton"`
-	// TonNetwork 是 TON 链网络标识（mainnet/testnet），留空按供应商默认。
-	TonNetwork string `json:"ton_network"`
-	// Jetton 是 TON 侧代币合约地址；原生 TON 留空。
-	Jetton string `json:"jetton"`
 }
 
 // PaySDKConfig 是一段资金 SDK 配置：一套供应商接入的全部事实——驱动标记、
 // 基址、凭证、端点表，以及我方在该供应商名下的商户账户表。
 //
-// 集中登记的用意：同一个供应商往往同时供着充值、提现、验证码下发三条链路，
-// 凭证与端点抄三份之后必然改漏一处，出款那侧还留着旧密钥。SDK 段写一次，
+// 集中登记的用意：同一个供应商往往同时供着提现、查单、验证码下发几条链路，
+// 凭证与端点抄几份之后必然改漏一处，出款那侧还留着旧密钥。SDK 段写一次，
 // 各通道只留「用哪个 SDK、用哪个商户账户」两个名字。
 //
-// 配置结构体刻意留在 config 包而不是 pay 包：本包的 Cfg 要引用它，而 pay 只认
-// 与配置无关的 ProviderOptions（端点表也是以取值函数的形式交进去）。若把结构体
-// 挪到 pay，config→pay 与 pay→config 两头引用就成环了。
+// 配置结构体留在 config 包：pay 的核心文件（channel/client/provider/types）只认
+// 与配置无关的 ProviderOptions（端点表也是以取值函数的形式交进去），只有装配层
+// pay/assemble.go 按值引用这里的结构体——config 不反向引 pay，这个方向不成环。
 // 各通道包（whatsapp/zalo/facebook/instagram/usdt/telegram）负责把本结构逐字段转成
 // pay.ProviderOptions。
 //
@@ -246,12 +238,61 @@ type PaySDKConfig struct {
 	MaxRetries  int    `json:"max_retries"`  // 可重试错误的重试次数，<0 用 pay.DefaultMaxRetry
 	NotifyURL   string `json:"notify_url"`   // 本侧回执接收地址，下单时随报文交出去
 	// Endpoints 是「接口文档到位后只改这里」的注入点之一：
-	// 键是本仓代码里固定的逻辑名（account/recharge/query/withdraw/login/send_code），
+	// 键是本仓代码里固定的逻辑名（account/query/withdraw/login/send_code），
 	// 值是供应商的实际路径。缺某个键 ⇒ 对应操作返回明确错误，不发请求。
 	Endpoints map[string]string `json:"endpoints"`
 	// Accounts 是我方在该供应商名下的商户账户表，键是本地别名（default/reserve…），
 	// 通道段用别名引用。商户号是路由信息不是凭证，可以进日志。
 	Accounts map[string]*PayMerchantAccount `json:"accounts"`
+	// Chain 是「直接动公链」那一类驱动的接入点与凭证，nil 即这一段只是 HTTP 供应商配置。
+	//
+	// 它挂在 SDK 段而不是通道段：节点、API Key、热钱包是「我用哪个接入点、以谁的身份出资」，
+	// 与这一单发的是 USDT 还是 TRX 无关；同一接入点服务同链多币种时不该复制两份。
+	// 合约地址与网络不在这里（那是通道段的 usdt.contract / usdt.network，权威值只有一处）。
+	Chain *PayChainConfig `json:"chain"`
+}
+
+// PayChainConfig 是链上接入点配置（pay_sdks.<段>.chain）。
+//
+// 单位与币种名不进配置：fee_limit 明确写死是「该链原生币的最小单位」（TRON 为 sun），
+// 因为链上 gas 收的是原生币而不是本单币种（见 pay.AccountInfo.CanWithdraw 的注释），
+// 把它写成不带单位的 fee_limit 就会有人填 65 而不是 65000000。
+type PayChainConfig struct {
+	// Node 是链节点接入点（TRON 为 gRPC 的 host:port，如 grpc.trongrid.io:50051）。
+	// 出款广播只走它；driver 为链上驱动时它是必填项。
+	Node string `json:"node"`
+	// TLS 是接入点的传输安全开关："off" 才走明文，其余（含留空）一律按 TLS 建连。
+	//
+	// 反向缺省是刻意的：公共接入点必须 TLS，把「明文」写成需要显式声明的例外，
+	// 才不会有人照抄一份自建节点的配置就把热钱包私钥签名链路挂到了明文中转上。
+	TLS string `json:"tls"`
+	// HTTPBase 是同链的 REST 基址（如 https://api.trongrid.io），只用于读侧兜底
+	// （查单、余额、近期转出反查），不用于广播。留空即读侧也只走 Node。
+	HTTPBase string `json:"http_base"`
+	// APIKey 是接入点要求的访问凭证（TRON 侧为 TRON-PRO-API-KEY）。
+	// 它不是资金密钥，但同样禁止写入日志、error 文案与摘要字段。
+	APIKey string `json:"api_key"`
+	// WalletAddress 是我方出款账户的链上地址。它是路由信息不是凭证，可以进日志，
+	// 且必须与私钥派生出的地址逐字相等，否则「配了 A 的地址、实际用 B 的私钥出款」
+	// 这种错要到对账时才看得见。
+	WalletAddress string `json:"wallet_address"`
+	// PrivateKey 是热钱包私钥（hex）。配置里恒为空，由下游在启动前经
+	// util.CallPayChainMsg+段名 钩子注入；它不得进入日志、error 文案与任何摘要字段。
+	PrivateKey string `json:"private_key"`
+	// FeeLimit 是允许为本单烧掉的手续费上限，单位是该链原生币的最小单位（TRON 为 sun）。
+	// <=0 由驱动按该链缺省值定，配置不必知道缺省是多少。
+	FeeLimit int64 `json:"fee_limit"`
+	// TimeoutSec 是单次链上操作的超时（秒），<=0 由驱动用缺省值。
+	//
+	// 它不复用上层的 timeout_sec：那一个是「供应商 HTTP 接口响应要多久」，这一个管的是
+	// 「链节点取一份 raw transaction / 广播 / 查回执要多久」，两者量级与失败形态都不同，
+	// 共用一格会让调过 HTTP 超时的人顺手改坏链上超时。
+	TimeoutSec int `json:"timeout_sec"`
+	// MaxRetries 是链上读操作（查单、余额、近期转出反查）的重试次数，0 即不重试。
+	//
+	// 写侧永远不看它：广播不是「失败了再来一次」的操作，重试由链上驱动的台账判定决定
+	// （见 pay.ChainOptions.MaxRetry 的注释）。
+	MaxRetries int `json:"max_retries"`
 }
 
 // PayMerchantAccount 是「我方在供应商侧的一个商户账户」的配置。
@@ -287,7 +328,7 @@ type PaySDKRef struct {
 // Empty 该通道是否未绑定任何 SDK（未绑定即不启用）。
 func (r *PaySDKRef) Empty() bool { return r == nil || strings.TrimSpace(r.SDK) == "" }
 
-// Resolve 在全表里取被引用的 SDK 段与商户账户。资金通道（充值/提现）用它：
+// Resolve 在全表里取被引用的 SDK 段与商户账户。资金通道（提现）用它：
 // 出款必须有一个明确的商户主体，取不到账户就是配置错。
 //
 // 报错文案只说名字与缺项，绝不带出基址之外的敏感值；SDK 段里可能的密钥
@@ -380,18 +421,15 @@ func (p *PaySDKConfig) Endpoint(name string) (string, bool) {
 // 与其它三条社交通道不同，这里**没有 login/templates**：消息侧（QR 配对、发信、
 // 删会话）已改由 go.mau.fi/whatsmeow 直连 WhatsApp 多设备协议，不再经 HTTP 消息网关，
 // 会话本体（含 NoiseKey/IdentityKey 等密钥材料）持久化在本仓的 Postgres 会话库里。
-// 资金动作必须有持牌主体，仍留在 pay_sdks 供应商侧，所以只有 provider 与 sessions 两段。
+// 资金侧（提现门面与充值接口）已随 2026-10 的资金面收口删除，本包只剩消息侧，所以只有 sessions 一段。
 type WhatsappConfig struct {
 	// Enable 是通道总闸：显式为 "on" 才装配本通道，消息侧（whatsmeow）与资金侧一起闸。
 	// 整段不写、键不写、写成 off 或任何别的值都读作「不开」——口径与 pay_sdks/nft_sdks
 	// 段一致：默认不启动。whatsmeow 是非官方协议客户端，「没配即不连 WhatsApp 服务器」
 	// 必须是缺省，而不是靠「记得别填 dsn」。
 	Enable string `json:"enable"`
-	// Provider 是充值/提现通道引用的 SDK。Enable 不为 on 时整段不参与装配，
-	// 这一项填不填都不生效。
-	Provider *PaySDKRef `json:"provider"`
 	// Sessions 是 whatsmeow 消息侧的会话库与连接参数。Enable 为 on 但整段留空
-	//（或 dsn 为空）即只装资金侧，不影响 provider——「只跑钱、不跑协议」仍是合法形态。
+	//（或 dsn 为空）即消息侧不装配——本包已没有「只跑钱、不跑协议」这种形态可配。
 	Sessions *WhatsappSessionsConfig `json:"sessions"`
 }
 
@@ -448,8 +486,7 @@ type WhatsappSessionsConfig struct {
 // Zalo 是越南的即时通讯 App，我方登录的是供应商代持的账号，账号归属与凭证有效期
 // 都由那家供应商定，本层不为这几件事加字段——多一个字段就多一处和供应商口径打架的地方。
 type ZaloConfig struct {
-	Login    *PaySDKRef `json:"login"`    // 登录/验证码下发通道引用的 SDK
-	Provider *PaySDKRef `json:"provider"` // 充值/提现通道引用的 SDK
+	Login *PaySDKRef `json:"login"` // 登录/验证码下发通道引用的 SDK
 	// Templates 是消息模板名表，逻辑名口径与 zalo/facebook/instagram 三条通道一致。
 	Templates map[string]string `json:"templates"`
 }
@@ -465,8 +502,7 @@ type ZaloConfig struct {
 // 缺键的操作就地拒绝、不发请求，比为了凑齐两段而配一个假的登录网关省事，也不会让会员
 // 看到一个点了必失败的入口。
 type FacebookConfig struct {
-	Login    *PaySDKRef `json:"login"`    // 登录/验证码下发通道引用的 SDK
-	Provider *PaySDKRef `json:"provider"` // 充值/提现通道引用的 SDK
+	Login *PaySDKRef `json:"login"` // 登录/验证码下发通道引用的 SDK
 	// Templates 是消息模板名表，逻辑名口径与 zalo/facebook/instagram 三条通道一致。
 	Templates map[string]string `json:"templates"`
 }
@@ -481,8 +517,7 @@ type FacebookConfig struct {
 // 返回的关联账号列表」：三条社交通道各起一个逻辑名的话，端点表就散成三个名字，
 // 而取路径那侧只按逻辑名查，多一个名字就是多一处配漏了静默失败的地方。
 type InstagramConfig struct {
-	Login    *PaySDKRef `json:"login"`    // 登录/验证码下发通道引用的 SDK
-	Provider *PaySDKRef `json:"provider"` // 充值/提现通道引用的 SDK
+	Login *PaySDKRef `json:"login"` // 登录/验证码下发通道引用的 SDK
 	// Templates 是消息模板名表，逻辑名口径与 zalo/facebook/instagram 三条通道一致。
 	Templates map[string]string `json:"templates"`
 }
@@ -498,37 +533,6 @@ type UsdtConfig struct {
 	// 原生 TRX 留空。网络与合约是两个正交维度：同一网络下 USDT 与原生币
 	// 靠合约区分，同一合约在不同网络下又是两个不同的币，都不能靠通道名区分。
 	Contract string `json:"contract"`
-}
-
-// TronConfig 是 TRON 原生币（TRX）通道配置。
-type TronConfig struct {
-	Provider *PaySDKRef `json:"provider"`
-	// Network 是公链网络标识（mainnet/shasta/nile），留空按供应商默认。
-	Network string `json:"network"`
-	// Token 是 TRC10 代币合约 id（纯数字串，如 1000101）；原生 TRX 留空。
-	// TRC20 的合约地址填 usdt.contract，填在这里会在装配时被拒——
-	// 两类代币的收端识别字段不同形态，混填等于把每一单送进错误的资产域。
-	Token string `json:"token"`
-}
-
-// BscConfig 是 BSC（BNB Smart Chain，EVM 形态）原生币通道配置。
-type BscConfig struct {
-	Provider *PaySDKRef `json:"provider"`
-	// Network 是公链网络标识（mainnet/chapel），留空按供应商默认。
-	Network string `json:"network"`
-	// Token 是 BEP20 代币合约地址（0x + 40 位十六进制，混合大小写时要过
-	// EIP-55 校验和，过不了则通道不启动）；原生 BNB 留空。
-	Token string `json:"token"`
-}
-
-// SolConfig 是 Solana 原生币（SOL）通道配置。
-type SolConfig struct {
-	Provider *PaySDKRef `json:"provider"`
-	// Network 是公链网络标识（mainnet/devnet），留空按供应商默认。
-	Network string `json:"network"`
-	// Token 是 SPL 代币合约地址（Base58 解出恰好 32 字节，过不了则通道不启动）；
-	// 原生 SOL 留空。报文里的特有字段键沿用 contract，与 usdt 侧口径一致。
-	Token string `json:"token"`
 }
 
 // Lua 配置

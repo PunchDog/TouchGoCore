@@ -45,7 +45,7 @@ func runCtx() context.Context {
 // NftStart 按配置装配 NFT 资产链路。
 //
 // 配置段缺失、SDK 段没开、密钥未注入，都只记日志并返回：资产通道没配好不该阻断整机启动，
-// 但必须留下可查的痕迹（逐字沿用 BscStart 注释口径）。
+// 但必须留下可查的痕迹（与各资金通道 Start 同一口径）。
 func NftStart(ctx context.Context) {
 	if ctx == nil {
 		ctx = context.Background()

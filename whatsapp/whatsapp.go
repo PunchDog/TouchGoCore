@@ -1,24 +1,30 @@
-// Package whatsapp 是 WhatsApp 通道的消息与资金接入点。
+// Package whatsapp 是 WhatsApp 通道的消息接入点。
 //
-// 分层口径与 telegram 包一致：本包只负责「把 WhatsApp 账号跑起来并收发消息」和
-// 「把资金请求送到供应商、把回执读成 pay.PayResult」，不碰业务积分与额度账本。
-// 落库、风控由下游业务工程负责，它可以在启动前后按 util.CallWhatsappMsg+"Xxx"
-// 注册回调接手结果（资金回执 kind=Recharge/Withdraw/Query；消息事件
-// kind=Inbound/Receipt/Connection/QR/SendResult，载荷形态见 wa_client.go 与 wa_pairing.go）。
+// 分层口径与 telegram 包一致：本包只负责「把 WhatsApp 账号跑起来并收发消息」，
+// 不碰业务积分与额度账本。落库、风控由下游业务工程负责，它可以在启动前后按
+// util.CallWhatsappMsg+"Xxx" 注册回调接手结果（消息事件 kind=Inbound/Receipt/
+// Connection/QR/SendResult，载荷形态见 wa_client.go 与 wa_pairing.go）。
 //
 // 整通道由 whatsapp.enable 总闸控制：值不为 "on"（或压根没有 whatsapp 段）时
-// WhatsappStart 两支都不装配，本包所有门面调用就地拒绝。
+// WhatsappStart 不装配消息侧，本包所有门面调用就地拒绝。
 //
-// 两条链路用的是两套传输，别混：
-//   - 消息侧走 go.mau.fi/whatsmeow 直连 WhatsApp 多设备协议（wa_client.go 门面 +
-//     wa_manager.go 会话管理 + wa_pairing.go 扫码配对 + wa_delete_device.go 吊销配对 +
-//     store_postgres.go 存储）：
-//     QR 配对、发文本、删会话框、吊销设备配对都在这里；会话密钥材料持久化在
-//     **本仓的 Postgres** 会话库里（whatsapp.sessions.dsn），多账号一个 Client 一条常驻协程。
-//     非官方客户端有封号风险，责任与风控归业务方。
-//   - 资金侧走 pay_sdks 供应商链路（fund.go），仍是 HTTP + MD5 签名 + 商户账户那一套。
-//     提现这类动作必须有持牌主体出账，而 WhatsApp 协议里没有任何可发起转账的 API
-//     （库里支付消息只是 unsupported 占位），所以资金动作不挂在消息侧那一支上。
+// 消息侧走 go.mau.fi/whatsmeow 直连 WhatsApp 多设备协议（wa_client.go 门面 +
+// wa_manager.go 会话管理 + wa_pairing.go 扫码配对 + wa_delete_device.go 吊销配对 +
+// store_postgres.go 存储）：
+// QR 配对、发文本、删会话框、吊销设备配对都在这里；会话密钥材料持久化在
+// **本仓的 Postgres** 会话库里（whatsapp.sessions.dsn），多账号一个 Client 一条常驻协程。
+// 非官方客户端有封号风险，责任与风控归业务方。
+//
+// 资金侧那套 HTTP + MD5 签名 + 商户账户的供应商装配（原 client.go 与 fund.go）已在
+// 2026-10 的资金面收口里删掉：全仓真正会动钱的出款路径只剩 USDT-TRC20 一条
+// （在 tron 包，本地签名后直接上链）。三个资金门面保留签名并返回 ErrPayoutNotWired，
+// 理由与其余通道相同：它们是包外可见的调用面，留函数比删函数让上游当场编译失败
+// 更容易收口。这条通道本来也不该自己动钱——WhatsApp 协议里没有任何可发起转账的
+// API（库里支付消息只是 unsupported 占位），提现这类动作必须有持牌主体出账。
+//
+// util.CallWhatsappMsg 那组前缀还登记在 util 里，但本包只播消息事件（Inbound/Receipt/
+// Connection/QR/SendResult）：Withdraw/Query 两个键不再有回执。下游收不到
+// 资金回调时该读成「这条通道没接入」，而不是「单还在路上」。
 //
 // **本包有常驻协程**：每个已启动账号一条连接守护（wa_manager.go 的 run），
 // 每次进行中的配对一条泵协程（wa_pairing.go 的 runPairing）。停机由 WhatsappStop
@@ -28,14 +34,12 @@ package whatsapp
 import (
 	"context"
 	"errors"
-	"fmt"
 	"strings"
 	"sync/atomic"
 
 	"touchgocore/config"
 	"touchgocore/corectx"
 	"touchgocore/pay"
-	"touchgocore/util"
 	"touchgocore/vars"
 )
 
@@ -44,8 +48,6 @@ var (
 	// 用 atomic.Pointer 而不是 atomic.Value：后者要求存入的具体类型一致，
 	// 而 context.Context 的实现类型随调用方变化，存第二个即 panic。
 	whatsappRunCtx atomic.Pointer[context.Context]
-	// fund 是资金供应商链路；nil 表示未启动，对应操作会就地拒绝而不是发出请求。
-	fund atomic.Pointer[pay.Provider]
 	// waStore 单独持一份指针只为停机时关库：管理器也引用它，但关闭动作
 	// 必须在「全部协程收掉之后」发生，挂在生命周期上比挂在管理器里清晰。
 	waStore atomic.Pointer[WAStore]
@@ -92,13 +94,12 @@ func whatsappCfg() *config.WhatsappConfig {
 	return cfg.Whatsapp
 }
 
-// WhatsappStart 装配消息侧与资金链路。
+// WhatsappStart 装配消息侧。
 //
 // 总闸先看 whatsapp.enable：整段没配或值不为 "on"（大小写不敏感，两侧空白忽略）即
-// 两支都不装配、直接返回——whatsmeow 是非官方客户端，不该因为「dsn 恰好写了」就连上
-// WhatsApp 服务器。闸打开后两边的判定各自独立：资金侧引用缺失、SDK 段没开、密钥未注入，
-// 都只记日志并返回，不该阻断整机启动；消息侧只看 whatsapp.sessions.dsn 配没配、
-// Postgres 连不连得上，连不上同样只记日志——「只跑钱、不跑协议」是常见形态，反过来「只跑协议」也是。
+// 不装配、直接返回——whatsmeow 是非官方客户端，不该因为「dsn 恰好写了」就连上
+// WhatsApp 服务器。闸打开后只看 whatsapp.sessions.dsn 配没配、Postgres 连不连得上，
+// 连不上只记日志不阻断整机启动：「这个号不跑协议」是常见形态。
 func WhatsappStart(ctx context.Context) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -111,15 +112,12 @@ func WhatsappStart(ctx context.Context) {
 		return
 	}
 	startWA(all)
-	if p, ok := openFund(all, wcfg.Provider); ok {
-		fund.Store(p)
-	}
-	if fund.Load() == nil && waMgr.Load() == nil {
-		vars.Info("不启动Whatsapp（enable 为 on 但两支都没装起来：sessions.dsn 没配或会话库不可用、provider 引用不通）")
+	if waMgr.Load() == nil {
+		vars.Info("不启动Whatsapp（enable 为 on 但消息侧没装起来：sessions.dsn 没配或会话库不可用）")
 	}
 }
 
-// WhatsappStop 停掉消息侧全部常驻协程、关会话库、摘资金客户端。可重复调用。
+// WhatsappStop 停掉消息侧全部常驻协程并关会话库。可重复调用。
 func WhatsappStop(ctx context.Context) {
 	if mgr := waMgr.Swap(nil); mgr != nil {
 		mgr.StopAll(waStopWaitBudget)
@@ -129,7 +127,6 @@ func WhatsappStop(ctx context.Context) {
 			vars.Warning("关闭 whatsapp 会话库失败: %v", err)
 		}
 	}
-	fund.Store(nil)
 }
 
 // startWA 装配消息侧：开 Postgres 会话库 → 建管理器 → 注册 QR 端点。
@@ -144,7 +141,7 @@ func WhatsappStop(ctx context.Context) {
 // WhatsappStartClient。启动日志把库里设备数报出来，方便对账。
 //
 // 只在 whatsapp.enable 为 on 时被调用（总闸在 WhatsappStart）。
-// 没配 DSN 或库连不上只记日志返回，不阻断整机（资金侧照常装配）。
+// 没配 DSN 或库连不上只记日志返回，不阻断整机。
 func startWA(all *config.Cfg) {
 	var scfg *config.WhatsappSessionsConfig
 	if all != nil && all.Whatsapp != nil {
@@ -171,38 +168,27 @@ func startWA(all *config.Cfg) {
 	waMgr.Store(mgr)
 }
 
-// currentFund 取资金链路客户端；未启动时返回明确错误而不是 panic。
-func currentFund() (*pay.Provider, error) {
-	p := fund.Load()
-	if p == nil {
-		return nil, errors.New("whatsapp 资金通道未启动（检查 whatsapp.provider 是否引用了已开启的 pay_sdks 段与商户账户）")
-	}
-	return p, nil
+// ErrPayoutNotWired 本通道没有接入资金链路。
+//
+// 它是哨兵而不是普通错误：调用方要用 errors.Is 区分「本进程没接入这条通道」（部署缺陷，
+// 该改走 USDT-TRC20 或补实现）与「供应商拒了这一单」（业务结果，该走状态机）。
+// 三个门面一律返回 nil 结果 + 这个错误，是为了让上游不可能把「没接入」误读成「已受理」。
+var ErrPayoutNotWired = errors.New("whatsapp 资金通道未接入（本仓资金出款只交付 USDT-TRC20 链上通道）")
+
+// WhatsappWithdraw 未接入：保留签名，不假装受理。
+//
+// nil 订单也一样返回哨兵：参数校验拦不住「没接入」这个事实，先报部署缺陷才轮得到报订单。
+func WhatsappWithdraw(context.Context, *pay.PayOrder) (*pay.PayResult, error) {
+	return nil, ErrPayoutNotWired
 }
 
-// publish 把归一后的资金回执广播给下游，键为 util.CallWhatsappMsg+kind。
-//
-// 无人订阅不算失败：本包不要求下游一定要落库，只给一个不必层层转发的出口。
-// 载荷是 *pay.PayResult，回调签名据此写。消息侧的事件广播在 wa_client.go 的 publishWA。
-func publish(kind string, res *pay.PayResult) {
-	if res == nil {
-		return
-	}
-	if ok := util.DefaultCallFunc.Do(util.CallWhatsappMsg+kind, res); !ok {
-		vars.Debug("whatsapp 回执无人订阅: kind=%s order_no=%s", kind, res.OrderNo)
-	}
+// WhatsappQuery 未接入：查不出结论时给错误而不是给一个 UNKNOWN 回执——
+// UNKNOWN 会被上游当成「发过了、待对账」，而这里连发都没发过。
+func WhatsappQuery(context.Context, string) (*pay.PayResult, error) {
+	return nil, ErrPayoutNotWired
 }
 
-// orderCall 是三个下单/查单门面共用的收尾：调用→补通道前缀→广播回执。
-//
-// ctx 为 nil 时回落到包级运行上下文，让「启动时快照的配置」仍然生效。
-// 前置校验与状态归一都在 pay 侧做，这里只负责本包的留痕口径。
-func orderCall(ctx context.Context, kind string, call func(context.Context) (*pay.PayResult, error)) (*pay.PayResult, error) {
-	ctx = ctxOrRun(ctx)
-	res, err := call(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("whatsapp %s 失败: %w", kind, err)
-	}
-	publish(kind, res)
-	return res, nil
+// WhatsappAccount 未接入：不返回零值账户，零值会被下游读成「余额不足」从而拒掉正常业务。
+func WhatsappAccount(context.Context, *pay.AccountQuery) (*pay.AccountInfo, error) {
+	return nil, ErrPayoutNotWired
 }

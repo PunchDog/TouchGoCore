@@ -2,64 +2,183 @@ package telegram
 
 import (
 	"context"
+	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"touchgocore/config"
 	"touchgocore/corectx"
 	"touchgocore/pay"
+
+	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
-// TestTonStartNilCfgDoesNotPanic 没有 telegram 段、或段里没有 ton 引用时，
-// TON 启动必须安静通过，且后续操作被拒而不是拿着空链路发请求。
-func TestTonStartNilCfgDoesNotPanic(t *testing.T) {
-	TonStop(nil)
-	TonStart(corectx.WithCfg(context.Background(), &config.Cfg{}))
-	TonStart(corectx.WithCfg(context.Background(), &config.Cfg{Telegram: &config.TelegramConfig{}}))
-	// 传 nil 时回落到包级运行快照：上一条已经把「没有配置」写进快照，这里仍应不启动。
-	TonStart(nil)
-	// 引用指向一个没开的 SDK 段：同样是不启动，而不是启动一条发不出去请求的链路。
-	closed := payTonCfg("https://ton.example", tonEndpoints())
-	closed.PaySDks[tonSection].Enable = "off"
-	TonStart(corectx.WithCfg(context.Background(), closed))
-	if _, err := TonQuery(nil, "O1"); err == nil {
-		t.Fatal("未启动时查询应当被拒")
+// refuse 钉住资金门面的 fail-closed 口径：未接入哨兵错误，且结果必须为 nil。
+// 两条都判是因为上游一旦只看「有没有报错」，一个非 nil 的半截回执就会被当成受理凭证。
+func refuse[T any](t *testing.T, name string, call func() (*T, error)) {
+	t.Helper()
+	res, err := call()
+	if !errors.Is(err, ErrPayoutNotWired) {
+		t.Errorf("%s 应返回未接入哨兵，实得 %v", name, err)
 	}
-	if _, err := TonRecharge(nil, &pay.PayOrder{OrderNo: "O1", Amount: 1}); err == nil {
-		t.Fatal("未启动时充值应当被拒")
+	if res != nil {
+		t.Errorf("%s 未接入却给出了结果对象: %+v", name, res)
 	}
-	if _, err := TonWithdraw(nil, &pay.PayOrder{OrderNo: "O1", Amount: 1, Address: tonAcctBounceable}); err == nil {
-		t.Fatal("未启动时提现应当被拒")
-	}
-	if _, err := TonAccount(nil, nil); err == nil {
-		t.Fatal("未启动时账户查询应当被拒")
-	}
-	TonStop(nil)
-	TonStop(nil) // 幂等
 }
 
-// TestTonStopDoesNotAffectBot 资金链路的开关不碰 Bot：
-// TelegramStart 与 TonStart 各自独立，Stop 一边不应把另一边摘掉。
-func TestTonStopDoesNotAffectBot(t *testing.T) {
-	startTon(t, payTonCfg("https://ton.example", tonEndpoints()))
-	TonStop(nil)
-	if _, err := TonQuery(nil, "O1"); err == nil {
-		t.Fatal("停止后查询应当被拒")
+// refuseAll 让三个门面对同一份入参走一遍同一口径。
+func refuseAll(t *testing.T, ctx context.Context, order *pay.PayOrder) {
+	t.Helper()
+	refuse(t, "TonWithdraw", func() (*pay.PayResult, error) { return TonWithdraw(ctx, order) })
+	refuse(t, "TonQuery", func() (*pay.PayResult, error) { return TonQuery(ctx, order.OrderNo) })
+	refuse(t, "TonAccount", func() (*pay.AccountInfo, error) { return TonAccount(ctx, nil) })
+}
+
+// TestPayoutNoCfgRefusesEveryFacade 没有 telegram 段、没有 ton 引用、连配置快照都没有时，
+// 三个门面一律被拒，而不是 panic 或给出可被误读的回执。
+//
+// 原用例走的是 TonStart 的「静默不启动」路径；装配层删除后同一口径落在门面上，
+// ctx 为 nil 的分支也一并钉住——它现在应当什么都不读。
+func TestPayoutNoCfgRefusesEveryFacade(t *testing.T) {
+	prev := runCtx()
+	defer setRunCtx(prev)
+
+	order := &pay.PayOrder{OrderNo: "O1", Amount: 1, Address: tonAcctBounceable}
+	for _, cfg := range []*config.Cfg{nil, {}, {Telegram: &config.TelegramConfig{}}} {
+		refuseAll(t, corectx.WithCfg(context.Background(), cfg), order)
+	}
+	refuseAll(t, nil, order)
+}
+
+// newLocalBot 造一个只对着本地假端点的 bot：凭证是假的，但 shutdownChannel 与
+// TelegramStop 要走的那条清理路径是真的（零值 BotAPI 上 close 空 channel 会当场 panic）。
+func newLocalBot(t *testing.T) *tgbotapi.BotAPI {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"ok":true,"result":{"id":42,"is_bot":true,"first_name":"test","username":"test_bot"}}`)
+	}))
+	t.Cleanup(srv.Close)
+	bot, err := tgbotapi.NewBotAPIWithClient("123456:ABC-DEF", srv.URL+"/bot%s/%s", srv.Client())
+	if err != nil {
+		t.Fatalf("本地假端点上的 bot 应当建起来: %v", err)
+	}
+	return bot
+}
+
+// TestPayoutCallsDoNotAffectBot 资金侧的调用不碰 Bot 侧运行时。
+//
+// 原用例钉的是「TonStop 只摘资金链路、不把 Bot 一起摘掉」；TonStop 已随实现删除，
+// 同一保护改钉两面：门面既不摘 globalBot 也不取消在册轮询，而 Bot 自己的停止路径照样走得通。
+func TestPayoutCallsDoNotAffectBot(t *testing.T) {
+	bot := newLocalBot(t)
+	roundCtx, roundCancel := context.WithCancel(context.Background())
+	defer roundCancel()
+
+	var wg sync.WaitGroup
+	var cleaned atomic.Bool
+	updates := make(chan tgbotapi.Update, 1)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		runUpdates(roundCtx, bot, updates, func() { cleaned.Store(true) })
+	}()
+
+	runTimeMu.Lock()
+	prev := currentCancel
+	globalBot.Store(bot)
+	currentCancel = roundCancel
+	runTimeMu.Unlock()
+	defer func() {
+		runTimeMu.Lock()
+		currentCancel = prev
+		globalBot.Store(nil)
+		runTimeMu.Unlock()
+	}()
+
+	refuseAll(t, nil, &pay.PayOrder{OrderNo: "O1", Amount: 1, Address: tonAcctBounceable})
+
+	if got := globalBot.Load(); got != bot {
+		t.Fatalf("资金门面调用把 Bot 摘掉了: got=%v", got)
+	}
+	select {
+	case <-roundCtx.Done():
+		t.Fatal("资金门面调用取消了 Bot 本轮轮询的上下文")
+	default:
+	}
+	if cleaned.Load() {
+		t.Fatal("资金门面调用触发了本轮轮询的清理")
+	}
+
+	// Bot 侧的停止链路仍按自己的语义走完：摘 Bot、取消本轮、跑清理。
+	TelegramStop(context.Background())
+	if !waitWithin(t, time.Second, "轮询退出", wg.Wait) {
+		return
+	}
+	if !cleaned.Load() {
+		t.Fatal("TelegramStop 没有执行本轮清理")
 	}
 	if globalBot.Load() != nil {
-		t.Fatal("TonStop 不该动 Bot（这里断言的是它没有把别的东西一起摘掉）")
+		t.Fatal("TelegramStop 后仍残留 bot")
 	}
 }
 
-// TestTonFlagOffKeepsBotPathIntact SDK 段没开时，telegram 段其余字段的读取不受影响。
-func TestTonFlagOffKeepsBotPathIntact(t *testing.T) {
-	cfg := payTonCfg("https://ton.example", tonEndpoints())
-	cfg.Telegram.BotToken = "123456:ABC"
-	cfg.PaySDks[tonSection].Enable = "off"
-	TonStart(corectx.WithCfg(context.Background(), cfg))
-	if p := tonActive.Load(); p != nil {
-		t.Fatal("SDK 段没开却启动了资金链路")
+// TestPayoutFacadeKeepsBotConfigSnapshot 资金门面不动 Bot 侧读的那份运行配置快照。
+//
+// 原用例钉的是「SDK 段没开时 TonStart 不搅动 telegram 段快照」。TonStart 与 TelegramStart
+// 共用同一个 telegramRunCtx，删掉前者之后这条保护仍要留着：门面若在 nil ctx 分支里
+// 补一次 setRunCtx，就会把 Bot 的快照擦成 Background，而 Bot 侧下一轮读到的就是空配置。
+func TestPayoutFacadeKeepsBotConfigSnapshot(t *testing.T) {
+	prev := runCtx()
+	defer setRunCtx(prev)
+
+	setRunCtx(corectx.WithCfg(context.Background(), &config.Cfg{
+		Telegram: &config.TelegramConfig{BotToken: "123456:ABC"},
+	}))
+	before := telegramRunCtx.Load()
+
+	order := &pay.PayOrder{OrderNo: "O1", Amount: 1, Address: tonAcctBounceable}
+	refuseAll(t, nil, order)
+	refuseAll(t, context.Background(), order)
+
+	if got := telegramRunCtx.Load(); got != before {
+		t.Fatal("资金门面改写了 Bot 侧的运行上下文快照")
 	}
 	if got := telegramCfg(); got == nil || got.BotToken != "123456:ABC" {
-		t.Fatalf("TonStart 改动了运行配置快照: %+v", got)
+		t.Fatalf("Bot 侧读到的配置快照被搅动: %+v", got)
+	}
+}
+
+// TestPayoutInterfaceStaysWired 三个门面仍是包外可见的调用面，且一律返回未接入哨兵。
+//
+// 资金实现已删除，这里只钉两件事：签名没被人顺手改掉（服务注册与下游代码都按它写），
+// 以及「没接入」绝不被读成「已受理」——结果必须是 nil 加 errors.Is 可判的哨兵。
+func TestPayoutInterfaceStaysWired(t *testing.T) {
+	var _ func(context.Context, *pay.PayOrder) (*pay.PayResult, error) = TonWithdraw
+	var _ func(context.Context, string) (*pay.PayResult, error) = TonQuery
+	var _ func(context.Context, *pay.AccountQuery) (*pay.AccountInfo, error) = TonAccount
+
+	o := &pay.PayOrder{OrderNo: "O1", Amount: 10, Address: tonAcctBounceable}
+	cases := []struct {
+		name string
+		run  func() error
+	}{
+		{"Withdraw", func() error { _, e := TonWithdraw(nil, o); return e }},
+		{"Query", func() error { _, e := TonQuery(nil, "O1"); return e }},
+		{"Account", func() error { _, e := TonAccount(nil, &pay.AccountQuery{}); return e }},
+	}
+	for _, cs := range cases {
+		if err := cs.run(); !errors.Is(err, ErrPayoutNotWired) {
+			t.Errorf("%s 应返回未接入哨兵，实得 %v", cs.name, err)
+		}
+	}
+	// 订单为 nil 也一样拒绝：不能因为参数不合法就先返回 nil 结果让上游以为已受理。
+	if _, err := TonWithdraw(nil, nil); !errors.Is(err, ErrPayoutNotWired) {
+		t.Errorf("空订单的拒绝口径不符: %v", err)
 	}
 }

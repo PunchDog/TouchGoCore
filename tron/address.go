@@ -11,14 +11,15 @@ import (
 	"touchgocore/pay"
 )
 
-// 本文件是 TRON 侧的收款端校验，登记给 pay 的 ChainRule 用。
+// 本文件是 TRON 侧的收款端校验，登记给 pay 的 ChainRule 用（登记点在 chainrule.go，
+// TRX 与 USDT 两条币种共用这里的 TRONRule）。
 //
 // 之所以写在这个包而不是 pay：地址怎么编码是 TRON 的知识，不是资金契约的知识。
 // 之所以值得写：TRON 地址自带 4 字节校验和，白送的错误拦截——一次手抖、一次
 // 上游拼接漏字，都能在发出请求之前变成一条报错，而不是一笔进了无人地址的钱。
 //
-// 本包是 TRON 地址算法的归属地：usdt 包（USDT-TRC20 跑在同一条链上）通过
-// usdt.IsValidTRONAddress 的薄包装复用这里的实现，两侧校验口径永远只有一份。
+// 本包是 TRON 地址算法的归属地：USDT-TRC20 跑在同一条链上，收款端形态与原生 TRX
+// 完全相同，所以 usdt 包只留 usdt.IsValidTRONAddress 的薄转发，校验口径全仓一份。
 
 // base58Alphabet 是比特币系（含 TRON）的 Base58 字母表：剔掉了易混的 0OIl。
 const base58Alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
@@ -72,16 +73,11 @@ func IsValidTRONAddress(s string) bool {
 	return bytes.Equal(tronChecksum(raw[:21]), raw[21:])
 }
 
-// trxRule 是 TRON 一侧的收款端规则：原生 TRX 与同链的 USDT-TRC20 共用地址形态，
-// 但 TRX 的登记归本包（链的原生币规则归属链包），USDT 的登记留在 usdt 包。
-type trxRule = TRONRule
-
 // TRONRule 是 TRON 收款端规则的可复用实现：地址校验与 memo 拒绝都是链侧知识，
-// 同一条链上的代币通道（usdt 包的 TRC20）直接复用它，规则只有一份。
+// 同一条链上的两个币种（原生 TRX 与 usdt 包转发的 TRC20）在 chainrule.go 一起登记它。
 type TRONRule struct{}
 
-// CheckAddress 空地址放行：充值侧的收款端由供应商返回，提现侧的非空检查
-// 在 pay.CheckOrder 里已经做过，这里只管格式。
+// CheckAddress 空地址放行：提现侧的非空检查在 pay.CheckOrder 里已经做过，这里只管格式。
 func (TRONRule) CheckAddress(o *pay.PayOrder) error {
 	addr := strings.TrimSpace(o.Address)
 	if addr == "" {
@@ -102,11 +98,4 @@ func (TRONRule) CheckMemo(o *pay.PayOrder) error {
 		return errors.New("TRON 转账不支持备注（memo）：交易所归集账户的认款机制是 TON 那条链的事")
 	}
 	return nil
-}
-
-func init() {
-	// 登记失败只可能是本包把币种名写错了，让它炸在启动期。
-	if err := pay.RegisterChainRule(pay.CurrencyTRX, trxRule{}); err != nil {
-		panic(err)
-	}
 }

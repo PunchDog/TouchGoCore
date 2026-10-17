@@ -23,12 +23,17 @@ Go 游戏服务框架：WebSocket、gRPC、定时器、Lua、Telegram、Gin、Re
 - 队列容量与背压：`server.read_buffer` / `write_buffer` / `backpressure`。
 - Prometheus：`metrics.enabled`，可选 `metrics.token` 保护 `/metrics`。
 - 资金通道：供应商接入集中在顶层 `pay_sdks` 表，一段=一套供应商（`driver` 驱动标记、`base_url`、
-  凭证、`endpoints` 端点表、`accounts` 我方商户账户）。通道段 `telegram.ton`（TON）、
-  `usdt.provider`（USDT/TRC20）、`tron.provider` / `bsc.provider` / `sol.provider`（原生币）、
-  `whatsapp.provider` 与 `zalo` / `facebook` / `instagram` 的同名两段（充值/提现、登录/验证码）
-  只写 `{sdk, account}` 两个名字引用它，同一供应商的几条链路因此共用一份凭证，不必抄三份。
-  三条社交通道同构：登录各引一段消息网关（`supplier_zalo`/`supplier_fb`/`supplier_ig`），
-  资金一律复用支付网关段——充值提现与平台无关，凭证只登记一次；登录之所以一家一段，
+  凭证、`endpoints` 端点表、`accounts` 我方商户账户，链上出款另带 `chain` 子段）。
+  **真正会动钱的出款只有一条**：`usdt.provider`（USDT/TRC20），它的提现与查单是本地组交易、
+  私钥签名、经节点 gRPC 广播（`pay_sdks.<段>.chain` 给节点、热钱包地址与 API Key，
+  私钥由 `util.CallPayChainMsg+"<段名>"` 钩子注入），商户账户查询仍走该段引用的 HTTP 供应商。
+  其余原生币/代币通道（`telegram` 的 TON、`tron` 的 TRX、`bsc`、`sol`）与三条社交通道的
+  资金实现已在 2026-10 的资金面收口里删除：提现/查单/查账户三个门面的函数签名保留，
+  一律返回各包的 `ErrPayoutNotWired` 哨兵（`errors.Is` 可判），对应通道段不再有
+  `provider` / `ton` 配置项；充值/收款接口则整条删除（全仓只留提现）。
+  各链的地址校验与 `pay` 的币种收款端规则**刻意不随提现实现删除**——删掉规则登记会让该币种
+  的单走「未登记即放行」，那是资金安全退化而不是简化。
+  三条社交通道同构：登录各引一段消息网关（`supplier_zalo`/`supplier_fb`/`supplier_ig`）；登录之所以一家一段，
   是因为 `endpoints` 的键是全局逻辑名、不带平台维度，一段服务不了 `/zalo/login` 与 `/fb/login`
   两种实际路径；代价是密钥注入钩子按段名注册（`util.CallPaySDKMsg+段名`），同一供应商登记多段时
   下游要逐段注入，别把密钥抄进版本库。
@@ -39,7 +44,8 @@ Go 游戏服务框架：WebSocket、gRPC、定时器、Lua、Telegram、Gin、Re
   号码在错误文案与日志里一律掩码，在飞会话另有包内总量上限），
   多账号会话密钥材料存 `whatsapp.sessions.dsn` 指向的 Postgres（sqlstore 管表），发消息/删会话框/
   吊销配对（`WhatsappDeleteDevice`：在跑先向服务端解绑再删设备行，没在跑只删行）
-  直连 WhatsApp 多设备协议；只有资金侧（充值/提现）仍引用 `pay_sdks`。整通道另有一支总闸
+  直连 WhatsApp 多设备协议；本包不再有任何资金链路（提现/查单/查账户门面只剩哨兵，
+  充值接口已整条删除）。整通道另有一支总闸
   `whatsapp.enable`：**显式为 `on` 才装配**，值不为 on（或压根没有 whatsapp 段）时消息侧与
   资金侧一起不启动，本包所有门面调用就地拒绝——默认不开是刻意的，见下条封号风险。
   读写门面（发消息/发群消息/删框/列好友/列群组/批量发信）**自带按需登录**：账号没在跑就先拉起并
@@ -57,11 +63,15 @@ Go 游戏服务框架：WebSocket、gRPC、定时器、Lua、Telegram、Gin、Re
   键名与逐项说明见 [config/example.json](config/example.json)。
   `secret_key` 建议留空，由下游按 SDK 段名注册 `util.CallPaySDKMsg+"<段名>"` 钩子在启动前注入，
   不写进版本库；金额一律整数最小单位、手续费走万分比整数，全链路禁浮点。
-- 资金动作的调用面：`pay.Channel` 四件事——查商户账户 `QueryAccount`、充值 `Recharge`、
-  提现 `Withdraw`、查单 `QueryOrder`。上游按包名调用门面函数即可（`WhatsappRecharge` /
-  `UsdtWithdraw` / `TonAccount` 等），不必先知道配置里写的是哪家 SDK；`driver` 标记由
-  `paysdk` 读表后交给 `pay.Open` 解析成实现。接一家新供应商 = 在它自己的包里
-  `pay.Register("驱动名", 构造函数)` + 配置里改 `driver`，通道包与上游都不动。
+- 资金动作的调用面：`pay.Channel` 三件事——提现 `Withdraw`、查单 `QueryOrder`、
+  查商户账户 `QueryAccount`（充值/收款接口已在资金面收口中整条删除）。上游按包名调用门面函数即可（`UsdtWithdraw` /
+  `UsdtAccount` 等），不必先知道配置里写的是哪家实现；`driver` 标记由 `pay` 装配层
+  （`Open`/`OpenService`/`OpenChain`，pay/assemble.go）读表后交给驱动注册表（`OpenDriver`）
+  解析成实现，`OpenChain` 则是「出款直接上链」那类通道的装配入口（合约与网络
+  由通道段给出，节点与凭证由 `chain` 子段给出，两个维度各只有一处真相）。接一家新供应商 =
+  在它自己的包里 `pay.Register("驱动名", 构造函数)` + 配置里改 `driver`，通道包与上游都不动。
+  其余通道的同名门面仍在（`TonWithdraw` / `TronAccount` 等），但它们一律
+  返回 `ErrPayoutNotWired`：接口保留是为了不破坏调用面，不代表这条链路可用。
 - NFT 资产通道：代码在 `nft` 包，四件事——查询持有 `NftHoldings`、单币详情 `NftToken`、
   铸造 `NftMint`、转账 `NftTransfer`，外加查单 `NftQuery` 与对账 `NftReconcile`。它与数字货币资金链路刻意不耦合：
   凭证登记在独立的顶层 `nft_sdks` 表（不复用 `pay_sdks`——两张表的端点逻辑名与驱动命名空间不同域，

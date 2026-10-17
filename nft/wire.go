@@ -24,8 +24,8 @@ type client struct {
 //
 // 引用缺失、SDK 段没开、账户没点名、密钥没注入、驱动 Open 失败，都返回 ok=false：
 // 资产链路宁可不起，也不能带着「不知道该从哪个主体签发」的快照上线（§8 就地拒绝口径）。
-// 本函数把 paysdk.Open 的四步（取段/取账户/注密钥/按驱动 Open）同构复刻进来——
-// paysdk 返回 pay.Channel，import 即破硬约束 1（ADR-3）。
+// 本函数把 pay.Open 的四步（取段/取账户/注密钥/按驱动 OpenDriver）同构复刻进来——
+// pay.Open 返回 *pay.Resolved（内嵌 pay.Channel），import 即破硬约束 1（ADR-3）。
 func newClient(cfg *config.Cfg) (*client, bool) {
 	if cfg == nil || cfg.Nft == nil {
 		return nil, false

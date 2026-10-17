@@ -18,7 +18,8 @@ import (
 // 两个方法都收整单而不是单个字符串：判断地址合法往往要连着看 network（测试网位）
 // 和 currency（原生币与代币的收款端不是同一个地址形态）。
 type ChainRule interface {
-	// CheckAddress 校验收款地址。提现侧在 CheckOrder 之后调用，充值侧地址通常为空。
+	// CheckAddress 校验收款地址。提现路径在 CheckOrder（要求地址非空）之后调用，
+	// 这里只管格式；空地址不会走到这一步。
 	CheckAddress(o *PayOrder) error
 	// CheckMemo 校验备注。链上根本没有这一概念的（TRC20）应当直接拒绝非空值——
 	// 上游给不许带 memo 的链填了 memo，说明它把两条链的规则搞混了。
@@ -90,3 +91,9 @@ func checkChain(o *PayOrder) error {
 	}
 	return rule.CheckMemo(o)
 }
+
+// CheckChainRules 是 checkChain 的导出入口，供链上驱动在本地签名之前跑同一套收款端规则。
+//
+// 必须导出而不是让链上驱动自己再校验一遍地址：「地址怎么算合法」全仓只能有一份实现，
+// 两处实现迟早漂移，而漂移的表现是「供应商链路拒了这个地址、链上链路却把它广播出去了」。
+func CheckChainRules(o *PayOrder) error { return checkChain(o) }

@@ -21,6 +21,10 @@ const (
 	tronBogusChecksum = "TR7NharAcTPb3DHchqPguF36bXqWRRCbqR"
 )
 
+// 本文件的用例都只走导出符号：地址判定走 usdt.IsValidTRONAddress（转发 tron），
+// 规则走 pay 的注册表。装配期的合约/网络校验用例（newClient 那两个）跟着实现
+// 搬到了 tron/usdt_test.go。
+
 func TestIsValidTRONAddress(t *testing.T) {
 	cases := []struct {
 		addr string
@@ -57,12 +61,16 @@ func TestIsValidTRONAddress(t *testing.T) {
 	}
 }
 
+// TestTRC20RuleRejectsBadAddressBeforeSending USDT 侧规则在注册表里，且判法与链侧一致。
+//
+// 登记点合并后这条是本包存在的意义所在：宿主只链接 usdt（不直接引 tron）时，
+// 规则仍要生效——usdt 包 import tron 就是为了把那份 init 链进来。
 func TestTRC20RuleRejectsBadAddressBeforeSending(t *testing.T) {
 	rule, ok := pay.ChainRuleFor(pay.CurrencyUSDT)
 	if !ok {
 		t.Fatal("USDT 的收款端规则没登记，本包可能没被链进测试二进制")
 	}
-	// 充值侧地址为空是合法形态：非空检查只在提现侧，由 pay.CheckOrder 负责。
+	// 空地址放行是规则本层的口径：非空检查只在提现侧，由 pay.CheckOrder 负责。
 	if err := rule.CheckAddress(&pay.PayOrder{Address: ""}); err != nil {
 		t.Errorf("空地址被拒: %v", err)
 	}
@@ -119,51 +127,15 @@ func TestUsdtRejectsBadChainFieldsWithoutSending(t *testing.T) {
 	if got := recorded(); len(got) != 0 {
 		t.Fatalf("被拒的单广播了回执: %+v", got)
 	}
-	// 纯空白备注按「没有备注」处理，且不得出现在报文里：omitempty 认得出空串，
-	// 认不出两个空格，供应商会把这串空格当成一条真有内容的备注。
-	if _, err := UsdtWithdraw(nil, &pay.PayOrder{OrderNo: "O7", Amount: 10, Address: tronRangeAcct, Memo: "  "}); err != nil {
-		t.Fatalf("空白备注的正常提现被拒: %v", err)
+	// 纯空白备注按「没有备注」处理：门禁不该因为它把钱拦下。
+	// 出款已改为本地签名上链，这里断言的是「过了前置校验」而不是「供应商收到了报文」——
+	// 节点是夹具里的本地不可达地址，所以到链上网关这一步才失败。
+	if _, err := UsdtWithdraw(nil, &pay.PayOrder{OrderNo: "O7", Amount: 10, Address: tronRangeAcct, Memo: "  "}); err == nil {
+		t.Fatal("链上出款在节点不可达时应当报错")
+	} else if strings.Contains(err.Error(), "备注") || strings.Contains(err.Error(), "memo") {
+		t.Fatalf("空白备注被门禁当成有值拦下了: %v", err)
 	}
-	reqs := f.seen()
-	if len(reqs) != 1 {
-		t.Fatalf("请求次数=%d，期望 1", len(reqs))
-	}
-	if strings.Contains(reqs[0].body, "memo") {
-		t.Fatalf("空白备注进了报文: %s", reqs[0].body)
-	}
-}
-
-func TestNewClientRejectsBogusContract(t *testing.T) {
-	cfg := payCfg("https://pay.invalid", nil)
-	if _, ok := newClient(cfg); !ok {
-		t.Fatal("夹具合约应当能通过启动校验，否则本用例说明不了任何事")
-	}
-	cfg = payCfg("https://pay.invalid", nil)
-	cfg.Usdt.Contract = tronBogusChecksum
-	if c, ok := newClient(cfg); ok || c != nil {
-		t.Errorf("校验和不过的合约地址不应让通道启动，实得 ok=%v", ok)
-	}
-	// 原生 TRX 通道留空合约是合法形态。
-	cfg = payCfg("https://pay.invalid", nil)
-	cfg.Usdt.Contract = ""
-	if _, ok := newClient(cfg); !ok {
-		t.Error("合约留空（原生 TRX）应当可启动")
-	}
-}
-
-func TestNewClientRejectsTokenStandardAsNetwork(t *testing.T) {
-	for _, net := range []string{"trc20", "TRC20", "erc20", "bep-20"} {
-		cfg := payCfg("https://pay.invalid", nil)
-		cfg.Usdt.Network = net
-		if c, ok := newClient(cfg); ok || c != nil {
-			t.Errorf("network=%s 是代币标准不是网络，不该让通道启动，实得 ok=%v", net, ok)
-		}
-	}
-	for _, net := range []string{"", pay.NetworkMainnet, pay.NetworkShasta, pay.NetworkNile, "supplier_custom_net"} {
-		cfg := payCfg("https://pay.invalid", nil)
-		cfg.Usdt.Network = net
-		if _, ok := newClient(cfg); !ok {
-			t.Errorf("network=%q 应当放行（未知写法不由本包断言），实得 ok=false", net)
-		}
+	if n := len(f.seen()); n != 0 {
+		t.Fatalf("被拒的单发出了 %d 次请求，期望 0", n)
 	}
 }

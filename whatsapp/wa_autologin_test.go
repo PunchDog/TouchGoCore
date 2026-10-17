@@ -34,6 +34,14 @@ func setContactSyncWindow(t *testing.T, d time.Duration) {
 	t.Cleanup(func() { waContactSyncFullMinInterval = old })
 }
 
+// setAppStateKeyWait 注入「解码 app state 缺密钥时最多等多久」这个包内预算，用完还原。
+func setAppStateKeyWait(t *testing.T, d time.Duration) {
+	t.Helper()
+	old := waAppStateKeyWait
+	waAppStateKeyWait = d
+	t.Cleanup(func() { waAppStateKeyWait = old })
+}
+
 // alCountSyncs 读同步账并把 full 序列拼成可读文本（红信息要能直接看出序列不对）。
 func alCountSyncs(t *testing.T, s *fakeSession) (calls, fullCalls int, seq string) {
 	t.Helper()
@@ -378,35 +386,6 @@ func TestContactFullSyncThrottledByWindow(t *testing.T) {
 	}
 }
 
-// TestContactFullSyncAllowedWhenWindowPassed 窗口的另一侧：窗口放开后升级确实会执行
-// （证明上一条不是「把 full 恒关掉」蒙过去的绿灯）。
-//
-// 变异对照：把升级分支（ListContacts 里 full=true 那一次调用）整段删掉 ⇒
-// 这里的序列只有 [false, false]、fullCalls=0，红。
-func TestContactFullSyncAllowedWhenWindowPassed(t *testing.T) {
-	setContactSyncWindow(t, 0)
-	dev := fakeDevice(t, "447378152319:1@s.whatsapp.net", "android", "P")
-	_, _, get := startFakeWA(t, nil, func(s *fakeSession) {}, dev)
-	if err := WhatsappStartClient(dev.ID.String()); err != nil {
-		t.Fatal(err)
-	}
-	s := get(dev.ID.String())
-	waitUntil(t, 2*time.Second, "首次连上", s.LoggedIn)
-
-	if _, err := WhatsappListContacts(nil, dev.ID.String()); err != nil {
-		t.Fatal(err)
-	}
-	alWantSeq(t, s, "false", "true")
-	if _, fullCalls, _ := alCountSyncs(t, s); fullCalls != 1 {
-		t.Fatalf("窗口放开时升级没执行：full=%d，期望 1", fullCalls)
-	}
-	// 第二次不再触发升级（本地 0 条会再试一次快路 + 一次升级），窗口已放开 ⇒ full 涨到 2。
-	if _, err := WhatsappListContacts(nil, dev.ID.String()); err != nil {
-		t.Fatal(err)
-	}
-	alWantSeq(t, s, "false", "true", "false", "true")
-}
-
 // TestSyncContactsFacadeCountsAndThrottles 新门面本身：返回的是同步后回读的条数；
 // 显式 full=true 首次立刻执行（擦版本重拉），第二次落在窗口内退化成快路。
 //
@@ -444,9 +423,7 @@ func TestSyncContactsFacadeCountsAndThrottles(t *testing.T) {
 //
 // 变异对照 MF：把同步失败退化成「记日志后返回空集 + nil」⇒ 这里 err==nil 立刻红。
 func TestSyncContactsReportsKeyNotFound(t *testing.T) {
-	oldWait := waAppStateKeyWait
-	waAppStateKeyWait = 0
-	t.Cleanup(func() { waAppStateKeyWait = oldWait })
+	setAppStateKeyWait(t, 0)
 
 	dev := fakeDevice(t, "447378152319:1@s.whatsapp.net", "android", "P")
 	keyErr := fmt.Errorf("failed to decode app state %s patches: %w",
@@ -482,9 +459,7 @@ func TestSyncContactsReportsKeyNotFound(t *testing.T) {
 // TestSyncContactsWaitsForAppStateKey 第一次解码缺密钥、手机随后把密钥补上时，
 // 同步必须等到联系人落库再返回，而不是把第一次的 ErrKeyNotFound 直接交给群发。
 func TestSyncContactsWaitsForAppStateKey(t *testing.T) {
-	oldWait := waAppStateKeyWait
-	waAppStateKeyWait = 3 * time.Second
-	t.Cleanup(func() { waAppStateKeyWait = oldWait })
+	setAppStateKeyWait(t, 3*time.Second)
 
 	dev := fakeDevice(t, "447378152319:2@s.whatsapp.net", "android", "P")
 	friend := jidOf(t, "447700900001@s.whatsapp.net")

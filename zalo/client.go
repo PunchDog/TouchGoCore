@@ -5,30 +5,22 @@ import (
 
 	"touchgocore/config"
 	"touchgocore/pay"
-	"touchgocore/paysdk"
 	"touchgocore/vars"
 )
-
-// openFund 装配充值/提现链路。走 paysdk 的严格口径：必须点名到一个商户账户，
-// 否则「这一单从哪个商户号出钱」就成了初始化顺序的函数。
-func openFund(cfg *config.Cfg, ref *config.PaySDKRef) (*pay.Provider, bool) {
-	res, err := paysdk.Open(cfg, "zalo", ref, nil)
-	return providerOf("zalo", res, err)
-}
 
 // openLogin 装配验证码下发与登录链路。这类链路只发消息、不出钱，
 // 被引用的 SDK 段没有商户账户也照样能用。
 func openLogin(cfg *config.Cfg, ref *config.PaySDKRef) (*pay.Provider, bool) {
-	res, err := paysdk.OpenService(cfg, "zalo.login", ref)
+	res, err := pay.OpenService(cfg, "zalo.login", ref)
 	return providerOf("zalo.login", res, err)
 }
 
 // providerOf 把一次装配的结果收口成本包要的形状。
 //
-// 本包的两条链路都要用会话凭证头（登录后每笔请求都带 token），而凭证只由
-// pay.Provider 持有：将来若登记了不给会话态的驱动，这里拒绝启动，
+// 登录链路要用会话凭证头（登录后每笔请求都带 token），而凭证只由 pay.Provider 持有：
+// 将来若登记了不给会话态的驱动，这里拒绝启动，
 // 而不是让登录成功变成「后面每一笔都 401」。
-func providerOf(channel string, res *paysdk.Resolved, err error) (*pay.Provider, bool) {
+func providerOf(channel string, res *pay.Resolved, err error) (*pay.Provider, bool) {
 	if err != nil {
 		vars.Info("%s 链路不启动: %v", channel, err)
 		return nil, false

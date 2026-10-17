@@ -1,8 +1,11 @@
-// Package pay 是资金通道（充值/提现）的共用契约与出站客户端。
+// Package pay 是资金通道（提现）的共用契约、出站客户端与配置装配层。
 //
 // 分层口径：本包只认「把一单资金请求送出去、把供应商回执读回来」这件事，
-// 不碰 SQL、不碰业务积分、不定义配置结构体（配置留在 config 包，
-// 否则 config→pay→config 成环）。落库、额度校验、状态机跃迁都由下游业务工程负责。
+// 不碰 SQL、不碰业务积分、不定义配置结构体（结构体与 Cfg 同住 config 包）。
+// 落库、额度校验、状态机跃迁都由下游业务工程负责。
+// 「不引 config」曾是包级边界（装配逻辑住在独立的 paysdk 包）；合并后降为文件级——
+// 仅 assemble.go 引 config，channel/client/provider/types/chainoptions/chainrule
+// 继续保持零 config 引用。
 package pay
 
 import (
@@ -13,7 +16,7 @@ import (
 
 // 币种标识。代码内统一用这几个大写名字，与目录名 usdt 一致。
 //
-// CurrencyTRX 不是本仓的充值/提现币种，它是手续费侧的事实：TRON 上转 USDT，
+// CurrencyTRX 不是本仓的出款币种，它是手续费侧的事实：TRON 上转 USDT，
 // gas 是以 TRX 收的，与转账币种不同一种。
 // CurrencyBNB / CurrencySOL 是另两条链的原生币：BNB 是 BSC（EVM 形态）的 gas 币，
 // SOL 是 Solana 的 gas 币（lamports，9 位最小单位）。
@@ -84,7 +87,6 @@ func IsFinal(status string) bool {
 const (
 	EndpointSendCode = "send_code"
 	EndpointLogin    = "login"
-	EndpointRecharge = "recharge"
 	EndpointQuery    = "query"
 	EndpointWithdraw = "withdraw"
 	// EndpointAccount 是查商户账户的逻辑名。它排在下单之前是有原因的：
@@ -129,7 +131,7 @@ func NormalizeAccountStatus(raw string) string {
 // IsActive 账户是否处于「可以发起资金动作」的状态。
 func IsActive(status string) bool { return status == AcctActive }
 
-// PayOrder 是一次充值或提现请求的全部输入。
+// PayOrder 是一次提现请求的全部输入。
 //
 // Amount 是币种最小单位的整数值，全链路禁用浮点：一旦中途出现 float64，大额出款
 // 就会在元/分转换上丢精度。最小单位是几位**由那一单实际走的合约决定**，不由包名决定：
@@ -144,7 +146,7 @@ type PayOrder struct {
 	Amount   int64  `json:"amount"`
 	Currency string `json:"currency,omitempty"`
 	Network  string `json:"network,omitempty"`
-	// Address 是收款地址（提现）；充值侧留空或由供应商返回。
+	// Address 是收款地址（提现）：出款的收端，必填（见 CheckOrder）。
 	Address string `json:"address,omitempty"`
 	Phone   string `json:"phone,omitempty"`
 	// Memo 是附在转账上的备注（TON 侧的 comment / message）。

@@ -1,7 +1,6 @@
 package usdt
 
 import (
-	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -11,8 +10,14 @@ import (
 	"testing"
 
 	"touchgocore/pay"
-	"touchgocore/util"
+	"touchgocore/tron"
 )
+
+// 本包没有装配代码了，这里钉的是「转发有没有转错」：
+// 门面必须落到 USDT 那条 route 上（币种缺省、contract 进签名域、回执键前缀），
+// 而不是顺手接到了 TRX 那条 route 上——两者现在共用同一套机器（tron/route.go），
+// 接错的时候报错文案与回执前缀都会跟着换，下游按 CallUsdtMsg 注册的回调就收不到东西。
+// 报文形态与签名逐位的完整用例在 tron/usdt_test.go。
 
 // capturedRequest 是一次到达假供应商的请求摘要（不含凭证）。
 type capturedRequest struct {
@@ -63,253 +68,86 @@ func (f *fakeSupplier) seen() []capturedRequest {
 
 func allEndpoints() map[string]string {
 	return map[string]string{
-		pay.EndpointAccount:  "/api/account",
-		pay.EndpointRecharge: "/api/recharge",
-		pay.EndpointWithdraw: "/api/withdraw",
-		pay.EndpointQuery:    "/api/query",
+		pay.EndpointAccount: "/api/account",
+		pay.EndpointQuery:   "/api/query",
 	}
 }
 
-// TestRechargeSignsAndSerializes 下单报文字段与签名域一致，金额以整数最小单位上送。
-func TestRechargeSignsAndSerializes(t *testing.T) {
+// TestShimForwardsToUsdtRouteOnWire 转发的门面确实落在 USDT 那条 route 上：
+// 币种缺省补 USDT、合约既进报文又追加在签名域末尾。账户查询是充值删除后仅存的
+// 供应商侧调用，路由身份由它钉（快照字段的归一条例在 tron 包用例里）。
+func TestShimForwardsToUsdtRouteOnWire(t *testing.T) {
 	f, url := newFakeSupplier(t)
-	f.response["/api/recharge"] = `{"code":"0","data":{"order_no":"O1","trade_no":"T1","status":"success","amount":1000000}}`
+	f.response["/api/account"] = `{"code":"0","data":{"currency":"USDT","status":"active"}}`
 	startWith(t, payCfg(url, allEndpoints()))
 	recorded()
 
-	res, err := UsdtRecharge(nil, &pay.PayOrder{OrderNo: "O1", Amount: 1000000})
-	if err != nil {
-		t.Fatalf("充值失败: %v", err)
-	}
-	if res.Status != pay.StatusSuccess || res.TradeNo != "T1" || res.Amount != 1000000 {
-		t.Fatalf("回执不符: %+v", res)
-	}
-	req := f.seen()[0]
-	var body map[string]any
-	if err := json.Unmarshal([]byte(req.body), &body); err != nil {
-		t.Fatal(err)
-	}
-	if body["merchant_id"] != merchantID {
-		t.Fatalf("商户号未进报文: %s", req.body)
-	}
-	if body["network"] != testNetwork || body["contract"] != testContract {
-		t.Fatalf("链上字段未进报文: %s", req.body)
-	}
-	if amt, ok := body["amount"].(float64); !ok || int64(amt) != 1000000 {
-		t.Fatalf("金额不是整数最小单位: %s", req.body)
-	}
-	if strings.Contains(req.body, testSecret) {
-		t.Fatalf("密钥进了报文: %s", req.body)
-	}
-	// 签名域十个定长标量 + 按登记顺序追加的通道特有字段。此单没填 network 之外的
-	// 收款侧字段，所以 address / phone / memo / notify_url 四位是空串占位——
-	// 空串也要占位，否则后面每一位的落点都会整体偏移。
-	want := pay.SignMD5(testSecret,
-		"app1", merchantID, "O1", "1000000", pay.CurrencyUSDT, testNetwork, "", "", "", "",
-		testContract)
-	if req.sign != want {
-		t.Fatalf("签名=%s，期望 %s", req.sign, want)
-	}
-	pub := recorded()
-	if len(pub) != 1 || pub[0].OrderNo != "O1" {
-		t.Fatalf("回执广播=%+v", pub)
-	}
-}
-
-// TestWithdrawRequiresAddressOnWire 提现单把收款地址带进报文与签名域。
-func TestWithdrawRequiresAddressOnWire(t *testing.T) {
-	f, url := newFakeSupplier(t)
-	f.response["/api/withdraw"] = `{"code":"0","data":{"order_no":"O2","status":"pending"}}`
-	startWith(t, payCfg(url, allEndpoints()))
-	recorded()
-
-	res, err := UsdtWithdraw(nil, &pay.PayOrder{OrderNo: "O2", Amount: 500, Address: tronFFAcct})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if res.Status != pay.StatusPending || res.IsFinal() {
-		t.Fatalf("处理中不应是终态: %+v", res)
-	}
-	req := f.seen()[0]
-	if !strings.Contains(req.body, `"address":"`+tronFFAcct+`"`) {
-		t.Fatalf("提现报文缺地址: %s", req.body)
-	}
-	// 收款地址与网络标识都必须在签名域里：报文改一个字节而签名跟着不变，
-	// 就等于谁都能把钱转到别的地址上。
-	wantSign := pay.SignMD5(testSecret,
-		"app1", merchantID, "O2", "500", pay.CurrencyUSDT, testNetwork, tronFFAcct, "", "", "",
-		testContract)
-	if req.sign != wantSign {
-		t.Fatalf("签名=%s，期望 %s", req.sign, wantSign)
-	}
-	if got := recorded(); len(got) != 1 || got[0].Status != pay.StatusPending {
-		t.Fatalf("未广播处理中回执: %+v", got)
-	}
-}
-
-// TestUnregisteredEndpointSendsNothing 端点没登记的操作必须就地拒绝：
-// 发出去只会拿到一个含义不明的 404，还留下「请求可能已被受理」的疑点。
-func TestUnregisteredEndpointSendsNothing(t *testing.T) {
-	f, url := newFakeSupplier(t)
-	startWith(t, payCfg(url, map[string]string{pay.EndpointQuery: "/api/query"}))
-
-	if _, err := UsdtRecharge(nil, &pay.PayOrder{OrderNo: "O1", Amount: 1}); err == nil {
-		t.Fatal("未登记端点应当报错")
-	} else if !strings.Contains(err.Error(), "endpoints."+pay.EndpointRecharge) {
-		t.Fatalf("错误未指明缺哪个端点: %v", err)
-	}
-	if n := len(f.seen()); n != 0 {
-		t.Fatalf("配置不全却发出了 %d 次请求", n)
-	}
-}
-
-// TestBusinessFailureIsNotRetried 包络业务失败码只发一次请求，且错误文案不含凭证。
-func TestBusinessFailureIsNotRetried(t *testing.T) {
-	f, url := newFakeSupplier(t)
-	f.response["/api/recharge"] = `{"code":"250008","msg":"余额不足"}`
-	startWith(t, payCfg(url, allEndpoints()))
-	recorded()
-
-	_, err := UsdtRecharge(nil, &pay.PayOrder{OrderNo: "O1", Amount: 1000})
-	if err == nil {
-		t.Fatal("业务失败应当报错")
-	}
-	var pe *pay.ProviderError
-	if !errors.As(err, &pe) || pe.Code != "250008" {
-		t.Fatalf("错误类型不符: %v", err)
-	}
-	if n := len(f.seen()); n != 1 {
-		t.Fatalf("业务失败重发了 %d 次", n)
-	}
-	if strings.Contains(err.Error(), testSecret) {
-		t.Fatalf("错误文案泄漏密钥: %v", err)
-	}
-	if got := recorded(); len(got) != 0 {
-		t.Fatalf("失败不该广播回执: %+v", got)
-	}
-}
-
-// TestWhitelistedBizCodeRetryIsTransparent 白名单内的供应商业务码由共用层原单重发，门面只报告最终结果。
-//
-// 新契约（L3）：Withdraw 严格路径仅 RetryableCodes 白名单内的码可重试，5xx 不再默认 Retryable。
-// 本用例用【虚构业务码 59901】验证白名单机制：登记后该码触发同一张单透明重发。
-// 警示：严禁拿 502/504 这类网关状态码做演示——502=受理状态未知（请求可能已被供应商受理、
-// 只是回执没穿回来），把它登记进提现白名单再原单重发就是双付；详见 pay.SetRetryableCodes 文档。
-func TestWhitelistedBizCodeRetryIsTransparent(t *testing.T) {
-	// 虚构业务码走带锁入口临时登记，用后即撤，不裸写 map；不用真实网关码（502/504）以免背书双付风险配置。
-	const fakeBizCode = "59901"
-	pay.SetRetryableCodes(fakeBizCode)
-	defer pay.DeleteRetryableCode(fakeBizCode)
-
-	f, url := newFakeSupplier(t)
-	// 供应商以 2xx 包络回一个「明确拒绝、未受理」的业务码——这类码原单重发不会双花，
-	// 正是白名单的合法用途（区别于受理状态未知的 502/504 网关码）。
-	f.response["/api/withdraw"] = `{"code":"59901","msg":"供应商明确拒绝，未受理"}`
-	cfg := payCfg(url, allEndpoints())
-	cfg.PaySDks[testSection].MaxRetries = 1
-	startWith(t, cfg)
-
-	_, err := UsdtWithdraw(nil, &pay.PayOrder{OrderNo: "O1", Amount: 100, Address: tronRangeAcct})
-	if err == nil {
-		t.Fatal("白名单内业务码持续被拒应当报错")
-	}
-	seen := f.seen()
-	if len(seen) != 2 {
-		t.Fatalf("请求次数=%d，期望 2（首次 + 1 次重试）", len(seen))
-	}
-	if seen[0].body != seen[1].body {
-		t.Fatalf("重试换了报文，幂等键失效:\n%s\n%s", seen[0].body, seen[1].body)
-	}
-}
-
-// TestUnrecognizedStatusBecomesUnknown 认不出的状态词归一成 UNKNOWN 并照常广播给对账，
-// 而不是被判成失败后诱发上游重发同一张出款单。
-func TestUnrecognizedStatusBecomesUnknown(t *testing.T) {
-	_, url := newFakeSupplier(t)
-	startWith(t, payCfg(url, allEndpoints()))
-	recorded()
-	res, err := UsdtRecharge(nil, &pay.PayOrder{OrderNo: "O1", Amount: 1000})
-	if err != nil {
-		t.Fatalf("供应商已受理就不该报错: %v", err)
-	}
-	if res.Status != pay.StatusUnknown || res.IsFinal() {
-		t.Fatalf("空回执归一成 %+v，期望 unknown 且非终态", res)
-	}
-	if got := recorded(); len(got) != 1 || got[0].Status != pay.StatusUnknown {
-		t.Fatalf("未广播未知态回执: %+v", got)
-	}
-}
-
-// TestSdkSectionKeyHookInjectsSecret 配置文件里不留密钥：下游按 SDK 段名注册钩子，
-// 装配时注入凭证。与 telegram 包的 BotKey 钩子同源，差别在于键名跟着 SDK 段走。
-func TestSdkSectionKeyHookInjectsSecret(t *testing.T) {
-	f, url := newFakeSupplier(t)
-	cfg := payCfg(url, allEndpoints())
-	cfg.PaySDks[testSection].SecretKey = ""
-	id := util.DefaultCallFunc.Register(util.CallPaySDKMsg+testSection, func(sk *string) { *sk = testSecret })
-	defer util.DefaultCallFunc.Unregister(util.CallPaySDKMsg+testSection, id)
-
-	startWith(t, cfg)
-	if _, err := UsdtQuery(nil, "O1"); err != nil {
-		t.Fatalf("钩子注入密钥后应当可用: %v", err)
-	}
-	reqs := f.seen()
-	if len(reqs) != 1 {
-		t.Fatalf("请求次数=%d，期望 1", len(reqs))
-	}
-	if reqs[0].sign == "" {
-		t.Fatal("请求未带上钩子注入密钥算出的签名")
-	}
-}
-
-// TestAccountQueryReadsMerchantSnapshot 商户账户查询把供应商侧的余额、可用额、
-// 授信与费率读成整数快照，并带上商户号与本通道的合约；这是读操作，不广播回执。
-func TestAccountQueryReadsMerchantSnapshot(t *testing.T) {
-	f, url := newFakeSupplier(t)
-	f.response["/api/account"] = `{"code":"0","data":{"balance":10,"available":7,"frozen":3,"credit":1,"fee_rate_bps":30,"status":"active"}}`
-	startWith(t, payCfg(url, allEndpoints()))
-	recorded()
-
-	info, err := UsdtAccount(nil, nil)
+	res, err := UsdtAccount(nil, nil)
 	if err != nil {
 		t.Fatalf("账户查询失败: %v", err)
 	}
-	if info.Status != pay.AcctActive || info.Balance != 10 || info.Available != 7 ||
-		info.Frozen != 3 || info.Credit != 1 || info.FeeRateBps != 30 {
-		t.Fatalf("账户快照不符: %+v", info)
-	}
-	if info.Currency != pay.CurrencyUSDT {
-		t.Fatalf("币种缺省未补: %+v", info)
-	}
-	if !info.CanWithdraw(7) || info.CanWithdraw(8) {
-		t.Fatalf("可用额判断不符: %+v", info)
+	if res.Currency != pay.CurrencyUSDT {
+		t.Fatalf("币种缺省未按 USDT 口径补: %+v", res)
 	}
 	reqs := f.seen()
-	if len(reqs) != 1 {
-		t.Fatalf("账户查询发出 %d 次请求，期望 1", len(reqs))
+	if len(reqs) != 1 || reqs[0].path != "/api/account" {
+		t.Fatalf("账户查询请求不符: %+v", reqs)
 	}
-	if !strings.Contains(reqs[0].body, `"`+"merchant_id"+`":"`+merchantID) ||
-		!strings.Contains(reqs[0].body, `"`+"contract"+`":"`+testContract) {
-		t.Fatalf("账户报文缺路由字段: %s", reqs[0].body)
+	req := reqs[0]
+	if !strings.Contains(req.body, `"currency":"`+pay.CurrencyUSDT+`"`) ||
+		!strings.Contains(req.body, `"contract":"`+testContract+`"`) {
+		t.Fatalf("报文未按 USDT 通道装配: %s", req.body)
 	}
-	if strings.Contains(reqs[0].body, testSecret) {
-		t.Fatal("密钥进了报文")
+	want := pay.SignMD5(testSecret,
+		"app1", merchantID, pay.CurrencyUSDT,
+		testContract)
+	if req.sign != want {
+		t.Fatalf("签名=%s，期望 %s（签名域少一位合约就是把通道接到了另一条 route 上）", req.sign, want)
 	}
-	if got := recorded(); len(got) != 0 {
-		t.Fatalf("账户查询不该广播资金回执: %+v", got)
+	// 账户查询是读操作，不广播回执。
+	if pub := recorded(); len(pub) != 0 {
+		t.Fatalf("账户查询广播了回执: %+v", pub)
 	}
 }
 
-// TestAccountQueryFailureNotReportedAsZero 供应商拒了就只能报错：
-// 返回一个全零账户会被下游读成「余额不足」，把查询故障伪装成业务拒绝。
-func TestAccountQueryFailureNotReportedAsZero(t *testing.T) {
-	f, url := newFakeSupplier(t)
-	f.response["/api/account"] = `{"code":"401002","msg":"签名失败"}`
+// TestShimKeepsRoutesIndependent 启动 USDT 不该让 TRX 门面变成「能出钱」：
+// 两条链路各有各的状态，共用一份快照时换配置会出现用 TRX 网关发 USDT 的单。
+//
+// TRX 侧现在恒返回未接入哨兵（供应商提现实现已删，链上原生币出款没有实现），
+// 所以这里的判据从「文案是 TRON 通道未启动」换成「错误就是那个哨兵」：
+// 保住的是同一条不变量——USDT 起了，TRX 也不会跟着动起来。
+func TestShimKeepsRoutesIndependent(t *testing.T) {
+	_, url := newFakeSupplier(t)
 	startWith(t, payCfg(url, allEndpoints()))
-	if _, err := UsdtAccount(nil, &pay.AccountQuery{Currency: pay.CurrencyUSDT}); err == nil {
-		t.Fatal("业务失败应当报错")
+	recorded()
+
+	if _, err := tron.TronWithdraw(nil, &pay.PayOrder{OrderNo: "O1", Amount: 1}); !errors.Is(err, tron.ErrPayoutNotWired) {
+		t.Fatalf("USDT 启动后 TRX 门面却可用了: %v", err)
 	}
-	if n := len(f.seen()); n != 1 {
-		t.Fatalf("请求次数=%d，期望 1（业务失败不重试）", n)
+	if _, err := UsdtQuery(nil, "O1"); err != nil {
+		t.Fatalf("USDT 门面应当可用: %v", err)
 	}
+}
+
+// TestShimErrorWordingUnchanged 错误文案逐字保持合并前的写法：
+// 下游按文案做失败分类与告警归因，改一个字就是下游的归类漂移。
+func TestShimErrorWordingUnchanged(t *testing.T) {
+	UsdtStop(nil)
+	recorded()
+	_, err := UsdtWithdraw(nil, &pay.PayOrder{OrderNo: "O1", Amount: 1, Address: "a"})
+	if err == nil || err.Error() != "USDT 通道未启动（检查 usdt.provider 是否引用了已开启的 pay_sdks 段与商户账户）" {
+		t.Fatalf("未启动文案变了: %v", err)
+	}
+	if _, err := UsdtQuery(nil, "  "); err == nil || err.Error() != "USDT Query 失败: 订单号（幂等键）为空" {
+		t.Fatalf("空订单号文案变了: %v", err)
+	}
+
+	f, url := newFakeSupplier(t)
+	f.response["/api/account"] = `{"code":"250008","msg":"余额不足"}`
+	startWith(t, payCfg(url, allEndpoints()))
+	if _, err := UsdtAccount(nil, nil); err == nil ||
+		!strings.HasPrefix(err.Error(), "USDT 账户查询失败: ") {
+		t.Fatalf("失败前缀不是 USDT 口径: %v", err)
+	}
+	// 失败语义（错误码原样、只发一次、不广播）由 tron 包的 TestUsdtBusinessFailureIsNotRetried 钉。
 }

@@ -15,6 +15,7 @@ import (
 	// 只为把通道包的 init 链进来：不导入则注册表是空的，
 	// 下面的地址断言会全部走「未登记即放行」那条路，测不出任何东西。
 	// bsc/sol 不直接或间接被 config 引到，必须显式点名；tron 经 usdt 的薄包装间接链入。
+	// 这三个包的提现实现已删，但地址校验与链规则登记仍然活着（见各包 address.go）。
 	_ "touchgocore/bsc"
 	_ "touchgocore/sol"
 	_ "touchgocore/telegram"
@@ -32,8 +33,9 @@ func loadExample(t *testing.T) *config.Cfg {
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		t.Fatalf("example.json 反序列化失败: %v", err)
 	}
-	if cfg.Usdt == nil || cfg.Telegram == nil || cfg.Tron == nil || cfg.Bsc == nil || cfg.Sol == nil {
-		t.Fatalf("示例缺 usdt / telegram / tron / bsc / sol 段: %p %p %p %p %p", cfg.Usdt, cfg.Telegram, cfg.Tron, cfg.Bsc, cfg.Sol)
+	// telegram 段仍在示例里（Bot 配置），只是它的 TON 资金引用已随提现链路删除。
+	if cfg.Usdt == nil || cfg.Telegram == nil {
+		t.Fatalf("示例缺 usdt / telegram 段: %p %p", cfg.Usdt, cfg.Telegram)
 	}
 	return &cfg
 }
@@ -52,16 +54,11 @@ func TestChainRulesLinked(t *testing.T) {
 // 地址是给人抄的，长度和版本字节都对、校验和却不过的字符串最容易蒙过肉眼。
 func TestExampleChainAddressesAreReal(t *testing.T) {
 	cfg := loadExample(t)
-	contract, jetton := cfg.Usdt.Contract, cfg.Telegram.Jetton
-	t.Logf("usdt.network=%s contract=%q | telegram.ton_network=%s jetton=%q",
-		cfg.Usdt.Network, contract, cfg.Telegram.TonNetwork, jetton)
+	contract := cfg.Usdt.Contract
+	t.Logf("usdt.network=%s contract=%q", cfg.Usdt.Network, contract)
 
 	nets := map[string]string{
-		"usdt.network":         cfg.Usdt.Network,
-		"telegram.ton_network": cfg.Telegram.TonNetwork,
-		"tron.network":         cfg.Tron.Network,
-		"bsc.network":          cfg.Bsc.Network,
-		"sol.network":          cfg.Sol.Network,
+		"usdt.network": cfg.Usdt.Network,
 	}
 	for name, v := range nets {
 		switch v {
@@ -71,13 +68,11 @@ func TestExampleChainAddressesAreReal(t *testing.T) {
 		}
 	}
 
-	// jetton 留空代表原生 TON，是示例有意演示的形态；填了就必须是真地址。
 	addrs := []struct {
 		name, currency, addr, network string
 		optional                      bool
 	}{
 		{"usdt.contract", pay.CurrencyUSDT, contract, cfg.Usdt.Network, false},
-		{"telegram.jetton", pay.CurrencyTON, jetton, cfg.Telegram.TonNetwork, true},
 	}
 	for _, a := range addrs {
 		rule, ok := pay.ChainRuleFor(a.currency)

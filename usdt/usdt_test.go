@@ -9,6 +9,7 @@ import (
 	"touchgocore/config"
 	"touchgocore/corectx"
 	"touchgocore/pay"
+	"touchgocore/tron"
 	"touchgocore/util"
 )
 
@@ -24,6 +25,9 @@ const (
 	// 编一个「看着像」的字符串会让本包的启动校验与全部出款用例都失去意义。
 	testContract = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
 	testNetwork  = pay.NetworkMainnet
+	// testPrivKey / testWallet 是一对测试私钥与它的派生地址（用 gotron-sdk 现算，非抄自网络）。
+	testPrivKey = "1111111111111111111111111111111111111111111111111111111111111111"
+	testWallet  = "TCLBgkbfVkJroVBJVqBEsxtPNQEQMTQCLQ"
 )
 
 // recorder 收集 publish 广播出去的回执。
@@ -35,7 +39,7 @@ var recorder = struct {
 func init() {
 	// 资金门面按 CallUsdtMsg+Kind 广播回执，测试在此收口，
 	// 下游业务的落库回调就是同一个形态。
-	for _, kind := range []string{"Recharge", "Withdraw", "Query"} {
+	for _, kind := range []string{"Withdraw", "Query"} {
 		util.DefaultCallFunc.Register(util.CallUsdtMsg+kind, func(res *pay.PayResult) {
 			recorder.mu.Lock()
 			recorder.calls = append(recorder.calls, res)
@@ -55,15 +59,22 @@ func recorded() []*pay.PayResult {
 // payCfg 组一份「pay_sdks 登记一段 + usdt 段引用它」的完整配置。
 //
 // 通道段只留 sdk/account 两个名字，其余全在 SDK 段里：这正是本仓的装配形态，
-// 测试若绕过 paysdk 直接喂 ProviderOptions，就测不到「引用指不通」这一整类错误。
+// 测试若绕过 pay 装配直接喂 ProviderOptions，就测不到「引用指不通」这一整类错误。
 func payCfg(baseURL string, endpoints map[string]string) *config.Cfg {
 	return &config.Cfg{
 		PaySDks: map[string]*config.PaySDKConfig{
 			testSection: {
-				Enable: "on", Driver: pay.DriverGeneric, BaseURL: baseURL,
+				Enable: "on", Driver: tron.DriverTronGrid, BaseURL: baseURL,
 				AppID: "app1", SecretKey: testSecret, Endpoints: endpoints,
 				Accounts: map[string]*config.PayMerchantAccount{
 					testAccount: {Enable: "on", MerchantID: merchantID},
+				},
+				// USDT 出款恒定直接上链，所以夹具必须带 chain 子段：
+				// 缺它时装配会当场拒绝（那正是「配置写着上链、实际发给别人」的拦点）。
+				// 私钥与地址是一对可公开的测试私钥派生结果，用 gotron-sdk 现算得到。
+				Chain: &config.PayChainConfig{
+					Node: "127.0.0.1:50051", TLS: "off",
+					WalletAddress: testWallet, PrivateKey: testPrivKey,
 				},
 			},
 		},
@@ -87,83 +98,15 @@ func startWith(t *testing.T, cfg *config.Cfg) {
 	})
 }
 
-// TestNewClientFailClosed 引用指不通的链路一律不启动：SDK 段没开、商户账户没点名、
-// 驱动标记写错，都只会在供应商侧留下验签失败，本地却看起来一切正常。
-func TestNewClientFailClosed(t *testing.T) {
-	full := func() *config.Cfg { return payCfg("https://pay.invalid", nil) }
-	cases := []struct {
-		name   string
-		mutate func(*config.Cfg)
-	}{
-		{"没有 usdt 段", func(c *config.Cfg) { c.Usdt = nil }},
-		{"通道段没引用 SDK", func(c *config.Cfg) { c.Usdt.Provider = nil }},
-		{"引用的段不存在", func(c *config.Cfg) { c.Usdt.Provider.SDK = "ghost" }},
-		{"SDK 段没开", func(c *config.Cfg) { c.PaySDks[testSection].Enable = "off" }},
-		{"缺驱动标记", func(c *config.Cfg) { c.PaySDks[testSection].Driver = "" }},
-		{"驱动名没登记", func(c *config.Cfg) { c.PaySDks[testSection].Driver = "no_such_driver" }},
-		{"多账户没点名", func(c *config.Cfg) {
-			c.PaySDks[testSection].Accounts["reserve"] = &config.PayMerchantAccount{Enable: "on", MerchantID: "M2"}
-			c.Usdt.Provider.Account = ""
-		}},
-		{"商户账户停用", func(c *config.Cfg) { c.PaySDks[testSection].Accounts[testAccount].Enable = "off" }},
-		{"缺基址", func(c *config.Cfg) { c.PaySDks[testSection].BaseURL = "" }},
-		{"缺密钥", func(c *config.Cfg) { c.PaySDks[testSection].SecretKey = "" }},
-	}
-	for _, cs := range cases {
-		cfg := full()
-		cs.mutate(cfg)
-		if c, ok := newClient(cfg); ok || c != nil {
-			t.Errorf("%s 不应启动，实得 ok=%v", cs.name, ok)
-		}
-	}
-	// 端点表为空但引用齐备：装配成功，但任何操作都应在发请求之前被拒。
-	if _, ok := newClient(full()); !ok {
-		t.Error("引用齐备时应当启动")
-	}
-	// 只有一个账户时允许不点名；多个账户时点名即可启用备用商户号。
-	cfg := full()
-	cfg.Usdt.Provider.Account = ""
-	if _, ok := newClient(cfg); !ok {
-		t.Error("唯一账户时 account 留空应当可启动")
-	}
-	cfg = full()
-	cfg.PaySDks[testSection].Accounts["reserve"] = &config.PayMerchantAccount{Enable: "on", MerchantID: "MCH-RESERVE"}
-	cfg.Usdt.Provider.Account = "reserve"
-	c, ok := newClient(cfg)
-	if !ok {
-		t.Fatal("点名备用账户后应当可启动")
-	}
-	_ = c
-}
-
-// TestOrderDefaultsFromChainConfig 网络标识与币种缺省由链路配置补齐，
-// 调用方显式给的值不得被覆盖，交进来的订单对象也不得被就地改动。
-func TestOrderDefaultsFromChainConfig(t *testing.T) {
-	c, ok := newClient(payCfg("https://pay.invalid", nil))
-	if !ok {
-		t.Fatal("装配失败")
-	}
-	o := &pay.PayOrder{OrderNo: "O1", Amount: 1000000, Address: "TAddr1"}
-	got := c.order(o)
-	if got.Currency != pay.CurrencyUSDT || got.Network != testNetwork {
-		t.Fatalf("缺省补齐不符: %+v", got)
-	}
-	if o.Currency != "" || o.Network != "" {
-		t.Fatalf("就地改了调用方的订单: %+v", o)
-	}
-	other := c.order(&pay.PayOrder{OrderNo: "O2", Amount: 1, Currency: pay.CurrencyTON, Network: "mainnet"})
-	if other.Currency != pay.CurrencyTON || other.Network != "mainnet" {
-		t.Fatalf("显式字段被配置覆盖: %+v", other)
-	}
-}
+// 装配与报文用例（引用解析矩阵、缺省补齐、签名域逐位对齐）跟着实现搬到了
+// tron/usdt_test.go：newClient 与 client.order 已是本包不存在的符号，留在原地
+// 只能靠门面间接断言，间接到测不出「引用指不通」这一整类错误。
+// 这里只留门面级行为：未启动即拒、前置校验先于发请求。
 
 // TestOperationsRefuseWhenNotStarted 未启动时门面函数返回错误而不是 panic。
 func TestOperationsRefuseWhenNotStarted(t *testing.T) {
 	UsdtStop(nil)
 	recorded()
-	if _, err := UsdtRecharge(nil, &pay.PayOrder{OrderNo: "O1", Amount: 1}); err == nil {
-		t.Error("未启动时充值应当被拒")
-	}
 	if _, err := UsdtWithdraw(nil, &pay.PayOrder{OrderNo: "O1", Amount: 1, Address: "a"}); err == nil {
 		t.Error("未启动时提现应当被拒")
 	}
@@ -189,10 +132,10 @@ func TestOrderPreChecks(t *testing.T) {
 		!strings.Contains(err.Error(), "地址") {
 		t.Errorf("提现缺地址未被拦下: %v", err)
 	}
-	if _, err := UsdtRecharge(nil, &pay.PayOrder{OrderNo: "O1", Amount: 0}); err == nil {
+	if _, err := UsdtWithdraw(nil, &pay.PayOrder{OrderNo: "O1", Amount: 0, Address: "a"}); err == nil {
 		t.Error("零金额未被拦下")
 	}
-	if _, err := UsdtRecharge(nil, &pay.PayOrder{Amount: 1}); err == nil {
+	if _, err := UsdtWithdraw(nil, &pay.PayOrder{Amount: 1, Address: "a"}); err == nil {
 		t.Error("空幂等键未被拦下")
 	}
 	if _, err := UsdtQuery(nil, "   "); err == nil {

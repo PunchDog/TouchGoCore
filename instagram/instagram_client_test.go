@@ -81,20 +81,19 @@ func allEndpoints() map[string]string {
 	return map[string]string{
 		pay.EndpointSendCode: "/api/code",
 		pay.EndpointLogin:    "/api/login",
-		pay.EndpointAccount:  "/api/account",
-		pay.EndpointRecharge: "/api/recharge",
-		pay.EndpointWithdraw: "/api/withdraw",
-		pay.EndpointQuery:    "/api/query",
 	}
 }
 
-// TestLoginThenRechargeCarriesToken 登录后会话凭证只经请求头传给后续请求，
-// 不出现在报文里；签名域按登记顺序覆盖下单字段。
-func TestLoginThenRechargeCarriesToken(t *testing.T) {
+// TestLoginCarriesTokenOnLoginChain 登录后会话凭证只经请求头传给后续请求，不出现在报文里。
+//
+// 原用例名带 Recharge，测的是「登录后用同一登录态发充值」：充值侧随资金链路删除，
+// 已无被测对象。这里保留它的登录态部分——后续请求改走还活着的登录链路（关联账号列表），
+// 并补一条「资金门面零请求」的钉，防止有人把会话转手给资金通道。
+func TestLoginCarriesTokenOnLoginChain(t *testing.T) {
 	f, url := newFakeSupplier(t)
 	f.response["/api/login"] = `{"code":"0","data":{"token":"TK-1","user_id":"U9","phone":"86138"}}`
-	f.response["/api/recharge"] = `{"code":"0","data":{"order_no":"O1","trade_no":"T1","status":"success","amount":1000}}`
-	startWith(t, payCfg(url, allEndpoints()))
+	f.response["/api/friends"] = `{"code":"0","data":{"list":[{"user_id":"U1"}]}}`
+	startWith(t, payCfg(url, friendEndpoints()))
 	recorded()
 
 	got, err := InstagramLogin(nil, "86138", "123456")
@@ -110,72 +109,35 @@ func TestLoginThenRechargeCarriesToken(t *testing.T) {
 		t.Fatalf("登录请求不符: %+v", first)
 	}
 	if !strings.Contains(first[0].body, "123456") {
-		t.Fatalf("登录报文缺验证码: %s", first[0].body)
+		t.Fatalf("登录报文缺一次性凭证: %s", first[0].body)
 	}
 
-	res, err := InstagramRecharge(nil, &pay.PayOrder{OrderNo: "O1", Amount: 1000, Currency: pay.CurrencyUSDT})
+	list, err := InstagramFriends(nil, "U9")
 	if err != nil {
-		t.Fatalf("充值失败: %v", err)
+		t.Fatalf("关联账号查询失败: %v", err)
 	}
-	if res.Status != pay.StatusSuccess || res.TradeNo != "T1" || res.Amount != 1000 {
-		t.Fatalf("充值回执=%+v", res)
+	if len(list) != 1 || list[0].UserID != "U1" {
+		t.Fatalf("关联账号列表=%+v", list)
 	}
 	req := f.seen()[1]
 	if req.auth != "TK-1" {
 		t.Fatalf("后续请求未带会话凭证: %q", req.auth)
 	}
-	wantSign := pay.SignMD5(testSecret, "app1", merchantID, "O1", "1000", pay.CurrencyUSDT, "", "")
-	if req.sign != wantSign {
-		t.Fatalf("签名=%s，期望 %s", req.sign, wantSign)
-	}
-	if !strings.Contains(req.body, `"order_no":"O1"`) || !strings.Contains(req.body, `"amount":1000`) {
-		t.Fatalf("充值报文不符: %s", req.body)
+	// 签名覆盖 AppID+Account 两个登记字段，会话凭证只走请求头。
+	if want := pay.SignMD5(testSecret, "app1", "U9"); req.sign != want {
+		t.Fatalf("签名=%s，期望 %s", req.sign, want)
 	}
 	if strings.Contains(req.body, "TK-1") || strings.Contains(req.body, testSecret) {
 		t.Fatalf("凭证进了报文: %s", req.body)
 	}
-	pub := recorded()
-	if len(pub) != 1 || pub[0].OrderNo != "O1" {
-		t.Fatalf("回执广播=%+v", pub)
+	if _, err := InstagramWithdraw(nil, &pay.PayOrder{OrderNo: "O1", Amount: 1000, Currency: pay.CurrencyUSDT, Address: "a"}); !errors.Is(err, ErrPayoutNotWired) {
+		t.Fatalf("提现应返回未接入哨兵: %v", err)
 	}
-}
-
-// TestWithdrawCarriesMerchantAndTarget 商户转出：商户号与目标地址必须既进报文又进签名域。
-// 商户号定「钱从谁的账上出」，地址定「钱到哪去」——任一缺失或被篡改都是错账；
-// 回执成功后还要广播给下游对账。
-func TestWithdrawCarriesMerchantAndTarget(t *testing.T) {
-	f, url := newFakeSupplier(t)
-	f.response["/api/withdraw"] = `{"code":"0","data":{"order_no":"O2","trade_no":"T2","status":"success","amount":500}}`
-	startWith(t, payCfg(url, allEndpoints()))
-	recorded()
-
-	res, err := InstagramWithdraw(nil, &pay.PayOrder{OrderNo: "O2", Amount: 500, Currency: pay.CurrencyUSDT, Address: "TTargetAddr"})
-	if err != nil {
-		t.Fatalf("提现失败: %v", err)
+	if n := len(f.seen()); n != 2 {
+		t.Fatalf("资金门面却发出了请求，实得 %d 次", n)
 	}
-	if res.Status != pay.StatusSuccess || res.TradeNo != "T2" || res.Amount != 500 {
-		t.Fatalf("提现回执=%+v", res)
-	}
-	req := f.seen()[0]
-	if req.path != "/api/withdraw" {
-		t.Fatalf("请求路径=%s", req.path)
-	}
-	for _, want := range []string{`"merchant_id":"` + merchantID + `"`, `"address":"TTargetAddr"`, `"amount":500`} {
-		if !strings.Contains(req.body, want) {
-			t.Fatalf("提现报文缺 %s: %s", want, req.body)
-		}
-	}
-	if strings.Contains(req.body, testSecret) {
-		t.Fatalf("凭证进了报文: %s", req.body)
-	}
-	// 签名域十个定长位：地址在第七位，网络未填以空串占位。
-	wantSign := pay.SignMD5(testSecret, "app1", merchantID, "O2", "500", pay.CurrencyUSDT, "", "TTargetAddr")
-	if req.sign != wantSign {
-		t.Fatalf("签名=%s，期望 %s", req.sign, wantSign)
-	}
-	pub := recorded()
-	if len(pub) != 1 || pub[0].OrderNo != "O2" || pub[0].Status != pay.StatusSuccess {
-		t.Fatalf("回执广播=%+v", pub)
+	if got := recorded(); len(got) != 0 {
+		t.Fatalf("登录侧读操作不该广播回执: %+v", got)
 	}
 }
 
@@ -199,17 +161,21 @@ func TestSendCodeUsesConfiguredTemplate(t *testing.T) {
 	}
 }
 
-// TestLogoutClearsToken 退出后请求头不再带旧会话，避免拿已失效凭证继续出款。
+// TestLogoutClearsToken 退出后请求头不再带旧会话，避免拿已失效凭证继续发请求。
+//
+// 原用例的载体是资金查单，载体随链路删除；这里换成还活着的登录链路请求，
+// 被测对象仍是 InstagramLogout 把两边会话一起清掉这条口径。
 func TestLogoutClearsToken(t *testing.T) {
 	f, url := newFakeSupplier(t)
 	f.response["/api/login"] = `{"code":"0","data":{"token":"TK-1","user_id":"U9"}}`
-	startWith(t, payCfg(url, allEndpoints()))
+	f.response["/api/friends"] = `{"code":"0","data":{"list":[{"user_id":"U1"}]}}`
+	startWith(t, payCfg(url, friendEndpoints()))
 
 	if _, err := InstagramLogin(nil, "86138", "123456"); err != nil {
 		t.Fatal(err)
 	}
 	InstagramLogout()
-	if _, err := InstagramQuery(nil, "O1"); err != nil {
+	if _, err := InstagramFriends(nil, "U9"); err != nil {
 		t.Fatalf("查询失败: %v", err)
 	}
 	if req := f.seen()[1]; req.auth != "" {
@@ -217,13 +183,16 @@ func TestLogoutClearsToken(t *testing.T) {
 	}
 }
 
-// TestSessionNotSharedAcrossHosts 登录链路与资金链路指向不同供应商时，
-// 会话凭证不得跟着请求头送到另一家：那等于把用户的登录态交给第三方。
+// TestSessionNotSharedAcrossHosts 登录链路与资金段指向不同供应商时，会话凭证不得出现在
+// 另一家的任何请求上：那等于把用户的登录态交给第三方。
+//
+// 原用例钉的是 syncSession 的「基址不同就不带 token」规则，该实现随资金链路一起删除，
+// 连「两条链路各持一份会话」这件事都不再存在。同一条安全不变量现在钉的是可观察面：
+// 资金段那家供应商收到 0 次请求，且登录请求的 token 只出现在登录那家身上。
 func TestSessionNotSharedAcrossHosts(t *testing.T) {
 	loginF, loginURL := newFakeSupplier(t)
 	loginF.response["/api/login"] = `{"code":"0","data":{"token":"TK-1","user_id":"U9"}}`
 	fundF, fundURL := newFakeSupplier(t)
-	fundF.response["/api/recharge"] = `{"code":"0","data":{"order_no":"O1","status":"success","amount":1000}}`
 
 	cfg := payCfg(fundURL, allEndpoints())
 	// 登录链路换成另一家：独立 SDK 段、独立基址，只做下发所以没有商户账户。
@@ -234,119 +203,23 @@ func TestSessionNotSharedAcrossHosts(t *testing.T) {
 	}
 	cfg.Instagram.Login = &config.PaySDKRef{SDK: loginSection}
 	startWith(t, cfg)
-
 	if _, err := InstagramLogin(nil, "86138", "123456"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := InstagramRecharge(nil, &pay.PayOrder{OrderNo: "O1", Amount: 1000}); err != nil {
-		t.Fatal(err)
+	if _, err := InstagramWithdraw(nil, &pay.PayOrder{OrderNo: "O1", Amount: 1000, Address: "a"}); !errors.Is(err, ErrPayoutNotWired) {
+		t.Fatalf("提现应返回未接入哨兵: %v", err)
 	}
-	if req := fundF.seen()[0]; req.auth != "" {
-		t.Fatalf("会话凭证被送到另一家供应商: %q", req.auth)
+	if n := len(fundF.seen()); n != 0 {
+		t.Fatalf("会话凭证被送到另一家供应商（%d 次请求）", n)
 	}
-}
-
-// TestUnregisteredEndpointSendsNothing 端点没登记的操作必须就地拒绝：
-// 发出去只会拿到一个含义不明的 404，还留下「请求可能已被受理」的疑点。
-func TestUnregisteredEndpointSendsNothing(t *testing.T) {
-	f, url := newFakeSupplier(t)
-	cfg := payCfg(url, map[string]string{pay.EndpointLogin: "/api/login"})
-	startWith(t, cfg)
-
-	if _, err := InstagramRecharge(nil, &pay.PayOrder{OrderNo: "O1", Amount: 1}); err == nil {
-		t.Fatal("未登记端点应当报错")
-	} else if !strings.Contains(err.Error(), "endpoints."+pay.EndpointRecharge) {
-		t.Fatalf("错误未指明缺哪个端点: %v", err)
-	}
-	if n := len(f.seen()); n != 0 {
-		t.Fatalf("配置不全却发出了 %d 次请求", n)
-	}
-}
-
-// TestBusinessFailureIsNotRetried 包络业务失败码只发一次请求，且错误文案不含凭证。
-func TestBusinessFailureIsNotRetried(t *testing.T) {
-	f, url := newFakeSupplier(t)
-	f.response["/api/recharge"] = `{"code":"250008","msg":"余额不足"}`
-	startWith(t, payCfg(url, allEndpoints()))
-	recorded()
-
-	_, err := InstagramRecharge(nil, &pay.PayOrder{OrderNo: "O1", Amount: 1000, Currency: pay.CurrencyUSDT})
-	if err == nil {
-		t.Fatal("业务失败应当报错")
-	}
-	var pe *pay.ProviderError
-	if !errors.As(err, &pe) || pe.Code != "250008" {
-		t.Fatalf("错误类型不符: %v", err)
-	}
-	if n := len(f.seen()); n != 1 {
-		t.Fatalf("业务失败重发了 %d 次", n)
-	}
-	if strings.Contains(err.Error(), testSecret) {
-		t.Fatalf("错误文案泄漏密钥: %v", err)
-	}
-	if got := recorded(); len(got) != 0 {
-		t.Fatalf("失败不该广播回执: %+v", got)
-	}
-}
-
-// TestWhitelistedBizCodeRetryIsTransparent 白名单内的供应商业务码由共用层原单重发，门面只报告最终结果。
-//
-// 新契约（L3）：Withdraw 严格路径仅 RetryableCodes 白名单内的码可重试，5xx 不再默认 Retryable。
-// 本用例用【虚构业务码 59901】验证白名单机制：登记后该码触发同一张单透明重发。
-// 警示：严禁拿 502/504 这类网关状态码做演示——502=受理状态未知（请求可能已被供应商受理、
-// 只是回执没穿回来），把它登记进提现白名单再原单重发就是双付；详见 pay.SetRetryableCodes 文档。
-func TestWhitelistedBizCodeRetryIsTransparent(t *testing.T) {
-	// 虚构业务码走带锁入口临时登记，用后即撤，不裸写 map；不用真实网关码（502/504）以免背书双付风险配置。
-	const fakeBizCode = "59901"
-	pay.SetRetryableCodes(fakeBizCode)
-	defer pay.DeleteRetryableCode(fakeBizCode)
-
-	f, url := newFakeSupplier(t)
-	// 供应商以 2xx 包络回一个「明确拒绝、未受理」的业务码——这类码原单重发不会双花，
-	// 正是白名单的合法用途（区别于受理状态未知的 502/504 网关码）。
-	f.response["/api/withdraw"] = `{"code":"59901","msg":"供应商明确拒绝，未受理"}`
-	cfg := payCfg(url, allEndpoints())
-	cfg.PaySDks[testSection].MaxRetries = 1
-	startWith(t, cfg)
-
-	_, err := InstagramWithdraw(nil, &pay.PayOrder{OrderNo: "O1", Amount: 100, Address: "TAddr1"})
-	if err == nil {
-		t.Fatal("白名单内业务码持续被拒应当报错")
-	}
-	if n := len(f.seen()); n != 2 {
-		t.Fatalf("请求次数=%d，期望 2（首次 + 1 次重试），且两次都是同一张单", n)
-	}
-	seen := f.seen()
-	if seen[0].body != seen[1].body {
-		t.Fatalf("重试换了报文，幂等键失效:\n%s\n%s", seen[0].body, seen[1].body)
-	}
-}
-
-// TestUnrecognizedStatusBecomesUnknown 认不出的状态词归一成 UNKNOWN 并照常广播给对账，
-// 而不是被判成失败后诱发上游重发同一张出款单。
-func TestUnrecognizedStatusBecomesUnknown(t *testing.T) {
-	_, url := newFakeSupplier(t)
-	startWith(t, payCfg(url, allEndpoints()))
-	recorded()
-	res, err := InstagramRecharge(nil, &pay.PayOrder{OrderNo: "O1", Amount: 1000})
-	if err != nil {
-		t.Fatalf("供应商已受理就不该报错: %v", err)
-	}
-	if res.Status != pay.StatusUnknown {
-		t.Fatalf("空回执归一成 %s，期望 unknown", res.Status)
-	}
-	if res.IsFinal() {
-		t.Fatal("UNKNOWN 不得是终态，否则会被记账流程当已结")
-	}
-	pub := recorded()
-	if len(pub) != 1 || pub[0].Status != pay.StatusUnknown || pub[0].OrderNo != "O1" {
-		t.Fatalf("未广播未知态回执: %+v", pub)
+	if reqs := loginF.seen(); len(reqs) != 1 || reqs[0].auth != "" {
+		t.Fatalf("登录链路请求序列不符: %+v", reqs)
 	}
 }
 
 // TestSdkSectionKeyHookInjectsSecret 配置文件里不留密钥：下游按 SDK 段名注册一个钩子，
-// 两条链路装配时各自注入同一份凭证。与 telegram 包的 BotKey 钩子同源，
-// 差别在于键名跟着 SDK 段走——一家供应商的密钥登记一次，而不是每条通道抄一遍。
+// 装配时注入凭证。与 telegram 包的 BotKey 钩子同源，差别在于键名跟着 SDK 段走——
+// 一家供应商的密钥登记一次，而不是每条通道抄一遍。
 func TestSdkSectionKeyHookInjectsSecret(t *testing.T) {
 	f, url := newFakeSupplier(t)
 	f.response["/api/login"] = `{"code":"0","data":{"token":"TK-1","user_id":"U9"}}`
@@ -359,50 +232,21 @@ func TestSdkSectionKeyHookInjectsSecret(t *testing.T) {
 	if _, err := InstagramLogin(nil, "86138", "123456"); err != nil {
 		t.Fatalf("钩子注入密钥后登录应当可用: %v", err)
 	}
-	if _, err := InstagramQuery(nil, "O1"); err != nil {
-		t.Fatalf("钩子注入密钥后查询应当可用: %v", err)
+	if err := InstagramSendCode(nil, "86138"); err != nil {
+		t.Fatalf("钩子注入密钥后发码应当可用: %v", err)
 	}
 	reqs := f.seen()
 	if len(reqs) != 2 {
 		t.Fatalf("请求次数=%d，期望 2", len(reqs))
 	}
+	// 签名值必须出自钩子注入的那份密钥：没注入时装配当场失败，根本走不到发请求。
+	if want := pay.SignMD5(testSecret, "app1", "86138", "123456"); reqs[0].sign != want {
+		t.Fatalf("登录签名=%s，期望 %s", reqs[0].sign, want)
+	}
 	for i, req := range reqs {
 		if req.sign == "" {
 			t.Fatalf("第 %d 个请求未带上钩子注入密钥算出的签名", i+1)
 		}
-	}
-}
-
-// TestAccountQueryReadsMerchantSnapshot 商户账户查询读回供应商侧的额度快照；
-// 这是读操作，不广播回执，也不参与登录会话。
-func TestAccountQueryReadsMerchantSnapshot(t *testing.T) {
-	f, url := newFakeSupplier(t)
-	f.response["/api/account"] = `{"code":"0","data":{"balance":10,"available":7,"frozen":3,"credit":1,"fee_rate_bps":30,"status":"active"}}`
-	startWith(t, payCfg(url, allEndpoints()))
-	recorded()
-
-	info, err := InstagramAccount(nil, nil)
-	if err != nil {
-		t.Fatalf("账户查询失败: %v", err)
-	}
-	if info.Status != pay.AcctActive || info.Available != 7 || info.FeeRateBps != 30 {
-		t.Fatalf("账户快照不符: %+v", info)
-	}
-	if !info.CanWithdraw(7) || info.CanWithdraw(8) {
-		t.Fatalf("可用额判断不符: %+v", info)
-	}
-	reqs := f.seen()
-	if len(reqs) != 1 {
-		t.Fatalf("账户查询发出 %d 次请求，期望 1", len(reqs))
-	}
-	if !strings.Contains(reqs[0].body, `"`+"merchant_id"+`":"`+merchantID) {
-		t.Fatalf("账户报文缺商户号: %s", reqs[0].body)
-	}
-	if strings.Contains(reqs[0].body, testSecret) {
-		t.Fatal("密钥进了报文")
-	}
-	if got := recorded(); len(got) != 0 {
-		t.Fatalf("账户查询不该广播资金回执: %+v", got)
 	}
 }
 
@@ -412,8 +256,8 @@ func TestStartNilCfgDoesNotPanic(t *testing.T) {
 	InstagramStart(corectx.WithCfg(context.Background(), &config.Cfg{}))
 	// 传 nil 回落到包级运行快照：上一条刚把「没有配置」写进快照，这里才测得准「未启动」。
 	InstagramStart(nil)
-	if _, err := InstagramQuery(nil, "O1"); err == nil {
-		t.Fatal("未启动时查询应当被拒")
+	if _, err := InstagramFriends(nil, "86138"); err == nil {
+		t.Fatal("未启动时查关联账号列表应当被拒")
 	}
 	if err := InstagramSendCode(nil, "86138"); err == nil {
 		t.Fatal("未启动时发码应当被拒")

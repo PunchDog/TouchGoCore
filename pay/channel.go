@@ -9,16 +9,17 @@ import (
 	"sync"
 )
 
-// Channel 是一条资金通道对外提供的四件事：查商户账户、充值、提现、查单。
+// Channel 是一条资金通道对外提供的三件事：提现、查单、查商户账户。
 //
 // 有了这个接口，上游就不必先知道「配置里写的是哪家 SDK」再写调用代码；
-// SDK 差异收在实现里，不散落成一层 switch。各通道的门面函数（WhatsappRecharge
+// SDK 差异收在实现里，不散落成一层 switch。各通道的门面函数（UsdtWithdraw
 // 等）保留下来做包级留痕与回执广播，实际出资动作都转给本接口。
+// 充值/收款那一侧接口已在资金面收口中整条删除（2026-10）：全仓只留提现闭环，
+// 要收钱走链上入账监听或供应商侧的独立实现，不经本接口。
 type Channel interface {
 	// Driver 返回驱动标记，MerchantID 返回我方在供应商侧的默认商户号；两者只用于定位。
 	Driver() string
 	MerchantID() string
-	Recharge(ctx context.Context, o *PayOrder) (*PayResult, error)
 	Withdraw(ctx context.Context, o *PayOrder) (*PayResult, error)
 	QueryOrder(ctx context.Context, orderNo string) (*PayResult, error)
 	QueryAccount(ctx context.Context, q *AccountQuery) (*AccountInfo, error)
@@ -65,9 +66,12 @@ func Register(driver string, f Factory) error {
 	return nil
 }
 
-// Open 按驱动名开一条通道。名没登记时把已登记的名单打在错误里，
+// OpenDriver 按驱动名开一条通道。名没登记时把已登记的名单打在错误里，
 // 免得配置写错一个字母就要翻代码找可用的名字。
-func Open(driver string, opt ProviderOptions) (Channel, error) {
+//
+// 按配置装配通道的入口是 Open/OpenService/OpenChain（assemble.go）：那三个读 config，
+// 本函数只认已经解析好的 ProviderOptions，是驱动级的底层入口。
+func OpenDriver(driver string, opt ProviderOptions) (Channel, error) {
 	name := strings.TrimSpace(driver)
 	if name == "" {
 		return nil, errors.New("pay: 未指定驱动名")

@@ -218,35 +218,17 @@ func validatePayChannels(c *Cfg) error {
 		"facebook.login":  true,
 		"instagram.login": true,
 	}
-	if c.Telegram != nil {
-		refs["telegram.ton"] = c.Telegram.Ton
-	}
 	if c.Usdt != nil {
 		refs["usdt.provider"] = c.Usdt.Provider
 	}
-	if c.Tron != nil {
-		refs["tron.provider"] = c.Tron.Provider
-	}
-	if c.Bsc != nil {
-		refs["bsc.provider"] = c.Bsc.Provider
-	}
-	if c.Sol != nil {
-		refs["sol.provider"] = c.Sol.Provider
-	}
-	if c.Whatsapp != nil {
-		refs["whatsapp.provider"] = c.Whatsapp.Provider
-	}
 	if c.Zalo != nil {
 		refs["zalo.login"] = c.Zalo.Login
-		refs["zalo.provider"] = c.Zalo.Provider
 	}
 	if c.Facebook != nil {
 		refs["facebook.login"] = c.Facebook.Login
-		refs["facebook.provider"] = c.Facebook.Provider
 	}
 	if c.Instagram != nil {
 		refs["instagram.login"] = c.Instagram.Login
-		refs["instagram.provider"] = c.Instagram.Provider
 	}
 	for _, name := range sortedMapKeys(refs) {
 		ref := refs[name]
@@ -283,6 +265,19 @@ func validatePayChannels(c *Cfg) error {
 		if strings.TrimSpace(sdk.BaseURL) == "" {
 			return fmt.Errorf("pay_sdks.%s 已登记但 base_url 为空", name)
 		}
+		// 链上接入点段只查「广播这一侧必需的三项」：base_url 仍然必填，因为带 chain 段
+		// 不等于放弃供应商侧——商户账户查询照旧走 HTTP 供应商，只有出款与查单
+		// 换成直接动链。把 base_url 改成可选会让账户查询链路在没人注意时静默失效。
+		if chain := sdk.Chain; chain != nil {
+			if strings.TrimSpace(chain.Node) == "" {
+				return fmt.Errorf("pay_sdks.%s.chain 已配置但 node 为空：链上通道不知道该把交易广播给谁", name)
+			}
+			if strings.TrimSpace(chain.WalletAddress) == "" {
+				return fmt.Errorf("pay_sdks.%s.chain 已配置但 wallet_address 为空：出款主体必须是配置里读得出的那个地址，不能只由私钥决定", name)
+			}
+			// private_key 恒为空是设计而非漏配（它由注入钩子在启动前填），这里不查；
+			// 真正「没注私钥」的表现要由链上驱动在装配时拒掉整条通道。
+		}
 		// accounts 是否为空不在这里查：只做验证码下发的 SDK 本就没有商户账户，
 		// 真正需要出账主体的引用在 Resolve 里会报「未配置 accounts」。
 		for _, alias := range sortedMapKeys(sdk.Accounts) {
@@ -298,7 +293,7 @@ func validatePayChannels(c *Cfg) error {
 // validateNftChannels 校验 NFT 资产通道的 SDK 引用与登记段是否指得通（对 validatePayChannels 同构）。
 //
 // 与资金侧的差别只在驱动名空间与 endpoints 键集（§6.3）：这里钉死 endpoints 的合法键是
-// holdings/token/mint/transfer/query 五个，把「把 recharge 抄进 nft 段」这种复用惯性钉在
+// holdings/token/mint/transfer/query 五个，把「把资金端点抄进 nft 段」这种复用惯性钉在
 // 校验期。至于驱动名有没有登记，不在 config 校验（本包不引 nft，避免配置层依赖资产契约层），
 // 由 nft.NftStart 装配时判定。
 //

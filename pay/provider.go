@@ -111,8 +111,9 @@ func (e *envelope) succeeded() bool {
 
 // ProviderOptions 是构造一个通道供应商客户端所需的全部输入。
 //
-// Endpoint 是个取值函数而不是 map：配置结构体留在 config 包（否则成环），
-// 调用方把 (*config.PaySDKConfig).Endpoint 直接传进来即可。
+// Endpoint 是个取值函数而不是 map：配置结构体留在 config 包，本文件不引它
+// （全包只有装配层 assemble.go 引 config），调用方把 (*config.PaySDKConfig).Endpoint
+// 直接传进来即可。
 type ProviderOptions struct {
 	Name string
 	// Driver 是驱动标记（注册表里的键名），只用于日志与错误定位，不参与判定。
@@ -138,6 +139,12 @@ type ProviderOptions struct {
 	// 同名字段不得重复登记，不得与单内 Extra 撞名——map 只留一值、签名却会双 append；
 	// 也不得与报文已签名量（payloadKeyNames）撞名，否则配置就能改写金额等字段而签名域看不见。
 	Extras []ExtraField
+	// Chain 是「直接动公链」那一类驱动的输入（见 ChainOptions）。
+	//
+	// 它是可选的：HTTP 供应商驱动（含本包的 Provider）永远不看这个字段，链上驱动则反过来
+	// 不看 AppID/SecretKey/Endpoint——两套实现各取所需，靠配置里的 driver 决定用哪一套，
+	// 通道门面与上游调用代码都不动。nil 即「这一段配置不是链上通道」。
+	Chain *ChainOptions
 }
 
 // ExtraField 是一个通道特有字段的「JSON 键名 + 取值」。
@@ -162,6 +169,12 @@ type Provider struct {
 // NewProvider 构造供应商客户端。凭证缺失就地拒绝——资金接口带着空密钥出去
 // 只会在供应商侧留下一堆验签失败日志，本地却看起来「启动成功」。
 func NewProvider(opt ProviderOptions) (*Provider, error) {
+	if opt.Chain != nil {
+		// 带 chain 配置却走到通用驱动上，意味着 driver 没换成链上驱动名。
+		// 这一格错配的表现是「配置里节点、热钱包、私钥都齐了，出款却仍然发给供应商」，
+		// 而供应商侧根本不知道那个地址是谁——必须当场拒，不许静默按 HTTP 形态发出去。
+		return nil, fmt.Errorf("通道[%s]配置了 chain 接入点但驱动 %s 不消费它：出款要上链请把 driver 换成链上驱动名", opt.Name, firstNonEmpty(opt.Driver, DriverGeneric))
+	}
 	if strings.TrimSpace(opt.SecretKey) == "" {
 		return nil, fmt.Errorf("通道[%s]未配置 secret_key", opt.Name)
 	}
@@ -252,7 +265,7 @@ func (p *Provider) Token() string {
 // 代码里是刻意的——报文加了字段却忘了同步签名域，是供应商全量拒签的典型成因。
 //
 // 本方法不追加任何特有字段，报文就是传进来的 payload；资金四类操作走
-// Recharge/Withdraw/QueryOrder/QueryAccount，它们经 callWithExtras 按登记顺序
+// Withdraw/QueryOrder/QueryAccount，它们经 callWithExtras 按登记顺序
 // 追加通道特有字段与单内特有字段。
 func (p *Provider) Call(ctx context.Context, endpoint string, payload any, signValues []string) (json.RawMessage, error) {
 	body, err := json.Marshal(payload)
@@ -458,7 +471,7 @@ func (p *Provider) parseResponse(status int, hdr http.Header, body []byte, stric
 	return env.Data, nil
 }
 
-// OrderRequest 是充值/提现下单报文。字段名等真实文档到位后在本结构与
+// OrderRequest 是提现下单报文。字段名等真实文档到位后在本结构与
 // SignValues 两处一起改，通道包与调用方都不感知。
 type OrderRequest struct {
 	AppID      string `json:"app_id,omitempty"`
@@ -627,19 +640,10 @@ func (p *Provider) Result(data json.RawMessage, orderNo string) *PayResult {
 	return res
 }
 
-// Recharge 充值下单：把一单充值请求送给供应商，返回归一回执。
-func (p *Provider) Recharge(ctx context.Context, o *PayOrder) (*PayResult, error) {
-	return p.placeOrder(ctx, EndpointRecharge, o, false)
-}
-
-// Withdraw 提现下单。比充值多两道前置：收款地址非空，以及该币种登记过的
+// Withdraw 提现下单。两道前置：收款地址非空，以及该币种登记过的
 // 地址格式与备注规则（ChainRule）。
 func (p *Provider) Withdraw(ctx context.Context, o *PayOrder) (*PayResult, error) {
-	return p.placeOrder(ctx, EndpointWithdraw, o, true)
-}
-
-func (p *Provider) placeOrder(ctx context.Context, endpoint string, o *PayOrder, needAddress bool) (*PayResult, error) {
-	if err := CheckOrder(o, needAddress); err != nil {
+	if err := CheckOrder(o); err != nil {
 		return nil, err
 	}
 	// 链上格式校验排在这里：签名已经能算、请求还没发出。放到发出去之后，
@@ -648,8 +652,9 @@ func (p *Provider) placeOrder(ctx context.Context, endpoint string, o *PayOrder,
 		return nil, err
 	}
 	req := p.NewOrderRequest(o)
-	strictRetry := endpoint == EndpointWithdraw
-	data, err := p.callWithExtras(ctx, endpoint, req, req.SignValues(), req.Extra, strictRetry)
+	// strictRetry 恒为 true：提现走严格口径（parseStrict 白名单 + 传输层不自动重发），
+	// 「提现已发出、响应超时」后的自动重发是双付而不是抖动（见 send 的注释）。
+	data, err := p.callWithExtras(ctx, EndpointWithdraw, req, req.SignValues(), req.Extra, true)
 	if err != nil {
 		return nil, err
 	}
@@ -743,10 +748,9 @@ func firstNonEmpty(vals ...string) string {
 	return ""
 }
 
-// CheckOrder 下单前置校验：幂等键必须有，金额必须是正的最小单位整数。
-//
-// 提现还要求收款地址：地址为空的一单出去，钱就找不到主人了。
-func CheckOrder(o *PayOrder, needAddress bool) error {
+// CheckOrder 下单前置校验：幂等键必须有，金额必须是正的最小单位整数，收款地址非空
+// （充值删除后只剩提现一条下单路径，地址恒必填——空地址的一单出去，钱就找不到主人了）。
+func CheckOrder(o *PayOrder) error {
 	switch {
 	case o == nil:
 		return errors.New("订单为 nil")
@@ -754,7 +758,7 @@ func CheckOrder(o *PayOrder, needAddress bool) error {
 		return errors.New("订单号（幂等键）为空")
 	case o.Amount <= 0:
 		return errors.New("金额必须为正整数最小单位")
-	case needAddress && strings.TrimSpace(o.Address) == "":
+	case strings.TrimSpace(o.Address) == "":
 		return errors.New("收款地址为空")
 	}
 	return nil

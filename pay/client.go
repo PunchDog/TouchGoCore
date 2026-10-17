@@ -26,8 +26,8 @@ const (
 	maxResponseBytes = 1 << 20
 )
 
-// Options 是客户端构造参数。通道配置结构体到这里的逐字段转换留在各通道包，
-// pay 不认识 config，避免成环。
+// Options 是客户端构造参数。config 到这里的逐字段转换在装配层（assemble.go）做：
+// 本文件不引 config——paysdk 合并进本包后，core 与 config 的边界由文件级守住。
 type Options struct {
 	// Name 是通道名（whatsapp/usdt/ton），进错误文案，不进凭证。
 	Name        string

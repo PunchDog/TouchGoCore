@@ -10,7 +10,7 @@ func sdkTable() map[string]*PaySDKConfig {
 	return map[string]*PaySDKConfig{
 		"one": {
 			Enable: "on", Driver: "generic_md5", BaseURL: "https://one.example",
-			Endpoints: map[string]string{"recharge": "pay/recharge"},
+			Endpoints: map[string]string{"query": "pay/query"},
 			Accounts: map[string]*PayMerchantAccount{
 				"default": {Enable: "on", MerchantID: "MCH-1"},
 			},
@@ -39,10 +39,10 @@ func TestRefResolve(t *testing.T) {
 		t.Fatalf("解析结果不符: %+v / %+v", cfg, acc)
 	}
 	// 端点表取值：缺前导斜杠要补上，未登记要报 ok=false。
-	if got, has := cfg.Endpoint("recharge"); !has || got != "/pay/recharge" {
-		t.Errorf("Endpoint(recharge)=%q,%v，期望 /pay/recharge,true", got, has)
+	if got, has := cfg.Endpoint("query"); !has || got != "/pay/query" {
+		t.Errorf("Endpoint(query)=%q,%v，期望 /pay/query,true", got, has)
 	}
-	if _, has := cfg.Endpoint("withdraw"); has {
+	if _, has := cfg.Endpoint("recharge"); has {
 		t.Error("未登记的端点不得报成功")
 	}
 
@@ -122,8 +122,8 @@ func TestValidatePayChannels(t *testing.T) {
 					Accounts: map[string]*PayMerchantAccount{"default": {Enable: "on", MerchantID: "M1"}}},
 			},
 			Usdt:     &UsdtConfig{Provider: &PaySDKRef{SDK: "a"}},
-			Whatsapp: &WhatsappConfig{Provider: nil},
-			Telegram: &TelegramConfig{TonNetwork: "mainnet"},
+			Whatsapp: &WhatsappConfig{},
+			Telegram: &TelegramConfig{BotToken: "123456:ABC"},
 		}
 	}
 	if err := base().Validate(); err != nil {
@@ -137,6 +137,12 @@ func TestValidatePayChannels(t *testing.T) {
 		"账户缺商户号":     func(c *Cfg) { c.PaySDks["a"].Accounts["default"].MerchantID = "" },
 		"出款引用没有账户":   func(c *Cfg) { c.PaySDks["a"].Accounts = nil },
 		"出款引用了停用的账户": func(c *Cfg) { c.PaySDks["a"].Accounts["default"].Enable = "off" },
+		"链上段缺 node": func(c *Cfg) {
+			c.PaySDks["a"].Chain = &PayChainConfig{WalletAddress: "TWallet"}
+		},
+		"链上段缺出款地址": func(c *Cfg) {
+			c.PaySDks["a"].Chain = &PayChainConfig{Node: "grpc.trongrid.io:50051"}
+		},
 	}
 	for name, mutate := range cases {
 		c := base()

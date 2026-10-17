@@ -40,7 +40,7 @@ func TestMergeExtrasRejectsReservedConfigNames(t *testing.T) {
 // 且错误文案不带出密钥。
 func TestConfigExtrasReservedNameSendsNothing(t *testing.T) {
 	r := newSDKServer(t)
-	ch, err := Open(DriverGeneric, ProviderOptions{
+	ch, err := OpenDriver(DriverGeneric, ProviderOptions{
 		Name: "usdt", BaseURL: r.srv.URL, SecretKey: "TOPSECRET",
 		Endpoint: endpoints(),
 		Extras:   []ExtraField{{Name: "amount", Value: "1"}},
@@ -48,7 +48,7 @@ func TestConfigExtrasReservedNameSendsNothing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = ch.Recharge(context.Background(), &PayOrder{OrderNo: "O1", Amount: 1000, Currency: CurrencyUSDT})
+	_, err = ch.Withdraw(context.Background(), &PayOrder{OrderNo: "O1", Amount: 1000, Currency: CurrencyUSDT, Address: "TAddr"})
 	if err == nil {
 		t.Fatal("配置 Extras 撞保留字应当报错")
 	}

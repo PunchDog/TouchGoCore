@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sort"
 	"strings"
 	"testing"
@@ -17,7 +18,7 @@ const goodAddr = "GOODADDR"
 type fakeRule struct{}
 
 func (fakeRule) CheckAddress(o *PayOrder) error {
-	// 空地址放行，与真规则一致：充值侧的收款端由供应商返回，非空要求只加在提现上。
+	// 空地址放行：非空要求只加在提现的 CheckOrder 上，规则本身只管「有值时值对不对」。
 	if a := strings.TrimSpace(o.Address); a != "" && a != goodAddr {
 		return errors.New("地址不合法")
 	}
@@ -32,41 +33,46 @@ func (fakeRule) CheckMemo(o *PayOrder) error {
 }
 
 const (
-	// regCoinA/B 只给登记表用例，ruleCoin 只给拒单用例：注册表是进程级全局的，
-	// 同一币种在两个用例里各注册一次会被第二个用例的重名拒绝挡住。
+	// regCoinA/B 只给登记表用例，ruleCoin 只给拒单用例。注册表是进程级全局的，
+	// 固定名在 -count=N 的第二轮会被自己的重名登记拒掉，所以各用例在原名之后拼
+	// spySeq 唯一后缀（spySeq 的口径见 assemble_test.go）。
 	regCoinA = "TESTCOIN-A"
 	regCoinB = "TESTCOIN-B"
 	ruleCoin = "TESTCOIN-RULE"
 )
 
 func TestChainRuleRegistry(t *testing.T) {
+	// 唯一币种名：同一进程连跑多轮（-count=N）时第二轮换个没用过的名字，
+	// 才不会被自己的首次登记挡在门外。被测行为不变，变的只是名字。
+	coinA := fmt.Sprintf("%s_%d", regCoinA, spySeq.Add(1))
+	coinB := fmt.Sprintf("%s_%d", regCoinB, spySeq.Add(1))
 	if err := RegisterChainRule("  ", fakeRule{}); err == nil {
 		t.Error("空币种应当被拒")
 	}
-	if err := RegisterChainRule(regCoinA, nil); err == nil {
+	if err := RegisterChainRule(coinA, nil); err == nil {
 		t.Error("nil 规则应当被拒")
 	}
-	if err := RegisterChainRule(regCoinA, fakeRule{}); err != nil {
+	if err := RegisterChainRule(coinA, fakeRule{}); err != nil {
 		t.Fatalf("首次登记失败: %v", err)
 	}
-	if err := RegisterChainRule("  "+strings.ToLower(regCoinA)+"  ", fakeRule{}); err == nil {
+	if err := RegisterChainRule("  "+strings.ToLower(coinA)+"  ", fakeRule{}); err == nil {
 		t.Error("同一币种换大小写再来一次应当被拒——覆盖等于让 init 顺序决定生效者")
 	}
-	// 大小写与空白不影响查找：配置里写 testcoin-a 也要能命中标成 TESTCOIN-A 的规则。
-	if _, ok := ChainRuleFor(strings.ToLower(regCoinA)); !ok {
+	// 大小写与空白不影响查找：配置里写小写也要能命中标大写的规则。
+	if _, ok := ChainRuleFor(strings.ToLower(coinA)); !ok {
 		t.Error("按小写币种查不到规则")
 	}
 	if _, ok := ChainRuleFor("   "); ok {
 		t.Error("空白币种不该命中任何规则")
 	}
-	if err := RegisterChainRule(regCoinB, fakeRule{}); err != nil {
+	if err := RegisterChainRule(coinB, fakeRule{}); err != nil {
 		t.Fatal(err)
 	}
 	got := CurrenciesWithRules()
 	if !sort.StringsAreSorted(got) {
 		t.Fatalf("已登记币种未排序: %v", got)
 	}
-	for _, want := range []string{regCoinA, regCoinB} {
+	for _, want := range []string{coinA, coinB} {
 		if !strings.Contains(strings.Join(got, ","), want) {
 			t.Errorf("已登记币种缺 %s，实得 %v", want, got)
 		}
@@ -76,11 +82,13 @@ func TestChainRuleRegistry(t *testing.T) {
 // TestChainRuleRejectsBeforeSending 规则拒掉的单必须一次请求都不发出。
 // 没登记规则的币种继续只管非空：宿主没链接那条通道包时，pay 没有那条链的知识。
 func TestChainRuleRejectsBeforeSending(t *testing.T) {
-	if err := RegisterChainRule(ruleCoin, fakeRule{}); err != nil {
+	// 唯一币种名：-count=N 第二轮不会被自己的首次登记挡住（理由同 TestChainRuleRegistry）。
+	coin := fmt.Sprintf("%s_%d", ruleCoin, spySeq.Add(1))
+	if err := RegisterChainRule(coin, fakeRule{}); err != nil {
 		t.Fatal(err)
 	}
 	r := newSDKServer(t)
-	ch, err := Open(DriverGeneric, ProviderOptions{
+	ch, err := OpenDriver(DriverGeneric, ProviderOptions{
 		Name: "t", BaseURL: r.srv.URL, SecretKey: "s", Endpoint: endpoints(),
 	})
 	if err != nil {
@@ -91,8 +99,8 @@ func TestChainRuleRejectsBeforeSending(t *testing.T) {
 		order *PayOrder
 		want  string
 	}{
-		{"坏地址", &PayOrder{OrderNo: "O1", Amount: 10, Currency: ruleCoin, Address: "x"}, "地址不合法"},
-		{"带备注", &PayOrder{OrderNo: "O2", Amount: 10, Currency: ruleCoin, Address: goodAddr, Memo: "m"}, "该链不支持备注"},
+		{"坏地址", &PayOrder{OrderNo: "O1", Amount: 10, Currency: coin, Address: "x"}, "地址不合法"},
+		{"带备注", &PayOrder{OrderNo: "O2", Amount: 10, Currency: coin, Address: goodAddr, Memo: "m"}, "该链不支持备注"},
 	}
 	for _, cs := range cases {
 		if _, err := ch.Withdraw(context.Background(), cs.order); err == nil ||
@@ -113,19 +121,12 @@ func TestChainRuleRejectsBeforeSending(t *testing.T) {
 		t.Fatalf("请求次数=%d，期望 1", n)
 	}
 	// 提现缺地址时先被 CheckOrder 挡下，规则连跑都不该跑。
-	if _, err := ch.Withdraw(context.Background(), &PayOrder{OrderNo: "O5", Amount: 10, Currency: ruleCoin}); err == nil ||
+	if _, err := ch.Withdraw(context.Background(), &PayOrder{OrderNo: "O5", Amount: 10, Currency: coin}); err == nil ||
 		strings.Contains(err.Error(), "地址不合法") {
 		t.Errorf("缺地址应报「收款地址为空」而不是格式错，实得 %v", err)
 	}
 	if n := r.calls.Load(); n != 1 {
 		t.Fatalf("请求次数=%d，期望仍是 1", n)
-	}
-	// 充值侧不带收款地址是合法形态：格式规则只管「有值时值对不对」。
-	if _, err := ch.Recharge(context.Background(), &PayOrder{OrderNo: "O6", Amount: 10, Currency: ruleCoin}); err != nil {
-		t.Fatalf("充值侧空地址被规则误伤: %v", err)
-	}
-	if n := r.calls.Load(); n != 2 {
-		t.Fatalf("请求次数=%d，期望 2", n)
 	}
 }
 
@@ -153,7 +154,7 @@ func TestSignDomainCoversChainAndCallbackFields(t *testing.T) {
 	}
 	var seen []string
 	for _, cs := range cases {
-		ch, err := Open(DriverGeneric, ProviderOptions{
+		ch, err := OpenDriver(DriverGeneric, ProviderOptions{
 			Name: "t", BaseURL: r.srv.URL, SecretKey: "TOPSECRET", AppID: "app1",
 			MerchantID: "MCH-1", NotifyURL: cs.notify, Endpoint: endpoints(), Timeout: 2 * time.Second,
 		})
@@ -256,7 +257,7 @@ func TestOrderExtraCannotClobberSignedFields(t *testing.T) {
 		t.Fatalf("追加顺序应为「通道字段登记顺序 → 单内字段字典序」，实得 %v", signs)
 	}
 	r := newSDKServer(t)
-	ch, err := Open(DriverGeneric, ProviderOptions{
+	ch, err := OpenDriver(DriverGeneric, ProviderOptions{
 		Name: "t", BaseURL: r.srv.URL, SecretKey: "s", Endpoint: endpoints(),
 	})
 	if err != nil {

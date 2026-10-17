@@ -113,26 +113,25 @@ func TestResultNeverReportsSuccessOnGarbage(t *testing.T) {
 	}
 }
 
-// TestCheckOrderGuards 幂等键、正整数金额、提现地址三项前置校验。
+// TestCheckOrderGuards 幂等键、正整数金额、收款地址三项前置校验。
 func TestCheckOrderGuards(t *testing.T) {
-	ok := &PayOrder{OrderNo: "O1", Amount: 1}
-	if err := CheckOrder(ok, false); err != nil {
+	ok := &PayOrder{OrderNo: "O1", Amount: 1, Address: "TAddr"}
+	if err := CheckOrder(ok); err != nil {
 		t.Fatalf("合法订单被拒: %v", err)
 	}
 	cases := []struct {
-		name    string
-		order   *PayOrder
-		address bool
+		name  string
+		order *PayOrder
 	}{
-		{"nil 订单", nil, false},
-		{"缺订单号", &PayOrder{Amount: 1}, false},
-		{"订单号空白", &PayOrder{OrderNo: "  ", Amount: 1}, false},
-		{"零金额", &PayOrder{OrderNo: "O1"}, false},
-		{"负金额", &PayOrder{OrderNo: "O1", Amount: -5}, false},
-		{"提现缺收款地址", &PayOrder{OrderNo: "O1", Amount: 1}, true},
+		{"nil 订单", nil},
+		{"缺订单号", &PayOrder{Amount: 1, Address: "TAddr"}},
+		{"订单号空白", &PayOrder{OrderNo: "  ", Amount: 1, Address: "TAddr"}},
+		{"零金额", &PayOrder{OrderNo: "O1", Address: "TAddr"}},
+		{"负金额", &PayOrder{OrderNo: "O1", Amount: -5, Address: "TAddr"}},
+		{"缺收款地址", &PayOrder{OrderNo: "O1", Amount: 1}},
 	}
 	for _, cs := range cases {
-		if err := CheckOrder(cs.order, cs.address); err == nil {
+		if err := CheckOrder(cs.order); err == nil {
 			t.Errorf("%s 未被拒", cs.name)
 		}
 	}
@@ -244,10 +243,10 @@ func TestTokenRoundTrip(t *testing.T) {
 	}
 }
 
-// TestPlaceOrderReconcilesReceipt 下单回执必须与请求对账：success 却金额不对、
+// TestWithdrawReconcilesReceipt 提现回执必须与请求对账：success 却金额不对、
 // 或回了另一张单号时不得当成功——上游会按回执记账。pending 省略金额仍可过。
-func TestPlaceOrderReconcilesReceipt(t *testing.T) {
-	order := &PayOrder{OrderNo: "O1", Amount: 1000, Currency: CurrencyUSDT}
+func TestWithdrawReconcilesReceipt(t *testing.T) {
+	order := &PayOrder{OrderNo: "O1", Amount: 1000, Currency: CurrencyUSDT, Address: "TAddr"}
 	cases := []struct {
 		name    string
 		resp    string
@@ -286,14 +285,14 @@ func TestPlaceOrderReconcilesReceipt(t *testing.T) {
 		t.Run(cs.name, func(t *testing.T) {
 			r := newSDKServer(t)
 			r.resp.Store(cs.resp)
-			ch, err := Open(DriverGeneric, ProviderOptions{
+			ch, err := OpenDriver(DriverGeneric, ProviderOptions{
 				Name: "usdt", BaseURL: r.srv.URL, SecretKey: "s",
 				Timeout: 2 * time.Second, Endpoint: endpoints(),
 			})
 			if err != nil {
 				t.Fatal(err)
 			}
-			res, err := ch.Recharge(context.Background(), order)
+			res, err := ch.Withdraw(context.Background(), order)
 			if cs.wantOK {
 				if err != nil {
 					t.Fatalf("期望成功，实得 %v", err)

@@ -1,8 +1,11 @@
 package whatsapp
 
+// 生命周期与资金门面存续的测试：enable 总闸不得放行消息侧装配，
+// 三个资金门面仍是包外可见调用面且一律返回未接入哨兵、不广播回执。
+
 import (
 	"context"
-	"strings"
+	"errors"
 	"sync"
 	"testing"
 
@@ -12,132 +15,35 @@ import (
 	"touchgocore/util"
 )
 
-const (
-	// testSecret 是测试内用的签名密钥，与真实凭证无关。
-	testSecret = "TEST_SECRET_KEY"
-	// testSection / testAccount 是测试里 SDK 段与商户账户的名字。
-	testSection = "test_a"
-	testAccount = "default"
-	merchantID  = "MCH-TEST"
-)
-
-// recorder 收集 publish 广播出去的资金回执。
-var recorder = struct {
-	mu    sync.Mutex
-	calls []*pay.PayResult
-}{}
-
-func init() {
-	// 资金门面会按 CallWhatsappMsg+Kind 广播回执，测试在此收口，
-	// 下游业务的落库回调就是同一个形态。
-	for _, kind := range []string{"Recharge", "Withdraw", "Query"} {
-		util.DefaultCallFunc.Register(util.CallWhatsappMsg+kind, func(res *pay.PayResult) {
-			recorder.mu.Lock()
-			recorder.calls = append(recorder.calls, res)
-			recorder.mu.Unlock()
-		})
-	}
+// ghostSessions 是一个形状合法但必然连不上的会话库 DSN（127.0.0.1:1 直接拒连）。
+// 带上它是为了复现「配置齐备但没开闸」这一现网形态：闸失效时 startWA 会一路走到
+// 开会话库那一步（随后因连不上而放弃），本用例钉的是这一步绝不能留下装配产物。
+func ghostSessions() *config.WhatsappSessionsConfig {
+	return &config.WhatsappSessionsConfig{DSN: "postgres://u:p@127.0.0.1:1/ghost?sslmode=disable"}
 }
 
-func recorded() []*pay.PayResult {
-	recorder.mu.Lock()
-	defer recorder.mu.Unlock()
-	got := recorder.calls
-	recorder.calls = nil
-	return got
-}
-
-// payCfg 组一份「通道已开启 + pay_sdks 登记一段 + provider 引用它」的完整配置。
-//
-// 消息侧改走 whatsmeow 之后本包只剩 provider 一段引用：登录/发码链路已随
-// HTTP 供应商一起撤掉（扫码配对不经过任何供应商），资金链路不变。
-func payCfg(baseURL string, endpoints map[string]string) *config.Cfg {
-	return &config.Cfg{
-		PaySDks: map[string]*config.PaySDKConfig{
-			testSection: {
-				Enable: "on", Driver: pay.DriverGeneric, BaseURL: baseURL,
-				AppID: "app1", SecretKey: testSecret, Endpoints: endpoints,
-				Accounts: map[string]*config.PayMerchantAccount{
-					testAccount: {Enable: "on", MerchantID: merchantID},
-				},
-			},
-		},
-		Whatsapp: &config.WhatsappConfig{
-			Enable:   "on",
-			Provider: &config.PaySDKRef{SDK: testSection, Account: testAccount},
-		},
-	}
-}
-
-// TestOpenFundFailClosed 引用指不通的资金链路不得启动：带着空密钥、没点名的商户账户
-// 出去，只会在供应商侧留下验签失败或错账，本地却看起来一切正常。
-func TestOpenFundFailClosed(t *testing.T) {
-	full := func() *config.Cfg { return payCfg("https://pay.invalid", nil) }
-	cases := []struct {
-		name   string
-		mutate func(*config.Cfg)
-	}{
-		{"没有 whatsapp 段", func(c *config.Cfg) { c.Whatsapp = nil }},
-		{"通道段没引用 SDK", func(c *config.Cfg) { c.Whatsapp.Provider = nil }},
-		{"引用的段不存在", func(c *config.Cfg) { c.Whatsapp.Provider.SDK = "ghost" }},
-		{"SDK 段没开", func(c *config.Cfg) { c.PaySDks[testSection].Enable = "off" }},
-		{"缺驱动标记", func(c *config.Cfg) { c.PaySDks[testSection].Driver = "" }},
-		{"驱动名没登记", func(c *config.Cfg) { c.PaySDks[testSection].Driver = "no_such_driver" }},
-		{"没有商户账户", func(c *config.Cfg) { c.PaySDks[testSection].Accounts = nil }},
-		{"商户账户停用", func(c *config.Cfg) { c.PaySDks[testSection].Accounts[testAccount].Enable = "off" }},
-		{"缺基址", func(c *config.Cfg) { c.PaySDks[testSection].BaseURL = "" }},
-		{"缺密钥", func(c *config.Cfg) { c.PaySDks[testSection].SecretKey = "" }},
-	}
-	for _, cs := range cases {
-		cfg := full()
-		cs.mutate(cfg)
-		var ref *config.PaySDKRef
-		if cfg.Whatsapp != nil {
-			ref = cfg.Whatsapp.Provider
-		}
-		if p, ok := openFund(cfg, ref); ok || p != nil {
-			t.Errorf("%s 不应启动，实得 ok=%v", cs.name, ok)
-		}
-	}
-	// 端点表为空但引用齐备：装配成功，但任何操作都应在发请求之前被拒（见 client_test）
-	ready := full()
-	if _, ok := openFund(ready, ready.Whatsapp.Provider); !ok {
-		t.Error("引用齐备时应当启动")
-	}
-}
-
-// TestChannelEnableGateBlocksStart whatsapp.enable 不为 on 时两支都不装配：
-// 消息侧不开会话库、不建管理器（因此绝不会去连 WhatsApp 服务器），资金侧不挂 provider。
-//
-// 用例特意配上 provider 与一个 sessions.dsn：闸失效时资金链路会当场装配起来
-// （fund 非空即红），这是本用例的判据；waStore/waMgr 两项是兜底——dsn 指向 127.0.0.1:1
-// 本来就连不上，单靠它证不了消息侧没被装配。
+// TestChannelEnableGateBlocksStart whatsapp.enable 不为 on 时消息侧一律不装配：
+// 不开会话库、不建管理器（因此绝不会去连 WhatsApp 服务器），门面全部 fail-closed。
 // enable 缺失与显式 off 必须同一个结果——「忘了开」不该表现成「连上了但发不出去」。
+//
+// 口径变更（资金链路删除时留下的口子，写明白）：原来这圈用例的正向对照是
+// 「enable 为 on 时 fund 非空」，那是唯一能证明「闸确实放行过」的可观测产物。
+// 消息侧要装配成功必须连得上真 Postgres，测试里造不出来，所以正向对照退到
+// 闸的判据本身（on 的大小写/空白形态），负向那半退到「没有装配产物 + 门面拒」。
 func TestChannelEnableGateBlocksStart(t *testing.T) {
-	cfgOf := func(wa *config.WhatsappConfig) *config.Cfg {
-		c := payCfg("https://pay.invalid", allEndpoints())
-		c.Whatsapp = wa
-		return c
-	}
-	sessions := func() *config.WhatsappSessionsConfig {
-		return &config.WhatsappSessionsConfig{DSN: "postgres://u:p@127.0.0.1:1/ghost?sslmode=disable"}
-	}
 	off := []struct {
 		name string
 		wa   *config.WhatsappConfig
 	}{
 		{"没有 whatsapp 段", nil},
-		{"enable 键没写", &config.WhatsappConfig{Provider: &config.PaySDKRef{SDK: testSection, Account: testAccount}, Sessions: sessions()}},
-		{"enable 为空串", &config.WhatsappConfig{Enable: "  ", Sessions: sessions()}},
-		{"enable 为 off", &config.WhatsappConfig{Enable: "off", Sessions: sessions()}},
-		{"enable 写了非 on 的值", &config.WhatsappConfig{Enable: "true", Sessions: sessions()}},
+		{"enable 键没写", &config.WhatsappConfig{Sessions: ghostSessions()}},
+		{"enable 为空串", &config.WhatsappConfig{Enable: "  ", Sessions: ghostSessions()}},
+		{"enable 为 off", &config.WhatsappConfig{Enable: "off", Sessions: ghostSessions()}},
+		{"enable 写了非 on 的值", &config.WhatsappConfig{Enable: "true", Sessions: ghostSessions()}},
 	}
 	for _, cs := range off {
 		WhatsappStop(nil)
-		WhatsappStart(corectx.WithCfg(context.Background(), cfgOf(cs.wa)))
-		if p := fund.Load(); p != nil {
-			t.Errorf("%s：资金链路却装配了", cs.name)
-		}
+		WhatsappStart(corectx.WithCfg(context.Background(), &config.Cfg{Whatsapp: cs.wa}))
 		if m := waMgr.Load(); m != nil {
 			t.Errorf("%s：消息侧管理器却装配了（enable 闸失效）", cs.name)
 		}
@@ -150,68 +56,84 @@ func TestChannelEnableGateBlocksStart(t *testing.T) {
 		if err := WhatsappStartClient("8613800000000@s.whatsapp.net"); err == nil {
 			t.Errorf("%s：未启动时启动账号应当被拒", cs.name)
 		}
-		if _, err := WhatsappQuery(nil, "O1"); err == nil {
-			t.Errorf("%s：未启动时查询应当被拒", cs.name)
+		if _, err := WhatsappSendMessage(nil, "8613800000000", "8613900000000", "hi"); err == nil {
+			t.Errorf("%s：未启动时发信应当被拒", cs.name)
 		}
 	}
 	WhatsappStop(nil)
 
-	// 正向对照：enable 为 on（大小写与首尾空白不敏感）才装配资金侧。
-	// sessions 留空，消息侧仍按「没配 dsn 即不启动」独立判定。
 	for _, on := range []string{"on", "ON", "On", " on "} {
-		WhatsappStop(nil)
-		cfg := cfgOf(&config.WhatsappConfig{Enable: on, Provider: &config.PaySDKRef{SDK: testSection, Account: testAccount}})
-		WhatsappStart(corectx.WithCfg(context.Background(), cfg))
-		if fund.Load() == nil {
-			t.Errorf("enable=%q 应当装配资金链路", on)
+		wa := &config.WhatsappConfig{Enable: on}
+		if !wa.Enabled() {
+			t.Errorf("enable=%q 应当放行消息侧装配", on)
 		}
+		// 闸放行但 sessions 未配：消息侧仍按「没配 dsn 即不装配」独立判定，安静返回不 panic。
+		WhatsappStop(nil)
+		WhatsappStart(corectx.WithCfg(context.Background(), &config.Cfg{Whatsapp: wa}))
 		if waMgr.Load() != nil {
 			t.Errorf("enable=%q 但 sessions 未配，消息侧不该装配", on)
 		}
 	}
 	WhatsappStop(nil)
-	recorded()
 }
 
-// TestOperationsRefuseWhenNotStarted 未启动时资金门面返回错误而不是 panic，
-// 且不得广播任何回执。消息侧门面的同型断言在 wa_client_test.go。
-func TestOperationsRefuseWhenNotStarted(t *testing.T) {
-	WhatsappStop(nil)
-	recorded()
-	if _, err := WhatsappRecharge(nil, &pay.PayOrder{OrderNo: "O1", Amount: 1}); err == nil {
-		t.Error("未启动时充值应当被拒")
+// TestPayoutInterfaceStaysWired 三个资金门面仍是包外可见的调用面，且一律返回未接入哨兵。
+//
+// 资金实现已删除，这里只钉两件事：签名没被人顺手改掉（下游按它编译），
+// 以及「没接入」绝不被读成「已受理」——结果必须是 nil 加 errors.Is 可判的哨兵。
+func TestPayoutInterfaceStaysWired(t *testing.T) {
+	var _ func(context.Context, *pay.PayOrder) (*pay.PayResult, error) = WhatsappWithdraw
+	var _ func(context.Context, string) (*pay.PayResult, error) = WhatsappQuery
+	var _ func(context.Context, *pay.AccountQuery) (*pay.AccountInfo, error) = WhatsappAccount
+
+	o := &pay.PayOrder{OrderNo: "O1", Amount: 10}
+	cases := []struct {
+		name string
+		run  func() error
+	}{
+		{"Withdraw", func() error { _, e := WhatsappWithdraw(nil, o); return e }},
+		{"Query", func() error { _, e := WhatsappQuery(nil, "O1"); return e }},
+		{"Account", func() error { _, e := WhatsappAccount(nil, &pay.AccountQuery{}); return e }},
 	}
-	if _, err := WhatsappWithdraw(nil, &pay.PayOrder{OrderNo: "O1", Amount: 1, Address: "a"}); err == nil {
-		t.Error("未启动时提现应当被拒")
+	for _, cs := range cases {
+		if err := cs.run(); !errors.Is(err, ErrPayoutNotWired) {
+			t.Errorf("%s 应返回未接入哨兵，实得 %v", cs.name, err)
+		}
 	}
-	if _, err := WhatsappQuery(nil, "O1"); err == nil {
-		t.Error("未启动时查询应当被拒")
+	// 订单与查询参数为 nil/空也一样先拒：不能因为参数不合法就先返回 nil 结果让上游以为已受理。
+	if _, err := WhatsappWithdraw(nil, nil); !errors.Is(err, ErrPayoutNotWired) {
+		t.Errorf("空订单的拒绝口径不符: %v", err)
 	}
-	if _, err := WhatsappAccount(nil, nil); err == nil {
-		t.Error("未启动时账户查询应当被拒")
-	}
-	if got := recorded(); len(got) != 0 {
-		t.Errorf("未启动却广播了回执: %+v", got)
+	if _, err := WhatsappQuery(nil, ""); !errors.Is(err, ErrPayoutNotWired) {
+		t.Errorf("空单号的拒绝口径不符: %v", err)
 	}
 }
 
-// TestOrderPreChecks 下单前置校验在发出请求之前就生效。
-func TestOrderPreChecks(t *testing.T) {
-	// 用一份引用齐备、但没有任何端点的配置：真发出请求就会因缺端点报错，
-	// 前置校验应当先于端点判定拦下来。
-	startWith(t, payCfg("https://pay.invalid", nil))
-	recorded()
-	if _, err := WhatsappWithdraw(nil, &pay.PayOrder{OrderNo: "O1", Amount: 1}); err == nil ||
-		!strings.Contains(err.Error(), "地址") {
-		t.Errorf("提现缺地址未被拦下: %v", err)
+// TestPayoutNotWiredDoesNotBroadcast 未接入的门面不得广播任何回执。
+//
+// 广播键（CallWhatsappMsg+Withdraw/Query）在下游挂着落库回调，
+// 误广播一次就给账本记一笔不存在的资金动作。
+func TestPayoutNotWiredDoesNotBroadcast(t *testing.T) {
+	var (
+		mu   sync.Mutex
+		got  []*pay.PayResult
+		kind []string
+	)
+	for _, k := range []string{"Withdraw", "Query"} {
+		id := util.DefaultCallFunc.Register(util.CallWhatsappMsg+k, func(res *pay.PayResult) {
+			mu.Lock()
+			defer mu.Unlock()
+			got = append(got, res)
+			kind = append(kind, k)
+		})
+		defer util.DefaultCallFunc.Unregister(util.CallWhatsappMsg+k, id)
 	}
-	if _, err := WhatsappRecharge(nil, &pay.PayOrder{OrderNo: "O1", Amount: 0}); err == nil {
-		t.Error("零金额未被拦下")
-	}
-	if _, err := WhatsappQuery(nil, "   "); err == nil {
-		t.Error("空订单号未被拦下")
-	}
-	if got := recorded(); len(got) != 0 {
-		t.Errorf("前置校验失败却广播了回执: %+v", got)
+	o := &pay.PayOrder{OrderNo: "O9", Amount: 1}
+	_, _ = WhatsappWithdraw(nil, o)
+	_, _ = WhatsappQuery(nil, "O9")
+	mu.Lock()
+	defer mu.Unlock()
+	if len(got) != 0 {
+		t.Fatalf("未接入的链路广播了回执: kinds=%v %+v", kind, got)
 	}
 }

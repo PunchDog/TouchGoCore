@@ -1,114 +1,56 @@
-// Package tron 是 TRON 原生币（TRX）通道的充值与提现接入点。
+// Package tron 是 TRON 链上资金通道的接入点：同链代币 USDT-TRC20 的出款门面，
+// 以及原生币 TRX 的未接入哨兵。
 //
-// 目录、包名与币种常量统一为 tron/TRX，代码内币种一律用 pay.CurrencyTRX。
-// 网络取值走 pay.NetworkMainnet / shasta / nile——TRON 的收款端地址校验（含
-// 校验和核）在本包 address.go，usdt 包（同链代币）经 usdt.IsValidTRONAddress
-// 的薄包装复用同一份实现，两侧口径不会漂移。
+// 目录、包名与币种常量按通道分：TRX 用 pay.CurrencyTRX，USDT 用 pay.CurrencyUSDT
+// 读 cfg.Usdt。网络取值走 pay.NetworkMainnet 这类公链名，USDT 侧的合约位是
+// usdt.contract（TRC20 的 Base58 地址）——把 trc20 当网络填进配置会被本包在启动时
+// 拒掉（见 usdt.go）。
 //
-// 本包只负责把请求送到供应商、把回执读成 pay.PayResult，不碰 SQL、不碰积分与额度；
-// 下游业务按 util.CallTronMsg+"Xxx" 注册回调接手结果。
-// 与 whatsapp 通道相比这里没有登录链路：TRX 的收付靠签名凭证即可，没有会话态。
+// 全仓真正会动钱的出款只有 USDT-TRC20 一条：本地组交易、私钥签名、经节点 gRPC 广播，
+// 幂等由本包的出款台账保证（onchain.go、idempotent.go）。TRX 那条供应商提现链路已在
+// 2026-10 的资金面收口里删除——链上原生币出款并没有对应实现，留着一条没人实测的
+// 「把提现单交给 HTTP 供应商」的路径只是多一个能被配置点亮的出资口。三个 TRX 门面
+// 保留（签名是包外可见调用面），一律返回 ErrPayoutNotWired。
 //
-// 供应商接入本身不在这个包里配置：tron.provider 只是对 pay_sdks 一段的引用，
-// 凭证、端点表与商户账户都集中在 pay_sdks，装配动作在 paysdk。
-// 本包是「接入点」而非「已完成对接」：真实接口文档到位后只需要改配置里的 endpoints
-// 路径与 pay_sdks.<段>.driver 标记，生命周期与门面函数签名都不动。
+// 地址算法与两条链规则的登记点都在本包（address.go、chainrule.go）：「地址怎么编码」
+// 是这条链的知识，两种币共用同一个地址形态，两份实现迟早漂移。usdt 包只剩薄转发，
+// 目的是保住 touchgocore/usdt 这个已被下游按 import 路径写死的接入点。
+// TRX 的规则登记不随提现实现删除：删了它，带 TRX 币种的单会走「未登记即放行」，
+// 那是资金安全退化而不是简化（口径见 pay/chainrule.go）。
+//
+// 本包不碰 SQL、不碰积分与额度；下游按 util.CallTronMsg+"Xxx" / util.CallUsdtMsg+"Xxx"
+// 注册回调接手结果。与 whatsapp 通道相比这里没有登录链路：收付靠签名凭证即可。
+//
+// 供应商接入不在这个包里配置：usdt.provider 只是对 pay_sdks 一段的引用，凭证、端点表
+// 与商户账户都集中在 pay_sdks，装配动作在 pay（assemble.go）。
 package tron
 
 import (
 	"context"
 	"errors"
-	"fmt"
-	"sync/atomic"
 
-	"touchgocore/corectx"
 	"touchgocore/pay"
-	"touchgocore/util"
-	"touchgocore/vars"
 )
 
-var (
-	// 只读快照：TronStart 写入，各入口经 runCtx() 读取。
-	// 用 atomic.Pointer 而不是 atomic.Value：后者要求存入的具体类型一致，
-	// 而 context.Context 的实现类型随调用方变化，存第二个即 panic。
-	tronRunCtx atomic.Pointer[context.Context]
-	// active 为 nil 表示链路未启动，对应操作会就地拒绝而不是发出请求。
-	active atomic.Pointer[client]
-)
-
-func init() {
-	setRunCtx(context.Background())
-}
-
-func setRunCtx(ctx context.Context) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	c := ctx
-	tronRunCtx.Store(&c)
-}
-
-func runCtx() context.Context {
-	if p := tronRunCtx.Load(); p != nil {
-		return *p
-	}
-	return context.Background()
-}
-
-// TronStart 按配置装配 TRX 资金链路。
+// ErrPayoutNotWired TRX 侧没有接入出款链路。
 //
-// 配置段缺失、SDK 段没开、密钥未注入，都只记日志并返回：
-// 资金通道没配好不该阻断整机启动，但必须留下可查的痕迹。
-func TronStart(ctx context.Context) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	setRunCtx(ctx)
-	if c, ok := newClient(corectx.CfgFrom(ctx)); ok {
-		active.Store(c)
-		return
-	}
-	vars.Info("不启动TRON")
+// 它是哨兵而不是普通错误：调用方要用 errors.Is 区分「本进程没接入这条链」（部署缺陷，
+// 该补实现或改走 USDT 通道）与「这一单被拒」（业务结果，该走状态机）。
+// 三个门面一律返回 nil 结果加这个错误，是为了让「没接入」永远不可能被读成「已受理」。
+var ErrPayoutNotWired = errors.New("TRON(TRX) 出款链路未接入（本仓资金出款只交付 USDT-TRC20 链上通道）")
+
+// TronWithdraw 未接入：保留签名，不假装受理。
+func TronWithdraw(context.Context, *pay.PayOrder) (*pay.PayResult, error) {
+	return nil, ErrPayoutNotWired
 }
 
-// TronStop 摘掉供应商客户端。本包无常驻协程，清空指针即可；可重复调用。
-func TronStop(ctx context.Context) {
-	active.Store(nil)
+// TronQuery 未接入：给错误而不是给一个 UNKNOWN 回执——
+// UNKNOWN 会被上游当成「发过了、待对账」，而这里连发都没发过。
+func TronQuery(context.Context, string) (*pay.PayResult, error) {
+	return nil, ErrPayoutNotWired
 }
 
-// currentClient 取资金链路；未启动时返回明确错误而不是 panic。
-func currentClient() (*client, error) {
-	if c := active.Load(); c != nil {
-		return c, nil
-	}
-	return nil, errors.New("TRON 通道未启动（检查 tron.provider 是否引用了已开启的 pay_sdks 段与商户账户）")
-}
-
-// publish 把归一后的资金回执广播给下游，键为 util.CallTronMsg+kind。
-//
-// 无人订阅不算失败：本包不要求下游一定要落库，只给一个不必层层转发的出口。
-// 载荷是 *pay.PayResult，回调签名据此写。
-func publish(kind string, res *pay.PayResult) {
-	if res == nil {
-		return
-	}
-	if ok := util.DefaultCallFunc.Do(util.CallTronMsg+kind, res); !ok {
-		vars.Debug("TRON 回执无人订阅: kind=%s order_no=%s", kind, res.OrderNo)
-	}
-}
-
-// orderCall 是三个下单/查单门面共用的收尾：补通道前缀 → 广播回执。
-//
-// ctx 为 nil 时回落到包级运行上下文，让「启动时快照的配置」仍然生效。
-// 前置校验与状态归一都在 pay 侧做，这里只负责本包的留痕口径。
-func orderCall(ctx context.Context, kind string, call func(context.Context) (*pay.PayResult, error)) (*pay.PayResult, error) {
-	if ctx == nil {
-		ctx = runCtx()
-	}
-	res, err := call(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("TRON %s 失败: %w", kind, err)
-	}
-	publish(kind, res)
-	return res, nil
+// TronAccount 未接入：不返回零值账户，零值会被下游读成「余额不足」从而拒掉正常业务。
+func TronAccount(context.Context, *pay.AccountQuery) (*pay.AccountInfo, error) {
+	return nil, ErrPayoutNotWired
 }

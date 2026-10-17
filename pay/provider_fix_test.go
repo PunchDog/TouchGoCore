@@ -15,9 +15,9 @@ import (
 // Task #18: 回执金额校验——仅当 res.Amount 非零时才校验与订单金额一致
 // ---------------------------------------------------------------------------
 
-// TestPlaceOrderAmountValidation 表驱动：回执省略金额通过、金额一致通过、金额不一致拒绝。
-func TestPlaceOrderAmountValidation(t *testing.T) {
-	order := &PayOrder{OrderNo: "ORD-100", Amount: 5000, Currency: CurrencyUSDT}
+// TestWithdrawAmountValidation 表驱动：回执省略金额通过、金额一致通过、金额不一致拒绝。
+func TestWithdrawAmountValidation(t *testing.T) {
+	order := &PayOrder{OrderNo: "ORD-100", Amount: 5000, Currency: CurrencyUSDT, Address: "TAddr"}
 	cases := []struct {
 		name       string
 		resp       string
@@ -64,14 +64,14 @@ func TestPlaceOrderAmountValidation(t *testing.T) {
 		t.Run(cs.name, func(t *testing.T) {
 			r := newSDKServer(t)
 			r.resp.Store(cs.resp)
-			ch, err := Open(DriverGeneric, ProviderOptions{
+			ch, err := OpenDriver(DriverGeneric, ProviderOptions{
 				Name: "usdt", BaseURL: r.srv.URL, SecretKey: "s",
 				Timeout: 2 * time.Second, Endpoint: endpoints(),
 			})
 			if err != nil {
 				t.Fatal(err)
 			}
-			res, err := ch.Recharge(context.Background(), order)
+			res, err := ch.Withdraw(context.Background(), order)
 			if cs.wantOK {
 				if err != nil {
 					t.Fatalf("期望成功，实得错误: %v", err)
@@ -209,7 +209,7 @@ func TestWithdrawEndToEndStrictRetry(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	ch, err := Open(DriverGeneric, ProviderOptions{
+	ch, err := OpenDriver(DriverGeneric, ProviderOptions{
 		Name: "usdt", BaseURL: srv.URL, SecretKey: "s",
 		Timeout: 2 * time.Second, MaxRetry: 3, Endpoint: endpoints(),
 	})
@@ -231,41 +231,6 @@ func TestWithdrawEndToEndStrictRetry(t *testing.T) {
 	// MaxRetry=3 但因不可重试，只应调用一次
 	if calls != 1 {
 		t.Errorf("期望只请求 1 次（不可重试），实得 %d 次", calls)
-	}
-}
-
-// TestDepositEndToEndRetries5xx 端到端验证：Deposit 遇 500 仍会重试（行为不变）。
-func TestDepositEndToEndRetries5xx(t *testing.T) {
-	var calls int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls++
-		w.WriteHeader(http.StatusServiceUnavailable)
-		_, _ = w.Write([]byte(`unavailable`))
-	}))
-	defer srv.Close()
-
-	ch, err := Open(DriverGeneric, ProviderOptions{
-		Name: "usdt", BaseURL: srv.URL, SecretKey: "s",
-		Timeout: 2 * time.Second, MaxRetry: 2, Endpoint: endpoints(),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	order := &PayOrder{OrderNo: "D-1", Amount: 500, Currency: CurrencyUSDT}
-	_, err = ch.Recharge(context.Background(), order)
-	if err == nil {
-		t.Fatal("期望 Recharge 报错")
-	}
-	var pe *ProviderError
-	if !errors.As(err, &pe) {
-		t.Fatalf("期望 ProviderError，实得 %T: %v", err, err)
-	}
-	if !pe.Retryable {
-		t.Error("Deposit 503 应保持可重试")
-	}
-	// MaxRetry=2 → 首次 + 2 次重试 = 3 次请求
-	if calls != 3 {
-		t.Errorf("期望 3 次请求（1+2 重试），实得 %d 次", calls)
 	}
 }
 

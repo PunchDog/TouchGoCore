@@ -42,7 +42,7 @@ func ZaloSendCode(ctx context.Context, phone string) error {
 }
 
 // ZaloLogin 校验验证码并换取会话凭证；成功后凭证留在客户端内部，
-// 后续充值/提现请求自动带上 token 请求头。
+// 后续经该供应商出站的请求自动带上 token 请求头。
 func ZaloLogin(ctx context.Context, phone, code string) (*LoginResult, error) {
 	p, err := currentLogin()
 	if err != nil {
@@ -72,13 +72,11 @@ func ZaloLogin(ctx context.Context, phone, code string) (*LoginResult, error) {
 
 // ZaloLogout 清除会话凭证。未登录时为 no-op。
 //
-// 两条链路都要清：资金链路可能带着从登录链路同步过去的同一份凭证，
-// 只清一边等于退出后还能用旧会话出款。
+// 从前这里要清两条链路：资金链路的凭证是从登录链路同步过去的，只清一边
+// 等于退出后还能用旧会话出款。资金链路已删除（见 zalo.go 的哨兵门面），
+// 现在只剩登录这一份会话要清。
 func ZaloLogout() {
 	if p := login.Load(); p != nil {
-		p.SetToken("")
-	}
-	if p := fund.Load(); p != nil {
 		p.SetToken("")
 	}
 }

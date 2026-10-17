@@ -163,13 +163,7 @@ func (w *waClientWrapper) requestHistoryLocked(ctx context.Context) {
 	if withinWindow(w.lastHistAt, waReachoutHistoryMinInterval) {
 		return
 	}
-	asker, ok := w.sess.(interface {
-		RequestRecentHistory(context.Context) error
-	})
-	if !ok {
-		return
-	}
-	if err := asker.RequestRecentHistory(ctx); err != nil {
+	if err := w.sess.RequestRecentHistory(ctx); err != nil {
 		vars.Warning("WhatsApp[%s] 向手机请求历史同步失败: %v", w.jid.String(), err)
 		return
 	}

@@ -152,6 +152,14 @@ func (f *fakeSession) LoggedIn() bool {
 	return f.loggedIn
 }
 
+// Connected 与 LoggedIn 同源：假会话不区分「凭据被接受」与「socket 在」，
+// 登录即视为已连（waSession 接口方法，sessionReady 消费）。
+func (f *fakeSession) Connected() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.loggedIn
+}
+
 func (f *fakeSession) Disconnect() {
 	f.mu.Lock()
 	defer f.mu.Unlock()

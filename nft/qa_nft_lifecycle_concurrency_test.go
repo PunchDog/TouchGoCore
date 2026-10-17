@@ -4,7 +4,7 @@ package nft
 // 闸 6 —— NftStop 之后（区别于既有「从未启动」用例：这里先真实启动并证明广播/外呼发生过，
 //        再停）六门面逐字拒绝 SPEC §8 文案、httptest 零新增命中、回调广播零新增触发；
 // 闸 7 —— 契约反耦合的源码级闸（go/parser 读非测试文件的 import 面，
-//        闭包反证另有 `go list -deps ./nft`，此处把「不得 import 六包+paysdk、
+//        闭包反证另有 `go list -deps ./nft`，此处把「不得 import 六包（pay+usdt/bsc/sol/tron/telegram）、
 //        types/channel/provider/client 四核心文件零本仓 import、config 只准出现在 wire.go」
 //        钉成活闸）；
 // 闸 8 —— 并发共享状态补强：同指纹并发重发（orderLedger）、token 读写（atomic）、
@@ -101,7 +101,7 @@ func TestQaStopAfterStartRejectsInPlaceNoRequestNoBroadcast(t *testing.T) {
 func TestQaSourceImportsDecoupled(t *testing.T) {
 	banned := []string{
 		"touchgocore/pay", "touchgocore/usdt", "touchgocore/bsc",
-		"touchgocore/sol", "touchgocore/tron", "touchgocore/telegram", "touchgocore/paysdk",
+		"touchgocore/sol", "touchgocore/tron", "touchgocore/telegram",
 	}
 	// §1 文件划分表：核心四文件必须零本仓 import（纯 stdlib）。
 	coreStdlibOnly := map[string]bool{"types.go": true, "channel.go": true, "provider.go": true, "client.go": true}

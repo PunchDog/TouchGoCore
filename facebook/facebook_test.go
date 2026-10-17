@@ -2,6 +2,7 @@ package facebook
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -23,16 +24,17 @@ const (
 	loginSection = "test_fb"
 )
 
-// recorder 收集 publish 广播出去的回执。
+// recorder 收集 util.CallFacebookMsg+Kind 上的回执。
+//
+// 资金门面已不再广播（publish 随链路一起删除），这里留着是给登录侧读操作用例
+// 当「不许自广播」的探针：一旦有人把广播接回来，这些用例会立刻变红。
 var recorder = struct {
 	mu    sync.Mutex
 	calls []*pay.PayResult
 }{}
 
 func init() {
-	// 资金门面会按 CallFacebookMsg+Kind 广播回执，测试在此收口，
-	// 下游业务的落库回调就是同一个形态。
-	for _, kind := range []string{"Recharge", "Withdraw", "Query"} {
+	for _, kind := range []string{"Withdraw", "Query"} {
 		util.DefaultCallFunc.Register(util.CallFacebookMsg+kind, func(res *pay.PayResult) {
 			recorder.mu.Lock()
 			recorder.calls = append(recorder.calls, res)
@@ -51,8 +53,8 @@ func recorded() []*pay.PayResult {
 
 // payCfg 组一份「pay_sdks 登记一段 + login/provider 都引用它」的完整配置。
 //
-// 两段引用同一段是刻意的：同一家的登录网关与支付网关指向同一供应商是最常见形态，
-// 装配出的是两个 Provider 对象，会话凭证能不能带过去由 syncSession 的基址规则决定。
+// provider 引用留着是有意的：config 仍按出款口径校验它，装配侧不再碰它，
+// 于是同一份配置既能测「登录链路照常起」，又能测「资金门面回哨兵且零请求」。
 func payCfg(baseURL string, endpoints map[string]string) *config.Cfg {
 	return &config.Cfg{
 		PaySDks: map[string]*config.PaySDKConfig{
@@ -66,7 +68,6 @@ func payCfg(baseURL string, endpoints map[string]string) *config.Cfg {
 		},
 		Facebook: &config.FacebookConfig{
 			Login:     &config.PaySDKRef{SDK: testSection, Account: testAccount},
-			Provider:  &config.PaySDKRef{SDK: testSection, Account: testAccount},
 			Templates: map[string]string{"auth_verify": "tpl_verify"},
 		},
 	}
@@ -94,45 +95,8 @@ func TestSignValuesMatchPayloadOrder(t *testing.T) {
 	}
 }
 
-// TestOpenFundFailClosed 引用指不通的资金链路不得启动：带着空密钥、没点名的商户账户
-// 出去，只会在供应商侧留下验签失败或错账，本地却看起来一切正常。
-func TestOpenFundFailClosed(t *testing.T) {
-	full := func() *config.Cfg { return payCfg("https://pay.invalid", nil) }
-	cases := []struct {
-		name   string
-		mutate func(*config.Cfg)
-	}{
-		{"没有 facebook 段", func(c *config.Cfg) { c.Facebook = nil }},
-		{"通道段没引用 SDK", func(c *config.Cfg) { c.Facebook.Provider = nil }},
-		{"引用的段不存在", func(c *config.Cfg) { c.Facebook.Provider.SDK = "ghost" }},
-		{"SDK 段没开", func(c *config.Cfg) { c.PaySDks[testSection].Enable = "off" }},
-		{"缺驱动标记", func(c *config.Cfg) { c.PaySDks[testSection].Driver = "" }},
-		{"驱动名没登记", func(c *config.Cfg) { c.PaySDks[testSection].Driver = "no_such_driver" }},
-		{"没有商户账户", func(c *config.Cfg) { c.PaySDks[testSection].Accounts = nil }},
-		{"商户账户停用", func(c *config.Cfg) { c.PaySDks[testSection].Accounts[testAccount].Enable = "off" }},
-		{"缺基址", func(c *config.Cfg) { c.PaySDks[testSection].BaseURL = "" }},
-		{"缺密钥", func(c *config.Cfg) { c.PaySDks[testSection].SecretKey = "" }},
-	}
-	for _, cs := range cases {
-		cfg := full()
-		cs.mutate(cfg)
-		var ref *config.PaySDKRef
-		if cfg.Facebook != nil {
-			ref = cfg.Facebook.Provider
-		}
-		if p, ok := openFund(cfg, ref); ok || p != nil {
-			t.Errorf("%s 不应启动，实得 ok=%v", cs.name, ok)
-		}
-	}
-	// 端点表为空但引用齐备：装配成功，但任何操作都应在发请求之前被拒（见 client_test）
-	ready := full()
-	if _, ok := openFund(ready, ready.Facebook.Provider); !ok {
-		t.Error("引用齐备时应当启动")
-	}
-}
-
 // TestLoginChainNeedsNoMerchantAccount 只做验证码下发的 SDK 本就没有商户账户：
-// 按资金链路口径要求它填一个，只会逼配置里写个假商户号。
+// 按出款口径要求它填一个，只会逼配置里写个假商户号。
 func TestLoginChainNeedsNoMerchantAccount(t *testing.T) {
 	cfg := payCfg("https://pay.invalid", nil)
 	delete(cfg.PaySDks, testSection)
@@ -144,17 +108,12 @@ func TestLoginChainNeedsNoMerchantAccount(t *testing.T) {
 	if _, ok := openLogin(cfg, cfg.Facebook.Login); !ok {
 		t.Error("无商户账户的下发链路应当可启动")
 	}
-	// 同一段拿去做出款链路就不行了：出账主体必须明确。
-	cfg.Facebook.Provider = &config.PaySDKRef{SDK: loginSection}
-	if _, ok := openFund(cfg, cfg.Facebook.Provider); ok {
-		t.Error("没有商户账户的链路不得用于出款")
-	}
 }
 
 // TestLoginSectionPassesValidateAndStart 没有商户账户的下发段要能通过 config.Validate
 // 并真的启动起来：validate 认得 facebook.login 是 service 分支（不要求 accounts），
-// 而装配走的是 paysdk.OpenService 这条同样的口径。两处任一处漏认，
-// 「只登一家消息网关、资金走另一家」这个常见形态就配不出来。
+// 而装配走的是 pay.OpenService 这条同样的口径。任一处漏认，
+// 「只接一家消息网关」这个形态就配不出来。
 func TestLoginSectionPassesValidateAndStart(t *testing.T) {
 	cfg := payCfg("https://pay.invalid", nil)
 	cfg.PaySDks[loginSection] = &config.PaySDKConfig{
@@ -172,9 +131,6 @@ func TestLoginSectionPassesValidateAndStart(t *testing.T) {
 	if login.Load() == nil {
 		t.Error("引用无账户下发段的登录链路应当启动")
 	}
-	if fund.Load() == nil {
-		t.Error("资金链路应当照常启动")
-	}
 	if err := FacebookSendCode(nil, "86138"); err == nil ||
 		!strings.Contains(err.Error(), "endpoints."+pay.EndpointSendCode) {
 		t.Errorf("该段没登记任何端点，发码应缺端点被拒，实得: %v", err)
@@ -184,19 +140,6 @@ func TestLoginSectionPassesValidateAndStart(t *testing.T) {
 // TestOperationsRefuseWhenNotStarted 未启动时门面函数返回错误而不是 panic。
 func TestOperationsRefuseWhenNotStarted(t *testing.T) {
 	FacebookStop(nil)
-	recorded()
-	if _, err := FacebookRecharge(nil, &pay.PayOrder{OrderNo: "O1", Amount: 1}); err == nil {
-		t.Error("未启动时充值应当被拒")
-	}
-	if _, err := FacebookWithdraw(nil, &pay.PayOrder{OrderNo: "O1", Amount: 1, Address: "a"}); err == nil {
-		t.Error("未启动时提现应当被拒")
-	}
-	if _, err := FacebookQuery(nil, "O1"); err == nil {
-		t.Error("未启动时查询应当被拒")
-	}
-	if _, err := FacebookAccount(nil, nil); err == nil {
-		t.Error("未启动时账户查询应当被拒")
-	}
 	if err := FacebookSendCode(nil, "86138"); err == nil {
 		t.Error("未启动时发码应当被拒")
 	}
@@ -206,28 +149,37 @@ func TestOperationsRefuseWhenNotStarted(t *testing.T) {
 	if _, err := FacebookLogin(nil, "86138", "123456"); err == nil {
 		t.Error("未启动时登录应当被拒")
 	}
-	if got := recorded(); len(got) != 0 {
-		t.Errorf("未启动却广播了回执: %+v", got)
-	}
 }
 
-// TestOrderPreChecks 下单前置校验在发出请求之前就生效。
-func TestOrderPreChecks(t *testing.T) {
-	// 用一份引用齐备、但没有任何端点的配置：真发出请求就会因缺端点报错，
-	// 前置校验应当先于端点判定拦下来。
-	startWith(t, payCfg("https://pay.invalid", nil))
-	recorded()
-	if _, err := FacebookWithdraw(nil, &pay.PayOrder{OrderNo: "O1", Amount: 1}); err == nil ||
-		!strings.Contains(err.Error(), "地址") {
-		t.Errorf("提现缺地址未被拦下: %v", err)
+// TestPayoutInterfaceStaysWired 三个资金门面仍是包外可见的调用面，且一律返回未接入哨兵。
+//
+// 资金实现已删除，这里只钉两件事：签名没被人顺手改掉（下游按它编译），
+// 以及「没接入」绝不被读成「已受理」——结果必须是 nil 加 errors.Is 可判的哨兵。
+func TestPayoutInterfaceStaysWired(t *testing.T) {
+	var _ func(context.Context, *pay.PayOrder) (*pay.PayResult, error) = FacebookWithdraw
+	var _ func(context.Context, string) (*pay.PayResult, error) = FacebookQuery
+	var _ func(context.Context, *pay.AccountQuery) (*pay.AccountInfo, error) = FacebookAccount
+
+	o := &pay.PayOrder{OrderNo: "O1", Amount: 10, Currency: pay.CurrencyUSDT, Address: "TTargetAddr"}
+	cases := []struct {
+		name string
+		run  func() error
+	}{
+		{"Withdraw", func() error { _, e := FacebookWithdraw(nil, o); return e }},
+		{"Query", func() error { _, e := FacebookQuery(nil, "O1"); return e }},
+		{"Account", func() error { _, e := FacebookAccount(nil, &pay.AccountQuery{}); return e }},
 	}
-	if _, err := FacebookRecharge(nil, &pay.PayOrder{OrderNo: "O1", Amount: 0}); err == nil {
-		t.Error("零金额未被拦下")
+	for _, cs := range cases {
+		if err := cs.run(); !errors.Is(err, ErrPayoutNotWired) {
+			t.Errorf("%s 应返回未接入哨兵，实得 %v", cs.name, err)
+		}
 	}
-	if _, err := FacebookQuery(nil, "   "); err == nil {
-		t.Error("空订单号未被拦下")
+	// 订单为 nil 也一样拒绝：不能因为参数不合法就先返回 nil 结果让上游以为已受理。
+	if _, err := FacebookWithdraw(nil, nil); !errors.Is(err, ErrPayoutNotWired) {
+		t.Errorf("空订单的拒绝口径不符: %v", err)
 	}
-	if got := recorded(); len(got) != 0 {
-		t.Errorf("前置校验失败却广播了回执: %+v", got)
+	// 空订单号也一样：收口前后都是同一个哨兵，不给「参数校验错」留第二条出口。
+	if _, err := FacebookQuery(nil, "  "); !errors.Is(err, ErrPayoutNotWired) {
+		t.Errorf("空订单号的拒绝口径不符: %v", err)
 	}
 }

@@ -438,15 +438,8 @@ func (w *waClientWrapper) retired() bool {
 // sessionReady 是「现在就能发信」：已登录，且真连接还在。
 // 库的 IsLoggedIn 在断线后不会自动清掉（onDisconnect 不改这个标记），只看它会把
 // 一条已拆的 socket 当成在线，SendText 就挂到调用方 deadline。
-// 测试假会话没有 Connected 方法时退回只看 LoggedIn，既有用例不用逐个补方法。
 func sessionReady(s waSession) bool {
-	if s == nil || !s.LoggedIn() {
-		return false
-	}
-	if c, ok := s.(interface{ Connected() bool }); ok {
-		return c.Connected()
-	}
-	return true
+	return s != nil && s.LoggedIn() && s.Connected()
 }
 
 func (w *waClientWrapper) reconnectAndAwait(ctx context.Context) error {

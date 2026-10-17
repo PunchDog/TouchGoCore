@@ -204,8 +204,9 @@ func waPairCodeClaim(m *waManager, digits, masked string) (*QRSession, error) {
 	return nil, nil
 }
 
-// ctxOrBackground 门面惯例允许调用方传 nil ctx（与 StartPairing 同口径），
-// 但 context.WithTimeout 对 nil 会 panic，握手段入口统一兜底。
+// ctxOrBackground 门面惯例允许调用方传 nil ctx，但 context.WithTimeout 对 nil 会
+// panic，握手段入口统一兜底：GetPairingCode 的等待段与泵里 PairPhone 的发起段都走它。
+// 注意与 StartPairing 不同口径——那边直接忽略入参改用 m.runCtx。
 func ctxOrBackground(ctx context.Context) context.Context {
 	if ctx == nil {
 		return context.Background()

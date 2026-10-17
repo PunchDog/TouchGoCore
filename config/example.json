@@ -120,9 +120,7 @@
         ],
         "url": "/ws",
         "inurl": "/ws",
-        "allowed_origins": [
-            "https://example.com"
-        ],
+        "allowed_origins": ["https://example.com"],
         "check_origin": true,
         "skip_origin_for_intranet说明": "内网且请求不带 Origin 时放行；带 Origin 仍比对 allowed_origins",
         "skip_origin_for_intranet": false,
@@ -191,7 +189,7 @@
             "token": ""
         }
     },
-    "pay_sdks说明": "资金 SDK 集中登记表：一段=一套供应商接入（驱动、基址、凭证、端点表、我方商户账户）。同一供应商常同时供着充值、提现、验证码下发三条链路，凭证抄三份必然改漏一处，所以只在这里写一次；telegram.ton / usdt.provider / whatsapp.provider / zalo.provider / zalo.login / facebook.provider / facebook.login / instagram.provider / instagram.login / tron.provider / bsc.provider / sol.provider 各段各自用 {sdk, account} 引用这里的一段。资金链路平台无关，zalo/facebook/instagram 的 provider 与 whatsapp 一样指向 supplier_a；三条社交通道的登录链路各登记一段（supplier_zalo/supplier_fb/supplier_ig），原因是 endpoints 的键是全局逻辑名、不带平台维度（权威定义在 pay/types.go，取路径那侧按逻辑名查），同一段服务不了 /zalo/login 与 /fb/login 两种实际路径。whatsapp 没有登录段：消息侧走 whatsmeow 协议直连（见 whatsapp.sessions），不经供应商。代价：密钥注入钩子按段名注册（util.CallPaySDKMsg+段名），同一供应商登记多段时，下游注入逻辑要逐段名循环，且别把密钥抄进版本库",
+    "pay_sdks说明": "资金 SDK 集中登记表：一段=一套供应商接入（驱动、基址、凭证、端点表、我方商户账户）。同一供应商常同时供着提现、查单、验证码下发几条链路，凭证抄几份必然改漏一处，所以只在这里写一次；telegram.ton / usdt.provider / whatsapp.provider / zalo.provider / zalo.login / facebook.provider / facebook.login / instagram.provider / instagram.login / tron.provider / bsc.provider / sol.provider 各段各自用 {sdk, account} 引用这里的一段。资金链路平台无关，zalo/facebook/instagram 的 provider 与 whatsapp 一样指向 supplier_a；三条社交通道的登录链路各登记一段（supplier_zalo/supplier_fb/supplier_ig），原因是 endpoints 的键是全局逻辑名、不带平台维度（权威定义在 pay/types.go，取路径那侧按逻辑名查），同一段服务不了 /zalo/login 与 /fb/login 两种实际路径。whatsapp 没有登录段：消息侧走 whatsmeow 协议直连（见 whatsapp.sessions），不经供应商。代价：密钥注入钩子按段名注册（util.CallPaySDKMsg+段名），同一供应商登记多段时，下游注入逻辑要逐段名循环，且别把密钥抄进版本库",
     "pay_sdks": {
         "supplier_a": {
             "enable": "off",
@@ -209,12 +207,10 @@
             "max_retries": 2,
             "notify_url": "https://example.com/callback/pay",
             "notify_url说明": "回调接收地址，随下单报文交给供应商并参与签名域（不签它就可能被改成别人的接收端）。留空则按供应商为该 AppID 登记的默认值",
-            "endpoints说明": "逻辑名 -> 供应商实际路径。资金侧逻辑名固定为 account/recharge/query/withdraw，消息侧为 login/send_code/friend_list（好友列表按账号查询，zalo/facebook/instagram 三条登录链路用这个逻辑名；Instagram 没有好友概念，同名沿用、读作按账号返回的关联账号列表。whatsapp 不再登记任何消息侧逻辑名：发消息/删会话走 whatsmeow 协议直连，不经供应商），缺某个键则该操作就地拒绝、不发请求——比如供应商没有「下发验证码」这一环时就不登记 send_code，比配一个假的登录网关省事",
+            "endpoints说明": "逻辑名 -> 供应商实际路径。资金侧逻辑名固定为 account/query/withdraw，消息侧为 login/send_code/friend_list（好友列表按账号查询，zalo/facebook/instagram 三条登录链路用这个逻辑名；Instagram 没有好友概念，同名沿用、读作按账号返回的关联账号列表。whatsapp 不再登记任何消息侧逻辑名：发消息/删会话走 whatsmeow 协议直连，不经供应商），缺某个键则该操作就地拒绝、不发请求——比如供应商没有「下发验证码」这一环时就不登记 send_code，比配一个假的登录网关省事。注意这里不再登记 withdraw：USDT 的提现在本仓是本地签名后直接上链（见 chain 子段与 tron 包），其余通道的提现链路已删除，recharge 已整条删除（全仓只留提现）；登记一条不会被调用的端点路径，只会让人以为改了它就能改出款去向",
             "endpoints": {
                 "account": "/pay/account",
-                "recharge": "/pay/recharge",
-                "query": "/pay/query",
-                "withdraw": "/pay/withdraw"
+                "query": "/pay/query"
             },
             "accounts说明": "我方在该供应商名下的商户账户表，键是本地别名（default/reserve…），通道段用 account 点名。余额/可用/授信/费率是供应商侧事实，用 pay 的 QueryAccount 读回来，不抄进配置（抄进来就是一份会过期的假账）。备用商户号的用法：主账户冻结或怀疑泄露时把通道段的 account 改成 reserve，不必动凭证；enable 不为 on 的账户一律拒绝被引用",
             "accounts": {
@@ -226,6 +222,27 @@
                     "enable": "off",
                     "merchant_id": "MCH-0002"
                 }
+            },
+            "chain说明": "链上接入点与热钱包，只有当 driver 换成链上驱动名（TRON 侧为 tron_trongrid）时才生效：那时本段的提现与查单直接动公链（本地组交易、签名、广播），商户账户查询照旧走上面的 base_url/endpoints 供应商链路。没配这一段却把 driver 换成链上驱动名，装配会当场报错而不是静默回落到供应商。合约地址与网络不在这里（那是 usdt.contract / usdt.network，权威值只有一处），这一格管的是「用哪个节点、以谁的身份出资」",
+            "chain": {
+                "node说明": "链节点接入点，出款广播只走它（TRON 为 gRPC 的 host:port）。链上通道必填",
+                "node": "grpc.trongrid.io:50051",
+                "tls说明": "接入点传输安全：只有显式写 \"off\" 才走明文，留空或其他值一律按 TLS 建连并校验证书。反向缺省是刻意的——把明文做成缺省，等于让「照抄一份自建节点配置」顺手把热钱包签名链路挂到明文中转上。但 TronGrid 的公共 gRPC 端点实测是明文 h2c（2026-10-16：TLS 建连报 \"first record does not look like a TLS handshake\"，改成 off 后同一端点读到链头 87162841），所以照抄本示例连 TronGrid 就填 off；换成自建或带 TLS 的节点再删掉这一格",
+                "tls": "off",
+                "http_base说明": "同链的 REST 基址，只用于读侧兜底（查单、余额、近期转出反查），不用于广播——少一条会动钱的未验证路径。留空即读侧也只走 node",
+                "http_base": "https://api.trongrid.io",
+                "api_key说明": "接入点要求的访问凭证（TRON 侧为 TRON-PRO-API-KEY）。它不是资金密钥，但同样禁止进日志与 error 文案。实测不带 Key 时扩展读接口（按地址列 TRC20 转账，即出款台账反查那条）会直接 429，所以这一格在生产上是必需的，不是可选项",
+                "api_key": "CHANGE-ME",
+                "wallet_address说明": "我方出款账户的链上地址。它是路由信息、可以进日志，且必须与私钥派生出的地址逐字相等；不等就是「配着 A 的地址、用的是 B 的私钥」，这种错不在装配期拒就会等对账才看得见",
+                "wallet_address": "TCHANGE-ME-HOT-WALLET",
+                "private_key说明": "热钱包私钥（hex）。恒留空，由下游在启动前经 util.CallPayChainMsg+\"supplier_a\" 钩子注入，口径与 secret_key 一致：不进版本库、不进日志、不进任何摘要字段。没注入时整条链上通道不启动",
+                "private_key": "",
+                "fee_limit说明": "本单允许烧掉的手续费上限，单位是该链原生币的最小单位（TRON 为 sun，65 TRX 写作 65000000）。<=0 由驱动按该链缺省值定。注意 gas 收的是原生币而不是本单币种：USDT 余额够而 TRX 为 0 时这一样出不了款",
+                "fee_limit": 0,
+                "timeout_sec说明": "单次链上操作的超时（秒），<=0 用驱动缺省。不复用上层的 timeout_sec：那一个管的是供应商 HTTP 接口响应，两者量级与失败形态都不同",
+                "timeout_sec": 30,
+                "max_retries说明": "链上读操作（查单、余额、近期转出反查）的重试次数，0 即不重试。广播永远不看这一格：广播出去之后是「结果不确定」，要靠台账按 txid 查清，而不是再来一次",
+                "max_retries": 2
             }
         },
         "supplier_zalo": {
@@ -290,7 +307,7 @@
             }
         }
     },
-    "nft_sdks说明": "NFT 资产链路的 SDK 集中登记表，代码在 nft 包。与 pay_sdks 刻意分开两张表：NFT 的驱动登记在 nft.Register（内置 nft_generic_md5），端点逻辑名是 holdings/token/mint/transfer/query 五个，与资金契约的 recharge/withdraw 不同域；混用一张表会让「换资金供应商」与「换 NFT 供应商」两个互不相关的运维动作互相牵连。同一供应商既供资金又供 NFT 时，密钥由下游对 util.CallPaySDKMsg+段名 与 util.CallNftSDKMsg+段名 两个钩子各注一次，配置里 secret_key 保持留空、不进版本库",
+    "nft_sdks说明": "NFT 资产链路的 SDK 集中登记表，代码在 nft 包。与 pay_sdks 刻意分开两张表：NFT 的驱动登记在 nft.Register（内置 nft_generic_md5），端点逻辑名是 holdings/token/mint/transfer/query 五个，与资金契约的 account/query/withdraw 不同域；混用一张表会让「换资金供应商」与「换 NFT 供应商」两个互不相关的运维动作互相牵连。同一供应商既供资金又供 NFT 时，密钥由下游对 util.CallPaySDKMsg+段名 与 util.CallNftSDKMsg+段名 两个钩子各注一次，配置里 secret_key 保持留空、不进版本库",
     "nft_sdks": {
         "mynft": {
             "enable": "off",
@@ -331,28 +348,12 @@
         "game_to_short": {
             "game_1": "g1",
             "game_2": "g2"
-        },
-        "ton说明": "TON 充值/提现的 SDK 引用（代码在 telegram 包、配置跟 telegram 段）。这里只留两个名字，凭证在 pay_sdks；sdk 留空即该通道不启用，与 bot_token 互不影响",
-        "ton": {
-            "sdk": "supplier_a",
-            "sdk说明": "pay_sdks 的键名。填了名字还要那一段 enable 为 on 才算启用；指向不存在段名会在启动校验直接报错",
-            "account": "default",
-            "account说明": "该 SDK 段 accounts 里的键名。只有一个账户时留空即取那一个；多于一个必须点名，否则「这一单从哪个商户号出」就成了初始化顺序的函数"
-        },
-        "ton_network说明": "TON 网络标识（mainnet/testnet），随下单报文交给供应商并参与签名，留空按主网口径处理。它还要与收款地址自带的那个标记位对齐：用户友好地址的第 1 字节有 0x80 就是测试网地址，填 mainnet 会被 telegram 包在下单前拒掉（反过来同理，宁可拒单不可错投）",
-        "ton_network": "mainnet",
-        "jetton说明": "TON 侧代币合约地址；原生 TON 留空。同一通道下原生币与代币靠这一列区分。启动时验格式：48 位 base64url 用户友好地址（末尾 2 字节是 CRC-16/CCITT-FALSE 校验和，EQ 与 UQ 两种写法都收）或 0:/-1: 开头的原始十六进制形态，不过则通道不启动。jetton 的小数位数取自该代币自己的元数据（TEP-64），不是固定 9 位——Amount 按最小单位整数上送，位数搞错就是 10^n 倍的不可逆多付",
-        "jetton": ""
+        }
     },
-    "whatsapp说明": "WhatsApp 通道（消息/充值/提现），代码在 whatsapp 包。消息侧走 go.mau.fi/whatsmeow 直连 WhatsApp 多设备协议（QR 扫码配对、发文本、删会话框），会话密钥材料存在 sessions.dsn 指向的 Postgres 库里，不经任何 HTTP 消息网关；资金侧（充值/提现）仍引用一个 pay_sdks 段——提现必须有持牌主体出账，而 WhatsApp 协议里没有任何可发起转账的 API",
+    "whatsapp说明": "WhatsApp 通道（消息/提现门面），代码在 whatsapp 包。消息侧走 go.mau.fi/whatsmeow 直连 WhatsApp 多设备协议（QR 扫码配对、发文本、删会话框），会话密钥材料存在 sessions.dsn 指向的 Postgres 库里，不经任何 HTTP 消息网关；资金侧仍引用一个 pay_sdks 段——提现必须有持牌主体出账，而 WhatsApp 协议里没有任何可发起转账的 API；充值接口已整条删除，该段只可能被账户查询读到",
     "whatsapp": {
         "enable说明": "通道总闸：必须显式为 on 才装配本通道，且一支管两支——whatsmeow 消息侧与资金侧一起开或一起关。整段不写、键不写、写成 off 或任何别的值都读作不开，启动日志留痕「不启动Whatsapp（无 whatsapp 段或 whatsapp.enable 不为 on）」，本包所有门面调用就地拒绝。示例写 off：消息侧直连的是 WhatsApp 官方服务器（非官方客户端，账号有封号风险），资金侧会真的出款，两支都不该是「复制示例即生效」的形态",
         "enable": "off",
-        "provider说明": "充值/提现链路的 SDK 引用；漏一个开关的代价是少一条通道，多开一条的代价是真金出款，所以默认不启用",
-        "provider": {
-            "sdk": "supplier_a",
-            "account": "default"
-        },
         "sessions说明": "whatsmeow 消息侧的会话库与连接参数（只在 enable 为 on 时参与装配）。这一段刻意不放任何凭证字段：账号密钥材料（NoiseKey/IdentityKey/SignedPreKey/AdvSecretKey）由 sqlstore 直接管在数据库表里，配进启动配置等于把账号本体抄进版本库。整段不写或 dsn 留空即消息侧不启动（资金侧不受影响）；非官方协议客户端有封号风险，部署前想清楚",
         "sessions": {
             "dsn说明": "Postgres 连接串，whatsmeow 会话表建在这个库里；它本身含数据库口令，属敏感值——只经部署配置注入、不进版本库，禁入日志与错误文案（whatsapp 包对含 DSN 的错误做脱敏）。示例值不可直接使用",
@@ -379,95 +380,44 @@
             "antiban_state_dir": "antiban_state"
         }
     },
-    "zalo说明": "Zalo 通道（登录/充值/提现），代码在 zalo 包。Zalo 是越南的即时通讯 App，我方登录的是供应商代持的账号，账号归属与凭证有效期都由那家供应商定，本层不为这几件事加字段。登录与资金各引用一个 SDK 段：验证码走消息网关、充值提现走支付网关是常见形态，两段独立开关（facebook/instagram 同构；whatsapp 不在此列——它的消息侧走 whatsmeow 协议直连，没有登录段）",
+    "zalo说明": "Zalo 通道（登录/提现门面），代码在 zalo 包。Zalo 是越南的即时通讯 App，我方登录的是供应商代持的账号，账号归属与凭证有效期都由那家供应商定，本层不为这几件事加字段。登录与资金各引用一个 SDK 段：验证码走消息网关、提现走支付网关是常见形态，两段独立开关（facebook/instagram 同构；whatsapp 不在此列——它的消息侧走 whatsmeow 协议直连，没有登录段）",
     "zalo": {
         "login说明": "登录与验证码下发链路的 SDK 引用。这类链路只发消息、不出钱，被引用的 SDK 段没有 accounts 也能启动；account 留空即可",
         "login": {
             "sdk": "supplier_zalo",
             "account": ""
         },
-        "provider说明": "充值/提现链路的 SDK 引用。充值提现与社交平台无关，一家支付网关可同时供多条社交通道，所以与 whatsapp 指向同一个 supplier_a/default——凭证只在 pay_sdks 登记一次，这里只留两个名字",
-        "provider": {
-            "sdk": "supplier_a",
-            "account": "default"
-        },
         "templates说明": "消息模板名表，键是逻辑名；auth_verify 是下发验证码用的模板（zalo/facebook/instagram 三条通道共用这套逻辑名口径）",
         "templates": {
             "auth_verify": "tpl_zalo_verify"
         }
     },
-    "facebook说明": "Facebook 通道（登录/充值/提现），代码在 facebook 包。真实世界 Facebook 走 OAuth 跳转授权，但本包登录的是供应商代持账号，登录链路仍只有「下发一次性凭证、拿凭证换会话」两步；code 是短信验证码、OAuth 授权码还是回调 ticket，由供应商在 pay_sdks 段的登记口径决定，包侧不猜。供应商没有「下发验证码」这一环时，就在其 SDK 段的 endpoints 里不登记 send_code，该操作就地拒绝、不发请求，不为凑齐两段配一个假网关",
+    "facebook说明": "Facebook 通道（登录/提现门面），代码在 facebook 包。真实世界 Facebook 走 OAuth 跳转授权，但本包登录的是供应商代持账号，登录链路仍只有「下发一次性凭证、拿凭证换会话」两步；code 是短信验证码、OAuth 授权码还是回调 ticket，由供应商在 pay_sdks 段的登记口径决定，包侧不猜。供应商没有「下发验证码」这一环时，就在其 SDK 段的 endpoints 里不登记 send_code，该操作就地拒绝、不发请求，不为凑齐两段配一个假网关",
     "facebook": {
         "login说明": "登录与验证码下发链路的 SDK 引用。单独成段（supplier_fb）而不是复用 supplier_zalo 的原因见 pay_sdks说明：endpoints 的逻辑名不带平台维度，一段给不出两个 /login 路径",
         "login": {
             "sdk": "supplier_fb",
             "account": ""
         },
-        "provider说明": "充值/提现链路的 SDK 引用，与 zalo/whatsapp 指向同一个 supplier_a/default",
-        "provider": {
-            "sdk": "supplier_a",
-            "account": "default"
-        },
         "templates说明": "Meta 系通常没有消息模板概念，留空即可（不填或空对象都行）；取到空串模板名不进报文，不会发出一个占位模板",
         "templates": {}
     },
-    "instagram说明": "Instagram 通道（登录/充值/提现），代码在 instagram 包。与 facebook 同属 Meta 系、多半复用同一家供应商，仍拆成独立通道段与独立 SDK 段（supplier_ig）：两条通道的账号、商户与开关各自独立，合并成一段就没法表达「只关 Instagram」；code 形态口径同 facebook说明。Instagram 没有「好友」概念，friend_list 逻辑名照样沿用，读作「按账号返回的关联账号列表」——三条社交通道共用一套逻辑名，端点表才不至于散成三个名字各配一遍",
+    "instagram说明": "Instagram 通道（登录/提现门面），代码在 instagram 包。与 facebook 同属 Meta 系、多半复用同一家供应商，仍拆成独立通道段与独立 SDK 段（supplier_ig）：两条通道的账号、商户与开关各自独立，合并成一段就没法表达「只关 Instagram」；code 形态口径同 facebook说明。Instagram 没有「好友」概念，friend_list 逻辑名照样沿用，读作「按账号返回的关联账号列表」——三条社交通道共用一套逻辑名，端点表才不至于散成三个名字各配一遍",
     "instagram": {
         "login说明": "登录与验证码下发链路的 SDK 引用；供应商若没有下发验证码环节，就在 supplier_ig 段里去掉 endpoints.send_code",
         "login": {
             "sdk": "supplier_ig",
             "account": ""
         },
-        "provider说明": "充值/提现链路的 SDK 引用，与 facebook/zalo/whatsapp 指向同一个 supplier_a/default",
-        "provider": {
-            "sdk": "supplier_a",
-            "account": "default"
-        },
         "templates说明": "Meta 系通常没有消息模板概念，留空即可；取到空串模板名不进报文",
         "templates": {}
     },
-    "usdt说明": "USDT(TRC20) 通道（充值/提现），代码在 usdt 包。金额一律整数最小单位（USDT 这张合约是 6 位小数，位数取自合约自身的元数据），配置与报文都不出现浮点。注意链上手续费不是万分比：TRON 的 gas 以 TRX 计、由发送方付、与转账金额无关，单笔实际成本看回执的 fee 与 fee_currency",
+    "usdt说明": "USDT(TRC20) 通道（提现/账户查询），代码在 usdt 包。金额一律整数最小单位（USDT 这张合约是 6 位小数，位数取自合约自身的元数据），配置与报文都不出现浮点。注意链上手续费不是万分比：TRON 的 gas 以 TRX 计、由发送方付、与转账金额无关，单笔实际成本看回执的 fee 与 fee_currency。出款是走供应商还是直接上链，只看所引用 SDK 段的两处：driver 换成链上驱动名 + 补 chain 子段；合约与网络仍以本段的 contract/network 为权威，SDK 段不再复制一份。充值/收款接口已整条删除，本通道只留提现、查单与商户账户查询",
     "usdt": {
         "network说明": "公链网络标识（mainnet / shasta / nile），随下单报文交给供应商并参与签名；留空则按供应商为该 AppID 登记的默认值。别把 trc20 填到这里——那是代币标准不是网络，网络和合约是两个正交维度，填了本包会在启动时拒掉这一段配置",
         "network": "mainnet",
         "contract说明": "TRC20 合约地址；原生 TRX 留空。同一 TRON 通道下 USDT 与原生币靠这一列区分。启动时按 Base58Check 验格式（长度 34、版本字节 0x41、末尾 4 字节双 SHA256 校验和），不通过则该通道不启动。它会并进报文并追加到签名域末尾，顺序由 usdt 包登记",
         "contract": "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t",
-        "provider说明": "资金链路的 SDK 引用",
-        "provider": {
-            "sdk": "supplier_a",
-            "account": "default"
-        }
-    },
-    "tron说明": "TRON 原生币(TRX) 通道（充值/提现），代码在 tron 包。金额一律整数最小单位（TRX 是 6 位小数）；同链代币 USDT 请走 usdt 段，不在这里配",
-    "tron": {
-        "network说明": "公链网络标识（mainnet / shasta / nile），随下单报文交给供应商并参与签名；留空则按供应商为该 AppID 登记的默认值",
-        "network": "mainnet",
-        "token说明": "TRC10 代币合约 id（纯数字串，如 1000101）；原生 TRX 留空。TRC20 的 Base58 合约地址填 usdt.contract，填在这里会被启动校验拒掉——两类代币的收端识别字段形态不同",
-        "token": "",
-        "provider说明": "资金链路的 SDK 引用",
-        "provider": {
-            "sdk": "supplier_a",
-            "account": "default"
-        }
-    },
-    "bsc说明": "BSC(BNB Smart Chain，EVM 形态) 原生币(BNB) 通道（充值/提现），代码在 bsc 包。金额一律整数最小单位（BNB 是 18 位小数）；链上 gas 以 BNB 计，单笔实际成本看回执的 fee 与 fee_currency",
-    "bsc": {
-        "network说明": "公链网络标识（mainnet / chapel），随下单报文交给供应商并参与签名；留空则按供应商为该 AppID 登记的默认值",
-        "network": "mainnet",
-        "token说明": "BEP20 代币合约地址（0x + 40 位十六进制）；原生 BNB 留空。启动时验格式：混合大小写时要过 EIP-55 校验和，不通过则该通道不启动。它会并进报文并追加到签名域末尾，键名 contract 与 usdt 侧口径一致",
-        "token": "",
-        "provider说明": "资金链路的 SDK 引用",
-        "provider": {
-            "sdk": "supplier_a",
-            "account": "default"
-        }
-    },
-    "sol说明": "Solana 原生币(SOL) 通道（充值/提现），代码在 sol 包。金额一律整数最小单位 lamports（9 位小数），位数填错就是 10^n 倍的不可逆多付",
-    "sol": {
-        "network说明": "公链网络标识（mainnet / devnet），随下单报文交给供应商并参与签名；留空则按供应商为该 AppID 登记的默认值。Solana 的测试网叫 devnet 不叫 testnet",
-        "network": "mainnet",
-        "token说明": "SPL 代币合约地址（Base58 解出恰好 32 字节）；原生 SOL 留空。过不了格式校验则该通道不启动。报文里的特有字段键沿用 contract，与 usdt 侧口径一致",
-        "token": "",
         "provider说明": "资金链路的 SDK 引用",
         "provider": {
             "sdk": "supplier_a",

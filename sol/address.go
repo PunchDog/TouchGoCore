@@ -69,8 +69,7 @@ func IsValidSolanaAddress(s string) bool {
 // 但 SOL 的登记归本包（链的原生币规则归属链包）。
 type solRule struct{}
 
-// CheckAddress 空地址放行：充值侧的收款端由供应商返回，提现侧的非空检查
-// 在 pay.CheckOrder 里已经做过，这里只管格式。
+// CheckAddress 空地址放行：提现侧的非空检查在 pay.CheckOrder 里已经做过，这里只管格式。
 func (solRule) CheckAddress(o *pay.PayOrder) error {
 	addr := strings.TrimSpace(o.Address)
 	if addr == "" {

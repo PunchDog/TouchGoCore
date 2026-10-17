@@ -25,13 +25,16 @@ func TestStartNilCfgDoesNotPanic(t *testing.T) {
 }
 
 // TestTimeoutAndRetryDefaults 未配超时与重试时落到共用层默认值，而不是 0 超时。
+//
+// 用账户查询链路测：那是本通道仍然经过 HTTP 供应商的那条路（出款与查单已改为直接上链，
+// 它们的超时口径由链上网关自己管）。
 func TestTimeoutAndRetryDefaults(t *testing.T) {
-	cfg := payCfg("https://pay.invalid", map[string]string{pay.EndpointQuery: "/api/query"})
+	cfg := payCfg("https://pay.invalid", map[string]string{pay.EndpointAccount: "/api/account"})
 	cfg.PaySDks[testSection].TimeoutSec = 0
 	cfg.PaySDks[testSection].MaxRetries = -1
 	startWith(t, cfg)
 	// 域名不可解析：一次请求 + 默认重试次数后返回错误即可，不 panic 也不无限等待。
-	if _, err := UsdtQuery(nil, "O1"); err == nil {
+	if _, err := UsdtAccount(nil, nil); err == nil {
 		t.Fatal("不可达供应商应当报错")
 	}
 }

@@ -18,7 +18,8 @@ package whatsapp
 //     账号本体凭据（等价于把那只手机交出去），由 sqlstore 落在本仓 Postgres 会话库里。
 //     本包任何日志、error 文案、SessionInfo、广播载荷都不携带这些材料。
 //   - **提现不在这里**：库里支付消息只是 unsupported 占位（WM/armadillomessage.go:95-96，
-//     无任何可发起转账的 API），资金动作一律留在 pay_sdks 供应商链路（fund.go）。
+//     无任何可发起转账的 API）。本包的供应商资金链路已删（原 fund.go），三个资金门面只剩
+//     返回 ErrPayoutNotWired 的哨兵；全仓会动钱的出款只有 USDT-TRC20 一条（tron 包）。
 //
 // 并发口径：同一 Client 可并发发信（whatsmeow 底层有请求表锁与 socket 锁，实践可行，
 // 但库对多 goroutine 安全零表述，不是契约）；WhatsappStartClient / WhatsappStopClient /
@@ -136,7 +137,12 @@ type WaGroup struct {
 type waSession interface {
 	// Login 建立连接并完成握手；已连接时按库的语义应就地返回。
 	Login(ctx context.Context) error
+	// LoggedIn 报凭据已被服务端接受（断线后库不清这个标记）；Connected 报 socket
+	// 真连上。sessionReady 两个都要看，理由见 wa_manager.go。
+	// Connected 收进接口而非调用点做可选断言：两个实现（waConn、fakeSession）
+	// 都提供，断言恒真，改由编译期保证实现完备。
 	LoggedIn() bool
+	Connected() bool
 	Disconnect()
 	Logout(ctx context.Context) error
 	// SendText 发一条纯文本，返回消息 id 与服务器时间戳。
@@ -168,6 +174,11 @@ type waSession interface {
 	// GetJoinedGroups 向服务器查询该账号已加入的群组（需在线，一次 IQ 往返，
 	// 查自 WM/group.go:535）。
 	GetJoinedGroups(ctx context.Context) ([]*types.GroupInfo, error)
+	// RequestRecentHistory 让手机把最近 7 天的会话推过来。历史里的 TcToken 会由库写进
+	// 会话库，是外联凭证恢复档（wa_reachout.go）补盐与 tctoken 的一步。
+	// 收进接口而非在调用点做可选断言：两个实现（waConn 与测试的 fakeSession）都提供
+	// 该方法，断言恒真，改由编译期保证实现完备。
+	RequestRecentHistory(ctx context.Context) error
 	// OnEvent 注册事件回调；只应在连接之前调用一次。
 	OnEvent(handler func(any))
 }

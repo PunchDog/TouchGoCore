@@ -11,7 +11,8 @@ package whatsapp
 // 口径与纪律：
 //   - 全部走既有 seam 假件（fakeSession/fakeStore/startFakeWA），不联网、不连真 Postgres；
 //   - 手搓 t.Fatalf/t.Errorf，本包不用 testify；
-//   - helper 一律 ch 前缀（同包命名空间：pc/pch/pcs/al 已被占用，重名在 Go 里是编译错误）；
+//   - helper 一律 ch 前缀（同包命名空间：pc/pcs/al 已被占用，重名在 Go 里是编译错误；
+//     码配对那支的假件与 helper 统一 pc 前缀，宿主见 wa_pairing_code_test.go）；
 //     复用既有 helper（alCountSyncs/alWantSeq/alContact/waitUntil/startFakeWA/fakeDevice）不新增同义反复；
 //   - 零 t.Skip：跑不出去的直接红，不许把形态藏起来；
 //   - 竞态时序一律避开「setDown() 之后立刻等登录」这一档（wa_manager.go:540-560 的 waitLoggedIn
@@ -751,8 +752,11 @@ func TestChNoStateOrGoroutineLeak(t *testing.T) {
 // TestContactChFullEscalationTwiceThenWindowBack 钉「full 升级每轮只发生一次、且第二次落在
 // 窗口内就不再发生」：窗口放开时连跑两次列好友 ⇒ fullCalls 恰为 2、序列 [false,true,false,true]；
 // 把窗口调回生效 ⇒ 第三次只有快路那一次真发，升级被挡住后**不再补发**（序列末位多一个 false、
-// full 仍为 2）。这条与 T10 的两条窗口用例的分工：那条钉「第一次会升级 / 第二次被挡」，
+// full 仍为 2）。与 T10 保留的那条窗口用例（wa_autologin_test.go 的
+// TestContactFullSyncThrottledByWindow）的分工：那条钉「第一次会升级 / 第二次被挡」，
 // 这条钉「连续两轮都各升级一次」+「中途把窗口调回生效立刻开始挡」这个翻转。
+// T10 原来还有一条「窗口放开后升级确实执行」（两轮 [false,true]→[false,true,false,true]、
+// full 依次 1/2），判据与本用例前两轮逐字相同、夹具同字面量，已并入这里（删它不丢任何闸）。
 //
 // 改坏哪行会红：
 //   - wa_contacts.go:141-143 不记 lastFullAt ⇒ 窗口永远挡不住，第三轮的 full 涨到 3，红；

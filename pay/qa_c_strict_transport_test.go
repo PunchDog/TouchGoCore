@@ -120,7 +120,7 @@ func TestWithdrawHijackCloseNeverResends(t *testing.T) {
 }
 
 // TestWithdrawTimeoutNeverResends 供应商收单后不回包、客户端超时：Withdraw 只发一次；
-// Recharge（非严格）仍按 maxRetry 重发。
+// 非严格路径（查单）仍按 maxRetry 重发。
 func TestWithdrawTimeoutNeverResends(t *testing.T) {
 	hang := func(t *testing.T, calls *atomic.Int32) *httptest.Server {
 		t.Helper()
@@ -140,17 +140,16 @@ func TestWithdrawTimeoutNeverResends(t *testing.T) {
 	_, err := p.Withdraw(context.Background(), order)
 	assertNoResendStrict(t, err, "transport", wcalls.Load(), "Withdraw/超时")
 
-	var rcalls atomic.Int32
-	rsrv := hang(t, &rcalls)
-	p2 := newTransportTestProvider(t, rsrv.URL, 1, 40*time.Millisecond)
-	_, err = p2.Recharge(context.Background(), &PayOrder{OrderNo: "D-T2", Amount: 500, Currency: CurrencyUSDT})
-	if err == nil {
-		t.Fatal("Recharge: 期望报错")
+	var qcalls atomic.Int32
+	qsrv := hang(t, &qcalls)
+	p2 := newTransportTestProvider(t, qsrv.URL, 1, 40*time.Millisecond)
+	if _, err := p2.QueryOrder(context.Background(), "W-T2"); err == nil {
+		t.Fatal("Query: 期望报错")
 	} else if !IsProviderRetryable(err) {
-		t.Errorf("Recharge: 非严格路径超时应保持可重试，实得 %v", err)
+		t.Errorf("Query: 非严格路径超时应保持可重试，实得 %v", err)
 	}
-	if n := rcalls.Load(); n != 2 {
-		t.Errorf("Recharge: 期望 2 次请求（首次+1 重试），实得 %d 次", n)
+	if n := qcalls.Load(); n != 2 {
+		t.Errorf("Query: 期望 2 次请求（首次+1 重试），实得 %d 次", n)
 	}
 }
 

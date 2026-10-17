@@ -7,7 +7,8 @@ package whatsapp
 // 单飞记账清理、同号可重发、单飞拒绝、成功路径的 pair_code 事件形态与
 // 「不自动 StartClient」裁决、全链路号码脱敏。
 //
-// 本文件还带 fakePairSession（wa_pairing_test.go 既有假件）的 PairPhone 方法——
+// 本文件是码配对假会话（pcFakePairSession）的唯一宿主，T5/T7/T8 三支用例共用它；
+// 这里还带 fakePairSession（wa_pairing_test.go 既有假件）的 PairPhone 方法——
 // 同包方法允许跨文件拆分，既有测试文件因此一个字节都不用动；QR 扫码路径
 // 永远不该调它，被调到即 panic 暴露误用。
 
@@ -34,26 +35,45 @@ func (*fakePairSession) PairPhone(context.Context, string, bool, whatsmeow.PairC
 	panic("QR 扫码配对路径不得调用 PairPhone（码配对断言请用 pcFakePairSession）")
 }
 
-// pcFakePairSession 是码配对的假一次性会话。默认形态：Connect 被调时自动向
-// QR 通道推首个 code 项（复刻「连接建立后库秒级出码」时序，门面同步等待时
-// 不会卡死）；holdCode=true 时不出码，由测试手动推。
+// pcFakePairSession 是码配对的一次性假会话，T5/T7/T8 三支用例共用这一份。
+// 默认形态：Connect 被调时自动向 QR 通道推首个 code 项（复刻「连接建立后库秒级
+// 出码」时序，门面同步等待时不会卡死）；holdCode=true 时不出码，由测试手动推。
+//
+// 「首个 code 项之前」这一段可编排，供 T7 的负例形态使用：
+//   - closeFirst：Connect 后立刻关通道，一个项都不推（库侧「通道先关」形态，
+//     qrchan.go:88-91 的 closed 分支）；
+//   - preItems：Connect 后按序推若干个**非 code 中间项**，之后可再补首个 code 项
+//     （qrchan.go:37-40 的四种事件形态；passkey 两态与 error 项都不是终局，
+//     见 qrchan.go:158-186 推完即 return、不 close）；
+//   - terminalFirst：先推一个终局项（timeout/err-*）再关通道（qrchan.go:203-207
+//     「终局项之后立即 close」）。
+//
+// PairPhone 的返回值随「首个 code 项是否已经投递过」而不同：没见到 code 项就被调
+// （握手误取了中间项）返回 earlyCode，见到后才返回 pairCode。这样「把第一个事件
+// 当 code 项」的实现改动会让用例变红，而不是依旧拿到一个看起来正常的码。
 type pcFakePairSession struct {
 	dev   *store.Device
 	store *fakeStore
 
-	out       chan whatsmeow.QRChannelItem
-	closeOnce sync.Once
+	out chan whatsmeow.QRChannelItem
 
-	mu        sync.Mutex
-	order     []string // 调用序记录仪："QRChannel" / "Connect" / "PairPhone"
+	mu    sync.Mutex
+	order []string // 调用序记录仪："QRChannel" / "Connect" / "PairPhone"
+	// 行为开关（创建当场由 configure 预置，泵协程读取时也在锁内）。
+	closeFirst    bool
+	terminalFirst bool
+	holdCode      bool
+	preItems      []whatsmeow.QRChannelItem
+	codeAfterPre  bool
+	pairErr       error
+	pairCode      string // PairPhone 返回值（假码形态与库一致：XXXX-XXXX）
+	earlyCode     string
+
 	closed    bool
 	disconn   int
-	ctx       context.Context
-	holdCode  bool
-	pairErr   error
-	pairCode  string // PairPhone 返回值（假码形态与库一致：XXXX-XXXX）
+	codeSent  bool
 	pairCalls int
-	// PairPhone 五实参留档，供逐字断言。
+	// PairPhone 五实参留档，供逐字断言（T5 钉 ctx 非空与号码归一）。
 	gotCtx   context.Context
 	gotPhone string
 	gotShow  bool
@@ -61,12 +81,21 @@ type pcFakePairSession struct {
 	gotName  string
 }
 
+// pcFakePairCode / pcEarlyPairCode 是两个可区分的假码（形态与库一致：XXXX-XXXX），
+// 由安装子创建当场预置，configure 再覆盖成用例自己的码。
+// pcRawQRCode 是假件自动推的首个二维码串（取码场景只要求它是「一条二维码帧」）。
+const (
+	pcFakePairCode  = "K3PD-7MZA"
+	pcEarlyPairCode = "EARL-YBAD"
+	pcRawQRCode     = "w1://pc-raw-qr"
+)
+
 func (f *pcFakePairSession) QRChannel(ctx context.Context) (<-chan whatsmeow.QRChannelItem, error) {
 	f.mu.Lock()
 	f.order = append(f.order, "QRChannel")
-	f.ctx = ctx
 	f.mu.Unlock()
 	// 复刻库侧对 ctx 取消的处置：关通道 + 断连（qrchan.go:124-132）。
+	// StopAll/Cancel 路径的收敛依赖这条，假件不做就会把「停机释放号码」判成红。
 	go func() {
 		<-ctx.Done()
 		f.pcClose()
@@ -78,12 +107,25 @@ func (f *pcFakePairSession) QRChannel(ctx context.Context) (<-chan whatsmeow.QRC
 func (f *pcFakePairSession) Connect() error {
 	f.mu.Lock()
 	f.order = append(f.order, "Connect")
-	hold := f.holdCode
+	closeFirst := f.closeFirst
+	terminalFirst := f.terminalFirst
+	holdCode := f.holdCode
+	preItems := append([]whatsmeow.QRChannelItem(nil), f.preItems...)
+	codeAfterPre := f.codeAfterPre
 	f.mu.Unlock()
-	if !hold {
-		f.pcSend(whatsmeow.QRChannelItem{
-			Event: whatsmeow.QRChannelEventCode, Code: "w1://pc-raw-qr", Timeout: 20 * time.Second,
-		}, false)
+
+	switch {
+	case closeFirst:
+		f.pcClose()
+	case terminalFirst:
+		f.pcSend(whatsmeow.QRChannelTimeout, true)
+	default:
+		for _, it := range preItems {
+			f.pcSend(it, false)
+		}
+		if codeAfterPre || (!holdCode && len(preItems) == 0) {
+			f.pcPushCode()
+		}
 	}
 	return nil
 }
@@ -96,12 +138,22 @@ func (f *pcFakePairSession) Disconnect() {
 
 func (f *pcFakePairSession) Device() *store.Device { return f.dev }
 
+// LoggedIn 复刻库侧 IsLoggedIn 的口径：设备 JID 已写入即算登录。泵在配对成功后
+// 靠它决定要不要用落库凭据重登（wa_pairing.go 的 reloginPaired）。
 func (f *pcFakePairSession) LoggedIn() bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.dev != nil && f.dev.ID != nil && len(f.order) > 0
+	return f.dev != nil && f.dev.ID != nil
 }
 
+// pcDisconn 读出假件被 Disconnect 的次数（StopAll 收会话的判据）。
+func (f *pcFakePairSession) pcDisconn() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.disconn
+}
+
+// PairPhone 记录五实参留档；没见到 code 项就被调时返回可区分的坏码（earlyCode）。
 func (f *pcFakePairSession) PairPhone(ctx context.Context, phone string, showPushNotification bool,
 	clientType whatsmeow.PairClientType, clientDisplayName string) (string, error) {
 	f.mu.Lock()
@@ -113,15 +165,15 @@ func (f *pcFakePairSession) PairPhone(ctx context.Context, phone string, showPus
 	if f.pairErr != nil {
 		return "", f.pairErr
 	}
-	code := f.pairCode
-	if code == "" {
-		code = "Q4H5-JK7M"
+	if !f.codeSent {
+		// 握手把非 code 的中间项当成了首个 code 项——返回一个可区分的坏码。
+		return f.earlyCode, nil
 	}
-	return code, nil
+	return f.pairCode, nil
 }
 
-// pcPairArgs 读出五实参留档快照。
-func (f *pcFakePairSession) pcPairArgs() (context.Context, string, bool, whatsmeow.PairClientType, string) {
+// pcArgs 读出五实参留档快照。
+func (f *pcFakePairSession) pcArgs() (context.Context, string, bool, whatsmeow.PairClientType, string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.gotCtx, f.gotPhone, f.gotShow, f.gotType, f.gotName
@@ -151,18 +203,29 @@ func (f *pcFakePairSession) pcClose() {
 }
 
 // pcSend 在锁内投递事件；通道已关闭时静默跳过（清理竞态下的迟到推送不该炸测试）。
-// terminal=true 投完即关（库口径：终局项之后立即 close）。
+// terminal=true 投完即关（库口径：终局项之后立即 close）。见 code 项即置 codeSent，
+// PairPhone 的返回值据此区分「真见到码」与「误取中间项」。
 func (f *pcFakePairSession) pcSend(item whatsmeow.QRChannelItem, terminal bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.closed {
 		return
 	}
+	if item.Event == whatsmeow.QRChannelEventCode {
+		f.codeSent = true
+	}
 	f.out <- item
 	if terminal {
 		f.closed = true
 		close(f.out)
 	}
+}
+
+// pcPushCode 手动补投首个 code 项（单飞/并发用例里放行在途调用用）。
+func (f *pcFakePairSession) pcPushCode() {
+	f.pcSend(whatsmeow.QRChannelItem{
+		Event: whatsmeow.QRChannelEventCode, Code: pcRawQRCode, Timeout: 20 * time.Second,
+	}, false)
 }
 
 // pcPairSuccess 模拟「用户在手机上输完码」：库先写 JID 并自动 Save，再推终局
@@ -209,8 +272,23 @@ func (tr *pcPairTracker) last() *pcFakePairSession {
 	return tr.list[len(tr.list)-1]
 }
 
+func (tr *pcPairTracker) all() []*pcFakePairSession {
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	return append([]*pcFakePairSession(nil), tr.list...)
+}
+
+// pcTotalPairCalls 汇总全部假会话的 PairPhone 调用次数（断言「没被误取」用）。
+func (tr *pcPairTracker) pcTotalPairCalls() int {
+	n := 0
+	for _, f := range tr.all() {
+		n += f.pcPairCount()
+	}
+	return n
+}
+
 // pcInstallPairFactory 换掉 waPairSessionFactory，t.Cleanup 还原全局挂点。
-// configure 在创建当场调用，用于预置 holdCode/pairErr 分支。
+// configure 在创建当场调用，用于预置 holdCode/pairErr/preItems 等分支。
 func pcInstallPairFactory(t *testing.T, st *fakeStore, configure func(*pcFakePairSession)) *pcPairTracker {
 	t.Helper()
 	tr := &pcPairTracker{}
@@ -218,7 +296,8 @@ func pcInstallPairFactory(t *testing.T, st *fakeStore, configure func(*pcFakePai
 	oldSettle := waPairReloginSettle
 	waPairReloginSettle = 0
 	waPairSessionFactory = func(dev *store.Device, log waLog.Logger) waPairSession {
-		f := &pcFakePairSession{dev: dev, store: st, out: make(chan whatsmeow.QRChannelItem, 8)}
+		f := &pcFakePairSession{dev: dev, store: st, out: make(chan whatsmeow.QRChannelItem, 8),
+			pairCode: pcFakePairCode, earlyCode: pcEarlyPairCode}
 		if configure != nil {
 			configure(f)
 		}
@@ -329,7 +408,7 @@ func TestPairCodeSuccessFlow(t *testing.T) {
 		t.Fatalf("调用顺序不符: %v（期望 %v）", calls, want)
 	}
 	// ① 五实参逐字断言（号码为归一形态）。
-	gotCtx, gotPhone, gotShow, gotType, gotName := fake.pcPairArgs()
+	gotCtx, gotPhone, gotShow, gotType, gotName := fake.pcArgs()
 	if gotPhone != digits {
 		t.Errorf("PairPhone 号码应为归一形态 %q，实得 %q", digits, gotPhone)
 	}

@@ -97,15 +97,21 @@ const (
 	CallWebSocketMsg = "WebSocketMsg"
 	CallRpcMsg       = "RpcMsg"
 	CallTelegramMsg  = "TelegramMsg"
-	// CallWhatsappMsg / CallUsdtMsg / CallTonMsg 是三条资金通道的回调前缀。
-	// 下游按 <前缀>+<动作> 注册，例如 WhatsappMsg+"Recharge"（载荷 *pay.PayResult）；
+	// CallWhatsappMsg / CallUsdtMsg / CallTonMsg 是三条通道的回调前缀。
+	// 下游按 <前缀>+<动作> 注册，例如 UsdtMsg+"Withdraw"（载荷 *pay.PayResult）；
 	// 通道包本身不落库，结果只经这里交出去。
+	//
+	// 2026-10 的资金面收口后，只有 CallUsdtMsg 还会播资金回执（Withdraw/Query 走链上
+	// 台账，Account 走供应商；充值已删）。CallWhatsappMsg 只剩消息事件（Inbound/Receipt/
+	// Connection/QR/SendResult），CallTonMsg 已无播报方。常量留着是因为删它是包外可见
+	// 的破坏面，而留一个没人订阅的键无害：收不到回调要读成「这条链没接入」，
+	// 不是「单还在路上」。
 	CallWhatsappMsg = "WhatsappMsg"
 	CallUsdtMsg     = "UsdtMsg"
 	CallTonMsg      = "TonMsg"
 	// CallTronMsg / CallBscMsg / CallSolMsg 是 TRON(TRX) / BSC(BNB) / Solana(SOL)
-	// 三条原生币通道的回调前缀，口径与上面三条完全一致：按 <前缀>+<动作> 注册，
-	// 载荷是 *pay.PayResult，通道包本身不落库。
+	// 三条原生币通道从前播资金回执用的前缀，口径同上。这三条通道的提现实现已删
+	// （门面只剩哨兵），常量按下条同样的理由保留。
 	CallTronMsg = "TronMsg"
 	CallBscMsg  = "BscMsg"
 	CallSolMsg  = "SolMsg"
@@ -128,6 +134,14 @@ const (
 	// 若让下游为 whatsapp/usdt/ton 各注册一次同一个密钥，迟早出现「只注入了两家、
 	// 第三家用空密钥出款」这种只有供应商会发现的错。
 	CallPaySDKMsg = "PaySDK"
+	// CallPayChainMsg + pay_sdks 的段名 = 该段热钱包私钥的注入钩子，载荷是 *string
+	// （指向该段 chain.private_key 字段本身）。
+	//
+	// 它与 CallPaySDKMsg 是两个键而不是复用同一个：一次 Do 只交出一个 *string，
+	// 下游同一个订阅方会把两个秘密写到同一格里。签名密钥（供应商侧）与私钥（链上出资主体）
+	// 的轮换周期、泄露后果、是否存在的段都不一样，分开登记才能让「没注私钥」在启动期
+	// 就表现为「链上通道不启动」而不是「拿签名密钥去签交易」。
+	CallPayChainMsg = "PayChain"
 	// CallNftMsg 是 NFT 资产通道的回调前缀。下游按 <前缀>+<动作> 注册，
 	// 例如 NftMsg+"Mint"（载荷 *nft.NftResult）；nft 包本身不落库，结果只经这里交出去。
 	CallNftMsg = "NftMsg"

@@ -348,10 +348,11 @@ func (a *PayMerchantAccount) Enabled() bool {
 
 // PaySDKRef 是通道段对 pay_sdks 表的引用：只留两个名字，不留任何凭证。
 //
-// 通道段（usdt.provider / zalo.login / facebook.login / instagram.login）
+// 通道段（usdt.provider / facebook.login / instagram.login）
 // 各自的开关就是这里填不填名字：留空即该通道不启用。之所以不再单独放一个
 // enable，是为了让「开不开」只有一处真相——SDK 段的 enable 决定凭证能不能用，
 // 这里的 sdk 决定这条通道用不用它；两处都开才是开。
+// Zalo 已改由 zcago 协议直连，不再引用这张表。
 type PaySDKRef struct {
 	SDK string `json:"sdk"` // pay_sdks 的键名
 	// Account 是 SDK 段 accounts 里的键名。该 SDK 只有一个账户时留空即取那一个；
@@ -516,13 +517,72 @@ type WhatsappSessionsConfig struct {
 	AntibanStateDir string `json:"antiban_state_dir"`
 }
 
-// ZaloConfig 是 Zalo 通道配置，与 FacebookConfig 同构，差异只在供应商口径：
-// Zalo 是越南的即时通讯 App，我方登录的是供应商代持的账号，账号归属与凭证有效期
-// 都由那家供应商定，本层不为这几件事加字段——多一个字段就多一处和供应商口径打架的地方。
+// ZaloConfig 是 Zalo 通道配置。
+//
+// 与 Facebook/Instagram 的供应商网关形态不同：Zalo 消息侧已改由 github.com/amrakk/zcago
+// 直连 Zalo 个人号协议（非官方客户端），会话凭证（cookies/IMEI/UA）持久化在 Postgres 的
+// zalo_sessions 表里，与 WhatsApp 一样按会话库管理。资金链路已在 2026-10 收口里删除，
+// 本通道只剩消息/登录面，所以只有 enable + sessions 两段。
 type ZaloConfig struct {
-	Login *PaySDKRef `json:"login"` // 登录/验证码下发通道引用的 SDK
-	// Templates 是消息模板名表，逻辑名口径与 zalo/facebook/instagram 三条通道一致。
-	Templates map[string]string `json:"templates"`
+	// Enable 是通道总闸：显式为 "on" 才装配。zcago 是非官方协议客户端，
+	// 缺省（整段不写、键不写、写任何非 on 值）都读作「不连 Zalo」。
+	Enable string `json:"enable"`
+	// Sessions 是 zcago 会话库与消息侧参数。Enable 为 on 但整段留空即不装配。
+	Sessions *ZaloSessionsConfig `json:"sessions"`
+	// Deprecated: Login 是旧 HTTP 供应商登录链路的 SDK 引用，已随 zcago 直连替换。
+	// 保留字段只为让旧配置在 Validate 阶段得到明确报错，而不是被 JSON 静默丢弃后
+	// 通道悄悄不工作。
+	Login *PaySDKRef `json:"login,omitempty"`
+	// Deprecated: Templates 是旧验证码模板名表，已废弃。保留理由同 Login。
+	Templates map[string]string `json:"templates,omitempty"`
+}
+
+// Enabled 该通道是否被显式开启（口径与 WhatsappConfig/PaySDKConfig 一致：enable
+// 大小写不敏感的 "on"，nil 接收者可安全调用）。段缺失即未开，调用侧不必先判 nil。
+func (c *ZaloConfig) Enabled() bool {
+	return c != nil && strings.EqualFold(strings.TrimSpace(c.Enable), "on")
+}
+
+// ZaloSessionsConfig 是 zcago 会话库与消息侧运行参数。
+//
+// DSN 指向 Postgres 的 zalo_sessions 表；留空时复用 whatsapp.sessions.dsn（两者共用
+// 同一个 Postgres 实例，表各自独立）。DSN 本身含数据库口令，只经部署配置注入，
+// 禁入日志与 error 文案（zalo 包侧对含 DSN 的错误做脱敏）。
+// 配置约定：JSON 不反序列化 time.Duration，时长一律用秒/毫秒，由 Effective* 折算。
+type ZaloSessionsConfig struct {
+	// DSN 是 Postgres 连接串（database/sql + pgx stdlib，URL 与 keyword/value 形态都收）。
+	// 留空则复用 whatsapp.sessions.dsn；两者都空时不装配 Zalo 消息侧。
+	DSN string `json:"dsn"`
+	// QRTTLSec 是一次扫码会话的存活上限（秒），<=0 折算 300 秒；低于 120 秒按 120 取
+	// （zcago 单张二维码约 100 秒过期，至少要允许刷新一次）。
+	QRTTLSec int `json:"qr_ttl_sec"`
+	// RequestTimeoutSec 是单次登录/发送/拉取请求的超时（秒），<=0 折算 30 秒。
+	// 只经 ctx 生效，不设 http.Client.Timeout——listener 是长连接。
+	RequestTimeoutSec int `json:"request_timeout_sec"`
+	// ListenerEnabled 是否在登录后建立入站消息长连接。指针区分「未配置(默认开)」
+	// 与「显式 false 关」；listener 本身风险低，但不需要入站消息时可以关掉。
+	ListenerEnabled *bool `json:"listener_enabled"`
+	// FriendsCacheTTLSec 是好友列表缓存 TTL（秒），<=0 折算 300 秒，低于 300 按 300 取：
+	// getAllFriends 被 zca-js 社区标为极高风险，必须缓存且两次拉取间隔 >=5 分钟。
+	FriendsCacheTTLSec int `json:"friends_cache_ttl_sec"`
+	// GroupsCacheTTLSec 是群列表缓存 TTL（秒），<=0 折算 300 秒，低于 300 按 300 取（同上）。
+	GroupsCacheTTLSec int `json:"groups_cache_ttl_sec"`
+	// InfoMinIntervalMs 是 getUserInfo/getGroupInfo 两次请求的最小间隔（毫秒），
+	// <=0 折算 1500，低于 1500 按 1500 取。
+	InfoMinIntervalMs int `json:"info_min_interval_ms"`
+	// InfoCacheTTLSec 是用户/群资料缓存 TTL（秒），<=0 折算 600 秒，低于 600 按 600 取。
+	InfoCacheTTLSec int `json:"info_cache_ttl_sec"`
+	// SendMinDelayMs/SendMaxDelayMs 是同账号连续两条消息的随机间隔下/上界（毫秒），
+	// 缺省 3000/5000，下界低于 3000 按 3000 取；下界大于上界时按上界取。
+	SendMinDelayMs int `json:"send_min_delay_ms"`
+	SendMaxDelayMs int `json:"send_max_delay_ms"`
+	// SendMaxPerHour 是单账号滚动一小时内的发送闸，<=0 折算 30 条。
+	// 非官方客户端发得越密越容易被风控，这条是封号风险的软闸。
+	SendMaxPerHour int `json:"send_max_per_hour"`
+	// UserAgent/Language 是新登录（扫码/cookie 缺省）使用的 UA 与语言。
+	// 留空由 zcago 用其默认值；已有凭证恢复时以库里保存的值为准，不被这里覆盖。
+	UserAgent string `json:"user_agent"`
+	Language  string `json:"language"`
 }
 
 // FacebookConfig 是 Facebook 通道配置，与 ZaloConfig 同构，差异只在供应商口径。

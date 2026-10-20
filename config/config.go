@@ -26,14 +26,15 @@ type Cfg struct {
 	Rpc       *RpcConfig       `json:"rpc"`        // gRPC 配置
 	Telegram  *TelegramConfig  `json:"telegram"`   //telegram配置
 	Whatsapp  *WhatsappConfig  `json:"whatsapp"`   //WhatsApp 通道（消息）配置，资金链路已删除
-	Zalo      *ZaloConfig      `json:"zalo"`       //Zalo 通道（登录）配置，资金链路已删除
+	Zalo      *ZaloConfig      `json:"zalo"`       //Zalo 通道（zcago 协议直连，Postgres 会话库）配置
 	Facebook  *FacebookConfig  `json:"facebook"`   //Facebook 通道（登录）配置，资金链路已删除
 	Instagram *InstagramConfig `json:"instagram"`  //Instagram 通道（登录）配置，资金链路已删除
 	Usdt      *UsdtConfig      `json:"usdt"`       //USDT(TRC20) 通道（提现/账户查询）配置
 	Nft       *NftConfig       `json:"nft"`        // NFT 资产通道（查询持有/详情/铸造/转账/对账）配置
 	// PaySDks 是资金 SDK 集中登记表，键是 SDK 段名；usdt.provider 与
-	// zalo.login / facebook.login / instagram.login 各段用 {sdk, account} 引用这里的一段。
-	// 凭证只在这里出现一次——三条社交通道尤其需要这条：它们和资金通道常常共用同一家
+	// facebook.login / instagram.login 各段用 {sdk, account} 引用这里的一段。
+	// Zalo 已改由 zcago 协议直连，不再引用这张表。
+	// 凭证只在这里出现一次——两条社交通道尤其需要这条：它们和资金通道常常共用同一家
 	// 供应商，凭证抄四份必然改漏一处。
 	PaySDks  map[string]*PaySDKConfig `json:"pay_sdks"`
 	NftSDks  map[string]*NftSDKConfig `json:"nft_sdks"`  // NFT SDK 集中登记表，键是段名；nft.provider 用 {sdk, account} 引用这里的一段

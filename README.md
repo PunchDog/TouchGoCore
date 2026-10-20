@@ -37,10 +37,20 @@ Go 游戏服务框架：WebSocket、gRPC、定时器、Lua、Telegram、Gin、Re
   `provider` 配置项；充值/收款接口则整条删除（全仓只留提现）。
   各链的地址校验与 `pay` 的币种收款端规则**刻意不随提现实现删除**——删掉规则登记会让该币种
   的单走「未登记即放行」，那是资金安全退化而不是简化。
-  三条社交通道同构：登录各引一段消息网关（`supplier_zalo`/`supplier_fb`/`supplier_ig`）；登录之所以一家一段，
-  是因为 `endpoints` 的键是全局逻辑名、不带平台维度，一段服务不了 `/zalo/login` 与 `/fb/login`
-  两种实际路径；代价是密钥注入钩子按段名注册（`util.CallPaySDKMsg+段名`），同一供应商登记多段时
-  下游要逐段注入，别把密钥抄进版本库。
+  三条社交通道里，facebook/instagram 仍走 HTTP 供应商登录（各引一段 `supplier_fb`/`supplier_ig`
+  消息网关）；登录之所以一家一段，是因为 `endpoints` 的键是全局逻辑名、不带平台维度，
+  一段服务不了 `/fb/login` 与 `/ig/login` 两种实际路径；代价是密钥注入钩子按段名注册
+  （`util.CallPaySDKMsg+段名`），同一供应商登记多段时下游要逐段注入，别把密钥抄进版本库。
+  Zalo 已改走 **zcago 协议直连**（非官方客户端，不再有 `supplier_zalo`）：扫码配对在本仓
+  （`ZaloStartPairing` + WebSocket 端点 `GET /zalo/qr/{session_id}`），也可用
+  `ZaloLoginWithCookie` 导入浏览器 cookie；账号凭证存 `zalo.sessions.dsn` 指向的 Postgres
+  `zalo_sessions` 表，该 DSN 留空时复用 `whatsapp.sessions.dsn`（两者都空则不启动），
+  `zalo.enable` 显式为 `on` 才装配。发送只支持文本，并严格限频：好友/群列表两次拉取间隔
+  至少 5 分钟且走缓存，用户/群资料请求间隔至少 1.5 秒、缓存 10 分钟，连续发信随机 3–5 秒。
+  zcago 是非官方客户端，**有封号风险**，通道默认不开；旧 `zalo.login` 配置与
+  `ZaloSendCode/ZaloLogin/ZaloFriends` 门面已删除（破坏性变更），旧配置会由 `Validate` 报错指引迁移。
+  `zalo_sessions.credentials` 含 cookie/IMEI，部署侧应收紧库权限或启用落盘加密；限频按
+  accountID 在进程内记账，多实例/重启会重置，同一 Zalo 账号不要用多个 accountID 导入同一份 cookie。
   whatsapp 不在这三条之内：它的**消息侧已改走 `go.mau.fi/whatsmeow` 协议客户端**（非 HTTP 供应商）——
   QR 扫码配对在本仓（`WhatsappStartPairing` + WebSocket 端点 `GET /whatsapp/qr/{session_id}`），
   不扫码改用手机号取配对码走 `WhatsappGetPairingCode(ctx, phone)`（同步回 `XXXX-XXXX` 8 位码 +

@@ -4,6 +4,7 @@ go 1.26.0
 
 require (
 	github.com/TA-rathnayaka/whatsmeow-antiban v0.1.0
+	github.com/amrakk/zcago v0.3.0
 	github.com/arnodel/golua v0.2.0
 	github.com/btcsuite/btcd/btcec/v2 v2.3.6
 	github.com/fbsobreira/gotron-sdk v0.27.1

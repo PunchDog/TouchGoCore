@@ -142,7 +142,12 @@ func (c *Cfg) Validate() error {
 		}
 	}
 
-	err := validatePayChannels(c)
+	err := validateZaloConfig(c)
+	if err != nil {
+		return err
+	}
+
+	err = validatePayChannels(c)
 	if err != nil {
 		return err
 	}
@@ -199,12 +204,28 @@ func (c *Cfg) Validate() error {
 	return nil
 }
 
+// validateZaloConfig 拦下旧 Zalo 供应商登录配置。
+//
+// Zalo 已从「pay_sdks 供应商网关」改为 zcago 协议直连，登录凭证改存 Postgres 的
+// zalo_sessions 表。旧配置里的 login/templates 如果不报错，会被 encoding/json 静默
+// 丢弃，运维却以为登录链路还配着——通道打开后扫码/发消息才发现不对。
+// 这里在启动期就把迁移动作说清楚，比留到运行期省事。
+func validateZaloConfig(c *Cfg) error {
+	if c == nil || c.Zalo == nil {
+		return nil
+	}
+	if c.Zalo.Login != nil || len(c.Zalo.Templates) > 0 {
+		return fmt.Errorf("zalo.login/zalo.templates 已废弃：Zalo 已改为 zcago 协议直连，请改用 zalo.enable 与 zalo.sessions（会话凭证存 Postgres 的 zalo_sessions 表）")
+	}
+	return nil
+}
+
 // validatePayChannels 校验资金通道的 SDK 引用是否指得通。
 //
 // 这里拦的是「配置写错」而不是「供应商挂了」：sdk 名字打错一个字母、引用了
 // 不存在的商户账户、SDK 段没标驱动，都是部署期就能确定的错，让它启动只会在
 // 第一笔出款时暴露。至于驱动名有没有登记，由通道包在 Start 时按入口判定
-// （usdt 走 pay.OpenChain，zalo/facebook/instagram 走 pay.OpenService；pay.Open
+// （usdt 走 pay.OpenChain，facebook/instagram 走 pay.OpenService；pay.Open
 // 在本仓已无调用点），本包不引 pay，避免配置层依赖资金契约层。
 //
 // 判定范围只有「已经开启的部分」：enable 不为 on 的段整体跳过——把一条通道关掉
@@ -215,7 +236,6 @@ func validatePayChannels(c *Cfg) error {
 	// service 标记这条引用只做验证码下发/登录换会话，不动资金：
 	// 这样的 SDK 本就没有商户账户，按资金链路口径要求它等于逼配置里填个假商户号。
 	service := map[string]bool{
-		"zalo.login":      true,
 		"facebook.login":  true,
 		"instagram.login": true,
 	}
@@ -227,9 +247,6 @@ func validatePayChannels(c *Cfg) error {
 	// 知识由 telegram 在装配时判——本包不引 pay，也不该知道 TON 的事。
 	if c.Telegram != nil && c.Telegram.Ton != nil {
 		refs["telegram.ton.provider"] = c.Telegram.Ton.Provider
-	}
-	if c.Zalo != nil {
-		refs["zalo.login"] = c.Zalo.Login
 	}
 	if c.Facebook != nil {
 		refs["facebook.login"] = c.Facebook.Login

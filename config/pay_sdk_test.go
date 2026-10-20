@@ -162,10 +162,11 @@ func TestValidatePayChannels(t *testing.T) {
 	if err := off.Validate(); err != nil {
 		t.Errorf("未开启的段不应参与判定: %v", err)
 	}
-	// 只有验证码下发的段没有商户账户是常态（whatsapp 不再有下发链路，改由 zalo 承载这条判定）。
+	// 只有验证码下发的段没有商户账户是常态（Zalo 已改走 zcago 直连，这条判定由
+	// facebook/instagram 继续承载）。
 	loginOnly := base()
 	loginOnly.PaySDks["wa"] = &PaySDKConfig{Enable: "on", Driver: "generic_md5", BaseURL: "https://wa.example"}
-	loginOnly.Zalo = &ZaloConfig{Login: &PaySDKRef{SDK: "wa"}}
+	loginOnly.Facebook = &FacebookConfig{Login: &PaySDKRef{SDK: "wa"}}
 	if err := loginOnly.Validate(); err != nil {
 		t.Errorf("下发链路引用无账户的段应当放行: %v", err)
 	}

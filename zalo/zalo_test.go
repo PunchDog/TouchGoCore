@@ -1,149 +1,23 @@
 package zalo
 
+// 本文件是 Zalo 包的顶层门面活闸：资金哨兵保持接线、未启动时 14 个公开 API 一律
+// 拒绝（不 panic、不发请求）、ZaloLogout 只清 conn 不删库行、ZaloStart 在
+// sessions 缺失时不安装 manager。
+//
+// 旧供应商登录链路的夹具（payCfg/recorder/签名域用例）随 auth.go/client.go 一起
+// 删除；本文件不再引用 pay_sdks 或任何 HTTP 供应商配置。
+
 import (
 	"context"
 	"errors"
-	"strings"
-	"sync"
 	"testing"
 
+	"github.com/amrakk/zcago"
+
 	"touchgocore/config"
+	"touchgocore/corectx"
 	"touchgocore/pay"
-	"touchgocore/util"
 )
-
-const (
-	// testSecret 是测试内用的签名密钥，与真实凭证无关。
-	testSecret = "TEST_SECRET_KEY"
-	// testSection / testAccount 是测试里 SDK 段与商户账户的名字。
-	testSection = "test_a"
-	testAccount = "default"
-	merchantID  = "MCH-TEST"
-	// loginSection 是只做验证码下发、没有商户账户的 SDK 段名。
-	loginSection = "test_zalo"
-)
-
-// recorder 收集 util.CallZaloMsg+Kind 上的回执。
-//
-// 资金门面已不再广播（publish 随链路一起删除），这里留着是给登录侧读操作用例
-// 当「不许自广播」的探针：一旦有人把广播接回来，这些用例会立刻变红。
-var recorder = struct {
-	mu    sync.Mutex
-	calls []*pay.PayResult
-}{}
-
-func init() {
-	for _, kind := range []string{"Withdraw", "Query"} {
-		util.DefaultCallFunc.Register(util.CallZaloMsg+kind, func(res *pay.PayResult) {
-			recorder.mu.Lock()
-			recorder.calls = append(recorder.calls, res)
-			recorder.mu.Unlock()
-		})
-	}
-}
-
-func recorded() []*pay.PayResult {
-	recorder.mu.Lock()
-	defer recorder.mu.Unlock()
-	got := recorder.calls
-	recorder.calls = nil
-	return got
-}
-
-// payCfg 组一份「pay_sdks 登记一段 + login/provider 都引用它」的完整配置。
-//
-// provider 引用留着是有意的：config 仍按出款口径校验它，装配侧不再碰它，
-// 于是同一份配置既能测「登录链路照常起」，又能测「资金门面回哨兵且零请求」。
-func payCfg(baseURL string, endpoints map[string]string) *config.Cfg {
-	return &config.Cfg{
-		PaySDks: map[string]*config.PaySDKConfig{
-			testSection: {
-				Enable: "on", Driver: pay.DriverGeneric, BaseURL: baseURL,
-				AppID: "app1", SecretKey: testSecret, Endpoints: endpoints,
-				Accounts: map[string]*config.PayMerchantAccount{
-					testAccount: {Enable: "on", MerchantID: merchantID},
-				},
-			},
-		},
-		Zalo: &config.ZaloConfig{
-			Login:     &config.PaySDKRef{SDK: testSection, Account: testAccount},
-			Templates: map[string]string{"auth_verify": "tpl_verify"},
-		},
-	}
-}
-
-// TestSignValuesMatchPayloadOrder 签名域顺序必须与报文里登记的字段的先后一致。
-// 报文加了字段而签名域漏掉，供应商会全量拒签，且本地永远查不出来。
-func TestSignValuesMatchPayloadOrder(t *testing.T) {
-	cases := []struct {
-		name string
-		got  []string
-		want []string
-	}{
-		{"下发验证码",
-			(&sendCodeRequest{AppID: "app1", Phone: "86138", Template: "tpl"}).signValues(),
-			[]string{"app1", "86138", "tpl"}},
-		{"登录",
-			(&loginRequest{AppID: "app1", Phone: "86138", Code: "123456"}).signValues(),
-			[]string{"app1", "86138", "123456"}},
-	}
-	for _, cs := range cases {
-		if strings.Join(cs.got, "|") != strings.Join(cs.want, "|") {
-			t.Errorf("%s 签名域=%v，期望 %v", cs.name, cs.got, cs.want)
-		}
-	}
-}
-
-// TestLoginChainNeedsNoMerchantAccount 只做验证码下发的 SDK 本就没有商户账户：
-// 按出款口径要求它填一个，只会逼配置里写个假商户号。
-func TestLoginChainNeedsNoMerchantAccount(t *testing.T) {
-	cfg := payCfg("https://pay.invalid", nil)
-	delete(cfg.PaySDks, testSection)
-	cfg.PaySDks[loginSection] = &config.PaySDKConfig{
-		Enable: "on", Driver: pay.DriverGeneric, BaseURL: "https://pay.invalid",
-		AppID: "app1", SecretKey: testSecret,
-	}
-	cfg.Zalo.Login = &config.PaySDKRef{SDK: loginSection}
-	if _, ok := openLogin(cfg, cfg.Zalo.Login); !ok {
-		t.Error("无商户账户的下发链路应当可启动")
-	}
-}
-
-// TestLoginSectionPassesCfgValidation 是 L0 口径的补测：config 的校验把 zalo.login 标为
-// service 类引用（验证码下发/登录换会话，不动资金），它引用的 SDK 段即使没有商户账户，
-// 也应通过 (*config.Cfg).Validate()（走 ResolveService 分支）并被本包成功装配出登录链路。
-// whatsapp 的范本只测到 openLogin 这一层，这里把「配置校验也放行」一并钉住，
-// 免得某次改 config 时把 zalo.login 漏出 service 名单、只在部署期才炸。
-func TestLoginSectionPassesCfgValidation(t *testing.T) {
-	cfg := payCfg("https://pay.invalid", nil)
-	delete(cfg.PaySDks, testSection)
-	cfg.PaySDks[loginSection] = &config.PaySDKConfig{
-		Enable: "on", Driver: pay.DriverGeneric, BaseURL: "https://pay.invalid",
-		AppID: "app1", SecretKey: testSecret,
-	}
-	// 只留登录引用：provider 为 nil 即不参与校验，否则缺 accounts 会被出款口径拦下。
-	cfg.Zalo = &config.ZaloConfig{Login: &config.PaySDKRef{SDK: loginSection}}
-	if err := cfg.Validate(); err != nil {
-		t.Fatalf("zalo.login 引用无账户的 SDK 段应通过配置校验（service 分支）: %v", err)
-	}
-	if _, ok := openLogin(cfg, cfg.Zalo.Login); !ok {
-		t.Error("校验放行的下发链路应能被本包装配起来")
-	}
-}
-
-// TestOperationsRefuseWhenNotStarted 未启动时门面函数返回错误而不是 panic。
-func TestOperationsRefuseWhenNotStarted(t *testing.T) {
-	ZaloStop(nil)
-	if err := ZaloSendCode(nil, "86138"); err == nil {
-		t.Error("未启动时发码应当被拒")
-	}
-	if _, err := ZaloFriends(nil, "86138"); err == nil {
-		t.Error("未启动时查好友列表应当被拒")
-	}
-	if _, err := ZaloLogin(nil, "86138", "123456"); err == nil {
-		t.Error("未启动时登录应当被拒")
-	}
-}
 
 // TestPayoutInterfaceStaysWired 三个资金门面仍是包外可见的调用面，且一律返回未接入哨兵。
 //
@@ -175,5 +49,132 @@ func TestPayoutInterfaceStaysWired(t *testing.T) {
 	// 空订单号也一样：收口前后都是同一个哨兵，不给「参数校验错」留第二条出口。
 	if _, err := ZaloQuery(nil, "  "); !errors.Is(err, ErrPayoutNotWired) {
 		t.Errorf("空订单号的拒绝口径不符: %v", err)
+	}
+}
+
+// TestOperationsRefuseWhenNotStarted 未启动时 14 个公开 API 全部返回
+// ErrZaloNotStarted，而不是 panic、空结果或 nil error。
+func TestOperationsRefuseWhenNotStarted(t *testing.T) {
+	ZaloStop(nil)
+	ctx := context.Background()
+
+	cases := []struct {
+		name string
+		call func() error
+	}{
+		{"start_pairing", func() error {
+			_, err := ZaloStartPairing(ctx, "acct")
+			return err
+		}},
+		{"login_with_cookie", func() error {
+			_, err := ZaloLoginWithCookie(ctx, "acct", []byte("[]"))
+			return err
+		}},
+		{"start_client", func() error {
+			_, err := ZaloStartClient(ctx, "acct")
+			return err
+		}},
+		{"logout", func() error { return ZaloLogout(ctx, "acct") }},
+		{"delete_account", func() error { return ZaloDeleteAccount(ctx, "acct") }},
+		{"list_accounts", func() error {
+			_, err := ZaloListAccounts(ctx)
+			return err
+		}},
+		{"send_message", func() error {
+			_, err := ZaloSendMessage(ctx, "acct", "peer-1", "hello")
+			return err
+		}},
+		{"send_group_message", func() error {
+			_, err := ZaloSendGroupMessage(ctx, "acct", "group-1", "hello")
+			return err
+		}},
+		{"list_friends", func() error {
+			_, err := ZaloListFriends(ctx, "acct")
+			return err
+		}},
+		{"sync_friends", func() error {
+			_, err := ZaloSyncFriends(ctx, "acct")
+			return err
+		}},
+		{"list_groups", func() error {
+			_, err := ZaloListGroups(ctx, "acct")
+			return err
+		}},
+		{"sync_groups", func() error {
+			_, err := ZaloSyncGroups(ctx, "acct")
+			return err
+		}},
+		{"get_user_info", func() error {
+			_, err := ZaloGetUserInfo(ctx, "acct", "u1")
+			return err
+		}},
+		{"get_group_info", func() error {
+			_, err := ZaloGetGroupInfo(ctx, "acct", "g1")
+			return err
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := tc.call(); !errors.Is(err, ErrZaloNotStarted) {
+				t.Fatalf("未启动 err=%v，期望 ErrZaloNotStarted", err)
+			}
+		})
+	}
+}
+
+// TestZaloLogoutClearsConnKeepsStore 钉住 ZaloLogout 的口径：停 listener、清内存
+// conn，但不删会话库行（下次使用按需重新登录）。
+func TestZaloLogoutClearsConnKeepsStore(t *testing.T) {
+	store := newFakeZAStore()
+	store.seed("acct", "uid-seed", []byte(mgrTestCredJSON))
+	sdk := newFakeZASDK()
+	sdk.factory = func(zcago.Credentials) *fakeZAConn {
+		return &fakeZAConn{uid: "uid-live", snap: zcago.Credentials{IMEI: "snap-imei", UserAgent: "snap-ua"}}
+	}
+	m := mgrNewTestManager(t, store, sdk, nil)
+
+	zaMgr.Store(m)
+	t.Cleanup(func() { zaMgr.Store(nil) })
+
+	ctx := context.Background()
+	if _, err := ZaloStartClient(ctx, "acct"); err != nil {
+		t.Fatalf("ZaloStartClient: %v", err)
+	}
+	acc, ok := m.account("acct")
+	if !ok {
+		t.Fatal("ZaloStartClient 后账号不在内存")
+	}
+	if acc.currentConn() == nil {
+		t.Fatal("ZaloStartClient 后没有 conn")
+	}
+
+	if err := ZaloLogout(ctx, "acct"); err != nil {
+		t.Fatalf("ZaloLogout: %v", err)
+	}
+	if acc.currentConn() != nil {
+		t.Fatal("ZaloLogout 后 conn 未清")
+	}
+	if _, ok := store.record("acct"); !ok {
+		t.Fatal("ZaloLogout 不应删除会话库行")
+	}
+}
+
+// TestZaloStartWithoutSessionsDoesNotInstallManager 覆盖「enable=on 但整段
+// sessions 缺失」：只记日志，不打开会话库、不安装 manager。走 ctx 注入配置，
+// 不触碰真实 Postgres。
+func TestZaloStartWithoutSessionsDoesNotInstallManager(t *testing.T) {
+	ZaloStop(nil)
+	t.Cleanup(func() {
+		ZaloStop(nil)
+		setRunCtx(context.Background())
+	})
+
+	cfg := &config.Cfg{Zalo: &config.ZaloConfig{Enable: "on"}}
+	ctx := corectx.WithCfg(context.Background(), cfg)
+	setRunCtx(ctx)
+
+	ZaloStart(ctx)
+	if zaMgr.Load() != nil {
+		t.Fatal("zalo.sessions 缺失时不应安装 manager")
 	}
 }

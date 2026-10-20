@@ -106,7 +106,7 @@ func (s *whatsappService) Stop(ctx context.Context) error {
 	return nil
 }
 
-// zaloService Zalo 登录与提现门面服务适配器（Start 为何返回 nil 见上方说明）
+// zaloService Zalo 消息与登录门面服务适配器（zcago 直连 + Postgres 会话库）
 type zaloService struct{}
 
 func (s *zaloService) Name() string { return "zalo" }

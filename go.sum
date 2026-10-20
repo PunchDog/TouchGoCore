@@ -8,6 +8,8 @@ github.com/TA-rathnayaka/whatsmeow-antiban v0.1.0 h1:uPH9EVRAxKMtNmCSPuU7LGpJr3s
 github.com/TA-rathnayaka/whatsmeow-antiban v0.1.0/go.mod h1:m6W04f2b5W0zjZgDyqPJ53bctLFIBQ+5tNxpYUid5iA=
 github.com/agnivade/levenshtein v1.2.1 h1:EHBY3UOn1gwdy/VbFwgo4cxecRznFk7fKWN1KOX7eoM=
 github.com/agnivade/levenshtein v1.2.1/go.mod h1:QVVI16kDrtSuwcpd0p1+xMC6Z/VfhtCyDIjcwga4/DU=
+github.com/amrakk/zcago v0.3.0 h1:MhleCWebTwYCuDpaJ+N+bWp7aX3gajUVGJKfH+I1O5M=
+github.com/amrakk/zcago v0.3.0/go.mod h1:TRfaujWnLxT9UNeBkWNFCa+q8HOgq/mKVbxe5zaaEcM=
 github.com/andreyvit/diff v0.0.0-20170406064948-c7f18ee00883 h1:bvNMNQO63//z+xNgfBlViaCIJKLlCJ6/fmUseuG0wVQ=
 github.com/andreyvit/diff v0.0.0-20170406064948-c7f18ee00883/go.mod h1:rCTlJbsFo29Kk6CurOXKm700vrz8f0KW0JNfpkRJY/8=
 github.com/arnodel/golua v0.2.0 h1:J7Y9BPNlaiuE7zkPxF+vOSBGjEpo8v0WFENzYl+VzXo=

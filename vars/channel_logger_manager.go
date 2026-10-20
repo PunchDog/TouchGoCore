@@ -155,7 +155,17 @@ func (m *ChannelLoggerManager) LogAsyncSimple(level slog.Level, msg string) {
 	m.writeLogged(level, msg, nil)
 }
 
-// writeLogged 文件落地的唯一入口（S70）。
+// writeLogged 解析业务调用点后交给唯一落盘入口。
+func (m *ChannelLoggerManager) writeLogged(level slog.Level, msg string, attrs []slog.Attr) {
+	// 先按级别过滤再扫栈：被过滤掉的日志不必付出调用点解析的代价
+	if !m.accepts(level) {
+		return
+	}
+	file, line := getCaller()
+	m.writeLoggedAt(level, msg, attrs, file, line)
+}
+
+// writeLoggedAt 投递一条调用点已解析好的记录。
 //
 // 三条分支都只认这一个管理器手里的 writer，不存在「另开一个日志管理器、再开一个
 // 文件句柄」的旁路：旁路的句柄不认识旋转，日志轮转之后它还继续往已被改名的备份文件
@@ -163,11 +173,10 @@ func (m *ChannelLoggerManager) LogAsyncSimple(level slog.Level, msg string) {
 //
 // 级别过滤放在这里而不是调用方：异步通道自己不看级别，此前绕过门面直接调
 // LogAsyncSimple 的调用方能把 debug 灌进 info 级别的文件里。
-func (m *ChannelLoggerManager) writeLogged(level slog.Level, msg string, attrs []slog.Attr) {
+func (m *ChannelLoggerManager) writeLoggedAt(level slog.Level, msg string, attrs []slog.Attr, file string, line int) {
 	if !m.accepts(level) {
 		return
 	}
-	file, line := getCaller()
 	m.submit(logEntry{level: level, msg: msg, time: time.Now(), attrs: attrs, file: file, line: line})
 }
 

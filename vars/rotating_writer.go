@@ -37,6 +37,7 @@ type RotatingFileWriter struct {
 	wg              sync.WaitGroup
 	nowFunc         func() time.Time
 	renameFunc      func(oldPath, newPath string) error
+	copyRotateFunc  func(currentPath, rotatedPath string) error
 }
 
 // NewRotatingFileWriter 创建旋转日志写入器
@@ -57,6 +58,7 @@ func NewRotatingFileWriter(filePath, fileName string, maxSize int64, maxAge, max
 		nowFunc:         time.Now,
 		renameFunc:      os.Rename,
 	}
+	writer.copyRotateFunc = writer.copyThenTruncate
 	writer.cleanupCtx, writer.cleanupCancel = context.WithCancel(context.Background())
 
 	// 打开或创建文件
@@ -262,17 +264,24 @@ func (w *RotatingFileWriter) rotate() {
 		}
 	}
 	if renameErr != nil {
-		// 重命名失败：旧文件仍在原位，按真实大小重新接管，
-		// 不能把 currentSize 归零（否则体积永久失真），下次检查时自动重试轮转
-		fmt.Fprintf(os.Stderr, "failed to rotate log file: %v\n", renameErr)
-		file, size, openErr := w.openLogFile()
-		if openErr != nil {
-			fmt.Fprintf(os.Stderr, "failed to reopen log file: %v\n", openErr)
+		// Windows 下 rename 要求所有句柄都允许删除共享，tail/日志查看器/杀毒
+		// 只要持有文件（哪怕只读）就会让 rename 永久失败。此时退化为
+		// 「复制到备份 + 原地截断」，否则活动文件会无限膨胀、轮转永远不生效。
+		if copyErr := w.copyRotateFunc(w.currentLogPath(), rotatedPath); copyErr == nil {
+			fmt.Fprintf(os.Stderr, "log file is held by another process (%v), rotated by copy+truncate: %s\n", renameErr, rotatedPath)
+		} else {
+			// 两种方式都失败：旧文件仍在原位，按真实大小重新接管，
+			// 不能把 currentSize 归零（否则体积永久失真），下次检查时自动重试轮转
+			fmt.Fprintf(os.Stderr, "failed to rotate log file: %v (copy fallback failed: %v)\n", renameErr, copyErr)
+			file, size, openErr := w.openLogFile()
+			if openErr != nil {
+				fmt.Fprintf(os.Stderr, "failed to reopen log file: %v\n", openErr)
+				return
+			}
+			w.file = file
+			w.currentSize = size
 			return
 		}
-		w.file = file
-		w.currentSize = size
-		return
 	}
 
 	// 异步压缩旧日志与清理超额备份
@@ -289,6 +298,46 @@ func (w *RotatingFileWriter) rotate() {
 	}
 	w.file = file
 	w.currentSize = size
+}
+
+// copyThenTruncate 是 rename 不可用时的轮转兜底：把活动文件完整复制成备份，
+// 备份落盘后才原地清空活动文件。
+//
+// 任一步失败都删除半成品备份并让活动文件保持原样，调用方会按真实大小重新接管：
+// 截断失败时必须删掉刚复制的备份，否则下次轮转会把同一段内容再复制一遍。
+func (w *RotatingFileWriter) copyThenTruncate(currentPath, rotatedPath string) error {
+	src, err := os.Open(currentPath)
+	if err != nil {
+		return err
+	}
+
+	dst, err := os.OpenFile(rotatedPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
+	if err != nil {
+		_ = src.Close()
+		return err
+	}
+
+	_, copyErr := io.Copy(dst, src)
+	syncErr := dst.Sync()
+	closeErr := dst.Close()
+	// Windows 下必须先放开源句柄再截断
+	_ = src.Close()
+	if copyErr != nil || syncErr != nil || closeErr != nil {
+		_ = os.Remove(rotatedPath)
+		if copyErr != nil {
+			return copyErr
+		}
+		if syncErr != nil {
+			return syncErr
+		}
+		return closeErr
+	}
+
+	if err := os.Truncate(currentPath, 0); err != nil {
+		_ = os.Remove(rotatedPath)
+		return err
+	}
+	return nil
 }
 
 // spawnCleanup 在关闭流程之外挂载一次性后台任务

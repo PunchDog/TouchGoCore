@@ -82,10 +82,10 @@ func DefaultConfig() LogConfig {
 		LogPath:         "./logs",
 		LogName:         "default",
 		LogLevel:        LogLevelDebug,
-		MaxSize:         100, // 100MB
-		MaxAge:          30,  // 30天
-		MaxBackups:      10,  // 最大备份数
-		Compress:        true,
+		MaxSize:         100,   // 100MB
+		MaxAge:          30,    // 30天
+		MaxBackups:      10,    // 最大备份数
+		Compress:        false, // 默认保留明文备份，轮转后不再生成 .gz
 		Stdout:          true,
 		Async:           true,  // 异步日志
 		AsyncBufferSize: 10000, // 异步缓冲区

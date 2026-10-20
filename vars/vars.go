@@ -270,12 +270,17 @@ func consoleLevelPrefix(level slog.Level) string {
 }
 
 // printToConsole 将日志同步输出到命令行。
+// 调用点与文件日志共用同一份 file:line，命令行同样能直接定位到业务代码。
 // 命令行不做级别过滤：所有级别（含低于文件落盘级别的 Debug）一律实时打印，
 // 便于开发/运维随时观察现场；文件落盘的级别过滤由 writeToFile → ShouldWriteFile 负责。
 // 完全静默（off）由门面函数的 IsOff 早退统一处理，这里不再重复判断。
-func printToConsole(level slog.Level, msg string) {
+func printToConsole(level slog.Level, msg, file string, line int) {
 	ts := time.Now().Format("15:04:05")
-	writeConsoleLine(fmt.Sprintf("%s %s %s\n", ts, consoleLevelPrefix(level), msg))
+	if file == "" {
+		writeConsoleLine(fmt.Sprintf("%s %s [%s]\n", ts, consoleLevelPrefix(level), msg))
+		return
+	}
+	writeConsoleLine(fmt.Sprintf("%s %s [%s:%d %s]\n", ts, consoleLevelPrefix(level), file, line, msg))
 }
 
 // ==================== 命令行输出缓冲 ====================
@@ -377,13 +382,13 @@ func CloseConsole() error {
 // 未初始化（或已 Shutdown）时只丢文件、不再另开句柄补写：命令行那一路已经先跑过了，
 // 消息不会整体消失；而这里过去会退回一个独立的同步 LoggerManager，那第二个文件句柄
 // 就是「轮转之后日志写进备份文件」的来源。
-func writeToFile(level slog.Level, msg string) {
+func writeToFile(level slog.Level, msg, file string, line int) {
 	ch := GetChannelLogger()
 	if ch == nil {
 		warnLoggerMissing()
 		return
 	}
-	ch.writeLogged(level, msg, nil)
+	ch.writeLoggedAt(level, msg, nil, file, line)
 }
 
 // warnLoggerMissing 未初始化提示只报一次：这条路径本身在日志器上，反复打印会刷屏，
@@ -402,8 +407,9 @@ func Debug(msg string, args ...any) {
 		return // off 完全静默
 	}
 	formatted := assembleLine(msg, args)
-	printToConsole(slog.LevelDebug, formatted)
-	writeToFile(slog.LevelDebug, formatted)
+	file, line := getCaller()
+	printToConsole(slog.LevelDebug, formatted, file, line)
+	writeToFile(slog.LevelDebug, formatted, file, line)
 }
 
 // Info 信息级别日志：优先输出到命令行，其次按等级写入 log 文件
@@ -412,8 +418,9 @@ func Info(msg string, args ...any) {
 		return // off 完全静默
 	}
 	formatted := assembleLine(msg, args)
-	printToConsole(slog.LevelInfo, formatted)
-	writeToFile(slog.LevelInfo, formatted)
+	file, line := getCaller()
+	printToConsole(slog.LevelInfo, formatted, file, line)
+	writeToFile(slog.LevelInfo, formatted, file, line)
 }
 
 // Warning 警告级别日志：优先输出到命令行，其次按等级写入 log 文件
@@ -422,8 +429,9 @@ func Warning(msg string, args ...any) {
 		return // off 完全静默
 	}
 	formatted := assembleLine(msg, args)
-	printToConsole(slog.LevelWarn, formatted)
-	writeToFile(slog.LevelWarn, formatted)
+	file, line := getCaller()
+	printToConsole(slog.LevelWarn, formatted, file, line)
+	writeToFile(slog.LevelWarn, formatted, file, line)
 }
 
 // Error 错误级别日志：优先输出到命令行，其次按等级写入 log 文件
@@ -432,8 +440,9 @@ func Error(msg string, args ...any) {
 		return // off 完全静默
 	}
 	formatted := assembleLine(msg, args)
-	printToConsole(slog.LevelError, formatted)
-	writeToFile(slog.LevelError, formatted)
+	file, line := getCaller()
+	printToConsole(slog.LevelError, formatted, file, line)
+	writeToFile(slog.LevelError, formatted, file, line)
 }
 
 // 初始化函数（默认使用默认配置）

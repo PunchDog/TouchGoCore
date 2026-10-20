@@ -35,7 +35,7 @@ import (
 // 它是哨兵而不是普通错误：调用方要用 errors.Is 区分「本进程没接入这条链」（部署缺陷，
 // 该修配置或补实现）与「供应商拒了这一单」（业务结果，该走状态机）。
 // 把这三种情形都返回 nil 结果 + 这个错误，是为了让上游不可能把「没接入」误读成「已受理」。
-var ErrPayoutNotWired = errors.New("SOL 出款链路未接入（本仓资金出款只交付 USDT-TRC20 链上通道）")
+var ErrPayoutNotWired = errors.New("SOL 出款链路未接入（本仓链上出款只交付 USDT-TRC20 与原生 TON 两条通道）")
 
 // SolWithdraw 未接入：保留签名，不假装受理。
 //

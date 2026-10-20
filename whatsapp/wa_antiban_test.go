@@ -134,7 +134,7 @@ func TestAntibanWiredIntoSendPath(t *testing.T) {
 		t.Error("群组收件人该按 isGroup=true 问闸")
 	}
 
-	// 延迟真睡：delayMs=250 时整条发送不该瞬间返回。
+	// 延迟真睡：闸给 250ms 时被抬到发送窗口下界（缺省 1 秒），整条不该瞬间返回。
 	fg.mu.Lock()
 	fg.delayMs = 250
 	fg.mu.Unlock()
@@ -142,8 +142,8 @@ func TestAntibanWiredIntoSendPath(t *testing.T) {
 	if _, err := WhatsappSendMessage(nil, "8613800000000", "8613900000000", "slow"); err != nil {
 		t.Fatal(err)
 	}
-	if el := time.Since(start); el < 250*time.Millisecond {
-		t.Errorf("闸给的 250ms 延迟没睡够: %v", el)
+	if el := time.Since(start); el < time.Second {
+		t.Errorf("250ms 应被抬到发送窗口下界 1s，实耗 %v", el)
 	}
 
 	// 拦截形态：错误带「防封闸拦截」，会话零触达。
@@ -218,6 +218,41 @@ func TestAntibanBatchSkipsOwnPacing(t *testing.T) {
 	fg.mu.Unlock()
 	if nBefore != 2 {
 		t.Errorf("两条都该问过闸: %d", nBefore)
+	}
+}
+
+// TestSendDelayClampedToConfigWindow 闸给出的超长延迟（拓扑档按分钟加、封禁恢复再拉长）
+// 必须被压进配置窗口（缺省 5 秒），不能让单条发送睡满闸的原值。
+func TestSendDelayClampedToConfigWindow(t *testing.T) {
+	_, _, fg := waAcct(t)
+	fg.mu.Lock()
+	fg.delayMs = 20_000
+	fg.mu.Unlock()
+	start := time.Now()
+	if _, err := WhatsappSendMessage(nil, "8613800000000", "8613900000000", "cap"); err != nil {
+		t.Fatal(err)
+	}
+	if el := time.Since(start); el > 7*time.Second {
+		t.Fatalf("20s 闸延迟应被截到 5s 窗口内，实耗 %s", el)
+	}
+	if el := time.Since(start); el < time.Second {
+		t.Fatalf("正延迟应至少睡到下界 1s，实耗 %s", el)
+	}
+}
+
+func TestClampSendDelayMs(t *testing.T) {
+	cfg := &config.WhatsappSessionsConfig{SendMinDelaySec: 1, SendMaxDelaySec: 5}
+	if got := clampSendDelayMs(cfg, 0); got != 0 {
+		t.Errorf("0 应立刻发，实得 %d", got)
+	}
+	if got := clampSendDelayMs(cfg, 250); got != 1000 {
+		t.Errorf("低于下界应抬到 1s，实得 %d", got)
+	}
+	if got := clampSendDelayMs(cfg, 3000); got != 3000 {
+		t.Errorf("窗口内应保留原值，实得 %d", got)
+	}
+	if got := clampSendDelayMs(cfg, 60_000); got != 5000 {
+		t.Errorf("高于上界应截到 5s，实得 %d", got)
 	}
 }
 

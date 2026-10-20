@@ -42,14 +42,16 @@ import (
 //   - waReachoutFullMinInterval：同一连接两次「擦版本全量重拉」的最小间隔
 //     （与 waContactSyncFullMinInterval 同款理由：擦版本要重付全量快照）；
 //   - waReachoutHistoryMinInterval：两次向手机要历史的最小间隔，也是落空账的有效期；
-//   - waReachoutWait：恢复档一轮轮询等待凭证落地的上限；
-//   - waReachoutPollTick：轮询间隔。
+//   - waReachoutWait：恢复档一轮轮询等待凭证落地的上限（压在单条发送预算内，不再预付 12 秒）；
+//   - waReachoutPollTick：轮询间隔，短到凭证一落地就立刻重试。
 var (
 	waReachoutRefreshMinInterval = 60 * time.Second
 	waReachoutFullMinInterval    = 10 * time.Minute
 	waReachoutHistoryMinInterval = 60 * time.Second
-	waReachoutWait               = 12 * time.Second
-	waReachoutPollTick           = 400 * time.Millisecond
+	waReachoutWait               = 2 * time.Second
+	waReachoutPollTick           = 50 * time.Millisecond
+	waOfflineReplayWait          = 2 * time.Second
+	waOfflineReplayTick          = 50 * time.Millisecond
 )
 
 // hasReachoutCreds 判定本连接对 target 是否已具备任一外联凭证（盐或对方 token）。
@@ -73,8 +75,8 @@ func (w *waClientWrapper) hasTargetToken(ctx context.Context, target types.JID) 
 // 离线回放 → regular_high 快路 → 增量 → 向手机发一次历史请求 的顺序逐级补齐。
 // 每一级之后都重问一次凭证：任一级落地就不付下一级的代价。
 //
-// 这里刻意**不等**历史落地：门闸在每条发送的必经路上，预付 12 秒会让手机离线时
-// 每条发送都白等一轮；等待集中在 463 恢复档（recoverReachout463），一批发信里
+// 这里刻意**不等**历史落地：门闸在每条发送的必经路上，预付一整轮等待会让手机离线时
+// 每条发送都白等；等待集中在 463 恢复档（recoverReachout463，上限 waReachoutWait），一批发信里
 // 由单飞与落空账保证只付一次。历史请求在这里先发出去，是为了让手机推送尽早启动——
 // 真机上半数 463 在恢复档开始等之前就已经能等到凭证。
 func (w *waClientWrapper) ensureReachoutCreds(ctx context.Context, target types.JID) {
@@ -235,9 +237,9 @@ func (w *waClientWrapper) waitOfflineReplay(ctx context.Context) {
 	if w == nil || !w.offlinePending.Load() {
 		return
 	}
-	deadline := time.NewTimer(10 * time.Second)
+	deadline := time.NewTimer(waOfflineReplayWait)
 	defer deadline.Stop()
-	tick := time.NewTicker(200 * time.Millisecond)
+	tick := time.NewTicker(waOfflineReplayTick)
 	defer tick.Stop()
 	for w.offlinePending.Load() {
 		select {

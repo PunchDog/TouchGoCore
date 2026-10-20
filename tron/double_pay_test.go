@@ -12,6 +12,7 @@ import (
 	"github.com/fbsobreira/gotron-sdk/pkg/proto/core"
 	"google.golang.org/protobuf/proto"
 
+	"touchgocore/ledger"
 	"touchgocore/pay"
 )
 
@@ -143,14 +144,14 @@ func (c *counters) signer() signFunc {
 	}
 }
 
-func newTestChannel(gw chainGateway, j Journal, sign signFunc) *onchainChannel {
+func newTestChannel(gw chainGateway, j ledger.Journal, sign signFunc) *onchainChannel {
 	// 默认让热钱包「钱够」：本文件测的是出资次数，不是余额门槛——后者单独有用例。
 	if f, ok := gw.(*fakeGateway); ok && f.tokenBal == 0 && f.tokenBalErr == nil {
 		f.tokenBal = 1 << 50
 	}
-	led := newLedger()
+	led := ledger.New("tron")
 	if j != nil {
-		led.set(j)
+		led.SetJournal(j)
 	}
 	return &onchainChannel{
 		gw:     gw,
@@ -239,7 +240,7 @@ func TestPreparedEntryRebroadcastsIdenticalBytes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if entry.State != statePrepared {
+	if entry.State != ledger.StatePrepared {
 		t.Fatalf("新条目应为 prepared，实得 %s", entry.State)
 	}
 	if _, err := ch.broadcastEntry(context.Background(), entry, testClock); err != nil {
@@ -359,8 +360,8 @@ func TestJournalWriteFailureAbortsBroadcast(t *testing.T) {
 
 type failingJournal struct{}
 
-func (failingJournal) Put(*ledgerEntry) error { return errors.New("库挂了") }
-func (failingJournal) Get(string) (*ledgerEntry, bool) {
+func (failingJournal) Put(*ledger.Entry) error { return errors.New("库挂了") }
+func (failingJournal) Get(string, string) (*ledger.Entry, bool) {
 	return nil, false
 }
 
@@ -373,10 +374,10 @@ func (failingJournal) Get(string) (*ledgerEntry, bool) {
 type firstPutFailsJournal struct {
 	mu   sync.Mutex
 	puts int
-	seen []*ledgerEntry
+	seen []*ledger.Entry
 }
 
-func (j *firstPutFailsJournal) Put(entry *ledgerEntry) error {
+func (j *firstPutFailsJournal) Put(entry *ledger.Entry) error {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	j.puts++
@@ -387,7 +388,7 @@ func (j *firstPutFailsJournal) Put(entry *ledgerEntry) error {
 	return nil
 }
 
-func (j *firstPutFailsJournal) Get(string) (*ledgerEntry, bool) { return nil, false }
+func (j *firstPutFailsJournal) Get(string, string) (*ledger.Entry, bool) { return nil, false }
 
 // TestPrepareMustBeJournaledBeforeBroadcast 签名完成后落账失败，就不许把这一笔交出去。
 func TestPrepareMustBeJournaledBeforeBroadcast(t *testing.T) {
@@ -409,7 +410,7 @@ func TestPrepareMustBeJournaledBeforeBroadcast(t *testing.T) {
 	// 失败的那一次必须是被拒的 prepared 落账，而不是后面那次状态推进。
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	if j.puts != 1 || j.seen[0].State != statePrepared {
+	if j.puts != 1 || j.seen[0].State != ledger.StatePrepared {
 		t.Fatalf("应当停在第一次 prepared 落账，实得 puts=%d state=%s", j.puts, j.seen[0].State)
 	}
 }
@@ -441,7 +442,7 @@ func TestRebuildAfterLedgerLossLooksUpChainFirst(t *testing.T) {
 		t.Fatalf("反查命中后应继续查证，实得 %s", res.Status)
 	}
 	// 命中必须落回台账，否则下一次重入还会再赌一遍。
-	if _, found := ch.ledger.get(o.OrderNo); !found {
+	if _, found := ch.ledger.Get(o.OrderNo); !found {
 		t.Error("反查命中的那一笔没挂回台账")
 	}
 }
@@ -496,11 +497,11 @@ func TestQueryOrderReportsLedgerStateHonestly(t *testing.T) {
 	gw := &fakeGateway{buildTx: buildableTx(), receipt: &txReceipt{}}
 	ch := newTestChannel(gw, nil, (&counters{}).signer())
 
-	prepared := &ledgerEntry{
-		OrderNo: "WD-P", TxID: strings.Repeat("11", 32), State: statePrepared,
+	prepared := &ledger.Entry{
+		OrderNo: "WD-P", TxID: strings.Repeat("11", 32), State: ledger.StatePrepared,
 		Amount: 1, ExpiresAtMS: testClock.Add(time.Minute).UnixMilli(),
 	}
-	if err := ch.ledger.put(prepared); err != nil {
+	if err := ch.ledger.Put(prepared); err != nil {
 		t.Fatal(err)
 	}
 	res, err := ch.QueryOrder(context.Background(), "WD-P")
@@ -511,8 +512,8 @@ func TestQueryOrderReportsLedgerStateHonestly(t *testing.T) {
 		t.Fatalf("prepared 条目的查单结论应说明未广播，实得 %+v", res)
 	}
 
-	rejected := &ledgerEntry{OrderNo: "WD-R", TxID: strings.Repeat("22", 32), State: stateRejected, Amount: 1}
-	if err := ch.ledger.put(rejected); err != nil {
+	rejected := &ledger.Entry{OrderNo: "WD-R", TxID: strings.Repeat("22", 32), State: ledger.StateRejected, Amount: 1}
+	if err := ch.ledger.Put(rejected); err != nil {
 		t.Fatal(err)
 	}
 	res, err = ch.QueryOrder(context.Background(), "WD-R")
@@ -618,8 +619,8 @@ func TestUnreadableVerdictIsUnknownNotFailed(t *testing.T) {
 		t.Fatalf("判定不明必须给 UNKNOWN 并带 txid，实得 %+v", res)
 	}
 	// 不落终局：等节点把执行结果回填后，同单号再查一次就能翻成成功。
-	entry, found := ch.ledger.get(order().OrderNo)
-	if !found || entry.terminal() {
+	entry, found := ch.ledger.Get(order().OrderNo)
+	if !found || entry.Terminal() {
 		t.Fatalf("判定不明就被打了终局，这一单再也没机会翻案: %+v", entry)
 	}
 	gw.receipt = &txReceipt{Found: true, InBlock: true, BlockNumber: 10, Success: true, VerdictKnown: true, ResultCode: "SUCCESS"}

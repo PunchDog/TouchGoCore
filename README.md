@@ -24,13 +24,17 @@ Go 游戏服务框架：WebSocket、gRPC、定时器、Lua、Telegram、Gin、Re
 - Prometheus：`metrics.enabled`，可选 `metrics.token` 保护 `/metrics`。
 - 资金通道：供应商接入集中在顶层 `pay_sdks` 表，一段=一套供应商（`driver` 驱动标记、`base_url`、
   凭证、`endpoints` 端点表、`accounts` 我方商户账户，链上出款另带 `chain` 子段）。
-  **真正会动钱的出款只有一条**：`usdt.provider`（USDT/TRC20），它的提现与查单是本地组交易、
-  私钥签名、经节点 gRPC 广播（`pay_sdks.<段>.chain` 给节点、热钱包地址与 API Key，
-  私钥由 `util.CallPayChainMsg+"<段名>"` 钩子注入），商户账户查询仍走该段引用的 HTTP 供应商。
-  其余原生币/代币通道（`telegram` 的 TON、`tron` 的 TRX、`bsc`、`sol`）与三条社交通道的
+  **真正会动钱的出款有两条**：`usdt.provider`（USDT/TRC20）与 `telegram.ton.provider`（原生 TON）。
+  USDT 的提现与查单是本地组交易、私钥签名、经节点 gRPC 广播（`pay_sdks.<段>.chain` 给节点、
+  热钱包地址与 API Key，私钥由 `util.CallPayChainMsg+"<段名>"` 钩子注入）；TON 的提现同样是
+  本地签名（`tongo` 组外部消息），但广播与查证走 `chain.http_base` 指向的 TonAPI HTTP 接口
+  （本仓不接 lite server，原因见 `telegram/ton_gateway_tonapi.go` 头部注释），金额单位是纳吨。
+  两条都用 `touchgocore/ledger` 的同一套出款台账保证「同一单号不签第二笔」（各持一个实例，
+  键带链维度），商户账户查询仍走各自段引用的 HTTP 供应商。
+  其余原生币/代币通道（`tron` 的 TRX、`bsc`、`sol`）与三条社交通道的
   资金实现已在 2026-10 的资金面收口里删除：提现/查单/查账户三个门面的函数签名保留，
   一律返回各包的 `ErrPayoutNotWired` 哨兵（`errors.Is` 可判），对应通道段不再有
-  `provider` / `ton` 配置项；充值/收款接口则整条删除（全仓只留提现）。
+  `provider` 配置项；充值/收款接口则整条删除（全仓只留提现）。
   各链的地址校验与 `pay` 的币种收款端规则**刻意不随提现实现删除**——删掉规则登记会让该币种
   的单走「未登记即放行」，那是资金安全退化而不是简化。
   三条社交通道同构：登录各引一段消息网关（`supplier_zalo`/`supplier_fb`/`supplier_ig`）；登录之所以一家一段，

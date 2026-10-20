@@ -7,7 +7,7 @@
 // 拒掉（见 usdt.go）。
 //
 // 全仓真正会动钱的出款只有 USDT-TRC20 一条：本地组交易、私钥签名、经节点 gRPC 广播，
-// 幂等由本包的出款台账保证（onchain.go、idempotent.go）。TRX 那条供应商提现链路已在
+// 幂等由本包的出款台账保证（onchain.go、query.go，实现在 touchgocore/ledger）。TRX 那条供应商提现链路已在
 // 2026-10 的资金面收口里删除——链上原生币出款并没有对应实现，留着一条没人实测的
 // 「把提现单交给 HTTP 供应商」的路径只是多一个能被配置点亮的出资口。三个 TRX 门面
 // 保留（签名是包外可见调用面），一律返回 ErrPayoutNotWired。
@@ -37,7 +37,7 @@ import (
 // 它是哨兵而不是普通错误：调用方要用 errors.Is 区分「本进程没接入这条链」（部署缺陷，
 // 该补实现或改走 USDT 通道）与「这一单被拒」（业务结果，该走状态机）。
 // 三个门面一律返回 nil 结果加这个错误，是为了让「没接入」永远不可能被读成「已受理」。
-var ErrPayoutNotWired = errors.New("TRON(TRX) 出款链路未接入（本仓资金出款只交付 USDT-TRC20 链上通道）")
+var ErrPayoutNotWired = errors.New("TRON(TRX) 出款链路未接入（本仓链上出款只交付 USDT-TRC20 与原生 TON 两条通道）")
 
 // TronWithdraw 未接入：保留签名，不假装受理。
 func TronWithdraw(context.Context, *pay.PayOrder) (*pay.PayResult, error) {

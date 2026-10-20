@@ -72,15 +72,19 @@ func (s *rpcService) Stop(ctx context.Context) error {
 	return nil
 }
 
-// telegramService Telegram Bot服务适配器
+// telegramService Telegram Bot服务适配器（Bot 长连接 + telegram.ton 的 TON 资金链路）
 type telegramService struct{}
 
 func (s *telegramService) Name() string { return "telegram" }
 func (s *telegramService) Start(ctx context.Context) error {
 	telegram.TelegramStart(ctx)
+	// TON 通道与 Bot 同段起停但互不牵制：钱包没配好只记日志、不阻断 Bot（两侧各自的
+	// 「不启动」判断都在包内留痕）。拆成两个 Service 反而会让停服顺序多一个变量。
+	telegram.TonStart(ctx)
 	return nil
 }
 func (s *telegramService) Stop(ctx context.Context) error {
+	telegram.TonStop(ctx)
 	telegram.TelegramStop(ctx)
 	return nil
 }

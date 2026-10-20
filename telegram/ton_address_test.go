@@ -7,43 +7,60 @@ import (
 	"touchgocore/pay"
 )
 
-// TON 地址夹具。account 部分是 0x00..0x1F 与 0x20..0x3F 两段递增字节，
-// 末尾两字节是按 CRC-16/CCITT-FALSE 现算的校验和。
+// TON 地址夹具。account 部分是 0x00..0x1F 递增字节，五种标签形态各编一次。
 //
-// 为什么现场造而不是抄：本包原先的 jetton 夹具（EQDtFpEw...BB1q）就是编的——
-// 48 位、EQ 开头、workchain 0，肉眼全然正常，校验和却对不上。
+// 校验和由 tongo 的 AccountID.ToHuman 生成（另一套实现，与本包不共享一行代码），
+// 而不是用本包自己的 CRC 现算：本包曾经把 CRC 抄成 CCITT-FALSE（初值错），
+// 自编的夹具全部自证通过，直到拿 tongo 的输出对拍才暴露——用被测实现产出的向量
+// 永远测不出被测实现的错，这一条就是那件事的补丁。
+//
+// 为什么仍要现场造而不是抄一个网上的地址：本包原先的 jetton 夹具（EQDtFpEw...BB1q）
+// 就是编的——48 位、EQ 开头、workchain 0，肉眼全然正常，校验和却对不上。
 // 抄来的向量一旦本身是编的，测试就永远藏不住这个错。
 const (
-	tonAcctBounceable  = "EQAAAQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eH7Qb"
-	tonAcctNonBounce   = "UQAAAQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eH-ne"
-	tonAcctTestnet     = "kQAAAQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHw-R"
-	tonAcctTestnetNonB = "0QAAAQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eH1JU"
-	tonAcctMasterchain = "Ef8AAQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eH0tT"
-	tonAcctBadChecksum = "EQAAAQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eH7Qc"
+	tonAcctBounceable  = "EQAAAQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHx2j"
+	tonAcctNonBounce   = "UQAAAQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eH0Bm"
+	tonAcctTestnet     = "kQAAAQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eH6Yp"
+	tonAcctTestnetNonB = "0QAAAQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eH_vs"
+	tonAcctMasterchain = "Ef8AAQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eH-Lr"
+	tonAcctBadChecksum = "EQAAAQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHx2b"
 	tonAcctRaw         = "0:000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
 	tonAcctRawMaster   = "-1:000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+
+	// tonAcctRealWorld 是 tongo 官方示例里那条真实主网地址（一个真实存在的账户）。
+	// 它不参与上面的形态表，只用来做下面那条「本包必须认得真地址」的断言——
+	// 自编夹具在 CRC 抄错时照样自证通过，只有真地址能把它照出来。
+	tonAcctRealWorld = "EQBszTJahYw3lpP64ryqscKQaDGk4QpsO7RO6LYVvKHSINS0"
 )
 
-// TestCRC16CCITTFalseCheckVector 钉住 CRC 的参数选择。
+// TestCRC16XMODEMCheckVector 钉住 CRC 的参数选择。
 //
-// CCITT-FALSE（初值 0xFFFF）的 "123456789" 检值是 0x29B1；常被混用的 XMODEM
-// （同多项式、初值 0）检值是 0x31C3。抄错初值的实现能编出地址、也能验出自己的
-// 编造，唯独验不了任何真实地址——症状是全线拒单，最难往回查。
-func TestCRC16CCITTFalseCheckVector(t *testing.T) {
-	if got := crc16CCITTFalse([]byte("123456789")); got != 0x29B1 {
-		t.Fatalf("crc16CCITTFalse(\"123456789\")=0x%04X，期望 0x29B1", got)
+// XMODEM（多项式 0x1021、初值 0x0000）的 "123456789" 检值是 0x31C3；常被混用的
+// CCITT-FALSE（同多项式、初值 0xFFFF）检值是 0x29B1。抄错初值的实现能编出地址、
+// 也能验出自己的编造，唯独验不了任何真实地址——症状是全线拒单，最难往回查。
+func TestCRC16XMODEMCheckVector(t *testing.T) {
+	if got := crc16XMODEM([]byte("123456789")); got != 0x31C3 {
+		t.Fatalf("crc16XMODEM(\"123456789\")=0x%04X，期望 0x31C3", got)
 	}
-	if got := crc16CCITTFalse(nil); got != 0xFFFF {
-		t.Fatalf("空输入的初值应为 0xFFFF，实得 0x%04X", got)
+	if got := crc16XMODEM(nil); got != 0x0000 {
+		t.Fatalf("空输入的初值应为 0x0000，实得 0x%04X", got)
 	}
 	// 夹具自检：抄错的地址在这一步就会露馅，不用等到跑校验用例。
 	for _, s := range []string{
 		tonAcctBounceable, tonAcctNonBounce, tonAcctTestnet,
-		tonAcctTestnetNonB, tonAcctMasterchain,
+		tonAcctTestnetNonB, tonAcctMasterchain, tonAcctRealWorld,
 	} {
 		if !IsValidTONAddress(s) {
 			t.Errorf("夹具地址 %s 校验不过，说明它是编的或本实现错了", s)
 		}
+	}
+	// 真地址的第二道判据：本包解出的 workchain 必须是 0（主网 basechain）。
+	a, ok := parseTONAddress(tonAcctRealWorld)
+	if !ok || a.Workchain != 0 || !a.Bounceable || a.Testnet {
+		t.Errorf("真地址 %s 解析结果不对: %+v ok=%v", tonAcctRealWorld, a, ok)
+	}
+	if tonAcctBadChecksum == tonAcctBounceable {
+		t.Fatal("坏校验和夹具与好夹具相同，这道反例是空的")
 	}
 }
 
@@ -69,10 +86,14 @@ func TestParseTONAddressForms(t *testing.T) {
 		{"0:" + strings.Repeat("z", 64), false, false, false, false, 0, "十六进制含非法字符"},
 		{"2:" + strings.Repeat("0", 64), false, false, false, false, 0, "不存在的分片号"},
 		{tonAcctBounceable[:47], false, false, false, false, 0, "用户友好地址少一位"},
-		{strings.ReplaceAll(tonAcctNonBounce, "-", "+"), false, false, false, false, 0, "换成标准 base64 字母表"},
+		{strings.ReplaceAll(tonAcctTestnetNonB, "_", "/"), false, false, false, false, 0, "换成标准 base64 字母表"},
 		{"", false, false, false, false, 0, "空串"},
 	}
 	for _, cs := range cases {
+		if cs.desc == "换成标准 base64 字母表" && cs.addr == tonAcctTestnetNonB {
+			// 夹具本身不含 URL-safe 字符时这条反例是空的（上一轮就因为它悄悄退化过）。
+			t.Fatalf("字母表反例没生效：夹具 %s 里没有被替换的字符", tonAcctTestnetNonB)
+		}
 		a, ok := parseTONAddress(cs.addr)
 		if ok != cs.ok {
 			t.Errorf("%s: parseTONAddress(%q) ok=%v，期望 %v", cs.desc, cs.addr, ok, cs.ok)

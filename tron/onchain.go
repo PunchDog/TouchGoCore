@@ -14,6 +14,7 @@ import (
 	"github.com/fbsobreira/gotron-sdk/pkg/proto/core"
 	"google.golang.org/protobuf/proto"
 
+	"touchgocore/ledger"
 	"touchgocore/pay"
 	"touchgocore/vars"
 )
@@ -49,7 +50,7 @@ type onchainChannel struct {
 	sign     signFunc
 	opt      pay.ProviderOptions
 	chain    *pay.ChainOptions
-	ledger   *ledger
+	ledger   *ledger.Ledger
 	wallet   string
 	supplier pay.Channel // 可为 nil：只上链不接供应商时，账户查询就地拒绝
 	nowFn    func() time.Time
@@ -90,7 +91,7 @@ func newOnchainChannel(opt pay.ProviderOptions) (pay.Channel, error) {
 		sign:   softSigner(key),
 		opt:    opt,
 		chain:  chain,
-		ledger: defaultLedger,
+		ledger: tronLedger,
 		wallet: wallet,
 		nowFn:  time.Now,
 	}
@@ -264,7 +265,7 @@ func (c *onchainChannel) Withdraw(ctx context.Context, o *pay.PayOrder) (*pay.Pa
 		return nil, err
 	}
 	var res *pay.PayResult
-	err := c.ledger.withLock(o.OrderNo, func() error {
+	err := c.ledger.WithLock(o.OrderNo, func() error {
 		var e error
 		res, e = c.withdrawLocked(ctx, o)
 		return e
@@ -292,23 +293,23 @@ func (c *onchainChannel) checkAsset(o *pay.PayOrder) error {
 
 func (c *onchainChannel) withdrawLocked(ctx context.Context, o *pay.PayOrder) (*pay.PayResult, error) {
 	orderNo := strings.TrimSpace(o.OrderNo)
-	entry, found := c.ledger.get(orderNo)
+	entry, found := c.ledger.Get(orderNo)
 	now := c.nowFn()
 
 	switch {
-	case found && entry.terminal():
+	case found && entry.Terminal():
 		return nil, fmt.Errorf("%w（order_no=%s tx=%s）", ErrOrderAlreadySettled, orderNo, entry.TxID)
-	case found && entry.State == stateBroadcast:
+	case found && entry.State == ledger.StateBroadcast:
 		// 已经交给过节点：唯一允许的动作是查证，任何重建都是第二笔钱。
 		return c.confirm(ctx, entry, now)
-	case found && entry.State == statePrepared && !entry.expired(now):
+	case found && entry.State == ledger.StatePrepared && !entry.Expired(now):
 		// 签好了却没交出去（或交出去前就失败）：把同一份 RawTx 再广播一次。
 		// 交易号由 raw_data 决定，重发同一份在节点侧天然去重，不会产生第二笔。
 		return c.broadcastEntry(ctx, entry, now)
-	case found && entry.State == statePrepared:
+	case found && entry.State == ledger.StatePrepared:
 		// prepared 且已过链上有效期：这一笔不可能再上链，也没有第二笔的风险，重建。
 	case found:
-		// stateRejected：节点从没让这一笔进过池，钱没动过，允许同单号重建重发。
+		// rejected 态：节点从没让这一笔进过池，钱没动过，允许同单号重建重发。
 	}
 
 	if !found {
@@ -338,7 +339,7 @@ func (c *onchainChannel) withdrawLocked(ctx context.Context, o *pay.PayOrder) (*
 }
 
 // prepare 签名并把这一笔写进台账；记账失败即放弃广播。
-func (c *onchainChannel) prepare(o *pay.PayOrder, tx *core.Transaction) (*ledgerEntry, error) {
+func (c *onchainChannel) prepare(o *pay.PayOrder, tx *core.Transaction) (*ledger.Entry, error) {
 	signed, err := c.sign(tx)
 	if err != nil {
 		return nil, &pay.ProviderError{Channel: c.opt.Name, Code: "sign_failed", Msg: c.redact(err.Error()), Retryable: false}
@@ -351,7 +352,7 @@ func (c *onchainChannel) prepare(o *pay.PayOrder, tx *core.Transaction) (*ledger
 	if err != nil {
 		return nil, fmt.Errorf("已签名交易无法序列化进台账: %w", err)
 	}
-	entry := &ledgerEntry{
+	entry := &ledger.Entry{
 		OrderNo:     strings.TrimSpace(o.OrderNo),
 		TxID:        txID,
 		RawTx:       raw,
@@ -359,31 +360,31 @@ func (c *onchainChannel) prepare(o *pay.PayOrder, tx *core.Transaction) (*ledger
 		Contract:    c.chain.Contract,
 		Amount:      o.Amount,
 		FeeLimit:    c.feeLimit(),
-		State:       statePrepared,
+		State:       ledger.StatePrepared,
 		ExpiresAtMS: signed.GetRawData().GetExpiration(),
-		UpdatedAtMS: nowMS(c.nowFn()),
+		UpdatedAtMS: ledger.NowMS(c.nowFn()),
 	}
 	// 记账排在广播之前：反过来就会留下「链上有一笔、本地查不到」的状态，那正是双付的温床。
-	if err := c.ledger.put(entry); err != nil {
+	if err := c.ledger.Put(entry); err != nil {
 		return nil, err
 	}
 	return entry, nil
 }
 
 // broadcastEntry 广播台账里这一笔。RawTx 逐字不变，因此同一单号重复走到这里也只有一笔钱。
-func (c *onchainChannel) broadcastEntry(ctx context.Context, entry *ledgerEntry, now time.Time) (*pay.PayResult, error) {
+func (c *onchainChannel) broadcastEntry(ctx context.Context, entry *ledger.Entry, now time.Time) (*pay.PayResult, error) {
 	tx := &core.Transaction{}
 	if err := proto.Unmarshal(entry.RawTx, tx); err != nil {
 		return nil, fmt.Errorf("台账里的已签名交易不可还原（order_no=%s）: %w", entry.OrderNo, err)
 	}
-	entry.State = stateBroadcast
-	entry.UpdatedAtMS = nowMS(now)
-	if err := c.ledger.put(entry); err != nil {
+	entry.State = ledger.StateBroadcast
+	entry.UpdatedAtMS = ledger.NowMS(now)
+	if err := c.ledger.Put(entry); err != nil {
 		return nil, err
 	}
 	res, err := c.gw.broadcast(ctx, tx)
 	if err != nil {
-		// 请求已经可能到达节点：状态停在 stateBroadcast，结论交给按 txid 的查证。
+		// 请求已经可能到达节点：状态停在 broadcast，结论交给按 txid 的查证。
 		return c.unknown(entry, "广播结果未知: "+c.redact(err.Error())), nil
 	}
 	switch {
@@ -401,10 +402,10 @@ func (c *onchainChannel) broadcastEntry(ctx context.Context, entry *ledgerEntry,
 //
 // 用独立状态而不是删条目：删掉会让下一次调用看不见「这一单号已经试过了」，
 // 留下状态既能允许重建，也能在日志里数出这一单号被拒过几次。
-func (c *onchainChannel) markRejected(entry *ledgerEntry, code string, now time.Time) (*pay.PayResult, error) {
-	entry.State = stateRejected
-	entry.UpdatedAtMS = nowMS(now)
-	if err := c.ledger.put(entry); err != nil {
+func (c *onchainChannel) markRejected(entry *ledger.Entry, code string, now time.Time) (*pay.PayResult, error) {
+	entry.State = ledger.StateRejected
+	entry.UpdatedAtMS = ledger.NowMS(now)
+	if err := c.ledger.Put(entry); err != nil {
 		return nil, err
 	}
 	return &pay.PayResult{
@@ -448,7 +449,7 @@ func (c *onchainChannel) precheckFunds(ctx context.Context, o *pay.PayOrder, fee
 }
 
 // unknown 给一条「说不清」的回执：带上 txid，让对账有把手。
-func (c *onchainChannel) unknown(entry *ledgerEntry, note string) *pay.PayResult {
+func (c *onchainChannel) unknown(entry *ledger.Entry, note string) *pay.PayResult {
 	return &pay.PayResult{
 		OrderNo: entry.OrderNo, TradeNo: entry.TxID, TxHash: entry.TxID,
 		Status: pay.StatusUnknown, Amount: entry.Amount, RawNote: c.note(note),

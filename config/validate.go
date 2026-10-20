@@ -203,8 +203,9 @@ func (c *Cfg) Validate() error {
 //
 // 这里拦的是「配置写错」而不是「供应商挂了」：sdk 名字打错一个字母、引用了
 // 不存在的商户账户、SDK 段没标驱动，都是部署期就能确定的错，让它启动只会在
-// 第一笔出款时暴露。至于驱动名有没有登记，由通道包在 Start 时用 pay.Open 判定
-// （本包不引 pay，避免配置层依赖资金契约层）。
+// 第一笔出款时暴露。至于驱动名有没有登记，由通道包在 Start 时按入口判定
+// （usdt 走 pay.OpenChain，zalo/facebook/instagram 走 pay.OpenService；pay.Open
+// 在本仓已无调用点），本包不引 pay，避免配置层依赖资金契约层。
 //
 // 判定范围只有「已经开启的部分」：enable 不为 on 的段整体跳过——把一条通道关掉
 // 不该同时要求它的每一项配置都仍然完整。唯一的例外是段名本身指不到：那是纯粹的
@@ -220,6 +221,12 @@ func validatePayChannels(c *Cfg) error {
 	}
 	if c.Usdt != nil {
 		refs["usdt.provider"] = c.Usdt.Provider
+	}
+	// telegram.ton 是 TON 资金链路对 pay_sdks 的引用（实现归 telegram 包，因为它与 Bot
+	// 同段配置）。这里只查引用指得通与账户点得名，网络取值与 jetton 那些 TON 自己的
+	// 知识由 telegram 在装配时判——本包不引 pay，也不该知道 TON 的事。
+	if c.Telegram != nil && c.Telegram.Ton != nil {
+		refs["telegram.ton.provider"] = c.Telegram.Ton.Provider
 	}
 	if c.Zalo != nil {
 		refs["zalo.login"] = c.Zalo.Login
@@ -269,8 +276,11 @@ func validatePayChannels(c *Cfg) error {
 		// 不等于放弃供应商侧——商户账户查询照旧走 HTTP 供应商，只有出款与查单
 		// 换成直接动链。把 base_url 改成可选会让账户查询链路在没人注意时静默失效。
 		if chain := sdk.Chain; chain != nil {
-			if strings.TrimSpace(chain.Node) == "" {
-				return fmt.Errorf("pay_sdks.%s.chain 已配置但 node 为空：链上通道不知道该把交易广播给谁", name)
+			// 接入点按驱动而异：TRON 的链上驱动只认 gRPC 的 node，TON 的只认 HTTP 的 http_base。
+			// 本包不知道哪个驱动叫什么，所以闸只能问「两样有没有一样」——
+			// 两样都空才是真的没接入点，具体该配哪一样由驱动在装配时点名报错。
+			if strings.TrimSpace(chain.Node) == "" && strings.TrimSpace(chain.HTTPBase) == "" {
+				return fmt.Errorf("pay_sdks.%s.chain 已配置但 node 与 http_base 都为空：链上通道不知道该把交易广播给谁", name)
 			}
 			if strings.TrimSpace(chain.WalletAddress) == "" {
 				return fmt.Errorf("pay_sdks.%s.chain 已配置但 wallet_address 为空：出款主体必须是配置里读得出的那个地址，不能只由私钥决定", name)

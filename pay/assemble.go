@@ -180,6 +180,10 @@ func buildChain(channel, section string, src *config.PayChainConfig, params *Cha
 		HTTPBase:      strings.TrimSpace(src.HTTPBase),
 		APIKey:        strings.TrimSpace(src.APIKey),
 		WalletAddress: strings.TrimSpace(src.WalletAddress),
+		// 热钱包形态直接取自 chain 段：它是「我以哪个账户出资、那个账户的合约长什么样」，
+		// 与币种无关，所以不由通道段声明，也不进 extras（extras 会并进出站报文与签名域）。
+		WalletVersion: strings.TrimSpace(src.WalletVersion),
+		SubWalletID:   src.SubWalletID,
 		PrivateKey:    strings.TrimSpace(src.PrivateKey),
 		Contract:      strings.TrimSpace(params.Contract),
 		Network:       strings.TrimSpace(params.Network),

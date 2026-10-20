@@ -67,7 +67,7 @@ type broadcastResult struct {
 // txReceipt 是一条链上交易的归一回执。
 type txReceipt struct {
 	// Found=false 表示节点没有这条交易的回执：既可能是还没进块，也可能是压根没广播出去。
-	// 这两态在本地分不开，只能靠台账里「有没有广播过」来定，见 idempotent.go。
+	// 这两态在本地分不开，只能靠台账里「有没有广播过」来定，见 touchgocore/ledger。
 	Found bool
 	// InBlock 是已进块（回执里有区块号）。
 	InBlock bool

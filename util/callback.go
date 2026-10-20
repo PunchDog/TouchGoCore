@@ -101,11 +101,15 @@ const (
 	// 下游按 <前缀>+<动作> 注册，例如 UsdtMsg+"Withdraw"（载荷 *pay.PayResult）；
 	// 通道包本身不落库，结果只经这里交出去。
 	//
-	// 2026-10 的资金面收口后，只有 CallUsdtMsg 还会播资金回执（Withdraw/Query 走链上
-	// 台账，Account 走供应商；充值已删）。CallWhatsappMsg 只剩消息事件（Inbound/Receipt/
-	// Connection/QR/SendResult），CallTonMsg 已无播报方。常量留着是因为删它是包外可见
-	// 的破坏面，而留一个没人订阅的键无害：收不到回调要读成「这条链没接入」，
-	// 不是「单还在路上」。
+	// 2026-10 的资金面收口后，播资金回执的通道是 CallUsdtMsg（Withdraw/Query 走链上
+	// 台账，Account 走供应商）与 CallTonMsg（同一套台账口径，实现见 telegram 包的
+	// ton_onchain.go / ton_query.go）；充值已整条删除。CallWhatsappMsg 只剩消息事件
+	// （Inbound/Receipt/Connection/QR/SendResult）。
+	//
+	// CallTonMsg 在 2026-10 收口时一度没有播报方（TON 出款实现被删），2026-10-20 随
+	// tongo 链上通道重新接上。常量从来没删：删它是包外可见的破坏面，而留一个暂时
+	// 没人订阅的键无害。收不到回调仍要读成「这条链没接入」而不是「单还在路上」——
+	// 本包没起来时三个门面直接报错，不会先播一条半截回执。
 	CallWhatsappMsg = "WhatsappMsg"
 	CallUsdtMsg     = "UsdtMsg"
 	CallTonMsg      = "TonMsg"

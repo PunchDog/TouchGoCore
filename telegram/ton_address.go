@@ -34,13 +34,16 @@ const (
 // 放开到几百只会把「上游把整段 JSON 塞进 memo」这类事故带上报文。
 const maxMemoRunes = 64
 
-// crc16CCITTFalse 算 CRC-16/CCITT-FALSE：多项式 0x1021、初值 0xFFFF、不反射、
-// 无异或输出。TON 用户友好地址末尾两字节就是它（大端）。
+// crc16XMODEM 算 CRC-16/XMODEM：多项式 0x1021、初值 0x0000、不反射、无异或输出。
+// TON 用户友好地址末尾两字节就是它（大端）。
 //
-// 别照抄成 XMODEM（同样 0x1021，但初值是 0）：两者只在「123456789」这种
-// 自检串上差一个常量，真实地址上却是全表错，症状是所有合法地址都被判非法。
-func crc16CCITTFalse(data []byte) uint16 {
-	crc := uint16(0xFFFF)
+// 别照抄成 CCITT-FALSE（同样 0x1021，但初值是 0xFFFF）：两者只在「123456789」这种
+// 自检串上差一个常量（0x31C3 对 0x29B1），真实地址上却是全表错，症状是所有合法地址
+// 都被判非法、而按错初值自编的夹具全部自证通过。本包曾经就抄成了 CCITT-FALSE，
+// 是拿 tongo 的 ToHuman 输出对拍时才暴露的（2026-10-19：真地址 EQBszTJahYw3…INS0 的
+// 校验和 d4b4 只有 XMODEM 算得出，CCITT-FALSE 给 7d0c）。
+func crc16XMODEM(data []byte) uint16 {
+	crc := uint16(0x0000)
 	for _, b := range data {
 		crc ^= uint16(b) << 8
 		for i := 0; i < 8; i++ {
@@ -62,6 +65,11 @@ type tonAddress struct {
 	Testnet bool
 	// Bounceable 表示这笔转账失败后能否退回（EQ 形态）。
 	Bounceable bool
+	// HasBounceFlag 标记这一形态里到底有没有「可退回」这一位。
+	//
+	// 原始十六进制形态（0:hex）不带标签字节，判不出可退回性，只有用户友好形态才置真。
+	// 出款侧据此决定缺省方向，不能把 false 当成「对方要不可退回」。
+	HasBounceFlag bool
 	// HasTestnetFlag 标记这一形态是否真的带了测试网位——
 	// 没有位的形态就没法与 PayOrder.Network 比对，不能当成「比过且一致」。
 	HasTestnetFlag bool
@@ -95,7 +103,7 @@ func parseTONAddress(s string) (*tonAddress, bool) {
 	default:
 		return nil, false
 	}
-	want := crc16CCITTFalse(buf[:friendlyAddrBytes-2])
+	want := crc16XMODEM(buf[:friendlyAddrBytes-2])
 	got := uint16(buf[friendlyAddrBytes-2])<<8 | uint16(buf[friendlyAddrBytes-1])
 	if want != got {
 		return nil, false
@@ -104,6 +112,7 @@ func parseTONAddress(s string) (*tonAddress, bool) {
 		Workchain:      int8(buf[1]),
 		Testnet:        tag&tagTestnetBit != 0,
 		Bounceable:     tag&^byte(tagTestnetBit) == tagBounceable,
+		HasBounceFlag:  true,
 		HasTestnetFlag: true,
 	}, true
 }

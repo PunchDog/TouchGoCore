@@ -50,6 +50,7 @@ import (
 	waLog "go.mau.fi/whatsmeow/util/log"
 	"google.golang.org/protobuf/proto"
 
+	"touchgocore/config"
 	"touchgocore/pay"
 	"touchgocore/util"
 	"touchgocore/vars"
@@ -548,8 +549,9 @@ func waSendText(ctx context.Context, w *waClientWrapper, jid types.JID, body, la
 		if gerr != nil {
 			return "", "", fmt.Errorf("whatsapp %s失败: 防封闸拦截: %w", label, gerr)
 		}
+		delayMs = clampSendDelayMs(w.cfg, delayMs)
 		if delayMs > 0 {
-			// 防封延迟可达十几秒，必须认 ctx：只 time.Sleep 的话，调用方（HTTP 请求）
+			// 睡眠必须认 ctx：只 time.Sleep 的话，调用方（HTTP 请求）
 			// 早就断了这里还在睡，醒来又往一个已取消的 ctx 上发一条注定失败的消息。
 			if werr := waSleepCtx(ctx, time.Duration(delayMs)*time.Millisecond); werr != nil {
 				w.gate.AfterSendFailed(time.Now())
@@ -581,6 +583,31 @@ func waSendText(ctx context.Context, w *waClientWrapper, jid types.JID, body, la
 	chat := waResolveChat(ctx, w.sess, jid).String()
 	w.recordLastSend(chat, msgID, ts)
 	return msgID, chat, nil
+}
+
+// clampSendDelayMs 把防封闸给出的睡眠压进单条发送窗口（缺省 1~5 秒，
+// 即 send_min_delay_sec / send_max_delay_sec）。
+//
+// 闸的 moderate 档在新会话、打字模拟、封禁恢复倍率之外，拓扑建议还会按分钟加延迟，
+// 一条消息的人为等待经常超过十几秒。业务要求单条发送的这段等待落在配置窗口里：
+// 0 仍立刻发；正延迟低于下界抬到下界，高于上界截到上界；窗口内的原值保留
+// （仍是闸自己的随机节奏）。
+func clampSendDelayMs(cfg *config.WhatsappSessionsConfig, delayMs int) int {
+	if delayMs <= 0 {
+		return 0
+	}
+	minMs := int(cfg.EffectiveSendMinDelay() / time.Millisecond)
+	maxMs := int(cfg.EffectiveSendMaxDelay() / time.Millisecond)
+	if maxMs < minMs {
+		maxMs = minMs
+	}
+	if delayMs < minMs {
+		return minMs
+	}
+	if delayMs > maxMs {
+		return maxMs
+	}
+	return delayMs
 }
 
 // waSleepCtx 是可被 ctx 打断的睡眠。

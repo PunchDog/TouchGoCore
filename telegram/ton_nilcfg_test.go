@@ -2,10 +2,10 @@ package telegram
 
 import (
 	"context"
-	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -18,16 +18,19 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
-// refuse 钉住资金门面的 fail-closed 口径：未接入哨兵错误，且结果必须为 nil。
-// 两条都判是因为上游一旦只看「有没有报错」，一个非 nil 的半截回执就会被当成受理凭证。
+// refuse 钉住资金门面在「链路未启动」时的 fail-closed 口径：明确报错，且结果必须为 nil。
+//
+// 两条都判是因为上游一旦只看「有没有报错」，一个非 nil 的半截回执就会被当成受理凭证——
+// 而对出款来说，「被当成已受理」的下半场就是重复打款。
+// 文案里点名的键名也要判：配置没开的人要靠这句话找到自己该改哪一格。
 func refuse[T any](t *testing.T, name string, call func() (*T, error)) {
 	t.Helper()
 	res, err := call()
-	if !errors.Is(err, ErrPayoutNotWired) {
-		t.Errorf("%s 应返回未接入哨兵，实得 %v", name, err)
+	if err == nil || !strings.Contains(err.Error(), "TON 通道未启动") {
+		t.Errorf("%s 应报「TON 通道未启动」，实得 %v", name, err)
 	}
 	if res != nil {
-		t.Errorf("%s 未接入却给出了结果对象: %+v", name, res)
+		t.Errorf("%s 未启动却给出了结果对象: %+v", name, res)
 	}
 }
 
@@ -154,10 +157,10 @@ func TestPayoutFacadeKeepsBotConfigSnapshot(t *testing.T) {
 	}
 }
 
-// TestPayoutInterfaceStaysWired 三个门面仍是包外可见的调用面，且一律返回未接入哨兵。
+// TestPayoutInterfaceStaysWired 三个门面仍是包外可见的调用面，且未启动时一律就地拒绝。
 //
-// 资金实现已删除，这里只钉两件事：签名没被人顺手改掉（服务注册与下游代码都按它写），
-// 以及「没接入」绝不被读成「已受理」——结果必须是 nil 加 errors.Is 可判的哨兵。
+// 签名钉子留着是因为服务注册与下游代码都按它写；这里钉的是另一半：链路没起来时
+// 「没接入」绝不被读成「已受理」——结果必须是 nil 加一句指名配置键的错误。
 func TestPayoutInterfaceStaysWired(t *testing.T) {
 	var _ func(context.Context, *pay.PayOrder) (*pay.PayResult, error) = TonWithdraw
 	var _ func(context.Context, string) (*pay.PayResult, error) = TonQuery
@@ -173,12 +176,50 @@ func TestPayoutInterfaceStaysWired(t *testing.T) {
 		{"Account", func() error { _, e := TonAccount(nil, &pay.AccountQuery{}); return e }},
 	}
 	for _, cs := range cases {
-		if err := cs.run(); !errors.Is(err, ErrPayoutNotWired) {
-			t.Errorf("%s 应返回未接入哨兵，实得 %v", cs.name, err)
+		if err := cs.run(); err == nil || !strings.Contains(err.Error(), "TON 通道未启动") {
+			t.Errorf("%s 应报「TON 通道未启动」，实得 %v", cs.name, err)
 		}
 	}
 	// 订单为 nil 也一样拒绝：不能因为参数不合法就先返回 nil 结果让上游以为已受理。
-	if _, err := TonWithdraw(nil, nil); !errors.Is(err, ErrPayoutNotWired) {
+	if _, err := TonWithdraw(nil, nil); err == nil || !strings.Contains(err.Error(), "TON 通道未启动") {
 		t.Errorf("空订单的拒绝口径不符: %v", err)
+	}
+}
+
+// TestTonStartWithoutConfigLeavesChannelDown 装配入口对空配置只留日志、不点亮通道。
+//
+// 这一条是新增的：TON 现在有真实实现，「配置没开即不能动钱」不再由哨兵白送，
+// 必须有一条活闸证明 newTonClient 的每条回落分支都真的没把通道挂上去。
+func TestTonStartWithoutConfigLeavesChannelDown(t *testing.T) {
+	prev := runCtx()
+	defer func() {
+		setRunCtx(prev)
+		TonStop(context.Background())
+	}()
+
+	orders := []*pay.PayOrder{{OrderNo: "O1", Amount: 1, Address: tonAcctBounceable}}
+	cases := []struct {
+		name string
+		cfg  *config.Cfg
+	}{
+		{"无 telegram 段", &config.Cfg{}},
+		{"telegram 段没有 ton", &config.Cfg{Telegram: &config.TelegramConfig{BotToken: "1:x"}}},
+		{"ton 段存在但没引用 SDK", &config.Cfg{Telegram: &config.TelegramConfig{
+			Ton: &config.TonChannelConfig{}}}},
+		{"ton 引用了一个不存在的 SDK 段", &config.Cfg{Telegram: &config.TelegramConfig{
+			Ton: &config.TonChannelConfig{Provider: &config.PaySDKRef{SDK: "no_such_section"}}}}},
+		{"jetton 被填了", &config.Cfg{Telegram: &config.TelegramConfig{
+			Ton: &config.TonChannelConfig{
+				Provider: &config.PaySDKRef{SDK: "supplier_x", Account: "default"},
+				Jetton:   tonAcctBounceable}}}},
+		{"network 填了 TonAPI 的自述名", &config.Cfg{Telegram: &config.TelegramConfig{
+			Ton: &config.TonChannelConfig{
+				Provider: &config.PaySDKRef{SDK: "supplier_x"}, Network: "testnet-v4"}}}},
+	}
+	for _, cs := range cases {
+		TonStart(corectx.WithCfg(context.Background(), cs.cfg))
+		if _, err := TonWithdraw(nil, orders[0]); err == nil || !strings.Contains(err.Error(), "TON 通道未启动") {
+			t.Errorf("%s：通道不该起来，实得 %v", cs.name, err)
+		}
 	}
 }

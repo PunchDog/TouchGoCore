@@ -1,8 +1,9 @@
 package whatsapp
 
 // 本文件是 whatsmeow 消息侧的门面：发一条文本消息（单聊或群组）、异步批量发信
-// （后台 goroutine 逐条、随机间隔、小时闸）、查好友列表（本地空集时按需同步，见
-// wa_contacts.go）、查可发言的群组列表、删掉代持账号客户端里那个会话框、
+// （后台 goroutine 逐条、随机间隔、小时闸）、发送成功后清空会话消息
+// （clearChat，不归档、不退群、不删好友）、查好友列表（本地空集时按需同步，见
+// wa_contacts.go）、查可发言的群组列表、清空代持账号客户端里的会话消息、
 // 多账号 Client 的启停与列表、QR 配对的发起、吊销账号配对，以及把入站事件摊平成回调广播给业务方。
 // 常驻协程与会话管理在 wa_manager.go，联系人 app state 同步在 wa_contacts.go，
 // 单聊发送前的外联凭证门闸与 463 恢复档在 wa_reachout.go，配对泵在 wa_pairing.go，
@@ -26,9 +27,10 @@ package whatsapp
 // WhatsappStartPairing / WhatsappDeleteDevice 属改状态动作，调用方必须串行化
 // （管理器只兜「不 panic、不双启」）。
 //
-// 边界口径与资金侧一致：本包不持有按手机号/会话的业务状态。删会话要的 lastMessage
-// 优先由调用方传入，调用方留空时回退本包的发送账（只记经本包发出的最近一条）；
-// 消息落库、幂等去重、冷却与预算都归业务方。
+// 边界口径与资金侧一致：本包不持有按手机号/会话的业务状态。发信成功后本包自动清空
+// 会话消息（单聊/群聊都只发 clearChat 变异，不归档、不退群、不删好友；失败仅记 Warning，
+// 不改变发送结果）。清空要的 lastMessage 优先由调用方传入，调用方留空时回退本包的
+// 发送账（只记经本包发出的最近一条）；消息落库、幂等去重、冷却与预算都归业务方。
 
 import (
 	"context"
@@ -44,6 +46,7 @@ import (
 	"go.mau.fi/whatsmeow/appstate"
 	"go.mau.fi/whatsmeow/proto/waCommon"
 	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/proto/waSyncAction"
 	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
@@ -151,7 +154,7 @@ type waSession interface {
 	// SendAppState 发一次会话级 app state 变异（当前唯一用途是删会话）。
 	SendAppState(ctx context.Context, patch appstate.PatchInfo) error
 	// GetLIDForPN 查 PN（s.whatsapp.net 号码）对应的 LID：whatsmeow 发送对单聊目标
-	// 会做同款改写（WM/send.go:339-356），删框与对账必须落在同一条会话 JID 上。
+	// 并改用 PN→LID 改写（WM/send.go:339-356），清理与对账必须落在同一条会话 JID 上。
 	// 查不到映射时库返回空 JID（可能伴随 nil error），调用方自行退回 PN。
 	GetLIDForPN(ctx context.Context, pn types.JID) (types.JID, error)
 	// GetContacts 读该账号在库内联系人区的全量好友（app state 联系人同步的落库产物，
@@ -475,6 +478,9 @@ func WhatsappStartPairing(ctx context.Context) (string, error) {
 // 启动（ensureLoggedIn），**等到连上才发**；
 // 等待上限 EffectiveConnectTimeout（缺省 15 秒），到点或调用方 ctx 取消即返回错误，
 // 不会把发信请求挂在无限等待上。会话真被服务端吊销了，错误文案是「需重新扫码配对」。
+//
+// 发送成功后自动清空该会话消息（clearChat，不归档、不删好友）；
+// 清空失败只记 Warning，不改变本函数的返回值。发给自己（备忘录会话）不清理。
 func WhatsappSendMessage(ctx context.Context, fromJID, to, body string) (string, error) {
 	m, err := currentWA()
 	if err != nil {
@@ -496,6 +502,9 @@ func WhatsappSendMessage(ctx context.Context, fromJID, to, body string) (string,
 // 能不能发（仅管理员可发言群、被禁言等）不在这里判定，先用
 // WhatsappListSpeakableGroups 拿可发言清单；真发出去被服务器拒了会原样带错误上抛。
 // 连接态自愈与等待上限同 WhatsappSendMessage（含「账号不在册先按需启动」）。
+//
+// 发送成功后自动清空该群会话消息，但**不退出群组**（只发 clearChat 变异，不归档、
+// 不碰成员关系）；清空失败只记 Warning，不改变本函数的返回值。
 func WhatsappSendGroupMessage(ctx context.Context, fromJID, groupJID, body string) (string, error) {
 	m, err := currentWA()
 	if err != nil {
@@ -509,7 +518,11 @@ func WhatsappSendGroupMessage(ctx context.Context, fromJID, groupJID, body strin
 	return msgID, err
 }
 
-// deliverText 是单发、群发、批内逐条共用的投递：先催连，再归一目标，再 waSendText。
+// deliverText 是单发、群发、批内逐条共用的投递：先催连，再归一目标，再 waSendText，
+// 成功拿到消息 id 后顺手清空该会话消息（发给自己除外，不归档）。
+//
+// 清理是后置动作：只发 clearChat 变异，不动群成员与联系人；失败仅记 Warning，
+// 不影响「消息已发出」这个既成事实（发送结果仍按 waSendText 的契约返回）。
 func deliverText(ctx context.Context, w *waClientWrapper, rawTo, body, label string, requireGroup bool) (string, string, error) {
 	if err := w.reconnectAndAwait(ctx); err != nil {
 		return "", "", waSendErr(label, err)
@@ -521,19 +534,26 @@ func deliverText(ctx context.Context, w *waClientWrapper, rawTo, body, label str
 	if requireGroup && jid.Server != types.GroupServer {
 		return "", "", fmt.Errorf("whatsapp 发送群组消息失败: 目标 %q 不是群组 JID（服务端应为 %s）", rawTo, types.GroupServer)
 	}
-	return waSendText(ctx, w, jid, body, label)
+	msgID, chat, ts, err := waSendText(ctx, w, jid, body, label)
+	if err != nil {
+		return "", "", err
+	}
+	if !waSameWaUser(jid, w.jid) {
+		waCleanupChatAfterSend(ctx, w, chat, msgID, ts)
+	}
+	return msgID, chat.String(), nil
 }
 
 // waSendText 是发信门面共享的发送段：空正文就地拒绝，ctx 为空退化到包级运行
 // 上下文，拿不到消息 id 一律折算成错误（label 决定错误文案的通道动作前缀）。
-// 返回的 chat 是实际会话 JID 串（单聊 PN 会被库改写成 LID 投递，发送成功后解析；
-// 未发出时为空串），成功的单聊同时记一笔发送账供删框回填。
+// 成功时返回实际会话 JID（单聊 PN 会被库改写成 LID 投递，发送后解析；群组原样）
+// 与服务器时间戳，两者供紧接着的清空直接使用；未发出时 chat 为零值。
 //
 // 防封闸（wa_antiban.go）开启时，「问闸→睡到点→真发→记账」整段持 gateMu：
 // 同账号发送被串成单行道，这是防封的本意；闸拦下的发送以「防封闸拦截」错误返回。
-func waSendText(ctx context.Context, w *waClientWrapper, jid types.JID, body, label string) (string, string, error) {
+func waSendText(ctx context.Context, w *waClientWrapper, jid types.JID, body, label string) (string, types.JID, time.Time, error) {
 	if body == "" {
-		return "", "", fmt.Errorf("whatsapp %s失败: 消息内容为空", label)
+		return "", types.JID{}, time.Time{}, fmt.Errorf("whatsapp %s失败: 消息内容为空", label)
 	}
 	ctx = ctxOrRun(ctx)
 	target := jid.String()
@@ -547,7 +567,7 @@ func waSendText(ctx context.Context, w *waClientWrapper, jid types.JID, body, la
 		wasNew = !w.gate.IsKnownChat(target)
 		delayMs, gerr := w.gate.BeforeSend(target, body, waIsGroupOrNewsletter(jid), "", time.Now())
 		if gerr != nil {
-			return "", "", fmt.Errorf("whatsapp %s失败: 防封闸拦截: %w", label, gerr)
+			return "", types.JID{}, time.Time{}, fmt.Errorf("whatsapp %s失败: 防封闸拦截: %w", label, gerr)
 		}
 		delayMs = clampSendDelayMs(w.cfg, delayMs)
 		if delayMs > 0 {
@@ -555,7 +575,7 @@ func waSendText(ctx context.Context, w *waClientWrapper, jid types.JID, body, la
 			// 早就断了这里还在睡，醒来又往一个已取消的 ctx 上发一条注定失败的消息。
 			if werr := waSleepCtx(ctx, time.Duration(delayMs)*time.Millisecond); werr != nil {
 				w.gate.AfterSendFailed(time.Now())
-				return "", "", waSendErr(label, werr)
+				return "", types.JID{}, time.Time{}, waSendErr(label, werr)
 			}
 		}
 	}
@@ -572,17 +592,17 @@ func waSendText(ctx context.Context, w *waClientWrapper, jid types.JID, body, la
 		if w.gate != nil {
 			w.gate.AfterSendFailed(time.Now())
 		}
-		return "", "", waSendErr(label, err)
+		return "", types.JID{}, time.Time{}, waSendErr(label, err)
 	}
 	if w.gate != nil {
 		w.gate.AfterSend(target, body, waIsGroupOrNewsletter(jid), "", wasNew, time.Now())
 	}
 	if strings.TrimSpace(msgID) == "" {
-		return "", "", &pay.ProviderError{Channel: "whatsapp", Code: "no_message_id", Msg: "服务端未返回消息 id"}
+		return "", types.JID{}, time.Time{}, &pay.ProviderError{Channel: "whatsapp", Code: "no_message_id", Msg: "服务端未返回消息 id"}
 	}
-	chat := waResolveChat(ctx, w.sess, jid).String()
-	w.recordLastSend(chat, msgID, ts)
-	return msgID, chat, nil
+	chat := waResolveChat(ctx, w.sess, jid)
+	w.recordLastSend(chat.String(), msgID, ts)
+	return msgID, chat, ts, nil
 }
 
 // clampSendDelayMs 把防封闸给出的睡眠压进单条发送窗口（缺省 1~5 秒，
@@ -671,7 +691,9 @@ type OutboundMessage struct {
 // Err 为空串即该条已受理（MsgID 非空，与同步门面的「空 id ⇔ 非 nil error」同一条契约）；
 // 批内每条各广播一次，业务方按 Account+To+MsgID 对账自己的流水。
 // To 保持调用方传入的原文；Chat 是实际落点的会话 JID——单聊会被 whatsmeow 改写成
-// LID（发送挂在 LID 会话上），发后要删框/对账直接用 Chat，不必自己猜 LID。
+// LID（发送挂在 LID 会话上），发后要清空/对账直接用 Chat，不必自己猜 LID。
+// 成功条目在广播前已由本包按 Chat 清空过一次消息（失败只记 Warning，不影响 Err）；
+// 调用方无需再清理，重复提交同一条清空不会退群或动联系人。
 type SendResult struct {
 	Account string
 	To      string
@@ -708,6 +730,8 @@ var errWaSendRateLimited = errors.New("超出单账号每小时发送上限（se
 //
 // 返回的 error 只覆盖「批次根本没被接走」：消息侧未启动、账号取不到（含自动启动失败）、
 // 列表为空。接走之后单条的成败一律看广播，不看这里的返回值。
+// 每条成功消息在广播 SendResult 前已尝试清空该会话消息（clearChat，不归档、
+// 不退群/不删好友）；清空失败只记 Warning，SendResult.Err 仍以发送结果为准。
 // 账号在批跑完之前被 WhatsappStopClient/吊销时，剩余条目会以发送失败形态广播出来
 // （底层连接已断），本包不做跨停机的续发。
 //
@@ -990,25 +1014,34 @@ func waResolveChat(ctx context.Context, sess waSession, jid types.JID) types.JID
 	return lid
 }
 
-// WhatsappDeleteChat 删除 fromJID 账号客户端里 chat 这个会话框的前端显示。
+// WhatsappDeleteChat 清空 fromJID 账号客户端里 chat 这个会话的消息。
+//
+// 语义变更（2026-10-20）：不再发 deleteChat，也不再归档。WhatsApp 的「删除群聊天」
+// 在手机端要求先退出群组，deleteChat 变异会被主设备按删群聊天执行，实际效果是退群。
+// 本门面改为只发 clearChat（清空消息）：群聊不退群、单聊不删好友；会话仍留在
+// 主聊天列表（空会话），不归档。
+//
+// 函数名保留是为了不破坏既有导出面；发送门面（WhatsappSendMessage /
+// WhatsappSendGroupMessage / 批量发信）成功后会走同一条清空逻辑，本门面留给人工操作
+// 与补偿场景。
 //
 // chat 与 WhatsappSendMessage 的 to 同一口径（号码或完整 JID 串）。
 // 单聊目标先做与发送同款的 PN→LID 改写（waResolveChat）：手机上的会话挂在 LID 上，
 // patch 按 PN 提交会被对端静默丢掉（SendAppState 仍返回 nil，假绿），必须用解析后的
-// LID 作为 BuildDeleteChat 的 target 与 MessageKey.RemoteJID；查不到映射才退回 PN。
+// LID 作为 clearChat 的 target 与 MessageKey.RemoteJID；查不到映射才退回 PN。
 //
-// lastMsgID / lastMsgTime 是「该会话最后一条消息」的 id 与时间戳，用于划定删除范围。
+// lastMsgID / lastMsgTime 是「该会话最后一条消息」的 id 与时间戳，用于划定清空范围。
 // lastMsgID 留空时先回退本包发送账（该账号最近一条发往该会话的 id+时间，发信成功即记账；
 // 调用方传了 lastMsgTime 则保留调用方的时间，只回填 id）；发送账也没有时维持库侧退化
 // 行为（时间戳退化成 time.Now()、不带消息键，查自 WM/appstate/encode.go:362-363），
-// 并记一条 Warning——删除范围交由对端判定，不在本包兜住。
-// lastMsgID 非空时按「本人发出的那条」构造消息键（FromMe=true）；群组里若要删的是
+// 并记一条 Warning——清空范围交由对端判定，不在本包兜住。
+// lastMsgID 非空时按「本人发出的那条」构造消息键（FromMe=true）；群组里若要清空到
 // 成员发的最后一条，请留空 lastMsgID，只传时间戳。
 //
 // 前置：该账号的 app state 密钥必须已同步（旧注释说的「首连后库会自动同步」不成立——
-// 库只在显式 FetchAppState 时同步，见 WhatsappSyncContacts；没同步完就删会报库侧错误，
+// 库只在显式 FetchAppState 时同步，见 WhatsappSyncContacts；没同步完就清理会报库侧错误，
 // 这条错误不在本包兜住）。
-// 连接态自愈同 WhatsappSendMessage（删框要往服务器发 app state 变异）。
+// 连接态自愈同 WhatsappSendMessage（清空要往服务器发 app state 变异）。
 func WhatsappDeleteChat(ctx context.Context, fromJID, chat, lastMsgID string, lastMsgTime time.Time, deleteMedia bool) error {
 	m, err := currentWA()
 	if err != nil {
@@ -1036,30 +1069,100 @@ func WhatsappDeleteChat(ctx context.Context, fromJID, chat, lastMsgID string, la
 				lastMsgTime = ts
 			}
 		} else {
-			vars.Warning("whatsapp 删除会话: chat=%s 无消息键可回填（调用方未传 lastMsgID 且发送账无记录），删除范围交由对端判定", target.String())
+			vars.Warning("whatsapp 删除会话: chat=%s 无消息键可回填（调用方未传 lastMsgID 且发送账无记录），清空范围交由对端判定", target.String())
 		}
 	}
-	patch := waDeleteChatPatch(target, lastMsgID, lastMsgTime, deleteMedia)
-	if err := w.sess.SendAppState(ctx, patch); err != nil {
-		return waSendErr("删除会话", err)
+	return waSendClearChat(ctx, w.sess, target, lastMsgID, lastMsgTime, deleteMedia)
+}
+
+// waMessageKey 拼「本人发出的那条」消息键；lastMsgID 为空时返回 nil（只按时间戳划范围）。
+func waMessageKey(chat types.JID, lastMsgID string) *waCommon.MessageKey {
+	id := strings.TrimSpace(lastMsgID)
+	if id == "" {
+		return nil
+	}
+	return &waCommon.MessageKey{
+		RemoteJID: proto.String(chat.String()),
+		FromMe:    proto.Bool(true),
+		ID:        proto.String(id),
+	}
+}
+
+// waMessageRange 拼清空的范围：时间戳 + 可选消息键；时间戳为零时退回 now
+// （与库的 newMessageRange 同口径，查自 WM/appstate/encode.go:361-377）。
+func waMessageRange(ts time.Time, key *waCommon.MessageKey) *waSyncAction.SyncActionMessageRange {
+	if ts.IsZero() {
+		ts = time.Now()
+	}
+	mr := &waSyncAction.SyncActionMessageRange{LastMessageTimestamp: proto.Int64(ts.Unix())}
+	if key != nil {
+		mr.Messages = []*waSyncAction.SyncActionMessage{{Key: key, Timestamp: proto.Int64(ts.Unix())}}
+	}
+	return mr
+}
+
+// waClearChatPatch 拼「清空会话消息」的 app state 变异。
+//
+// 编码查自 Baileys（Utils/chat-utils.ts）：Index 四段为
+// [clearChat, 目标 JID, "1"（0=保留星标消息）, deleteMedia 0/1]，Version 6，
+// 属于 regular_high（WM/appstate/keys.go:117-121 的 regular_high 常量块）。
+// clearChat 只清消息，不退群、不删好友。
+func waClearChatPatch(chat types.JID, lastMsgID string, ts time.Time, deleteMedia bool) appstate.PatchInfo {
+	deleteMediaStr := "0"
+	if deleteMedia {
+		deleteMediaStr = "1"
+	}
+	return appstate.PatchInfo{
+		Type: appstate.WAPatchRegularHigh,
+		Mutations: []appstate.MutationInfo{{
+			Index:   []string{appstate.IndexClearChat, chat.String(), "1", deleteMediaStr},
+			Version: 6,
+			Value: &waSyncAction.SyncActionValue{
+				ClearChatAction: &waSyncAction.ClearChatAction{
+					MessageRange: waMessageRange(ts, waMessageKey(chat, lastMsgID)),
+				},
+			},
+		}},
+	}
+}
+
+// waSendClearChat 提交「清空会话消息」patch。
+//
+// 只清消息：不退群、不删好友、也不归档——会话仍留在主聊天列表（空会话）。
+// 为什么不用 deleteChat：WhatsApp 的「删除群聊天」在手机端要求先退出群组，
+// deleteChat 变异会被主设备按删群聊天执行，实际效果是退群。
+func waSendClearChat(ctx context.Context, sess waSession, chat types.JID, lastMsgID string, ts time.Time, deleteMedia bool) error {
+	if err := sess.SendAppState(ctx, waClearChatPatch(chat, lastMsgID, ts, deleteMedia)); err != nil {
+		return fmt.Errorf("清空消息失败: %w", waSendErr("删除会话", err))
 	}
 	return nil
 }
 
-// waDeleteChatPatch 拼删除会话的 app state 变异（与门面分开写，便于单测逐字断言入参落点）。
-// BuildDeleteChat 签名查自 WM/appstate/encode.go:340：产出的 PatchInfo.Type 是
-// appstate.WAPatchRegularHigh，而 "deleteChat"（appstate.IndexDeleteChat，WM/appstate/keys.go:121）
-// 落在 Mutations[0].Index[0]，Index 三段是 [deleteChat, 目标 JID, deleteMedia 0/1]。
-func waDeleteChatPatch(chat types.JID, lastMsgID string, lastMsgTime time.Time, deleteMedia bool) appstate.PatchInfo {
-	var key *waCommon.MessageKey
-	if id := strings.TrimSpace(lastMsgID); id != "" {
-		key = &waCommon.MessageKey{
-			RemoteJID: proto.String(chat.String()),
-			FromMe:    proto.Bool(true),
-			ID:        proto.String(id),
-		}
+// waCleanupChatAfterSendTimeout 是发送成功后清空会话消息这趟 app state 往返的上限。
+// SendAppState 内部会先发 patch IQ、再同步 fetch 一次 app state（WM/appstate.go:549-620），
+// 最坏两次网络往返；清理只是已 ack 消息的附带动作，不能把成功的发送拖到库的 75 秒 IQ 预算。
+const waCleanupChatAfterSendTimeout = 10 * time.Second
+
+// waCleanupChatAfterSend 在消息已获服务器 ack 后清空该会话的消息。
+//
+// 只发 clearChat 变异：清空消息但不归档（会话仍留在主聊天列表）、不退群、不删好友。
+// chat 必须是 waSendText 解析后的实际会话 JID（单聊已是 LID），这里不再二次查询。
+// 失败尽力而为：记 vars.Warning 后返回，不改变发送结果。
+func waCleanupChatAfterSend(ctx context.Context, w *waClientWrapper, chat types.JID, msgID string, ts time.Time) {
+	if w == nil || w.sess == nil || chat.IsEmpty() || strings.TrimSpace(msgID) == "" {
+		return
 	}
-	return appstate.BuildDeleteChat(chat, lastMsgTime, key, deleteMedia)
+	switch chat.Server {
+	case types.DefaultUserServer, types.HiddenUserServer, types.GroupServer:
+	default:
+		return // newsletter/broadcast 等不归这条语义管
+	}
+	dctx, cancel := context.WithTimeout(ctxOrRun(ctx), waCleanupChatAfterSendTimeout)
+	defer cancel()
+	if err := waSendClearChat(dctx, w.sess, chat, msgID, ts, false); err != nil {
+		vars.Warning("WhatsApp[%s] 发送后清空会话消息失败（消息已发出，发送结果不受影响）: chat=%s msgID=%s err=%v",
+			w.jid.String(), chat.String(), msgID, err)
+	}
 }
 
 // waInbound 摊平一条入站消息（events.Message 字段查自 WM/types/events/events.go:322，

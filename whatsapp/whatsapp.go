@@ -11,7 +11,7 @@
 // 消息侧走 go.mau.fi/whatsmeow 直连 WhatsApp 多设备协议（wa_client.go 门面 +
 // wa_manager.go 会话管理 + wa_pairing.go 扫码配对 + wa_delete_device.go 吊销配对 +
 // store_postgres.go 存储）：
-// QR 配对、发文本、删会话框、吊销设备配对都在这里；会话密钥材料持久化在
+// QR 配对、发文本、清空会话消息、吊销设备配对都在这里；会话密钥材料持久化在
 // **本仓的 Postgres** 会话库里（whatsapp.sessions.dsn），多账号一个 Client 一条常驻协程。
 // 非官方客户端有封号风险，责任与风控归业务方。
 //
@@ -136,7 +136,7 @@ func WhatsappStop(ctx context.Context) {
 // 既绕过了显式启动的裁决，也是封号检测最敏感的形态。
 //
 // 这条裁决管的是「开机不批量拉起」，不等于「账号必须有人先点一下才能用」：
-// 读写门面（发消息/发群消息/删框/列好友/列群组/批量发信）都按需自动登录并等到连上
+// 读写门面（发消息/发群消息/清空消息/列好友/列群组/批量发信）都按需自动登录并等到连上
 // （wa_manager.go 的 ensureLoggedIn），所以冷启动后不必逐个预热；要长期在跑仍显式
 // WhatsappStartClient。启动日志把库里设备数报出来，方便对账。
 //

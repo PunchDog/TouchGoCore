@@ -48,10 +48,13 @@ type fakeSession struct {
 
 	sendID   string // SendText 返回的消息 id；空串模拟「服务端没给 id」
 	sendErr  error
+	sendTS   time.Time // 非零时作为 SendText 返回的服务器时间戳（删框时间戳断言用确定值）
 	stateErr error
 	sent     []fakeText
 	patches  []appstate.PatchInfo
 	handler  func(any)
+	// onState：非 nil 时在 SendAppState 的锁外回调（删框用例钉「闸已释放」等时序）。
+	onState func()
 	// downAfterSends>0 时，发满该条数就把登录态按回 false（批量发信逐条自愈的用例用）。
 	downAfterSends int
 
@@ -214,6 +217,10 @@ func (f *fakeSession) SendText(ctx context.Context, to string, body string) (str
 	if ctx != nil && ctx.Err() != nil {
 		return "", time.Time{}, ctx.Err()
 	}
+	ts := f.sendTS
+	if ts.IsZero() {
+		ts = time.Now()
+	}
 	f.sent = append(f.sent, fakeText{to: to, body: body})
 	// requireCreds（wa_reachout_test.go）：仿真服务器对「没带 tctoken/cstoken 的 DM」
 	// 在 ack 上回 463（WM/send.go:459-461）。凭证现值与门闸读的是同一份 salt/tokens。
@@ -222,7 +229,7 @@ func (f *fakeSession) SendText(ctx context.Context, to string, body string) (str
 		if jid, jerr := types.ParseJID(to); jerr == nil &&
 			(jid.Server == types.DefaultUserServer || jid.Server == types.HiddenUserServer) &&
 			len(f.salt) == 0 && len(f.tokens[jid]) == 0 {
-			return f.sendID, time.Now(), errors.New("server returned error 463")
+			return f.sendID, ts, errors.New("server returned error 463")
 		}
 	}
 	// requireToken：更严一档的服务器形态——**有盐带 cstoken 也照样 463**，只认对方
@@ -231,21 +238,28 @@ func (f *fakeSession) SendText(ctx context.Context, to string, body string) (str
 		if jid, jerr := types.ParseJID(to); jerr == nil &&
 			(jid.Server == types.DefaultUserServer || jid.Server == types.HiddenUserServer) &&
 			len(f.tokens[jid]) == 0 {
-			return f.sendID, time.Now(), errors.New("server returned error 463")
+			return f.sendID, ts, errors.New("server returned error 463")
 		}
 	}
 	// downAfterSends：发满第 N 条就把登录态按回 false，仿「批跑到一半 socket 掉了」。
 	if f.downAfterSends > 0 && len(f.sent) >= f.downAfterSends {
 		f.loggedIn = false
 	}
-	return f.sendID, time.Now(), f.sendErr
+	return f.sendID, ts, f.sendErr
 }
 
 func (f *fakeSession) SendAppState(ctx context.Context, patch appstate.PatchInfo) error {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.patches = append(f.patches, patch)
-	return f.stateErr
+	cb := f.onState
+	err := f.stateErr
+	f.mu.Unlock()
+	// 回调在锁外（与 RequestRecentHistory 同纪律）：用例要在 SendAppState 期间
+	// 检查别的锁（如 gateMu），不能让假件自己的锁参与锁序。
+	if cb != nil {
+		cb()
+	}
+	return err
 }
 
 func (f *fakeSession) GetContacts(ctx context.Context) (map[types.JID]types.ContactInfo, error) {

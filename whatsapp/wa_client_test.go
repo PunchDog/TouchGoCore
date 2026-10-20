@@ -298,52 +298,24 @@ func TestDeviceSuffixedAccountThroughFacades(t *testing.T) {
 	_ = s
 }
 
-// TestDeleteChatPatchVerbatim 删会话 patch 的逐字断言。
+// TestClearChatPatchVerbatim 清空消息 patch 的逐字断言。
 //
-// 与派发简报的假设有一处出入（以库源码为准）：PatchInfo.Type 不是 IndexDeleteChat，
-// 而是 WAPatchRegularHigh——"deleteChat" 出现在 Mutations[0].Index[0]
-// （查自 WM/appstate/encode.go:340-357、keys.go:121）。断言按真实结构写。
-func TestDeleteChatPatchVerbatim(t *testing.T) {
+// 编码来源：Baileys Utils/chat-utils.ts 的 clear 分支与 WM/appstate 常量。
+// clearChat 属于 regular_high（Version 6），Index 四段为
+// [clearChat, 目标 JID, "1"（0=保留星标）, deleteMedia 0/1]。
+// 同时钉死清理不包含 deleteChat（群聊天按 deleteChat 执行会退群），也不归档。
+func TestClearChatPatchVerbatim(t *testing.T) {
 	chat := jidOf(t, "8613900000000@s.whatsapp.net")
 	ts := time.Unix(1700000000, 0)
 
-	patch := waDeleteChatPatch(chat, " MSG-9 ", ts, true)
-	if patch.Type != appstate.WAPatchRegularHigh {
-		t.Fatalf("patch.Type=%s，期望 regular_high", patch.Type)
-	}
-	if len(patch.Mutations) != 1 {
-		t.Fatalf("变异条数=%d，期望 1", len(patch.Mutations))
-	}
-	mut := patch.Mutations[0]
-	if len(mut.Index) != 3 || mut.Index[0] != appstate.IndexDeleteChat ||
-		mut.Index[1] != chat.String() || mut.Index[2] != "1" {
-		t.Fatalf("Index=%v，期望 [deleteChat %s 1]", mut.Index, chat.String())
-	}
-	mr := mut.Value.GetDeleteChatAction().GetMessageRange()
-	if mr == nil {
-		t.Fatal("缺 MessageRange")
-	}
-	if mr.GetLastMessageTimestamp() != ts.Unix() {
-		t.Fatalf("LastMessageTimestamp=%d，期望 %d", mr.GetLastMessageTimestamp(), ts.Unix())
-	}
-	msgs := mr.GetMessages()
-	if len(msgs) != 1 {
-		t.Fatalf("消息键条数=%d，期望 1", len(msgs))
-	}
-	key := msgs[0].GetKey()
-	if key.GetRemoteJID() != chat.String() || !key.GetFromMe() || key.GetID() != "MSG-9" {
-		t.Fatalf("MessageKey 不符: remote=%s fromMe=%v id=%s", key.GetRemoteJID(), key.GetFromMe(), key.GetID())
-	}
+	clear := waClearChatPatch(chat, " MSG-9 ", ts, true)
+	assertClearPatch(t, clear, chat.String(), "MSG-9", ts, "1")
 
-	// lastMsgID 为空 → 不构造消息键（删除范围只按时间戳划）；deleteMedia=false → Index[2]=="0"。
-	patch2 := waDeleteChatPatch(chat, "  ", ts, false)
-	mut2 := patch2.Mutations[0]
-	if mut2.Index[2] != "0" {
-		t.Fatalf("deleteMedia=false 时 Index[2]=%s", mut2.Index[2])
-	}
-	if got := mut2.Value.GetDeleteChatAction().GetMessageRange().GetMessages(); len(got) != 0 {
-		t.Fatalf("lastMsgID 为空时应当不带消息键，实得 %v", got)
-	}
+	// lastMsgID 为空 → 不构造消息键（清空范围只按时间戳划）；deleteMedia=false → Index[3]=="0"。
+	clear2 := waClearChatPatch(chat, "  ", ts, false)
+	assertClearPatch(t, clear2, chat.String(), "", ts, "0")
+
+	assertNoDeleteOrArchive(t, []appstate.PatchInfo{clear, clear2})
 }
 
 // TestDeleteChatThroughFacade 门面路径：patch 原样送进会话的 SendAppState，
@@ -358,12 +330,15 @@ func TestDeleteChatThroughFacade(t *testing.T) {
 
 	ts := time.Unix(1700000000, 0)
 	if err := WhatsappDeleteChat(nil, "8613800000000", "8613900000000", "MSG-9", ts, true); err != nil {
-		t.Fatalf("删除会话失败: %v", err)
+		t.Fatalf("清理会话失败: %v", err)
 	}
 	_, _, _, _, patches := s.snapshot()
-	if len(patches) != 1 || patches[0].Mutations[0].Index[0] != appstate.IndexDeleteChat {
-		t.Fatalf("送进会话的 patch 不符: %+v", patches)
+	target := "8613900000000@s.whatsapp.net"
+	if len(patches) != 1 {
+		t.Fatalf("一次清理应只送 1 个清空 patch，实得 %d: %+v", len(patches), patches)
 	}
+	assertClearPatch(t, patches[0], target, "MSG-9", ts, "1")
+	assertNoDeleteOrArchive(t, patches)
 
 	s.mu.Lock()
 	s.stateErr = errBoom
@@ -378,11 +353,11 @@ func TestDeleteChatThroughFacade(t *testing.T) {
 	}
 }
 
-// TestDeleteChatRewritesPNToLID 交接文档（2026-10-14 wa-delete-chat-after-send）的活闸：
-// 删框必须走发送同款的 PN→LID 改写——送进 SendAppState 的 patch Index[1] 与
-// MessageKey.RemoteJID 都是 LID 串；退回「Index 仍是 PN」⇒ 红（patch 会落在一个
-// 并不存在的会话上，变异被对端丢掉而 SendAppState 假绿）。查不到映射/查询失败退回 PN；
-// 群组 @g.us 不改写、连查询都不发起。
+// TestDeleteChatRewritesPNToLID 交接文档（2026-10-14）的活闸：会话清理必须走发送同款的
+// PN→LID 改写——送进 SendAppState 的 clearChat/archive target 与 MessageKey.RemoteJID
+// 都是 LID 串；退回「Index 仍是 PN」⇒ 红（patch 会落在一个并不存在的会话上，变异被对端
+// 丢掉而 SendAppState 假绿）。查不到映射/查询失败退回 PN；群组 @g.us 不改写、连查询都不发起，
+// 且任何清理都不包含 deleteChat（群聊会退群）。
 func TestDeleteChatRewritesPNToLID(t *testing.T) {
 	dev := fakeDevice(t, "8613800000000@s.whatsapp.net", "android", "A")
 	m, _, get := startFakeWA(t, nil, nil, dev)
@@ -399,19 +374,16 @@ func TestDeleteChatRewritesPNToLID(t *testing.T) {
 	s.mu.Unlock()
 
 	if err := WhatsappDeleteChat(nil, "8613800000000", pn.String(), "3EB087FD71978BFA7E32D9", ts, false); err != nil {
-		t.Fatalf("删除会话失败: %v", err)
+		t.Fatalf("清理会话失败: %v", err)
 	}
 	_, _, _, _, patches := s.snapshot()
-	mut := patches[len(patches)-1].Mutations[0]
-	if mut.Index[1] != lid.String() {
-		t.Fatalf("删框 patch.Index[1]=%s，期望 %s（退回 PN 即红）", mut.Index[1], lid.String())
+	if len(patches) != 1 {
+		t.Fatalf("一次清理应只送 1 个清空 patch，实得 %d", len(patches))
 	}
-	key := mut.Value.GetDeleteChatAction().GetMessageRange().GetMessages()[0].GetKey()
-	if key.GetRemoteJID() != lid.String() || key.GetID() != "3EB087FD71978BFA7E32D9" || !key.GetFromMe() {
-		t.Fatalf("MessageKey 不符: remote=%s id=%s fromMe=%v", key.GetRemoteJID(), key.GetID(), key.GetFromMe())
-	}
+	assertClearPatch(t, patches[0], lid.String(), "3EB087FD71978BFA7E32D9", ts, "0")
+	assertNoDeleteOrArchive(t, patches)
 
-	// 查不到映射（老会话未迁 LID / NoopStore）退回 PN，删除照旧提交。
+	// 查不到映射（老会话未迁 LID / NoopStore）退回 PN，清理照旧提交。
 	s.mu.Lock()
 	s.lidMap = nil
 	s.mu.Unlock()
@@ -423,33 +395,32 @@ func TestDeleteChatRewritesPNToLID(t *testing.T) {
 		t.Fatalf("查不到映射应退回 PN，实得 %s", got)
 	}
 
-	// 查询报错同样退回 PN，而不是把删除拒掉。
+	// 查询报错同样退回 PN，而不是把清理拒掉。
 	s.mu.Lock()
 	s.lidErr = errBoom
 	s.mu.Unlock()
 	if err := WhatsappDeleteChat(nil, "8613800000000", pn.String(), "M3", ts, false); err != nil {
-		t.Fatalf("LID 查询失败应退回 PN 而不是拒绝删除: %v", err)
+		t.Fatalf("LID 查询失败应退回 PN 而不是拒绝清理: %v", err)
 	}
 	_, _, _, _, patches = s.snapshot()
 	if got := patches[len(patches)-1].Mutations[0].Index[1]; got != pn.String() {
 		t.Fatalf("查询失败应退回 PN，实得 %s", got)
 	}
 
-	// 群组会话不改写，也不该为它发起 LID 查询。
+	// 群组会话不改写，也不该为它发起 LID 查询；且绝不出现 deleteChat（会退群）或 archive。
 	before := s.countLidLookups()
 	if err := WhatsappDeleteChat(nil, "8613800000000", "12345@g.us", "M4", ts, false); err != nil {
 		t.Fatal(err)
 	}
 	_, _, _, _, patches = s.snapshot()
-	if got := patches[len(patches)-1].Mutations[0].Index[1]; got != "12345@g.us" {
-		t.Fatalf("群组删框目标应保持 12345@g.us，实得 %s", got)
-	}
+	assertClearPatch(t, patches[len(patches)-1], "12345@g.us", "M4", ts, "0")
+	assertNoDeleteOrArchive(t, patches[len(patches)-1:])
 	if n := s.countLidLookups() - before; n != 0 {
 		t.Errorf("群组目标不该发起 LID 查询（多查 %d 次）", n)
 	}
 }
 
-// TestDeleteChatBackfillsFromSendLedger 发信后立刻删框（运营刚需）：调用方留空
+// TestDeleteChatBackfillsFromSendLedger 发信后立刻清空消息（运营刚需）：调用方留空
 // lastMsgID 时回退本包发送账，消息键带最近一条实际发出的 id、挂在实际会话 JID（LID）上；
 // 发送账没有记录时不拒、不带键，维持库侧退化语义。
 func TestDeleteChatBackfillsFromSendLedger(t *testing.T) {
@@ -471,10 +442,19 @@ func TestDeleteChatBackfillsFromSendLedger(t *testing.T) {
 	}
 
 	if err := WhatsappDeleteChat(nil, "8613800000000", pn.String(), "", time.Time{}, false); err != nil {
-		t.Fatalf("删除会话失败: %v", err)
+		t.Fatalf("清理会话失败: %v", err)
 	}
 	_, _, _, _, patches := s.snapshot()
-	mr := patches[len(patches)-1].Mutations[0].Value.GetDeleteChatAction().GetMessageRange()
+	// 发信成功已自动清空 1 次；下面这次是调用方手工再清空（同键重复提交）。
+	if len(patches) != 2 {
+		t.Fatalf("发信自动清空 + 手工清空应各 1 个 patch，实得 %d", len(patches))
+	}
+	autoMsgs := patches[0].Mutations[0].Value.GetClearChatAction().GetMessageRange().GetMessages()
+	if len(autoMsgs) != 1 || autoMsgs[0].GetKey().GetID() != "3EB0AA" ||
+		autoMsgs[0].GetKey().GetRemoteJID() != lid.String() {
+		t.Fatalf("发信后的自动清空键不符: %v", autoMsgs)
+	}
+	mr := patches[len(patches)-1].Mutations[0].Value.GetClearChatAction().GetMessageRange()
 	msgs := mr.GetMessages()
 	if len(msgs) != 1 {
 		t.Fatalf("发送账应回填出消息键，实得 %d 条", len(msgs))
@@ -487,18 +467,21 @@ func TestDeleteChatBackfillsFromSendLedger(t *testing.T) {
 		t.Error("发送账的时间戳应一并回填")
 	}
 
-	// 没发过、调用方也没传 id：不拒绝，不带消息键（删除范围交由对端判定）。
+	// 没发过、调用方也没传 id：不拒绝，不带消息键（清空范围交由对端判定）。
 	if err := WhatsappDeleteChat(nil, "8613800000000", "8613920000000", "", time.Time{}, false); err != nil {
-		t.Fatalf("发送账无记录不该拒绝删除: %v", err)
+		t.Fatalf("发送账无记录不该拒绝清理: %v", err)
 	}
 	_, _, _, _, patches = s.snapshot()
-	if got := patches[len(patches)-1].Mutations[0].Value.GetDeleteChatAction().GetMessageRange().GetMessages(); len(got) != 0 {
+	if len(patches) != 3 {
+		t.Fatalf("无记录清理也应送 1 个清空 patch，累计应为 3，实得 %d", len(patches))
+	}
+	if got := patches[len(patches)-1].Mutations[0].Value.GetClearChatAction().GetMessageRange().GetMessages(); len(got) != 0 {
 		t.Errorf("发送账无记录时不该带消息键，实得 %v", got)
 	}
 }
 
 // TestSendResultChatResolved 批量广播的 SendResult：To 保持调用方原文，Chat 是实际
-// 落点的会话 JID——单聊按库同款改写落 LID，群组原样；这样后台群发后删框不必猜 LID。
+// 落点的会话 JID——单聊按库同款改写落 LID，群组原样；这样后台群发后清理不必猜 LID。
 func TestSendResultChatResolved(t *testing.T) {
 	dev := fakeDevice(t, "8613800000000@s.whatsapp.net", "android", "A")
 	cfg := &config.WhatsappSessionsConfig{AntibanEnabled: waBool(false)}

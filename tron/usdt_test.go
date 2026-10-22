@@ -571,3 +571,16 @@ func TestUsdtRouteBindsUnifiedChannel(t *testing.T) {
 		t.Fatalf("台账没有的单号应回 UNKNOWN，实得 %+v", res)
 	}
 }
+
+// TestWithdrawRejectsAmountUnits TRON 只消费 int64 最小单位；字符串金额必须显式拒绝，
+// 否则 Amount=0 会被下游当成 0 元转账。
+func TestWithdrawRejectsAmountUnits(t *testing.T) {
+	c := &onchainChannel{}
+	_, err := c.Withdraw(context.Background(), &pay.PayOrder{
+		OrderNo: "O-UNITS", AmountUnits: "1000000",
+		To: &pay.Party{Kind: pay.PartyWallet, Address: "TAddr1"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "amount_units") {
+		t.Fatalf("TRON 未拒绝 AmountUnits: %v", err)
+	}
+}

@@ -112,10 +112,9 @@ func (c *onchainChannel) judge(ctx context.Context, entry *ledger.Entry, out *rp
 		Fee: saturateUint64(meta.Fee), FeeCurrency: pay.CurrencySOL,
 		RawNote: c.note("链上成功（余额净减少与本单一致）"),
 	}
-	if confs > 0 {
-		v := confs
-		res.Confirmations = &v
-	}
+	// 已进块即显式回确认数（含 0）；nil 会被上游当成「无确认数概念」直接 success。
+	v := confs
+	res.Confirmations = &v
 	if err := c.settle(entry, "链上终局: success"); err != nil {
 		return nil, err
 	}

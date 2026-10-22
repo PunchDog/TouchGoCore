@@ -234,10 +234,11 @@ func (o *PayOrder) Check() error {
 		return errors.New("订单为 nil")
 	case strings.TrimSpace(o.OrderNo) == "":
 		return errors.New("订单号（幂等键）为空")
-	case o.Amount <= 0:
-		return errors.New("金额必须为正整数最小单位")
 	case o.To == nil:
 		return errors.New("收款方（to）为空")
+	}
+	if _, err := o.AmountBig(); err != nil {
+		return err
 	}
 	if err := o.To.Check(); err != nil {
 		return fmt.Errorf("收款方（to）: %w", err)

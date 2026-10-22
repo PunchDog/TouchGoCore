@@ -199,7 +199,7 @@ func TestPickTransfer(t *testing.T) {
 		{Data: common.LeftPadBytes(big.NewInt(1).Bytes(), 32)},
 		{Data: common.LeftPadBytes(amount.Bytes(), 32), TxHash: common.HexToHash("0xaa")},
 	}
-	hit := pickTransfer(logs, amount.Int64())
+	hit := pickTransfer(logs, amount)
 	if hit == nil || hit.TxHash != common.HexToHash("0xaa") {
 		t.Fatalf("未命中的金额: %+v", hit)
 	}
@@ -207,16 +207,16 @@ func TestPickTransfer(t *testing.T) {
 		Topics: []common.Hash{transferEventTopic, {}, {}, common.BytesToHash(common.LeftPadBytes(amount.Bytes(), 32))},
 		TxHash: common.HexToHash("0xbb"),
 	}}
-	if hit := pickTransfer(four, amount.Int64()); hit == nil || hit.TxHash != common.HexToHash("0xbb") {
+	if hit := pickTransfer(four, amount); hit == nil || hit.TxHash != common.HexToHash("0xbb") {
 		t.Errorf("四 topic 形态未命中: %+v", hit)
 	}
-	if hit := pickTransfer(logs, 999_999); hit != nil {
+	if hit := pickTransfer(logs, big.NewInt(999_999)); hit != nil {
 		t.Errorf("不该命中金额 999999: %+v", hit)
 	}
-	if hit := pickTransfer(nil, amount.Int64()); hit != nil {
+	if hit := pickTransfer(nil, amount); hit != nil {
 		t.Error("空日志列表命中了")
 	}
-	if hit := pickTransfer([]types.Log{{Data: []byte{1}}}, 1); hit != nil {
+	if hit := pickTransfer([]types.Log{{Data: []byte{1}}}, big.NewInt(1)); hit != nil {
 		t.Error("数据段过短的日志被命中")
 	}
 }

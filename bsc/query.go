@@ -70,7 +70,7 @@ func (c *onchainChannel) judge(ctx context.Context, entry *ledger.Entry, rec *ty
 		}
 		return &pay.PayResult{
 			OrderNo: entry.OrderNo, TradeNo: entry.TxID, TxHash: entry.TxID,
-			Status: pay.StatusFailed, Amount: entry.Amount,
+			Status: pay.StatusFailed, Amount: entry.Amount, AmountUnits: entry.AmountUnits,
 			Fee: c.feeOf(rec), FeeCurrency: pay.CurrencyBNB,
 			RawNote: c.note("链上执行失败 status=0（gas 已消耗）"),
 		}, nil
@@ -81,18 +81,21 @@ func (c *onchainChannel) judge(ctx context.Context, entry *ledger.Entry, rec *ty
 		return c.unknown(entry, "回执成功但未见本单的 Transfer 事件（可能该代币返回 false 而未 revert）"), nil
 	}
 	confs := int64(0)
-	if rec.BlockNumber != nil {
+	hasBlock := rec.BlockNumber != nil
+	if hasBlock {
 		if head, err := c.rpc.Head(ctx); err == nil && head > rec.BlockNumber.Uint64() {
 			confs = int64(head - rec.BlockNumber.Uint64())
 		}
 	}
 	res := &pay.PayResult{
 		OrderNo: entry.OrderNo, TradeNo: entry.TxID, TxHash: entry.TxID,
-		Status: pay.StatusSuccess, Amount: entry.Amount,
+		Status: pay.StatusSuccess, Amount: entry.Amount, AmountUnits: entry.AmountUnits,
 		Fee: c.feeOf(rec), FeeCurrency: pay.CurrencyBNB,
 		RawNote: c.note("链上成功 status=1"),
 	}
-	if confs > 0 {
+	if hasBlock {
+		// 已进块但确认数为 0 也必须显式回 0：nil 在上游是「没有确认数概念」，
+		// 会被当成 success 直接放行，required_confs 形同虚设。
 		v := confs
 		res.Confirmations = &v
 	}
@@ -123,7 +126,10 @@ func (c *onchainChannel) matchesTransfer(rec *types.Receipt, entry *ledger.Entry
 	}
 	from := addressTopic(wallet)
 	to := addressTopic(common.HexToAddress(entry.To))
-	want := big.NewInt(entry.Amount)
+	want, err := entryAmount(entry)
+	if err != nil {
+		return false
+	}
 	for _, lg := range rec.Logs {
 		if lg == nil || lg.Address != token {
 			continue
@@ -201,7 +207,7 @@ func (c *onchainChannel) deadByNonce(ctx context.Context, entry *ledger.Entry) (
 	}
 	return &pay.PayResult{
 		OrderNo: entry.OrderNo, TradeNo: entry.TxID, TxHash: entry.TxID,
-		Status: pay.StatusFailed, Amount: entry.Amount,
+		Status: pay.StatusFailed, Amount: entry.Amount, AmountUnits: entry.AmountUnits,
 		RawNote: c.note(fmt.Sprintf("交易 nonce=%d 已被账户 nonce=%d 越过且链上查无此哈希，未发生资金动作", tx.Nonce(), latest)),
 	}, nil
 }
@@ -210,7 +216,7 @@ func (c *onchainChannel) deadByNonce(ctx context.Context, entry *ledger.Entry) (
 func (c *onchainChannel) pending(entry *ledger.Entry, note string) *pay.PayResult {
 	return &pay.PayResult{
 		OrderNo: entry.OrderNo, TradeNo: entry.TxID, TxHash: entry.TxID,
-		Status: pay.StatusPending, Amount: entry.Amount, RawNote: c.note(note),
+		Status: pay.StatusPending, Amount: entry.Amount, AmountUnits: entry.AmountUnits, RawNote: c.note(note),
 	}
 }
 
@@ -266,6 +272,10 @@ func decodeRawTx(entry *ledger.Entry) (*types.Transaction, error) {
 // 早于 72 小时窗口。用区块时间而不是「按平均出块时间估区块数」：BSC 的出块间隔
 // 改过几次（3s → 1.5s → 0.75s），估算值一旦偏小，窗口就会被悄悄截短。
 func (c *onchainChannel) lookupLedgerByChain(ctx context.Context, o *pay.PayOrder, a orderAsset, now time.Time) (*ledger.Entry, error) {
+	amount, err := o.AmountBig()
+	if err != nil {
+		return nil, err
+	}
 	head, err := c.rpc.Head(ctx)
 	if err != nil {
 		return nil, err
@@ -295,10 +305,11 @@ func (c *onchainChannel) lookupLedgerByChain(ctx context.Context, o *pay.PayOrde
 			// 取满一页：这一段可能还有没读到的日志，「没命中」不等于「没有」。
 			return nil, fmt.Errorf("链上反查在区块 %d–%d 取满 %d 条日志，无法确认本单是否已上过链", low, high, logResultCap)
 		}
-		if hit := pickTransfer(logs, o.Amount); hit != nil {
+		if hit := pickTransfer(logs, amount); hit != nil {
 			entry := &ledger.Entry{
 				OrderNo: strings.TrimSpace(o.OrderNo), TxID: strings.ToLower(hit.TxHash.Hex()),
-				From: a.wallet.Hex(), To: target.Hex(), Contract: c.opt.Contract, Amount: o.Amount,
+				From: a.wallet.Hex(), To: target.Hex(), Contract: c.opt.Contract,
+				Amount: saturateInt64(amount), AmountUnits: amount.String(),
 				FeeLimit: int64(c.chain.GasLimit), State: ledger.StateBroadcast, UpdatedAtMS: ledger.NowMS(now),
 				// ExpiresAtMS 留 0：反查回来的已经是在链上的笔，不再有「过期」可言。
 			}
@@ -327,8 +338,8 @@ func (c *onchainChannel) lookupLedgerByChain(ctx context.Context, o *pay.PayOrde
 // 收端已经由 topic 过滤掉了，这里只比金额：同一收款方在窗口内可能被本钱包付过很多次，
 // 而「同额不同单」在业务上是常态（固定金额的商品），所以命中之后仍要如实返回——
 // 反查只回答「有没有一笔同额同收端的转账」，它本来就是概率性的兜底。
-func pickTransfer(logs []types.Log, amount int64) *types.Log {
-	want := big.NewInt(amount)
+func pickTransfer(logs []types.Log, amount *big.Int) *types.Log {
+	want := new(big.Int).Set(amount)
 	for i := range logs {
 		lg := &logs[i]
 		if len(lg.Topics) >= 4 {

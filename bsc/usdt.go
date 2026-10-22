@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math/big"
 	"strings"
 	"time"
 
@@ -31,9 +30,6 @@ const driverBSCRPC = "bsc_jsonrpc"
 // 键名直接取分派表里的种类（等价于配置段名 bsc.usdt）：与 Kind 同源则连
 // 「两边各写一遍、改一处忘一处」的路都不留。
 const bscUSDTKey = string(pay.KindBscUSDT)
-
-// maxInt64 是 int64 的上界，用于算「单笔最大可表达金额」的提示值。
-const maxInt64 = int64(^uint64(0) >> 1)
 
 // newBscUSDTClient 按 bsc.usdt 的内联字段构造本包的 channelOptions 与 chainConfig。
 //
@@ -97,8 +93,7 @@ func newBscUSDTClient(cfg *config.Cfg) (*client, bool) {
 	}
 	vars.Info("BSC-USDT 通道已就绪: driver=%s 合约=%s 网络=%s 小数位=%d 热钱包=%s",
 		driver, contract, network, decimals, strings.TrimSpace(u.Chain.WalletAddress))
-	vars.Info("BSC-USDT 出款上限提示: PayOrder.Amount 为 int64 最小单位，%d 位小数下单笔最大约 %s 个 USDT",
-		decimals, maxOrderAmountHint(decimals))
+	vars.Info("BSC-USDT 金额口径: 18 位最小单位，超出 int64 的金额走 PayOrder.AmountUnits（十进制字符串）")
 	return &client{ch: ch, network: network}, true
 }
 
@@ -136,18 +131,6 @@ func injectKey(prefix, key string, field *string) {
 		return
 	}
 	util.DefaultCallFunc.Do(prefix+key, field)
-}
-
-// maxOrderAmountHint 算出「int64 的最小单位在 N 位小数下最多是几个币」。
-//
-// 只为启动日志服务：18 位小数下这个上限只有约 9.22，任何一笔真实出款都会先撞上它。
-// 把这条写进日志，比让运维在第一笔大额时收到一句「金额非法」要好。
-func maxOrderAmountHint(decimals int) string {
-	if decimals < 0 {
-		decimals = 0
-	}
-	den := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(decimals)), nil)
-	return new(big.Rat).SetFrac(big.NewInt(maxInt64), den).FloatString(2)
 }
 
 // BscUsdtWithdraw 直接上链出款：本地组 BEP20 transfer、用热钱包私钥签名、经 JSON-RPC 广播。

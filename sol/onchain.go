@@ -169,6 +169,9 @@ func (c *onchainChannel) Withdraw(ctx context.Context, o *pay.PayOrder) (*pay.Pa
 	if err := pay.CheckOrder(o); err != nil {
 		return nil, err
 	}
+	if strings.TrimSpace(o.AmountUnits) != "" {
+		return nil, fmt.Errorf("SOL 通道金额请用 amount（6 位最小单位），不支持 amount_units")
+	}
 	// 收款方性质先过：银行代付/商户号收款本包发不了，必须在地址解析之前就给出
 	// 「走错了通道」而不是「地址不合法」。
 	if err := pay.CheckTarget(o, pay.WithdrawTarget{Wallet: true}); err != nil {
@@ -702,14 +705,16 @@ func (c *onchainChannel) QueryAccount(ctx context.Context, q *pay.AccountQuery) 
 			Msg: "读不出代币余额: " + c.redact(err.Error()), Retryable: true}
 	}
 	info := &pay.AccountInfo{
-		MerchantID: c.sign.Address().String(),
-		Currency:   pay.CurrencyUSDT,
-		Balance:    saturateUint64(bal),
-		Available:  saturateUint64(bal),
-		Status:     pay.AcctActive,
+		MerchantID:     c.sign.Address().String(),
+		Currency:       pay.CurrencyUSDT,
+		Balance:        saturateUint64(bal),
+		Available:      saturateUint64(bal),
+		BalanceUnits:   strconv.FormatUint(bal, 10),
+		AvailableUnits: strconv.FormatUint(bal, 10),
+		Status:         pay.AcctActive,
 	}
 	if bal > math.MaxInt64 {
-		info.RawNote = "余额超出 int64 可表达范围，已按上限饱和（链上真实值更大）"
+		info.RawNote = "余额超出 int64 可表达范围，已按上限饱和（精确值见 balance_units/available_units）"
 	}
 	if native, err := c.rpc.NativeBalance(ctx, c.sign.Address()); err == nil {
 		info.RawNote = strings.TrimSpace(info.RawNote + " gas 余额 " + strconv.FormatUint(native, 10) + " lamports")
@@ -757,14 +762,16 @@ func (c *onchainChannel) QueryOnchainAccount(ctx context.Context, q *pay.Onchain
 			Msg: "读不出代币余额: " + c.redact(err.Error()), Retryable: true}
 	}
 	info := &pay.AccountInfo{
-		MerchantID: owner.String(),
-		Currency:   pay.CurrencyUSDT,
-		Balance:    saturateUint64(bal),
-		Available:  saturateUint64(bal),
-		Status:     pay.AcctActive,
+		MerchantID:     owner.String(),
+		Currency:       pay.CurrencyUSDT,
+		Balance:        saturateUint64(bal),
+		Available:      saturateUint64(bal),
+		BalanceUnits:   strconv.FormatUint(bal, 10),
+		AvailableUnits: strconv.FormatUint(bal, 10),
+		Status:         pay.AcctActive,
 	}
 	if bal > math.MaxInt64 {
-		info.RawNote = "余额超出 int64 可表达范围，已按上限饱和（链上真实值更大）"
+		info.RawNote = "余额超出 int64 可表达范围，已按上限饱和（精确值见 balance_units/available_units）"
 	}
 	if native, err := c.rpc.NativeBalance(ctx, owner); err == nil {
 		info.RawNote = strings.TrimSpace(info.RawNote + " gas 余额 " + strconv.FormatUint(native, 10) + " lamports")

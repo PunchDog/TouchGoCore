@@ -75,8 +75,8 @@ func TestWithdrawRunsAddressGateBeforeRPC(t *testing.T) {
 	ctx := context.Background()
 
 	bad := &pay.PayOrder{
-		OrderNo: "SOL-GATE-1",
-		Amount:  1_000_000,
+		OrderNo:  "SOL-GATE-1",
+		Amount:   1_000_000,
 		Currency: pay.CurrencyUSDT,
 		To:       &pay.Party{Kind: pay.PartyWallet, Address: solBytes1To32[:42]},
 	}

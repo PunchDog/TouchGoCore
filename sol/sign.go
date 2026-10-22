@@ -66,6 +66,16 @@ func newSignerFromKey(privateKey string) (*signer, error) {
 	return &signer{key: key, addr: key.PublicKey()}, nil
 }
 
+// AddressOfKey 用私钥派生 Solana 地址，不需要通道配置。
+// 供上游保存线路时核对「私钥派生的地址 == from_address」；出款时 assetOf 会再核一遍。
+func AddressOfKey(privateKey string) (string, error) {
+	key, err := parsePrivateKey(privateKey)
+	if err != nil {
+		return "", err
+	}
+	return key.PublicKey().String(), nil
+}
+
 // parsePrivateKey 解析 Solana 私钥，支持 base58（钱包导出）与 hex（部署脚本）两种形态。
 //
 // hex 允许 64 字节完整私钥或 32 字节 seed：前者是多数钱包与 solana-keygen 的

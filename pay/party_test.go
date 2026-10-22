@@ -254,3 +254,31 @@ type fmtWrap struct{ err error }
 
 func (w fmtWrap) Error() string { return "wrapped: " + w.err.Error() }
 func (w fmtWrap) Unwrap() error { return w.err }
+
+// TestCheckAmountUnits 大额字符串金额：与 int64 Amount 二选一，且只接受纯数字正整数。
+func TestCheckAmountUnits(t *testing.T) {
+	const units = "100000000000000000000" // 100 USDT，18 位最小单位
+	base := &PayOrder{OrderNo: "O1", AmountUnits: units, To: &Party{Kind: PartyWallet, Address: "TAddr"}}
+	if err := base.Check(); err != nil {
+		t.Fatalf("合法的 AmountUnits 被拒: %v", err)
+	}
+	v, err := base.AmountBig()
+	if err != nil || v.String() != units {
+		t.Fatalf("AmountBig 解析错: %v %v", v, err)
+	}
+	both := *base
+	both.Amount = 1
+	if err := both.Check(); err == nil {
+		t.Fatal("Amount 与 AmountUnits 同时非零必须拒")
+	}
+	for _, bad := range []string{"0", "-1", "1.5", "12a", ""} {
+		o := &PayOrder{OrderNo: "O1", AmountUnits: bad, To: &Party{Kind: PartyWallet, Address: "TAddr"}}
+		if err := o.Check(); err == nil {
+			t.Fatalf("非法 amount_units %q 被放行", bad)
+		}
+	}
+	tooLong := &PayOrder{OrderNo: "O1", AmountUnits: strings.Repeat("9", 79), To: &Party{Kind: PartyWallet, Address: "TAddr"}}
+	if err := tooLong.Check(); err == nil {
+		t.Fatal("超长 amount_units 必须拒")
+	}
+}

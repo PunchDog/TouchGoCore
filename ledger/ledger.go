@@ -46,9 +46,13 @@ type Entry struct {
 	From     string
 	To       string
 	Contract string
-	Amount   int64
-	FeeLimit int64
-	State    State
+	// Amount 是最小单位 int64；18 位小数链超出 int64 时饱和。
+	Amount int64
+	// AmountUnits 是精确的最小单位十进制字符串；新写入的 BSC 台账必填。
+	// 查单/对账比较金额时必须优先用它。
+	AmountUnits string
+	FeeLimit    int64
+	State       State
 	// ExpiresAtMS 是这笔交易的链上有效期（毫秒）。过了它就不可能再上链，
 	// StateBroadcast 才有理由降级为失败而不是永远挂着。
 	ExpiresAtMS int64

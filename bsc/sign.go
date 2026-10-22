@@ -69,6 +69,18 @@ func newSignerFromKey(privateKeyHex string, chainID *big.Int) (*signer, error) {
 	return &signer{key: key, chainID: new(big.Int).Set(chainID), addr: crypto.PubkeyToAddress(key.PublicKey)}, nil
 }
 
+// AddressOfKey 用私钥派生 EVM 地址，不需要 chain ID。
+//
+// 供上游在保存线路时核对「私钥派生的地址 == from_address」；正式出款仍由
+// newSignerFromKey + assetOf 再核一遍，这里不是安全边界的替代品。
+func AddressOfKey(privateKeyHex string) (string, error) {
+	key, err := parsePrivateKey(privateKeyHex)
+	if err != nil {
+		return "", err
+	}
+	return crypto.PubkeyToAddress(key.PublicKey).Hex(), nil
+}
+
 // parsePrivateKey 解析 hex 形态的私钥，容忍 0x 前缀。
 //
 // 容错前缀而不是让上游自己剥：部署脚本从各家钱包工具导出私钥时形态不一，

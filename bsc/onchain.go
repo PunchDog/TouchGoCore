@@ -27,10 +27,9 @@ import (
 //   - **gas 计价**：TRON 用 fee_limit 封顶烧掉多少 TRX，EVM 是 gas_limit × gas_price。
 //     后者只能靠「gas_price 上限」来闸，所以配置里那个 gas_price_gwei 是下限，
 //     而节点报价超过它 2 倍时本通道拒单（见 gasPrice）。
-//   - **金额精度**：PayOrder.Amount 是 int64 的最小单位。USDT-BEP20 是 18 位小数，
-//     int64 最大只能表达约 9.22 个 USDT。这是契约层的既有约束（不是本链能改的），
-//     装配期会打印这条上限；超过它的单在 pay.CheckOrder 之外没有别的表达方式，
-//     下游要发更大的金额必须先扩契约类型。
+//   - **金额精度**：USDT-BEP20 是 18 位小数。PayOrder 同时支持 int64 Amount
+//     与十进制字符串 AmountUnits；本链统一用 big.Int 组 transfer、预检与台账，
+//     超过 int64 的金额必须走 AmountUnits（trade data 仍是精确大整数）。
 const (
 	// defaultBSCDecimals 是 USDT-BEP20 的小数位。配置留空时用它，
 	// 但装配期一定会拿合约自己的 decimals() 复核（见 newBscOnchainChannel）。
@@ -395,16 +394,20 @@ func (c *onchainChannel) send(ctx context.Context, o *pay.PayOrder, to common.Ad
 	c.sendMu.Lock()
 	defer c.sendMu.Unlock()
 
+	amount, err := o.AmountBig()
+	if err != nil {
+		return nil, err
+	}
 	gasPrice, err := c.gasPrice(ctx)
 	if err != nil {
 		return nil, err
 	}
-	data := erc20TransferData(to, big.NewInt(o.Amount))
+	data := erc20TransferData(to, amount)
 	gasLimit, err := c.gasLimit(ctx, data, a.wallet)
 	if err != nil {
 		return nil, err
 	}
-	if err := c.precheckFunds(ctx, o.Amount, gasLimit, gasPrice, a.wallet); err != nil {
+	if err := c.precheckFunds(ctx, amount, gasLimit, gasPrice, a.wallet); err != nil {
 		return nil, err
 	}
 	nonce, err := c.allocateNonce(ctx, a.wallet)
@@ -419,7 +422,7 @@ func (c *onchainChannel) send(ctx context.Context, o *pay.PayOrder, to common.Ad
 		Value:    big.NewInt(0),
 		Data:     data,
 	})
-	entry, err := c.prepare(o, tx, to, a, now)
+	entry, err := c.prepare(o, tx, to, a, amount, now)
 	if err != nil {
 		return nil, err
 	}
@@ -524,15 +527,18 @@ func (c *onchainChannel) adoptNonce(from common.Address, nonce uint64) {
 //
 // 顺序有原因：先看本单币种够不够，再看 gas 币够不够——后者不够时这一笔同样会失败，
 // 而失败也会烧掉估算与广播的往返，还可能让上游误以为是「链上已经动过」。
-func (c *onchainChannel) precheckFunds(ctx context.Context, amount int64, gasLimit uint64, gasPrice *big.Int, from common.Address) error {
+func (c *onchainChannel) precheckFunds(ctx context.Context, amount *big.Int, gasLimit uint64, gasPrice *big.Int, from common.Address) error {
 	bal, err := c.rpc.TokenBalance(ctx, c.token, from)
 	if err != nil {
 		return &pay.ProviderError{Channel: c.opt.Name, Code: "balance_unread",
 			Msg: "读不出代币余额: " + c.redact(err.Error()), Retryable: true}
 	}
-	if bal == nil || bal.Cmp(big.NewInt(amount)) < 0 {
+	if amount == nil || amount.Sign() <= 0 {
+		return fmt.Errorf("出款金额必须为正整数最小单位")
+	}
+	if bal == nil || bal.Cmp(amount) < 0 {
 		return &pay.ProviderError{Channel: c.opt.Name, Code: "insufficient_token",
-			Msg:       fmt.Sprintf("出款账户 USDT 余额 %s 不足以支付本单 %d（最小单位）", bigString(bal), amount),
+			Msg:       fmt.Sprintf("出款账户 USDT 余额 %s 不足以支付本单 %s（最小单位）", bigString(bal), amount.String()),
 			Retryable: false}
 	}
 	need := new(big.Int).Mul(new(big.Int).SetUint64(gasLimit), gasPrice)
@@ -550,7 +556,7 @@ func (c *onchainChannel) precheckFunds(ctx context.Context, amount int64, gasLim
 }
 
 // prepare 签名并把这一笔写进台账；记账失败即放弃广播。
-func (c *onchainChannel) prepare(o *pay.PayOrder, tx *types.Transaction, to common.Address, a orderAsset, now time.Time) (*ledger.Entry, error) {
+func (c *onchainChannel) prepare(o *pay.PayOrder, tx *types.Transaction, to common.Address, a orderAsset, amount *big.Int, now time.Time) (*ledger.Entry, error) {
 	signed, err := a.sign.Sign(tx)
 	if err != nil {
 		return nil, &pay.ProviderError{Channel: c.opt.Name, Code: "sign_failed", Msg: c.redactWith(a.secret, err.Error()), Retryable: false}
@@ -566,7 +572,8 @@ func (c *onchainChannel) prepare(o *pay.PayOrder, tx *types.Transaction, to comm
 		From:        a.wallet.Hex(),
 		To:          to.Hex(),
 		Contract:    c.opt.Contract,
-		Amount:      o.Amount,
+		Amount:      saturateInt64(amount),
+		AmountUnits: amount.String(),
 		FeeLimit:    int64(signed.Gas()),
 		State:       ledger.StatePrepared,
 		UpdatedAtMS: ledger.NowMS(now),
@@ -632,7 +639,7 @@ func (c *onchainChannel) markRejected(entry *ledger.Entry, reason string, now ti
 	}
 	return &pay.PayResult{
 		OrderNo: entry.OrderNo, TradeNo: entry.TxID, TxHash: entry.TxID,
-		Status: pay.StatusFailed, Amount: entry.Amount,
+		Status: pay.StatusFailed, Amount: entry.Amount, AmountUnits: entry.AmountUnits,
 		RawNote: c.note("节点拒绝入池 " + reason + "（未发生资金动作，可重发）"),
 	}, nil
 }
@@ -664,11 +671,12 @@ func (c *onchainChannel) QueryAccount(ctx context.Context, q *pay.AccountQuery) 
 		Available:  saturateInt64(bal),
 		Status:     pay.AcctActive,
 	}
+	info.BalanceUnits = bal.String()
+	info.AvailableUnits = bal.String()
 	if !bal.IsInt64() {
-		// 18 位小数下这个分支很常见（1 个 USDT 就是 1e18）。饱和而不是报错：
-		// 本仓任何一单的 Amount 都不可能超过 int64，因此「饱和」在「够不够」这件事上
-		// 恒等于真实的「够」。真正的资金闸是 precheckFunds，那里比的是大整数。
-		info.RawNote = "余额超出 int64 可表达范围，已按上限饱和（链上真实值更大）"
+		// 18 位小数下这个分支很常见（1 个 USDT 就是 1e18）。int64 字段饱和，
+		// 精确值在 BalanceUnits/AvailableUnits；水位判断必须读后者。
+		info.RawNote = "余额超出 int64 可表达范围，已按上限饱和（精确值见 balance_units/available_units）"
 	}
 	if native, err := c.rpc.NativeBalance(ctx, c.sign.Address()); err == nil && native != nil {
 		info.RawNote = strings.TrimSpace(info.RawNote + " gas 余额 " + native.String() + " wei")
@@ -713,14 +721,16 @@ func (c *onchainChannel) QueryOnchainAccount(ctx context.Context, q *pay.Onchain
 		bal = new(big.Int)
 	}
 	info := &pay.AccountInfo{
-		MerchantID: addr.Hex(),
-		Currency:   pay.CurrencyUSDT,
-		Balance:    saturateInt64(bal),
-		Available:  saturateInt64(bal),
-		Status:     pay.AcctActive,
+		MerchantID:     addr.Hex(),
+		Currency:       pay.CurrencyUSDT,
+		Balance:        saturateInt64(bal),
+		Available:      saturateInt64(bal),
+		BalanceUnits:   bal.String(),
+		AvailableUnits: bal.String(),
+		Status:         pay.AcctActive,
 	}
 	if !bal.IsInt64() {
-		info.RawNote = "余额超出 int64 可表达范围，已按上限饱和（链上真实值更大）"
+		info.RawNote = "余额超出 int64 可表达范围，已按上限饱和（精确值见 balance_units/available_units）"
 	}
 	if native, err := c.rpc.NativeBalance(ctx, addr); err == nil && native != nil {
 		info.RawNote = strings.TrimSpace(info.RawNote + " gas 余额 " + native.String() + " wei")
@@ -732,7 +742,7 @@ func (c *onchainChannel) QueryOnchainAccount(ctx context.Context, q *pay.Onchain
 func (c *onchainChannel) unknown(entry *ledger.Entry, note string) *pay.PayResult {
 	return &pay.PayResult{
 		OrderNo: entry.OrderNo, TradeNo: entry.TxID, TxHash: entry.TxID,
-		Status: pay.StatusUnknown, Amount: entry.Amount, RawNote: c.note(note),
+		Status: pay.StatusUnknown, Amount: entry.Amount, AmountUnits: entry.AmountUnits, RawNote: c.note(note),
 	}
 }
 
@@ -809,4 +819,22 @@ func bigString(v *big.Int) string {
 		return "0"
 	}
 	return v.String()
+}
+
+// entryAmount 取台账里的精确金额：优先 AmountUnits，旧条目回落 int64 Amount。
+func entryAmount(entry *ledger.Entry) (*big.Int, error) {
+	if entry == nil {
+		return nil, fmt.Errorf("出款台账条目为空")
+	}
+	if s := strings.TrimSpace(entry.AmountUnits); s != "" {
+		v, err := pay.ParseAmountUnits(s)
+		if err != nil {
+			return nil, fmt.Errorf("出款台账金额不可解析: %w", err)
+		}
+		return v, nil
+	}
+	if entry.Amount <= 0 {
+		return nil, fmt.Errorf("出款台账缺少金额")
+	}
+	return big.NewInt(entry.Amount), nil
 }

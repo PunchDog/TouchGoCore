@@ -27,6 +27,7 @@ func (c *onchainChannel) confirm(ctx context.Context, entry *ledger.Entry, now t
 	switch {
 	case rec.Found && rec.InBlock && rec.Success:
 		confs, err := c.confirmations(ctx, rec.BlockNumber)
+		hasConfs := err == nil
 		if err != nil {
 			// 已经确认成功，只是确认数读不出：给 nil 而不是编一个 0（口径见 PayResult.Confirmations）。
 			confs = 0
@@ -36,7 +37,9 @@ func (c *onchainChannel) confirm(ctx context.Context, entry *ledger.Entry, now t
 			Status: pay.StatusSuccess, Amount: entry.Amount, Fee: rec.FeeSun,
 			FeeCurrency: pay.CurrencyTRX, RawNote: c.note("链上成功 result=" + rec.ResultCode),
 		}
-		if confs > 0 {
+		if hasConfs {
+			// 已进块且读到了确认数：0 也要显式回 &0，否则上游会把 nil 当成
+			// 「没有确认数概念」直接 success，required_confs 形同虚设。
 			v := confs
 			res.Confirmations = &v
 		}

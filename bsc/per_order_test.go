@@ -72,7 +72,7 @@ func TestPrepareRecordsPerOrderFrom(t *testing.T) {
 		Value:    big.NewInt(0),
 		Data:     erc20TransferData(to, big.NewInt(o.Amount)),
 	})
-	entry, err := c.prepare(o, tx, to, a, time.Now())
+	entry, err := c.prepare(o, tx, to, a, big.NewInt(o.Amount), time.Now())
 	if err != nil {
 		t.Fatalf("按单资产记账失败: %v", err)
 	}

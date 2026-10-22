@@ -214,6 +214,9 @@ func (c *tonChannel) Withdraw(ctx context.Context, o *pay.PayOrder) (*pay.PayRes
 	if err := pay.CheckOrder(o); err != nil {
 		return nil, err
 	}
+	if strings.TrimSpace(o.AmountUnits) != "" {
+		return nil, fmt.Errorf("TON 通道金额请用 amount（9 位最小单位），不支持 amount_units")
+	}
 	// 收款方性质先过：银行代付/商户号收款本包发不了，必须在地址解析之前就给出
 	// 「走错了通道」而不是「地址不合法」。
 	if err := pay.CheckTarget(o, pay.WithdrawTarget{Wallet: true}); err != nil {

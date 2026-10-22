@@ -323,7 +323,7 @@ func TestPrepareRecordsBeforeBroadcast(t *testing.T) {
 	if err != nil {
 		t.Fatalf("解析资产失败: %v", err)
 	}
-	entry, err := c.prepare(o, tx, to, a, time.Now())
+	entry, err := c.prepare(o, tx, to, a, big.NewInt(o.Amount), time.Now())
 	if err != nil {
 		t.Fatalf("记账失败: %v", err)
 	}
@@ -466,5 +466,37 @@ func TestRedactRemovesSecrets(t *testing.T) {
 	}
 	if c.redact("") != "" {
 		t.Error("空串不该被改动")
+	}
+}
+
+// TestPrepareRecordsLargeAmountUnits 大额 BSC 出款：台账必须保存精确十进制串，
+// int64 Amount 只是饱和后的兼容值。
+func TestPrepareRecordsLargeAmountUnits(t *testing.T) {
+	c := newTestChannel(t)
+	to := common.HexToAddress(evmAllLower)
+	o := walletOrder(evmAllLower)
+	o.Amount = 0
+	o.AmountUnits = "100000000000000000000" // 100 USDT
+	amount, err := o.AmountBig()
+	if err != nil {
+		t.Fatalf("AmountBig 失败: %v", err)
+	}
+	tx := types.NewTx(&types.LegacyTx{
+		Nonce: 1, GasPrice: gweiToWei(1), Gas: defaultTransferGasLimit,
+		To: &c.token, Value: big.NewInt(0), Data: erc20TransferData(to, amount),
+	})
+	a, err := c.assetOf(o)
+	if err != nil {
+		t.Fatalf("解析资产失败: %v", err)
+	}
+	entry, err := c.prepare(o, tx, to, a, amount, time.Now())
+	if err != nil {
+		t.Fatalf("记账失败: %v", err)
+	}
+	if entry.AmountUnits != o.AmountUnits {
+		t.Fatalf("台账精确金额=%q，期望 %q", entry.AmountUnits, o.AmountUnits)
+	}
+	if entry.Amount != int64(^uint64(0)>>1) {
+		t.Fatalf("int64 兼容金额应饱和，实得 %d", entry.Amount)
 	}
 }

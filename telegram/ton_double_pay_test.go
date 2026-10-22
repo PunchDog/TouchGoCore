@@ -759,3 +759,15 @@ func mustTONAccount(t *testing.T, s string) ton.AccountID {
 	}
 	return id
 }
+
+// TestTonWithdrawRejectsAmountUnits TON 同样只消费 int64 最小单位，字符串金额必须显式拒绝。
+func TestTonWithdrawRejectsAmountUnits(t *testing.T) {
+	c := &tonChannel{}
+	_, err := c.Withdraw(context.Background(), &pay.PayOrder{
+		OrderNo: "O-UNITS", AmountUnits: "1000000",
+		To: &pay.Party{Kind: pay.PartyWallet, Address: "TAddr1"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "amount_units") {
+		t.Fatalf("TON 未拒绝 AmountUnits: %v", err)
+	}
+}

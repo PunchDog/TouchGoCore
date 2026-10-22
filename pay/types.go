@@ -12,6 +12,7 @@ package pay
 import (
 	"errors"
 	"fmt"
+	"math/big"
 	"strings"
 )
 
@@ -136,14 +137,19 @@ func IsActive(status string) bool { return status == AcctActive }
 // 就会在元/分转换上丢精度。最小单位是几位**由那一单实际走的合约决定**，不由包名决定：
 // USDT-TRC20 是 6 位，原生 TON 是 9 位 nanoton，而 jetton 的小数位数写在该代币自己的
 // 元数据里（TEP-64）——它可以是 6、8，也可以是别的。位数取错的后果是 10^n 倍的
-// 不可逆多付，所以本包只按 int64 最小单位原样透传，指数的解释权留给填
+// 不可逆多付，所以本包只按最小单位原样透传，指数的解释权留给填
 // contract / jetton 的那一方（以及它对着的那份代币文档）。
+// 18 位小数链超出 int64 时用 AmountUnits 字符串表达，两个金额字段二选一。
 type PayOrder struct {
 	// OrderNo 是业务侧订单号，同时是透传给供应商的幂等键：
 	// 同一单二次提交不得产生第二笔资金动作。一旦生成不得变更。
-	OrderNo  string `json:"order_no"`
-	Amount   int64  `json:"amount"`
-	Currency string `json:"currency,omitempty"`
+	OrderNo string `json:"order_no"`
+	Amount  int64  `json:"amount"`
+	// AmountUnits 是币种最小单位的十进制字符串，与 Amount 二选一。
+	// 为 18 位小数的 BSC-USDT 而设：int64 只能表达约 9.22 个 USDT，
+	// 超过它的金额必须走这个字段（Amount 必须为 0）。
+	AmountUnits string `json:"amount_units,omitempty"`
+	Currency    string `json:"currency,omitempty"`
 	// To 是收款方，必填（见 Check）。Kind 留空时按 Bank / Address / Account 推断，
 	// 推断规则与各性质的必填项见 party.go。
 	To *Party `json:"to"`
@@ -153,7 +159,7 @@ type PayOrder struct {
 	//
 	// 例外是按单携带完整出款参数的链上通道：From 可以带 Address + PrivateKey +
 	// Contract（+ Network），通道用这一单的私钥签名并逐字校验派生地址。当前由
-	// tron 的 USDT 通道消费；其他通道仍按「只认配置热钱包」处理。
+	// tron/bsc/sol 的 USDT 通道消费；TON 仍按「只认配置热钱包」处理。
 	From  *Party `json:"from,omitempty"`
 	Phone string `json:"phone,omitempty"`
 	// Decimals 是 Amount 这个整数对应的小数位数，0 表示「不声明」。
@@ -172,6 +178,50 @@ type PayOrder struct {
 	Extra map[string]string `json:"extra,omitempty"`
 }
 
+// maxAmountUnitsDigits 是 uint256 的十进制位数上限；超长输入在解析期拒绝，
+// 避免把任意大的字符串带进大整数运算。
+const maxAmountUnitsDigits = 78
+
+// ParseAmountUnits 解析币种最小单位的十进制字符串（只接受纯数字正整数）。
+func ParseAmountUnits(s string) (*big.Int, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil, errors.New("金额字符串（amount_units）为空")
+	}
+	if len(s) > maxAmountUnitsDigits {
+		return nil, fmt.Errorf("金额字符串（amount_units）超过 %d 位", maxAmountUnitsDigits)
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return nil, errors.New("金额字符串（amount_units）必须是纯数字")
+		}
+	}
+	v, ok := new(big.Int).SetString(s, 10)
+	if !ok || v.Sign() <= 0 {
+		return nil, errors.New("金额必须为正整数最小单位")
+	}
+	return v, nil
+}
+
+// AmountBig 返回这一单的精确金额：优先 AmountUnits，否则用 Amount。
+// 两个字段同时非零视为调用方错误，不做「谁优先」的猜测。
+func (o *PayOrder) AmountBig() (*big.Int, error) {
+	if o == nil {
+		return nil, errors.New("订单为 nil")
+	}
+	units := strings.TrimSpace(o.AmountUnits)
+	if units != "" {
+		if o.Amount != 0 {
+			return nil, errors.New("amount 与 amount_units 只能填一个")
+		}
+		return ParseAmountUnits(units)
+	}
+	if o.Amount <= 0 {
+		return nil, errors.New("金额必须为正整数最小单位")
+	}
+	return big.NewInt(o.Amount), nil
+}
+
 // PayResult 是供应商回执的归一形态。
 type PayResult struct {
 	OrderNo string `json:"order_no"`
@@ -180,6 +230,9 @@ type PayResult struct {
 	// Status 取值见上方四个状态常量。
 	Status string `json:"status"`
 	Amount int64  `json:"amount"`
+	// AmountUnits 是精确的最小单位十进制字符串；Amount 在 18 位小数链上
+	// 超出 int64 时会饱和，金额对账以本字段为准。
+	AmountUnits string `json:"amount_units,omitempty"`
 	// TxHash 是链上交易哈希。供应商代我们广播时它才是「钱真的动了」的那条证据；
 	// 账本划转类通道（whatsapp）留空。空哈希不表示失败，表示这家供应商没回。
 	TxHash string `json:"tx_hash,omitempty"`
@@ -227,6 +280,11 @@ type AccountInfo struct {
 	Balance   int64 `json:"balance"`
 	Available int64 `json:"available"`
 	Frozen    int64 `json:"frozen"`
+	// BalanceUnits / AvailableUnits 是精确的最小单位十进制字符串。
+	// 18 位小数链（BSC）的余额通常超出 int64，int64 字段会饱和；
+	// 需要做水位/额度判断的调用方必须优先读这两个字段。
+	BalanceUnits   string `json:"balance_units,omitempty"`
+	AvailableUnits string `json:"available_units,omitempty"`
 	// Credit 是供应商给的我方授信额度；没有授信概念的供应商返回 0。
 	Credit int64 `json:"credit"`
 	// FeeRateBps 手续费率，万分比整数（30 = 0.30%）。

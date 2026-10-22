@@ -380,9 +380,9 @@
                     "merchant_id": "MCH-0002"
                 }
             },
-            "network说明": "公链网络标识（mainnet / shasta / nile）。别把 trc20 填到这里——那是代币标准不是网络，填了本包会在启动时拒掉这一段配置",
+            "network说明": "公链网络标识（mainnet / shasta / nile）。别把 trc20 填到这里——那是代币标准不是网络，填了本包会在启动时拒掉这一段配置。订单 From.Network 可按单覆盖；From 里填 trc20 这类标准名会按空处理（兼容旧库 chain_network 写法）",
             "network": "mainnet",
-            "contract说明": "TRC20 合约地址（Base58Check：长度 34、版本字节 0x41、末尾 4 字节双 SHA256 校验和）。启动时验格式，不通过则通道不启动",
+            "contract说明": "TRC20 合约地址（Base58Check：长度 34、版本字节 0x41、末尾 4 字节双 SHA256 校验和）。留空表示由订单 From.Contract 按单提供；填了则既是缺省值也是格式校验对象，不通过则通道不启动",
             "contract": "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t",
             "decimals说明": "合约小数位（USDT-TRC20 恒为 6）。PayOrder.Decimals 填了就必须与本值一致，否则拒单——差一位就是 10^n 倍",
             "decimals": 6,
@@ -396,9 +396,9 @@
                 "http_base": "https://api.trongrid.io",
                 "api_key说明": "接入点访问凭证（TRON-PRO-API-KEY）。不是资金密钥，但同样禁入日志与 error 文案",
                 "api_key": "CHANGE-ME",
-                "wallet_address说明": "我方出款账户的链上地址，必须与私钥派生出的地址逐字相等",
+                "wallet_address说明": "我方出款账户的链上地址。留空表示由订单 From.Address 按单提供；填了则必须与私钥派生出的地址逐字相等",
                 "wallet_address": "TCHANGE-ME-HOT-WALLET",
-                "private_key说明": "热钱包私钥（hex）。恒留空，由下游在启动前经 util.CallPayChainMsg+\"tron.usdt\" 钩子注入；没注入时整条链上通道不启动",
+                "private_key说明": "热钱包私钥（hex）。配置里是缺省值，恒留空或由下游在启动前经 util.CallPayChainMsg+\"tron.usdt\" 钩子注入。多钱包部署应改走订单 From.PrivateKey（json:\"-\"，不进日志/回调）；配置与 From 都没私钥时出款在签名前拒单",
                 "private_key": "",
                 "fee_limit说明": "本单允许烧掉的手续费上限，单位 sun（65 TRX 写作 65000000）。<=0 由驱动按该链缺省值定",
                 "fee_limit": 0,

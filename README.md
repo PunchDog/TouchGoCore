@@ -34,11 +34,17 @@ Go 游戏服务框架：WebSocket、gRPC、定时器、Lua、Telegram、Gin、Re
   USDT-BEP20 用 EIP-155 本地签名、经 `chain.rpc` 的 JSON-RPC 广播；USDT-SPL 用
   `solana-go` 组包签名、经 `chain.rpc` 广播（寿命由 blockhash 而非 nonce 决定）。
   四条都用 `touchgocore/ledger` 的同一套出款台账保证「同一单号不签第二笔」（各持一个实例，
-  键带链维度）；账户查询分两种口径：tron/telegram 读供应商账本，bsc/sol 直接读链上余额。
+  键带链维度）；账户查询分两种口径：tron/telegram 读供应商账本，bsc/sol 直接读链上余额；
+  另有一个 `QueryOnchainAccount` 统一读热钱包链上余额（水位门禁用），四条链都实现
+  （TON 只支持原生 TON）。`tron.usdt` 支持按单出款：`PayOrder.From` 可携带
+  地址+私钥+合约+网络，配置里的 `chain.wallet_address` / `private_key` / `contract` 只是
+  缺省值——多线路热钱包因此不需要为每个钱包配一条通道。
   密钥分两个钩子、按段名各注一次：`util.CallPaySDKMsg+"<段名>"` 注供应商签名密钥
-  （只有 tron.usdt / telegram.ton 需要），`util.CallPayChainMsg+"<段名>"` 注热钱包私钥
-  （段名即 `tron.usdt` / `telegram.ton` / `bsc.usdt` / `sol.usdt`），且只认这一个键名——
-  同一段有两个名字都能塞密钥，等于让「密钥从哪来」变成猜的事。
+  （只有 tron.usdt / telegram.ton 需要），`util.CallPayChainMsg+"<段名>"` 注**配置里的**
+  热钱包私钥（段名即 `tron.usdt` / `telegram.ton` / `bsc.usdt` / `sol.usdt`），且只认
+  这一个键名——同一段有两个名字都能塞密钥，等于让「密钥从哪来」变成猜的事。
+  按单私钥不走钩子：它随 `From.PrivateKey`（`json:"-"` + `pay.Secret` 打码）进内存，
+  只在签名与派生地址时 Reveal。当前只有 tron 消费它；bsc/sol/telegram 收到明确拒单。
   其余原生币/代币通道（`tron` 的 TRX、`bsc` 的 BNB、`sol` 的 SOL）的资金实现已在 2026-10 的
   资金面收口里删除：提现/查单/查账户三个门面的函数签名保留，一律返回各包的
   `ErrPayoutNotWired` 哨兵（`errors.Is` 可判）；充值/收款接口则整条删除（全仓只留提现）。
@@ -80,16 +86,19 @@ Go 游戏服务框架：WebSocket、gRPC、定时器、Lua、Telegram、Gin、Re
   键名与逐项说明见 [config/example.json](config/example.json)。
   `secret_key` 建议留空，由下游按段名注册 `util.CallPaySDKMsg+"<段名>"` 钩子在启动前注入，
   不写进版本库；金额一律整数最小单位、手续费走万分比整数，全链路禁浮点。
-- 资金动作的调用面：上游按种类分派 `pay.TransferTo(ctx, pay.KindTronUSDT, order)`，
-  或直接调各包门面（`tron.UsdtWithdraw` / `telegram.TonWithdraw` …）。分派表只有一条契约
-  （`pay.Transfer.Withdraw`）：查单与查账户的入参在不同通道上各不相同，硬塞进一个接口只会
-  催生一批「本通道不支持」的空实现。装配归各通道包，`Start` 成功即 `pay.Bind(kind, ch)`、
-  `Stop` 先 `pay.Unbind` 再关连接——「这条通道起来了」与「分派找得到它」必须是同一件事。
+- 资金动作的调用面：上游按种类分派 `pay.ChannelFor(pay.KindTronUSDT)` 拿统一接口
+  （`Withdraw` / `QueryOrder` / `QueryAccount` / `QueryOnchainAccount`），或直接调各包门面
+  （`tron.UsdtWithdraw` / `telegram.TonWithdraw` …）。分派表保留两条面：`pay.Transfer`
+  是只含 `Withdraw` 的最小契约，`pay.Channel` 在它之上补查询；只实现 `Withdraw` 的旧装配方
+  仍可 `pay.Bind`，但 `ChannelFor` 会明确拒绝而不是返回空实现。
+  装配归各通道包，`Start` 成功即 `pay.Bind(kind, ch)`、`Stop` 先 `pay.Unbind` 再关连接——
+  「这条通道起来了」与「分派找得到它」必须是同一件事。
   `pay` 包因此只剩契约：不 import `config`、不 import 任何通道包；传输实现（超时、指数退避、
   `Retry-After`、响应体上限）已下沉到 `internal/httpx`。接一家新供应商 = 在它自己的包里读
   自己那段配置、装配、`pay.Bind` + 配置里改 `driver`，`pay` 与上游都不动。
   前置校验口径：`To.Kind` 为 `bank` 时通道直接给明确错误、不进地址解析；`From` 留空即用配置
-  的热钱包，链上通道只接受空或等于 `chain.wallet_address`；同一单号二次提交时 from/to 必须一致。
+  的热钱包；tron 支持 `From` 携带地址+私钥+合约+网络，其他通道收到按单私钥直接拒；
+  同一单号二次提交时 from/to/contract 必须一致。
   其余通道的同名门面仍在（`TronWithdraw` / `BscWithdraw` / `SolWithdraw` 等），但它们一律
   返回 `ErrPayoutNotWired`：接口保留是为了不破坏调用面，不代表这条链路可用。
 - NFT 资产通道：代码在 `nft` 包，四件事——查询持有 `NftHoldings`、单币详情 `NftToken`、

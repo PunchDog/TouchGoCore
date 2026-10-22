@@ -110,11 +110,22 @@ func (c *onchainChannel) matchesTransfer(rec *types.Receipt, entry *ledger.Entry
 	if rec == nil {
 		return false
 	}
-	from := addressTopic(c.sign.Address())
+	wallet, err := c.entryWallet(entry)
+	if err != nil {
+		return false
+	}
+	token := c.token
+	if v := strings.TrimSpace(entry.Contract); v != "" {
+		if !IsValidEVMAddress(v) {
+			return false
+		}
+		token = common.HexToAddress(v)
+	}
+	from := addressTopic(wallet)
 	to := addressTopic(common.HexToAddress(entry.To))
 	want := big.NewInt(entry.Amount)
 	for _, lg := range rec.Logs {
-		if lg == nil || lg.Address != c.token {
+		if lg == nil || lg.Address != token {
 			continue
 		}
 		if len(lg.Topics) < 3 || lg.Topics[0] != transferEventTopic {
@@ -173,7 +184,11 @@ func (c *onchainChannel) deadByNonce(ctx context.Context, entry *ledger.Entry) (
 	} else if !errors.Is(err, ethereum.NotFound) {
 		return nil, err
 	}
-	latest, err := c.rpc.LatestNonce(ctx, c.sign.Address())
+	wallet, err := c.entryWallet(entry)
+	if err != nil {
+		return nil, err
+	}
+	latest, err := c.rpc.LatestNonce(ctx, wallet)
 	if err != nil {
 		return nil, err
 	}
@@ -250,14 +265,14 @@ func decodeRawTx(entry *ledger.Entry) (*types.Transaction, error) {
 // 扫描方式：从链头按区块分段往回翻，每段读一次 eth_getLogs，直到这一段的区块时间
 // 早于 72 小时窗口。用区块时间而不是「按平均出块时间估区块数」：BSC 的出块间隔
 // 改过几次（3s → 1.5s → 0.75s），估算值一旦偏小，窗口就会被悄悄截短。
-func (c *onchainChannel) lookupLedgerByChain(ctx context.Context, o *pay.PayOrder, now time.Time) (*ledger.Entry, error) {
+func (c *onchainChannel) lookupLedgerByChain(ctx context.Context, o *pay.PayOrder, a orderAsset, now time.Time) (*ledger.Entry, error) {
 	head, err := c.rpc.Head(ctx)
 	if err != nil {
 		return nil, err
 	}
 	cutoff := now.Add(-scanWindow).Unix()
 	target := common.HexToAddress(strings.TrimSpace(o.To.Address))
-	topics := [][]common.Hash{{transferEventTopic}, {addressTopic(c.sign.Address())}, {addressTopic(target)}}
+	topics := [][]common.Hash{{transferEventTopic}, {addressTopic(a.wallet)}, {addressTopic(target)}}
 	high := head
 	for chunk := 0; chunk < maxLogChunks; chunk++ {
 		if high == 0 {
@@ -283,7 +298,7 @@ func (c *onchainChannel) lookupLedgerByChain(ctx context.Context, o *pay.PayOrde
 		if hit := pickTransfer(logs, o.Amount); hit != nil {
 			entry := &ledger.Entry{
 				OrderNo: strings.TrimSpace(o.OrderNo), TxID: strings.ToLower(hit.TxHash.Hex()),
-				To: target.Hex(), Contract: c.opt.Contract, Amount: o.Amount,
+				From: a.wallet.Hex(), To: target.Hex(), Contract: c.opt.Contract, Amount: o.Amount,
 				FeeLimit: int64(c.chain.GasLimit), State: ledger.StateBroadcast, UpdatedAtMS: ledger.NowMS(now),
 				// ExpiresAtMS 留 0：反查回来的已经是在链上的笔，不再有「过期」可言。
 			}

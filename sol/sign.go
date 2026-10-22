@@ -34,7 +34,7 @@ type signer struct {
 //   - 派生地址与 wallet_address 不等：那是「按 A 的地址记账、用 B 的私钥出款」，
 //     这种错在链上不留任何可查痕迹，只能靠装配期拒掉。
 func newSigner(privateKey, wallet string) (*signer, error) {
-	key, err := parsePrivateKey(privateKey)
+	sgn, err := newSignerFromKey(privateKey)
 	if err != nil {
 		return nil, err
 	}
@@ -48,11 +48,22 @@ func newSigner(privateKey, wallet string) (*signer, error) {
 	if err != nil {
 		return nil, fmt.Errorf("chain.wallet_address %q 不可解析: %w", wallet, err)
 	}
-	derived := key.PublicKey()
-	if !derived.Equals(want) {
-		return nil, fmt.Errorf("私钥派生地址 %s 与 chain.wallet_address %s 不是同一个账户", derived, want)
+	if !sgn.addr.Equals(want) {
+		return nil, fmt.Errorf("私钥派生地址 %s 与 chain.wallet_address %s 不是同一个账户", sgn.addr, want)
 	}
-	return &signer{key: key, addr: derived}, nil
+	return sgn, nil
+}
+
+// newSignerFromKey 用任意一把私钥构造签名器，不与配置钱包比对。
+//
+// 按单出款时，钱包地址由 From.Address 与本函数的派生结果比对；配置热钱包
+// 只在该单没有携带私钥时参与。
+func newSignerFromKey(privateKey string) (*signer, error) {
+	key, err := parsePrivateKey(privateKey)
+	if err != nil {
+		return nil, err
+	}
+	return &signer{key: key, addr: key.PublicKey()}, nil
 }
 
 // parsePrivateKey 解析 Solana 私钥，支持 base58（钱包导出）与 hex（部署脚本）两种形态。

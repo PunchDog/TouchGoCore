@@ -2,6 +2,7 @@ package bsc
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"math/big"
 	"strings"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/crypto"
 
 	"touchgocore/ledger"
 	"touchgocore/pay"
@@ -169,35 +171,73 @@ func TestWithdrawRejectsForeignAsset(t *testing.T) {
 	}
 }
 
-// TestCheckFromPinsHotWallet 出款方只能是本通道热钱包。
-//
-// From 留空是常态（用配置默认出款方）；一旦填了，就必须等于签名私钥派生的那个地址。
-// 允许填别的地址等于「按 A 的地址记账、用 B 的私钥出款」——链上不会留任何可查痕迹。
-func TestCheckFromPinsHotWallet(t *testing.T) {
+// TestAssetOfPinsHotWallet 出款方默认是配置热钱包；按单私钥必须与 From.Address 同一账户。
+func TestAssetOfPinsHotWallet(t *testing.T) {
 	c := newTestChannel(t)
-	if err := c.checkFrom(walletOrder(evmAllLower)); err != nil {
+	if _, err := c.assetOf(walletOrder(evmAllLower)); err != nil {
 		t.Errorf("From 留空被拒: %v", err)
 	}
-	if err := c.checkFrom(&pay.PayOrder{From: &pay.Party{}}); err != nil {
+	if _, err := c.assetOf(&pay.PayOrder{From: &pay.Party{}}); err != nil {
 		t.Errorf("From 空地址被拒: %v", err)
 	}
 	// 同一地址的另一种合法写法：按字节比，不能被当成另一个账户。
-	if err := c.checkFrom(&pay.PayOrder{From: &pay.Party{Address: strings.ToLower(testWallet)}}); err != nil {
+	if _, err := c.assetOf(&pay.PayOrder{From: &pay.Party{Address: strings.ToLower(testWallet)}}); err != nil {
 		t.Errorf("同一地址的小写形态被拒: %v", err)
 	}
-	if err := c.checkFrom(&pay.PayOrder{From: &pay.Party{Address: testWallet}}); err != nil {
+	if _, err := c.assetOf(&pay.PayOrder{From: &pay.Party{Address: testWallet}}); err != nil {
 		t.Errorf("热钱包地址被拒: %v", err)
 	}
-	if err := c.checkFrom(&pay.PayOrder{From: &pay.Party{Address: evmChecksumMixed2}}); err == nil {
+	if _, err := c.assetOf(&pay.PayOrder{From: &pay.Party{Address: evmChecksumMixed2}}); err == nil {
 		t.Error("非热钱包地址未被拒")
-	} else if !strings.Contains(err.Error(), "只持有那一个钱包的私钥") {
+	} else if !strings.Contains(err.Error(), "无法签名") {
 		t.Errorf("拒因文案不符: %v", err)
 	}
-	if err := c.checkFrom(&pay.PayOrder{From: &pay.Party{Address: "0xzz"}}); err == nil {
+	if _, err := c.assetOf(&pay.PayOrder{From: &pay.Party{Address: "0xzz"}}); err == nil {
 		t.Error("非法 From 地址未被拒")
 	} else if !strings.Contains(err.Error(), "不是合法的 EVM 地址") {
 		t.Errorf("非法 From 的拒因文案不符: %v", err)
 	}
+
+	// 按单私钥：派生地址与 From.Address 一致才放行；留空地址则用派生地址。
+	keyHex, addr := qaBSCPerOrderKey(t)
+	a, err := c.assetOf(&pay.PayOrder{From: &pay.Party{Address: addr.Hex(), PrivateKey: pay.Secret(keyHex)}})
+	if err != nil {
+		t.Fatalf("按单私钥被拒: %v", err)
+	}
+	if a.wallet != addr || a.sign == nil || a.secret != keyHex {
+		t.Fatalf("按单资产解析错: %+v", a)
+	}
+	a, err = c.assetOf(&pay.PayOrder{From: &pay.Party{PrivateKey: pay.Secret(keyHex)}})
+	if err != nil || a.wallet != addr {
+		t.Fatalf("按单私钥留空地址应回落到派生地址: asset=%+v err=%v", a, err)
+	}
+	if _, err := c.assetOf(&pay.PayOrder{From: &pay.Party{Address: testWallet, PrivateKey: pay.Secret(keyHex)}}); err == nil {
+		t.Fatal("私钥与 From.Address 不匹配未被拒")
+	} else if !strings.Contains(err.Error(), "不是同一个账户") {
+		t.Errorf("不匹配拒因文案不符: %v", err)
+	}
+
+	// 合约与网络仍钉配置：本轮不放开按单换币。
+	if _, err := c.assetOf(&pay.PayOrder{From: &pay.Party{Contract: evmChecksumMixed2}}); err == nil {
+		t.Error("按单换合约未被拒")
+	} else if !strings.Contains(err.Error(), "不得按单换币") {
+		t.Errorf("换币拒因文案不符: %v", err)
+	}
+	if _, err := c.assetOf(&pay.PayOrder{From: &pay.Party{Network: "chapel"}}); err == nil {
+		t.Error("按单换网未被拒")
+	} else if !strings.Contains(err.Error(), "配的是 mainnet 网络") {
+		t.Errorf("换网拒因文案不符: %v", err)
+	}
+}
+
+// qaBSCPerOrderKey 造一把随机私钥及其 EVM 地址（用例内自洽，不依赖固定向量）。
+func qaBSCPerOrderKey(t *testing.T) (string, common.Address) {
+	t.Helper()
+	key, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return hex.EncodeToString(crypto.FromECDSA(key)), crypto.PubkeyToAddress(key.PublicKey)
 }
 
 // TestSameRecipient EVM 地址的同一性按字节判，不按字符串判。
@@ -279,9 +319,16 @@ func TestPrepareRecordsBeforeBroadcast(t *testing.T) {
 		Value:    big.NewInt(0),
 		Data:     erc20TransferData(to, big.NewInt(o.Amount)),
 	})
-	entry, err := c.prepare(o, tx, to, time.Now())
+	a, err := c.assetOf(o)
+	if err != nil {
+		t.Fatalf("解析资产失败: %v", err)
+	}
+	entry, err := c.prepare(o, tx, to, a, time.Now())
 	if err != nil {
 		t.Fatalf("记账失败: %v", err)
+	}
+	if entry.From != common.HexToAddress(testWallet).Hex() {
+		t.Fatalf("台账 From = %q，期望配置热钱包 %s", entry.From, common.HexToAddress(testWallet).Hex())
 	}
 	if entry.State != ledger.StatePrepared {
 		t.Errorf("记账状态 = %s，期望 prepared", entry.State)

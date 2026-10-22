@@ -127,7 +127,7 @@ func TestTokenDelta(t *testing.T) {
 		},
 	}
 	for _, cs := range cases {
-		delta, err := c.tokenDelta(&rpc.TransactionMeta{PreTokenBalances: cs.pre, PostTokenBalances: cs.post})
+		delta, err := c.tokenDelta(&rpc.TransactionMeta{PreTokenBalances: cs.pre, PostTokenBalances: cs.post}, &ledger.Entry{})
 		if err != nil {
 			t.Errorf("%s: 计算失败: %v", cs.name, err)
 			continue
@@ -143,7 +143,7 @@ func TestTokenDeltaRejectsBadAmount(t *testing.T) {
 	c := solTestChannel(t)
 	owner := c.sign.Address()
 	bad := solTokenBal(1, c.mint, owner, "not-a-number")
-	if _, err := c.tokenDelta(&rpc.TransactionMeta{PreTokenBalances: []rpc.TokenBalance{bad}}); err == nil {
+	if _, err := c.tokenDelta(&rpc.TransactionMeta{PreTokenBalances: []rpc.TokenBalance{bad}}, &ledger.Entry{}); err == nil {
 		t.Error("不可解析的余额未被拦下")
 	}
 }
@@ -300,7 +300,7 @@ func TestTokenDeltaSignsAreBig(t *testing.T) {
 		PreTokenBalances:  []rpc.TokenBalance{solTokenBal(1, c.mint, owner, big1)},
 		PostTokenBalances: []rpc.TokenBalance{solTokenBal(1, c.mint, owner, "0")},
 	}
-	delta, err := c.tokenDelta(meta)
+	delta, err := c.tokenDelta(meta, &ledger.Entry{})
 	if err != nil {
 		t.Fatalf("计算失败: %v", err)
 	}

@@ -160,8 +160,8 @@ func (c *onchainChannel) QueryOrder(ctx context.Context, orderNo string) (*pay.P
 // 它是进程内默认台账重启后的兜底，不是持久台账的替身：命中条件是本地址、本合约、
 // 同一收端、同一金额，四条都对上才算。宁可因为「查不到/查不全」而放弃广播
 // （返回错误，让上游重试一次查证），也不在没查清时赌一次双付。
-func (c *onchainChannel) lookupLedgerByChain(ctx context.Context, o *pay.PayOrder, now time.Time) (*ledger.Entry, error) {
-	hits, err := c.gw.outboundTransfers(ctx, c.wallet, c.chain.Contract, now.Add(-scanWindow).UnixMilli())
+func (c *onchainChannel) lookupLedgerByChain(ctx context.Context, o *pay.PayOrder, a orderAsset, now time.Time) (*ledger.Entry, error) {
+	hits, err := c.gw.outboundTransfers(ctx, a.wallet, a.contract, now.Add(-scanWindow).UnixMilli())
 	if err != nil {
 		// 反查读不动（没配 http_base 时就是这样）：按「不能确认」处理。
 		return nil, err
@@ -175,7 +175,7 @@ func (c *onchainChannel) lookupLedgerByChain(ctx context.Context, o *pay.PayOrde
 		}
 		entry := &ledger.Entry{
 			OrderNo: strings.TrimSpace(o.OrderNo), TxID: strings.TrimSpace(h.TxID),
-			To: strings.TrimSpace(o.To.Address), Contract: c.chain.Contract, Amount: o.Amount,
+			From: a.wallet, To: strings.TrimSpace(o.To.Address), Contract: a.contract, Amount: o.Amount,
 			FeeLimit: c.feeLimit(), State: ledger.StateBroadcast, UpdatedAtMS: ledger.NowMS(now),
 			// ExpiresAtMS 留 0：反查回来的已经是在链上的笔，不再有「过期」可言。
 		}

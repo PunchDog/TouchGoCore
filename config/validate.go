@@ -256,27 +256,31 @@ func validateTronUsdtChannel(u *TronUsdtConfig) error {
 	if u == nil || !u.Enabled() {
 		return nil
 	}
-	if err := validateSupplierFields(&u.ChannelSupplierConfig); err != nil {
-		return err
+	// driver 是通道实现的定位标记，任何部署都必须点明。
+	if strings.TrimSpace(u.Driver) == "" {
+		return fmt.Errorf("缺 driver 驱动标记（应为 tron_trongrid）")
+	}
+	// 供应商字段只在真的配了供应商时才校验：链上余额与出款不依赖供应商 HTTP，
+	// 纯自托管部署的 base_url/accounts 可以为空。
+	if strings.TrimSpace(u.BaseURL) != "" || len(u.Accounts) > 0 {
+		if err := validateSupplierFields(&u.ChannelSupplierConfig); err != nil {
+			return err
+		}
 	}
 	if n := strings.TrimSpace(u.Network); isTokenStandardName(n) {
 		return fmt.Errorf("network=%s 是代币标准而不是公链网络，网络取值用 mainnet / shasta / nile", n)
-	}
-	if strings.TrimSpace(u.Contract) == "" {
-		return fmt.Errorf("contract 为空：USDT 通道必须点明合约地址（原生 TRX 不走本通道）")
 	}
 	if u.Decimals != 0 && u.Decimals != 6 {
 		return fmt.Errorf("decimals=%d 与 USDT-TRC20 的 6 位不一致：小数位差一位就是 10^n 倍", u.Decimals)
 	}
 	if u.Chain == nil {
-		return fmt.Errorf("chain 为空：链上出款必须要接入点与热钱包")
+		return fmt.Errorf("chain 为空：链上出款必须要接入点")
 	}
 	if strings.TrimSpace(u.Chain.Node) == "" && strings.TrimSpace(u.Chain.HTTPBase) == "" {
 		return fmt.Errorf("chain.node 与 chain.http_base 都为空：链上通道不知道该把交易广播给谁")
 	}
-	if strings.TrimSpace(u.Chain.WalletAddress) == "" {
-		return fmt.Errorf("chain.wallet_address 为空：出款主体必须是配置里读得出的那个地址")
-	}
+	// contract / chain.wallet_address 允许为空：whatapp 按单从 withdraw_type 携带
+	// 完整出款参数（合约+地址+私钥），配置里只留缺省值。填了就必须自洽的校验在装配期。
 	return nil
 }
 

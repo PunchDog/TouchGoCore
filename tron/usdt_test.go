@@ -187,12 +187,9 @@ func TestUsdtNewClientFailClosed(t *testing.T) {
 			c.Tron.Usdt.AccountID = ""
 		}},
 		{"商户账户停用", func(c *config.Cfg) { c.Tron.Usdt.Accounts[usdtTestAccount].Enable = "off" }},
-		{"缺商户账户", func(c *config.Cfg) { c.Tron.Usdt.Accounts = nil }},
 		{"缺签名密钥", func(c *config.Cfg) { c.Tron.Usdt.SecretKey = "" }},
 		{"缺链上接入点", func(c *config.Cfg) { c.Tron.Usdt.Chain = nil }},
 		{"链上缺节点", func(c *config.Cfg) { c.Tron.Usdt.Chain.Node = "" }},
-		{"链上缺出款地址", func(c *config.Cfg) { c.Tron.Usdt.Chain.WalletAddress = "" }},
-		{"没注入私钥", func(c *config.Cfg) { c.Tron.Usdt.Chain.PrivateKey = "" }},
 		{"私钥与出款地址不是同一个账户", func(c *config.Cfg) {
 			c.Tron.Usdt.Chain.WalletAddress = tronFFAcct
 		}},
@@ -207,6 +204,24 @@ func TestUsdtNewClientFailClosed(t *testing.T) {
 	// 端点表为空但其余齐备：装配成功，但任何操作都应在发请求之前被拒。
 	if _, ok := newUSDTClient(full()); !ok {
 		t.Error("字段齐备时应当启动")
+	}
+	// 按单携带出款参数后，配置里的钱包/私钥/商户账户都可以不填：通道照常装配，
+	// 但一笔没带出款私钥的单必须在碰网关之前被拒。
+	perOrder := full()
+	perOrder.Tron.Usdt.Accounts = nil
+	perOrder.Tron.Usdt.SecretKey = ""
+	perOrder.Tron.Usdt.Chain.WalletAddress = ""
+	perOrder.Tron.Usdt.Chain.PrivateKey = ""
+	perOrderClient, ok := newUSDTClient(perOrder)
+	if !ok || perOrderClient == nil {
+		t.Fatal("按单携带出款参数时，配置缺钱包/私钥/商户账户也应能装配")
+	}
+	_, err := perOrderClient.ch.Withdraw(context.Background(), &pay.PayOrder{
+		OrderNo: "O-ASSET-1", Amount: 1, Currency: pay.CurrencyUSDT,
+		To: &pay.Party{Kind: pay.PartyWallet, Address: usdtTestContract},
+	})
+	if err == nil || !strings.Contains(err.Error(), "缺少出款私钥") {
+		t.Fatalf("没带 From 私钥的单必须在签名前拒单，实得 %v", err)
 	}
 	// 没配 base_url 时照样能起：链上出款不依赖供应商，但商户账户查询必须就地拒绝，
 	// 不能拿着一个 nil 客户端去发请求。
@@ -533,5 +548,26 @@ func TestExampleConfigLeavesUsdtChannelDown(t *testing.T) {
 	}
 	if ch, ok := newUSDTClient(&cfg); ok || ch != nil {
 		t.Fatal("示例配置装配出了 USDT 通道：示例不该是「复制示例即出款」的形态")
+	}
+}
+
+// TestUsdtRouteBindsUnifiedChannel 装配成功必须能以 pay.Channel 的统一调用面取回：
+// whatapp 的 channelFor 只认 pay.ChannelFor(KindTronUSDT)，这里断了会在下游第一笔出款时
+// 才暴露；而 Bind 是运行期类型断言，编译器帮不上忙。
+func TestUsdtRouteBindsUnifiedChannel(t *testing.T) {
+	usdtStartWith(t, usdtPayCfg("", nil))
+	ch, err := pay.ChannelFor(pay.KindTronUSDT)
+	if err != nil {
+		t.Fatalf("已启动的 USDT 通道取不到统一调用面: %v", err)
+	}
+	if ch == nil {
+		t.Fatal("统一调用面为 nil")
+	}
+	res, err := ch.QueryOrder(context.Background(), "NO-SUCH-ORDER")
+	if err != nil {
+		t.Fatalf("查单失败: %v", err)
+	}
+	if res == nil || res.Status != pay.StatusUnknown {
+		t.Fatalf("台账没有的单号应回 UNKNOWN，实得 %+v", res)
 	}
 }

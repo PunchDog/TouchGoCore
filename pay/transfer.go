@@ -44,20 +44,29 @@ func Kinds() []Kind {
 	return []Kind{KindTronUSDT, KindTON, KindBscUSDT, KindSolUSDT}
 }
 
-// Transfer 是一条已经装配好的资金通道能对外承诺的全部动作。
+// Transfer 是一条已经装配好的资金通道对「出款」这一件事的最小承诺。
 //
-// 只有 Withdraw 一个方法，这不是残缺：查单与查账户的入参各不相同
-// （供应商按订单号查、链上按 txid 查、账户查询在有些通道上根本不存在），
-// 硬塞进一个接口只会催生一个个「这条通道不支持，返回 not implemented」的空实现。
-// 分派只需要一个共同动作，那就是把钱发出去。
+// 分派只需要一个共同动作，那就是把钱发出去；查单、查账户、查链上余额由
+// Channel（channel.go）在 Transfer 之上补齐。保留这个窄接口是为了兼容
+// 「只实现 Withdraw」的外部装配方——Bind 仍收 Transfer，完整实现则自动
+// 成为 Channel。
 type Transfer interface {
 	Withdraw(ctx context.Context, o *PayOrder) (*PayResult, error)
+}
+
+// binding 是一条已装配通道的两副面孔：最小出款面与统一查询面。
+//
+// channel 为 nil 表示实现方只提供了 Withdraw。此时出款照常可分派，但任何
+// 查询入口都会给出明确错误，而不是退化成空实现。
+type binding struct {
+	transfer Transfer
+	channel  Channel
 }
 
 // bindings 是「已装配通道」表。键是种类，值是那一条实现。
 var (
 	bindingsMu sync.RWMutex
-	bindings   = map[Kind]Transfer{}
+	bindings   = map[Kind]*binding{}
 )
 
 // Bind 登记一条已装配好的通道。
@@ -80,7 +89,11 @@ func Bind(k Kind, t Transfer) error {
 	if _, exists := bindings[k]; exists {
 		return fmt.Errorf("绑定资金通道 %s 失败：该种类已绑定，需先 Unbind", k)
 	}
-	bindings[k] = t
+	b := &binding{transfer: t}
+	if ch, ok := t.(Channel); ok {
+		b.channel = ch
+	}
+	bindings[k] = b
 	return nil
 }
 
@@ -103,16 +116,22 @@ func Unbind(k Kind) bool {
 // 而不是返回一个「什么也不做」的空实现——后者会让一笔本该报错的出款安静地消失。
 func TransferFor(k Kind) (Transfer, error) {
 	bindingsMu.RLock()
-	t, ok := bindings[k]
+	b, ok := bindings[k]
 	bindingsMu.RUnlock()
 	if ok {
-		return t, nil
+		return b.transfer, nil
 	}
+	return nil, unboundErr(k)
+}
+
+// unboundErr 是「这条通道没起来」的统一文案：未装配与已装配清单必须同时出现，
+// 否则运维只看到一句「没有实现」，不知道是配置没开还是整批都没启动。
+func unboundErr(k Kind) error {
 	bound := BoundKinds()
 	if len(bound) == 0 {
-		return nil, fmt.Errorf("资金通道 %s 未装配：当前没有任何通道启动成功", k)
+		return fmt.Errorf("资金通道 %s 未装配：当前没有任何通道启动成功", k)
 	}
-	return nil, fmt.Errorf("资金通道 %s 未装配（已装配: %s）", k, strings.Join(bound, " / "))
+	return fmt.Errorf("资金通道 %s 未装配（已装配: %s）", k, strings.Join(bound, " / "))
 }
 
 // TransferTo 把一单出款分派给对应种类。

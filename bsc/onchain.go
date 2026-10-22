@@ -73,13 +73,14 @@ type onchainChannel struct {
 	// 同一热钱包的两笔交易若各拿到同一个 nonce，链上只会执行其中一笔，
 	// 另一笔变成死单——而两边的上游都以为自己的单发出去了。
 	sendMu sync.Mutex
-	// nextNonce 是「本地已知被占用过的下一个 nonce」。
+	// nonces 是「每个出款地址本地已知被占用过的下一个 nonce」。
 	//
 	// 它只覆盖节点集群短暂不同步的那一小段：广播成功后 pendingNonce 立刻应该 +1，
 	// 但负载均衡后面的节点可能还没看见。**失败时不推进**——推进一个从未进池的
 	// nonce 会在链上留一个空洞，后续交易全部堆在它后面等（EVM 的 nonce 必须连续）。
-	nextNonce    uint64
-	hasNextNonce bool
+	// 按地址分桶是必须的：按单私钥允许多个热钱包，共用一个 uint64 会让 A 钱包
+	// 的缓存去推进 B 钱包的 nonce。
+	nonces map[common.Address]uint64
 }
 
 // newBscOnchainChannel 装配一条 BEP20 出款通道。
@@ -121,6 +122,7 @@ func newBscOnchainChannel(opt channelOptions) (*onchainChannel, error) {
 		ledger: bscLedger,
 		token:  common.HexToAddress(contract),
 		nowFn:  time.Now,
+		nonces: make(map[common.Address]uint64),
 	}
 	c.opt.Contract = contract
 	c.opt.Decimals = decimals
@@ -188,7 +190,8 @@ func (c *onchainChannel) Withdraw(ctx context.Context, o *pay.PayOrder) (*pay.Pa
 	if err := pay.CheckTarget(o, pay.WithdrawTarget{Wallet: true}); err != nil {
 		return nil, err
 	}
-	if err := c.checkFrom(o); err != nil {
+	a, err := c.assetOf(o)
+	if err != nil {
 		return nil, err
 	}
 	if err := checkOrderAddress(o); err != nil {
@@ -201,9 +204,9 @@ func (c *onchainChannel) Withdraw(ctx context.Context, o *pay.PayOrder) (*pay.Pa
 		return nil, err
 	}
 	var res *pay.PayResult
-	err := c.ledger.WithLock(strings.TrimSpace(o.OrderNo), func() error {
+	err = c.ledger.WithLock(strings.TrimSpace(o.OrderNo), func() error {
 		var e error
-		res, e = c.withdrawLocked(ctx, o)
+		res, e = c.withdrawLocked(ctx, o, a)
 		return e
 	})
 	if err != nil {
@@ -212,23 +215,82 @@ func (c *onchainChannel) Withdraw(ctx context.Context, o *pay.PayOrder) (*pay.Pa
 	return res, nil
 }
 
-// checkFrom 钉住「这一单的出款方只能是本通道的热钱包」。
-func (c *onchainChannel) checkFrom(o *pay.PayOrder) error {
-	if o == nil || o.From == nil {
-		return nil
+// orderAsset 是这一单实际使用的出款账户。
+//
+// 合约与网络仍钉配置：本轮只放开按单私钥/地址，不放开按单换币。per-contract
+// 的 decimals 必须逐张合约核对，否则 10^n 的倍率错误不会报错、只会多付。
+type orderAsset struct {
+	wallet common.Address
+	sign   *signer
+	secret string
+}
+
+// assetOf 解析这一单的出款私钥与地址：From 给了按单私钥就用它，否则回落配置热钱包。
+//
+// 按单私钥派生出的地址必须与 From.Address 相等；只给地址时必须等于配置热钱包,
+// 因为本进程没有第二个钱包的私钥。合约/网络与配置不一致直接拒，不做静默覆盖。
+func (c *onchainChannel) assetOf(o *pay.PayOrder) (orderAsset, error) {
+	if o == nil {
+		return orderAsset{}, fmt.Errorf("通道[%s]的订单为空", c.opt.Name)
 	}
-	from := strings.TrimSpace(o.From.Address)
-	if from == "" {
-		return nil
+	a := orderAsset{wallet: c.sign.Address(), sign: c.sign}
+	if o.From == nil {
+		return a, nil
 	}
-	if !IsValidEVMAddress(from) {
-		return fmt.Errorf("通道[%s]的 from.address %q 不是合法的 EVM 地址", c.opt.Name, from)
+	if k := o.From.KindOf(); k != "" && k != pay.PartyWallet {
+		return orderAsset{}, fmt.Errorf("通道[%s]只能从链上钱包出款，这一单的 From 性质是 %s", c.opt.Name, k)
 	}
-	if common.HexToAddress(from) == c.sign.Address() {
-		return nil
+	if keyHex := strings.TrimSpace(o.From.PrivateKey.Reveal()); keyHex != "" {
+		sgn, err := newSignerFromKey(keyHex, big.NewInt(c.chain.ChainID))
+		if err != nil {
+			// 错误里不带私钥原文：解析失败的文案可能回显输入，而这是资金密钥。
+			return orderAsset{}, fmt.Errorf("通道[%s]的按单出款私钥不可用", c.opt.Name)
+		}
+		addr := strings.TrimSpace(o.From.Address)
+		if addr == "" {
+			addr = sgn.Address().Hex()
+		}
+		if !IsValidEVMAddress(addr) {
+			return orderAsset{}, fmt.Errorf("通道[%s]的 from.address %q 不是合法的 EVM 地址", c.opt.Name, addr)
+		}
+		if common.HexToAddress(addr) != sgn.Address() {
+			return orderAsset{}, fmt.Errorf("通道[%s]的按单私钥派生地址与 From.Address 不是同一个账户", c.opt.Name)
+		}
+		a.wallet = sgn.Address()
+		a.sign = sgn
+		a.secret = keyHex
+	} else if addr := strings.TrimSpace(o.From.Address); addr != "" {
+		if !IsValidEVMAddress(addr) {
+			return orderAsset{}, fmt.Errorf("通道[%s]的 from.address %q 不是合法的 EVM 地址", c.opt.Name, addr)
+		}
+		if common.HexToAddress(addr) != c.sign.Address() {
+			return orderAsset{}, fmt.Errorf("通道[%s]只持有配置热钱包 %s 的私钥，这一单的出款方 %s 无法签名",
+				c.opt.Name, c.sign.Address().Hex(), addr)
+		}
 	}
-	return fmt.Errorf("通道[%s]的默认出款方是热钱包 %s，这一单却指定了 %s：本仓只持有那一个钱包的私钥",
-		c.opt.Name, c.sign.Address().Hex(), from)
+	if contract := strings.TrimSpace(o.From.Contract); contract != "" && !strings.EqualFold(contract, c.opt.Contract) {
+		return orderAsset{}, fmt.Errorf("通道[%s]只发合约 %s，这一单却指定了 %s：同一通道不得按单换币", c.opt.Name, c.opt.Contract, contract)
+	}
+	if net := strings.TrimSpace(o.From.Network); net != "" && !strings.EqualFold(net, c.opt.Network) {
+		return orderAsset{}, fmt.Errorf("通道[%s]配的是 %s 网络，这一单的出款方却写着 %s", c.opt.Name, c.opt.Network, net)
+	}
+	return a, nil
+}
+
+// entryWallet 取台账这一笔实际使用的出款地址。
+//
+// 旧台账没有 From 列值时回落配置热钱包；有值时按字节解析，坏值不能被当成零地址
+// 去查 nonce（那会把「读坏了」变成「另一个账户的 nonce 越过了本单」）。
+func (c *onchainChannel) entryWallet(entry *ledger.Entry) (common.Address, error) {
+	if entry != nil {
+		if v := strings.TrimSpace(entry.From); v != "" {
+			if !IsValidEVMAddress(v) {
+				return common.Address{}, fmt.Errorf("台账里的出款地址 %q 不是合法 EVM 地址", v)
+			}
+			return common.HexToAddress(v), nil
+		}
+	}
+	return c.sign.Address(), nil
 }
 
 // checkAsset 钉住「这一单发的确实是本通道配置的那张合约、那张网」。
@@ -256,7 +318,7 @@ func (c *onchainChannel) checkDecimals(o *pay.PayOrder) error {
 		c.opt.Name, c.opt.Decimals, o.Decimals)
 }
 
-func (c *onchainChannel) withdrawLocked(ctx context.Context, o *pay.PayOrder) (*pay.PayResult, error) {
+func (c *onchainChannel) withdrawLocked(ctx context.Context, o *pay.PayOrder, a orderAsset) (*pay.PayResult, error) {
 	orderNo := strings.TrimSpace(o.OrderNo)
 	entry, found := c.ledger.Get(orderNo)
 	now := c.nowFn()
@@ -266,6 +328,24 @@ func (c *onchainChannel) withdrawLocked(ctx context.Context, o *pay.PayOrder) (*
 	if found && !sameRecipient(entry.To, to) {
 		return nil, fmt.Errorf("订单号 %s 已在台账里且收款地址是 %s，这一单却写着 %s：同一幂等键不得改收款方",
 			orderNo, entry.To, to.Hex())
+	}
+	// 按单资产也要钉住：同一单号换钱包/合约重签，等于把同一笔钱从另一个账户
+	// 或另一种代币再发一次。空值表示旧台账没有这一维，不在这里补判。
+	if found {
+		if recorded := strings.TrimSpace(entry.From); recorded != "" {
+			from, err := c.entryWallet(entry)
+			if err != nil {
+				return nil, err
+			}
+			if from != a.wallet {
+				return nil, fmt.Errorf("订单号 %s 已在台账里且出款钱包是 %s，这一单却写着 %s：同一幂等键不得换钱包",
+					orderNo, from.Hex(), a.wallet.Hex())
+			}
+		}
+		if recorded := strings.TrimSpace(entry.Contract); recorded != "" && !strings.EqualFold(recorded, c.opt.Contract) {
+			return nil, fmt.Errorf("订单号 %s 已在台账里且合约是 %s，这一单却写着 %s：同一幂等键不得换币",
+				orderNo, recorded, c.opt.Contract)
+		}
 	}
 
 	switch {
@@ -285,7 +365,7 @@ func (c *onchainChannel) withdrawLocked(ctx context.Context, o *pay.PayOrder) (*
 
 	if !found {
 		// 没有台账（多半是重启把进程内实现清了）：先向链上反查，命中就禁止广播。
-		if hit, err := c.lookupLedgerByChain(ctx, o, now); err != nil {
+		if hit, err := c.lookupLedgerByChain(ctx, o, a, now); err != nil {
 			// 查不动不等于没发生：此时广播就是赌一次双付。
 			return nil, &pay.ProviderError{Channel: c.opt.Name, Code: "journal_unverified",
 				Msg: "无法确认这一单是否已上过链，已放弃广播", Retryable: true}
@@ -294,7 +374,7 @@ func (c *onchainChannel) withdrawLocked(ctx context.Context, o *pay.PayOrder) (*
 		}
 	}
 
-	return c.send(ctx, o, to, now)
+	return c.send(ctx, o, to, a, now)
 }
 
 // sameRecipient 判断台账里的收端与本单的收端是不是同一个地址。
@@ -311,7 +391,7 @@ func sameRecipient(recorded string, to common.Address) bool {
 }
 
 // send 在钱包级互斥里完成「取 nonce → 估算 gas → 预检 → 签名 → 记账 → 广播」。
-func (c *onchainChannel) send(ctx context.Context, o *pay.PayOrder, to common.Address, now time.Time) (*pay.PayResult, error) {
+func (c *onchainChannel) send(ctx context.Context, o *pay.PayOrder, to common.Address, a orderAsset, now time.Time) (*pay.PayResult, error) {
 	c.sendMu.Lock()
 	defer c.sendMu.Unlock()
 
@@ -320,14 +400,14 @@ func (c *onchainChannel) send(ctx context.Context, o *pay.PayOrder, to common.Ad
 		return nil, err
 	}
 	data := erc20TransferData(to, big.NewInt(o.Amount))
-	gasLimit, err := c.gasLimit(ctx, data)
+	gasLimit, err := c.gasLimit(ctx, data, a.wallet)
 	if err != nil {
 		return nil, err
 	}
-	if err := c.precheckFunds(ctx, o.Amount, gasLimit, gasPrice); err != nil {
+	if err := c.precheckFunds(ctx, o.Amount, gasLimit, gasPrice, a.wallet); err != nil {
 		return nil, err
 	}
-	nonce, err := c.allocateNonce(ctx)
+	nonce, err := c.allocateNonce(ctx, a.wallet)
 	if err != nil {
 		return nil, err
 	}
@@ -339,7 +419,7 @@ func (c *onchainChannel) send(ctx context.Context, o *pay.PayOrder, to common.Ad
 		Value:    big.NewInt(0),
 		Data:     data,
 	})
-	entry, err := c.prepare(o, tx, to, now)
+	entry, err := c.prepare(o, tx, to, a, now)
 	if err != nil {
 		return nil, err
 	}
@@ -379,9 +459,9 @@ func (c *onchainChannel) gasPrice(ctx context.Context) (*big.Int, error) {
 }
 
 // gasLimit 定 gas 上限：配置优先，但要挡住「配置小于估算值」这种必然 out of gas 的写法。
-func (c *onchainChannel) gasLimit(ctx context.Context, data []byte) (uint64, error) {
+func (c *onchainChannel) gasLimit(ctx context.Context, data []byte, from common.Address) (uint64, error) {
 	estimated, err := c.rpc.EstimateGas(ctx, ethereum.CallMsg{
-		From: c.sign.Address(),
+		From: from,
 		To:   &c.token,
 		Data: data,
 	})
@@ -417,61 +497,63 @@ func (c *onchainChannel) gasLimit(ctx context.Context, data []byte) (uint64, err
 //
 // 以节点的 pendingNonce 为准，用本地缓存兜住「节点集群还没同步到上一笔」的窗口。
 // 缓存只增不减：链上 nonce 只会往前走，回头只会撞上已落块的交易。
-func (c *onchainChannel) allocateNonce(ctx context.Context) (uint64, error) {
-	pending, err := c.rpc.PendingNonce(ctx, c.sign.Address())
+func (c *onchainChannel) allocateNonce(ctx context.Context, from common.Address) (uint64, error) {
+	pending, err := c.rpc.PendingNonce(ctx, from)
 	if err != nil {
 		return 0, &pay.ProviderError{Channel: c.opt.Name, Code: "nonce_unread",
 			Msg: "读不出账户 nonce: " + c.redact(err.Error()), Retryable: true}
 	}
-	if c.hasNextNonce && c.nextNonce > pending {
-		return c.nextNonce, nil
+	if next, ok := c.nonces[from]; ok && next > pending {
+		return next, nil
 	}
 	return pending, nil
 }
 
-// adoptNonce 记下「这个 nonce 已经被链上接受了」。
+// adoptNonce 记下「这个地址的 nonce 已经被链上接受了」。
 //
 // 只在节点明确受理（含 already known）时推进：失败时推进一个从未进池的 nonce，
 // 会在链上留一个空洞，后面每一笔都要等它被填上。
-func (c *onchainChannel) adoptNonce(nonce uint64) {
-	c.nextNonce = nonce + 1
-	c.hasNextNonce = true
+func (c *onchainChannel) adoptNonce(from common.Address, nonce uint64) {
+	if c.nonces == nil {
+		c.nonces = make(map[common.Address]uint64)
+	}
+	c.nonces[from] = nonce + 1
 }
 
 // precheckFunds 在签名之前把「发出去必然失败」的两种情况拦下来。
 //
 // 顺序有原因：先看本单币种够不够，再看 gas 币够不够——后者不够时这一笔同样会失败，
 // 而失败也会烧掉估算与广播的往返，还可能让上游误以为是「链上已经动过」。
-func (c *onchainChannel) precheckFunds(ctx context.Context, amount int64, gasLimit uint64, gasPrice *big.Int) error {
-	bal, err := c.rpc.TokenBalance(ctx, c.token, c.sign.Address())
+func (c *onchainChannel) precheckFunds(ctx context.Context, amount int64, gasLimit uint64, gasPrice *big.Int, from common.Address) error {
+	bal, err := c.rpc.TokenBalance(ctx, c.token, from)
 	if err != nil {
 		return &pay.ProviderError{Channel: c.opt.Name, Code: "balance_unread",
 			Msg: "读不出代币余额: " + c.redact(err.Error()), Retryable: true}
 	}
 	if bal == nil || bal.Cmp(big.NewInt(amount)) < 0 {
 		return &pay.ProviderError{Channel: c.opt.Name, Code: "insufficient_token",
-			Msg:       fmt.Sprintf("热钱包 USDT 余额 %s 不足以支付本单 %d（最小单位）", bigString(bal), amount),
+			Msg:       fmt.Sprintf("出款账户 USDT 余额 %s 不足以支付本单 %d（最小单位）", bigString(bal), amount),
 			Retryable: false}
 	}
 	need := new(big.Int).Mul(new(big.Int).SetUint64(gasLimit), gasPrice)
-	native, err := c.rpc.NativeBalance(ctx, c.sign.Address())
+	native, err := c.rpc.NativeBalance(ctx, from)
 	if err != nil {
 		return &pay.ProviderError{Channel: c.opt.Name, Code: "account_unread",
 			Msg: "读不出原生币余额: " + c.redact(err.Error()), Retryable: true}
 	}
 	if native == nil || native.Cmp(need) < 0 {
 		return &pay.ProviderError{Channel: c.opt.Name, Code: "insufficient_gas",
-			Msg: fmt.Sprintf("热钱包 BNB 余额 %s wei 低于本单 gas 上限 %s wei：gas 收在原生币上，USDT 够也发不出去",
+			Msg: fmt.Sprintf("出款账户 BNB 余额 %s wei 低于本单 gas 上限 %s wei：gas 收在原生币上，USDT 够也发不出去",
 				bigString(native), need.String()), Retryable: false}
 	}
 	return nil
 }
 
 // prepare 签名并把这一笔写进台账；记账失败即放弃广播。
-func (c *onchainChannel) prepare(o *pay.PayOrder, tx *types.Transaction, to common.Address, now time.Time) (*ledger.Entry, error) {
-	signed, err := c.sign.Sign(tx)
+func (c *onchainChannel) prepare(o *pay.PayOrder, tx *types.Transaction, to common.Address, a orderAsset, now time.Time) (*ledger.Entry, error) {
+	signed, err := a.sign.Sign(tx)
 	if err != nil {
-		return nil, &pay.ProviderError{Channel: c.opt.Name, Code: "sign_failed", Msg: c.redact(err.Error()), Retryable: false}
+		return nil, &pay.ProviderError{Channel: c.opt.Name, Code: "sign_failed", Msg: c.redactWith(a.secret, err.Error()), Retryable: false}
 	}
 	raw, err := signed.MarshalBinary()
 	if err != nil {
@@ -481,6 +563,7 @@ func (c *onchainChannel) prepare(o *pay.PayOrder, tx *types.Transaction, to comm
 		OrderNo:     strings.TrimSpace(o.OrderNo),
 		TxID:        txHash(signed),
 		RawTx:       raw,
+		From:        a.wallet.Hex(),
 		To:          to.Hex(),
 		Contract:    c.opt.Contract,
 		Amount:      o.Amount,
@@ -520,7 +603,9 @@ func (c *onchainChannel) broadcastEntry(ctx context.Context, entry *ledger.Entry
 			return c.markRejected(entry, c.redact(err.Error()), now)
 		case rejectAlreadyKnown:
 			// 节点说它已经见过这一笔：钱可能已经在路上，只能去查证。
-			c.adoptNonce(tx.Nonce())
+			if from, ferr := c.entryWallet(entry); ferr == nil {
+				c.adoptNonce(from, tx.Nonce())
+			}
 			return c.confirm(ctx, entry, now)
 		case rejectNonceUsed:
 			// nonce 位已被占用：占用它的可能正是本单上一次广播的那一笔，
@@ -532,7 +617,9 @@ func (c *onchainChannel) broadcastEntry(ctx context.Context, entry *ledger.Entry
 		}
 	}
 	// 节点受理：本地缓存推进一位，覆盖「集群还没同步」的那一小段窗口。
-	c.adoptNonce(tx.Nonce())
+	if from, ferr := c.entryWallet(entry); ferr == nil {
+		c.adoptNonce(from, tx.Nonce())
+	}
 	return c.confirm(ctx, entry, now)
 }
 
@@ -589,6 +676,58 @@ func (c *onchainChannel) QueryAccount(ctx context.Context, q *pay.AccountQuery) 
 	return info, nil
 }
 
+// QueryOnchainAccount 按查询里的地址/合约读链上余额（缺省用配置热钱包与合约）。
+//
+// 与 QueryAccount 同源（都是 balanceOf + 原生币余额），区别只在地址可指定：
+// whatapp 按单携带热钱包时，水位要看的是那一单实际出款地址，而不是配置默认值。
+func (c *onchainChannel) QueryOnchainAccount(ctx context.Context, q *pay.OnchainAccountQuery) (*pay.AccountInfo, error) {
+	addr := c.sign.Address()
+	token := c.token
+	currency := pay.CurrencyUSDT
+	if q != nil {
+		if v := strings.TrimSpace(q.Address); v != "" {
+			if !common.IsHexAddress(v) {
+				return nil, fmt.Errorf("通道[%s]链上余额查询的地址不是合法 EVM 地址", c.opt.Name)
+			}
+			addr = common.HexToAddress(v)
+		}
+		if v := strings.TrimSpace(q.Contract); v != "" {
+			if !common.IsHexAddress(v) {
+				return nil, fmt.Errorf("通道[%s]链上余额查询的合约不是合法 EVM 地址", c.opt.Name)
+			}
+			token = common.HexToAddress(v)
+		}
+		if v := strings.TrimSpace(q.Currency); v != "" {
+			currency = strings.ToUpper(v)
+		}
+	}
+	if currency != pay.CurrencyUSDT {
+		return nil, fmt.Errorf("通道[%s]只发 USDT-BEP20，链上余额查询不支持币种 %s", c.opt.Name, currency)
+	}
+	bal, err := c.rpc.TokenBalance(ctx, token, addr)
+	if err != nil {
+		return nil, &pay.ProviderError{Channel: c.opt.Name, Code: "balance_unread",
+			Msg: "读不出代币余额: " + c.redact(err.Error()), Retryable: true}
+	}
+	if bal == nil {
+		bal = new(big.Int)
+	}
+	info := &pay.AccountInfo{
+		MerchantID: addr.Hex(),
+		Currency:   pay.CurrencyUSDT,
+		Balance:    saturateInt64(bal),
+		Available:  saturateInt64(bal),
+		Status:     pay.AcctActive,
+	}
+	if !bal.IsInt64() {
+		info.RawNote = "余额超出 int64 可表达范围，已按上限饱和（链上真实值更大）"
+	}
+	if native, err := c.rpc.NativeBalance(ctx, addr); err == nil && native != nil {
+		info.RawNote = strings.TrimSpace(info.RawNote + " gas 余额 " + native.String() + " wei")
+	}
+	return info, nil
+}
+
 // unknown 给一条「说不清」的回执：带上 txid，让对账有把手。
 func (c *onchainChannel) unknown(entry *ledger.Entry, note string) *pay.PayResult {
 	return &pay.PayResult{
@@ -616,12 +755,17 @@ func clip(s string) string {
 // （服务商的密钥常常就写在路径或查询串里）。整串替换而不是只换密钥段——
 // 只换一段的话，剩下的 host 与路径仍然把接入点暴露在日志里。
 func (c *onchainChannel) redact(s string) string {
+	return c.redactWith("", s)
+}
+
+// redactWith 在全局脱敏之外再抹掉这一单的按单私钥。
+func (c *onchainChannel) redactWith(secret, s string) string {
 	if s == "" {
 		return s
 	}
-	for _, secret := range []string{c.chain.PrivateKey, c.chain.RPC} {
-		if secret != "" && strings.Contains(s, secret) {
-			s = strings.ReplaceAll(s, secret, "***")
+	for _, v := range []string{secret, c.chain.PrivateKey, c.chain.RPC} {
+		if v != "" && strings.Contains(s, v) {
+			s = strings.ReplaceAll(s, v, "***")
 		}
 	}
 	return s

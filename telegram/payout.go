@@ -47,6 +47,7 @@ type tonChainChannel interface {
 	Withdraw(ctx context.Context, o *pay.PayOrder) (*pay.PayResult, error)
 	QueryOrder(ctx context.Context, orderNo string) (*pay.PayResult, error)
 	QueryAccount(ctx context.Context, q *pay.AccountQuery) (*pay.AccountInfo, error)
+	QueryOnchainAccount(ctx context.Context, q *pay.OnchainAccountQuery) (*pay.AccountInfo, error)
 	Close() error
 }
 

@@ -150,6 +150,10 @@ type PayOrder struct {
 	// From 是出款方。留空表示「用本通道配置的默认出款方」——链上通道是热钱包地址，
 	// 供应商账本通道是付款商户号。填了就必须与配置一致：链上指定非热钱包地址即拒单，
 	// 因为本仓没有第二个钱包的私钥，那样的单只会在签名那一步失败。
+	//
+	// 例外是按单携带完整出款参数的链上通道：From 可以带 Address + PrivateKey +
+	// Contract（+ Network），通道用这一单的私钥签名并逐字校验派生地址。当前由
+	// tron 的 USDT 通道消费；其他通道仍按「只认配置热钱包」处理。
 	From  *Party `json:"from,omitempty"`
 	Phone string `json:"phone,omitempty"`
 	// Decimals 是 Amount 这个整数对应的小数位数，0 表示「不声明」。

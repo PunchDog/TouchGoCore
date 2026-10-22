@@ -236,7 +236,11 @@ func TestPreparedEntryRebroadcastsIdenticalBytes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	entry, err := ch.prepare(order(), tx)
+	asset, err := ch.assetOf(order())
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, err := ch.prepare(order(), tx, asset)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -700,14 +704,22 @@ func TestNoSecretsInAnyOutcome(t *testing.T) {
 }
 
 // TestAssemblyRejectsHalfConfiguredChannel 装配是包内直接构造，没有注册表可漏；
-// 但「半成品通道」这道闸必须还在：缺 chain 或缺口私钥时就地拒，不能返回一个
-// 只会在第一笔出款时炸的实例。
+// 但「半成品通道」这道闸必须还在：缺 chain/node 时就地拒。热钱包地址与私钥
+// 现在是按单参数：配置里不填允许装配，但没带 From 私钥的单必须在签名前拒。
 func TestAssemblyRejectsHalfConfiguredChannel(t *testing.T) {
 	if _, err := newOnchainChannel(channelOptions{Name: "usdt", Driver: DriverTronGrid}); err == nil {
 		t.Fatal("缺 chain 选项时必须拒绝装配，不能返回半成品通道")
 	}
-	if _, err := newOnchainChannel(channelOptions{Name: "usdt", Driver: DriverTronGrid,
-		Chain: &chainConfig{Node: "grpc.example:50051", WalletAddress: tronRangeAcct}}); err == nil {
-		t.Fatal("空私钥必须拒绝装配")
+	ch, err := newOnchainChannel(channelOptions{Name: "usdt", Driver: DriverTronGrid,
+		Chain: &chainConfig{Node: "grpc.example:50051"}})
+	if err != nil {
+		t.Fatalf("按单携带出款参数时，配置无钱包/私钥也应允许装配: %v", err)
+	}
+	_, werr := ch.Withdraw(context.Background(), &pay.PayOrder{
+		OrderNo: "O-ASSET-NOKEY", Amount: 1, Currency: pay.CurrencyUSDT,
+		To: &pay.Party{Kind: pay.PartyWallet, Address: tronRangeAcct},
+	})
+	if werr == nil || !strings.Contains(werr.Error(), "缺少出款私钥") {
+		t.Fatalf("没带 From 私钥的单必须在签名前拒单，实得 %v", werr)
 	}
 }

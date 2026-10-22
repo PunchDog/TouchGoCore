@@ -174,7 +174,8 @@ func (c *onchainChannel) Withdraw(ctx context.Context, o *pay.PayOrder) (*pay.Pa
 	if err := pay.CheckTarget(o, pay.WithdrawTarget{Wallet: true}); err != nil {
 		return nil, err
 	}
-	if err := c.checkFrom(o); err != nil {
+	a, err := c.assetOf(o)
+	if err != nil {
 		return nil, err
 	}
 	if err := checkOrderAddress(o); err != nil {
@@ -190,9 +191,9 @@ func (c *onchainChannel) Withdraw(ctx context.Context, o *pay.PayOrder) (*pay.Pa
 		return nil, err
 	}
 	var res *pay.PayResult
-	err := c.ledger.WithLock(strings.TrimSpace(o.OrderNo), func() error {
+	err = c.ledger.WithLock(strings.TrimSpace(o.OrderNo), func() error {
 		var e error
-		res, e = c.withdrawLocked(ctx, o)
+		res, e = c.withdrawLocked(ctx, o, a)
 		return e
 	})
 	if err != nil {
@@ -201,27 +202,101 @@ func (c *onchainChannel) Withdraw(ctx context.Context, o *pay.PayOrder) (*pay.Pa
 	return res, nil
 }
 
-// checkFrom 钉住「这一单的出款方只能是本通道的热钱包」。
-func (c *onchainChannel) checkFrom(o *pay.PayOrder) error {
-	if o == nil || o.From == nil {
-		return nil
+// orderAsset 是这一单实际使用的出款账户。
+//
+// mint 与网络仍钉配置：本轮只放开按单私钥/地址，不放开按单换币。per-mint 的
+// decimals 与 Token 程序归属必须逐个核对，否则 10^n 的倍率错误不会报错、只会多付。
+type orderAsset struct {
+	wallet solana.PublicKey
+	sign   *signer
+	secret string
+}
+
+// assetOf 解析这一单的出款私钥与地址：From 给了按单私钥就用它，否则回落配置热钱包。
+func (c *onchainChannel) assetOf(o *pay.PayOrder) (orderAsset, error) {
+	if o == nil {
+		return orderAsset{}, fmt.Errorf("通道[%s]的订单为空", c.opt.Name)
 	}
-	from := strings.TrimSpace(o.From.Address)
-	if from == "" {
-		return nil
+	a := orderAsset{wallet: c.sign.Address(), sign: c.sign}
+	if o.From == nil {
+		return a, nil
 	}
-	if !IsValidSolanaAddress(from) {
-		return fmt.Errorf("通道[%s]的 from.address %q 不是合法的 Solana 地址", c.opt.Name, from)
+	if k := o.From.KindOf(); k != "" && k != pay.PartyWallet {
+		return orderAsset{}, fmt.Errorf("通道[%s]只能从链上钱包出款，这一单的 From 性质是 %s", c.opt.Name, k)
 	}
-	pk, err := solana.PublicKeyFromBase58(from)
-	if err != nil {
-		return fmt.Errorf("通道[%s]的 from.address %q 不可解析: %w", c.opt.Name, from, err)
+	if keyRaw := strings.TrimSpace(o.From.PrivateKey.Reveal()); keyRaw != "" {
+		sgn, err := newSignerFromKey(keyRaw)
+		if err != nil {
+			// 错误里不带私钥原文：解析失败的文案可能回显输入，而这是资金密钥。
+			return orderAsset{}, fmt.Errorf("通道[%s]的按单出款私钥不可用", c.opt.Name)
+		}
+		addr := strings.TrimSpace(o.From.Address)
+		if addr == "" {
+			addr = sgn.Address().String()
+		}
+		if !IsValidSolanaAddress(addr) {
+			return orderAsset{}, fmt.Errorf("通道[%s]的 from.address %q 不是合法的 Solana 地址", c.opt.Name, addr)
+		}
+		pk, err := solana.PublicKeyFromBase58(addr)
+		if err != nil {
+			return orderAsset{}, fmt.Errorf("通道[%s]的 from.address %q 不可解析: %w", c.opt.Name, addr, err)
+		}
+		if !pk.Equals(sgn.Address()) {
+			return orderAsset{}, fmt.Errorf("通道[%s]的按单私钥派生地址与 From.Address 不是同一个账户", c.opt.Name)
+		}
+		a.wallet = sgn.Address()
+		a.sign = sgn
+		a.secret = keyRaw
+	} else if addr := strings.TrimSpace(o.From.Address); addr != "" {
+		if !IsValidSolanaAddress(addr) {
+			return orderAsset{}, fmt.Errorf("通道[%s]的 from.address %q 不是合法的 Solana 地址", c.opt.Name, addr)
+		}
+		pk, err := solana.PublicKeyFromBase58(addr)
+		if err != nil {
+			return orderAsset{}, fmt.Errorf("通道[%s]的 from.address %q 不可解析: %w", c.opt.Name, addr, err)
+		}
+		if !pk.Equals(c.sign.Address()) {
+			return orderAsset{}, fmt.Errorf("通道[%s]只持有配置热钱包 %s 的私钥，这一单的出款方 %s 无法签名",
+				c.opt.Name, c.sign.Address(), addr)
+		}
 	}
-	if pk.Equals(c.sign.Address()) {
-		return nil
+	if mint := strings.TrimSpace(o.From.Contract); mint != "" && mint != c.opt.Mint {
+		return orderAsset{}, fmt.Errorf("通道[%s]只发 mint %s，这一单却指定了 %s：同一通道不得按单换币", c.opt.Name, c.opt.Mint, mint)
 	}
-	return fmt.Errorf("通道[%s]的默认出款方是热钱包 %s，这一单却指定了 %s：本仓只持有那一个钱包的私钥",
-		c.opt.Name, c.sign.Address(), from)
+	if net := strings.TrimSpace(o.From.Network); net != "" && !strings.EqualFold(net, c.opt.Network) {
+		return orderAsset{}, fmt.Errorf("通道[%s]配的是 %s 网络，这一单的出款方却写着 %s", c.opt.Name, c.opt.Network, net)
+	}
+	return a, nil
+}
+
+// entryOwner 取台账这一笔实际使用的出款地址。
+//
+// 旧台账没有 From 列值时回落配置热钱包；有值时解析，坏值不能当成零地址去比余额。
+func (c *onchainChannel) entryOwner(entry *ledger.Entry) (solana.PublicKey, error) {
+	if entry != nil {
+		if v := strings.TrimSpace(entry.From); v != "" {
+			pk, err := solana.PublicKeyFromBase58(v)
+			if err != nil {
+				return solana.PublicKey{}, fmt.Errorf("台账里的出款地址 %q 不可解析: %w", v, err)
+			}
+			return pk, nil
+		}
+	}
+	return c.sign.Address(), nil
+}
+
+// entryMint 取台账这一笔实际使用的 mint；旧台账回落配置。
+func (c *onchainChannel) entryMint(entry *ledger.Entry) (solana.PublicKey, error) {
+	if entry != nil {
+		if v := strings.TrimSpace(entry.Contract); v != "" {
+			pk, err := solana.PublicKeyFromBase58(v)
+			if err != nil {
+				return solana.PublicKey{}, fmt.Errorf("台账里的 mint %q 不可解析: %w", v, err)
+			}
+			return pk, nil
+		}
+	}
+	return c.mint, nil
 }
 
 // checkAsset 钉住「这一单发的确实是本通道配置的那个 mint、那张网」。
@@ -264,7 +339,7 @@ func (c *onchainChannel) checkAmount(o *pay.PayOrder) error {
 	return nil
 }
 
-func (c *onchainChannel) withdrawLocked(ctx context.Context, o *pay.PayOrder) (*pay.PayResult, error) {
+func (c *onchainChannel) withdrawLocked(ctx context.Context, o *pay.PayOrder, a orderAsset) (*pay.PayResult, error) {
 	orderNo := strings.TrimSpace(o.OrderNo)
 	entry, found := c.ledger.Get(orderNo)
 	now := c.nowFn()
@@ -280,6 +355,30 @@ func (c *onchainChannel) withdrawLocked(ctx context.Context, o *pay.PayOrder) (*
 		return nil, fmt.Errorf("订单号 %s 已在台账里且收款地址是 %s，这一单却写着 %s：同一幂等键不得改收款方",
 			orderNo, entry.To, to)
 	}
+	// 按单资产同样要钉住：同一单号换钱包/合约重签，等于把同一笔钱从另一个账户
+	// 或另一种代币再发一次。空值表示旧台账没有这一维，不在这里补判。
+	if found {
+		if recorded := strings.TrimSpace(entry.From); recorded != "" {
+			owner, err := c.entryOwner(entry)
+			if err != nil {
+				return nil, err
+			}
+			if !owner.Equals(a.wallet) {
+				return nil, fmt.Errorf("订单号 %s 已在台账里且出款钱包是 %s，这一单却写着 %s：同一幂等键不得换钱包",
+					orderNo, owner, a.wallet)
+			}
+		}
+		if recorded := strings.TrimSpace(entry.Contract); recorded != "" {
+			mint, err := c.entryMint(entry)
+			if err != nil {
+				return nil, err
+			}
+			if !mint.Equals(c.mint) {
+				return nil, fmt.Errorf("订单号 %s 已在台账里且 mint 是 %s，这一单却写着 %s：同一幂等键不得换币",
+					orderNo, mint, c.mint)
+			}
+		}
+	}
 
 	switch {
 	case found && entry.Terminal():
@@ -291,14 +390,14 @@ func (c *onchainChannel) withdrawLocked(ctx context.Context, o *pay.PayOrder) (*
 		// 签好了却没交出去（或交出去前就失败）。Solana 的已签名交易有链上寿命，
 		// 因此这里比 EVM 多一个分支：blockhash 过期即这一笔永远上不了链，
 		// 可以同单号重建；仍然有效就把同一份字节交出去。
-		return c.resumePrepared(ctx, entry, o, to, now)
+		return c.resumePrepared(ctx, entry, o, a, to, now)
 	case found:
 		// rejected 态：节点从没让这一笔进过池，钱没动过，允许同单号重建重发。
 	}
 
 	if !found {
 		// 没有台账（多半是重启把进程内实现清了）：先向链上反查，命中就禁止广播。
-		if hit, err := c.lookupLedgerByChain(ctx, o, now); err != nil {
+		if hit, err := c.lookupLedgerByChain(ctx, o, a, now); err != nil {
 			// 查不动不等于没发生：此时广播就是赌一次双付。
 			return nil, &pay.ProviderError{Channel: c.opt.Name, Code: "journal_unverified",
 				Msg: "无法确认这一单是否已上过链，已放弃广播", Retryable: true}
@@ -307,7 +406,7 @@ func (c *onchainChannel) withdrawLocked(ctx context.Context, o *pay.PayOrder) (*
 		}
 	}
 
-	return c.send(ctx, o, to, now)
+	return c.send(ctx, o, to, a, now)
 }
 
 // sameRecipient 判断台账里的收端与本单的收端是不是同一个地址。
@@ -328,7 +427,7 @@ func sameRecipient(recorded string, to solana.PublicKey) bool {
 }
 
 // resumePrepared 处置「已签名但还没交给节点」的那一笔。
-func (c *onchainChannel) resumePrepared(ctx context.Context, entry *ledger.Entry, o *pay.PayOrder, to solana.PublicKey, now time.Time) (*pay.PayResult, error) {
+func (c *onchainChannel) resumePrepared(ctx context.Context, entry *ledger.Entry, o *pay.PayOrder, a orderAsset, to solana.PublicKey, now time.Time) (*pay.PayResult, error) {
 	tx, err := decodeRawTx(entry)
 	if err != nil {
 		return nil, err
@@ -349,17 +448,17 @@ func (c *onchainChannel) resumePrepared(ctx context.Context, entry *ledger.Entry
 	if err := c.expirePrepared(entry, now); err != nil {
 		return nil, err
 	}
-	return c.send(ctx, o, to, now)
+	return c.send(ctx, o, to, a, now)
 }
 
 // send 完成「预检 → 组包 → 签名 → 记账 → 广播」。
 //
 // 每次签名都重取 blockhash：复用旧值只会在广播时收到 BlockhashNotFound，
 // 而那一步的错误分不清「本地组包太慢」与「节点没收到」。
-func (c *onchainChannel) send(ctx context.Context, o *pay.PayOrder, to solana.PublicKey, now time.Time) (*pay.PayResult, error) {
-	src, err := c.hotWalletATA()
+func (c *onchainChannel) send(ctx context.Context, o *pay.PayOrder, to solana.PublicKey, a orderAsset, now time.Time) (*pay.PayResult, error) {
+	src, _, err := solana.FindAssociatedTokenAddress(a.wallet, c.mint)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("派生热钱包的 ATA 失败: %w", err)
 	}
 	dst, _, err := solana.FindAssociatedTokenAddress(to, c.mint)
 	if err != nil {
@@ -368,11 +467,11 @@ func (c *onchainChannel) send(ctx context.Context, o *pay.PayOrder, to solana.Pu
 	if err := c.precheckFunds(ctx, src, o.Amount); err != nil {
 		return nil, err
 	}
-	instructions, err := c.buildInstructions(ctx, to, src, dst, o.Amount)
+	instructions, err := c.buildInstructions(ctx, to, src, dst, o.Amount, a.wallet)
 	if err != nil {
 		return nil, err
 	}
-	if err := c.precheckFee(ctx); err != nil {
+	if err := c.precheckFee(ctx, a.wallet); err != nil {
 		return nil, err
 	}
 	hash, lastValid, err := c.rpc.LatestBlockhash(ctx)
@@ -382,7 +481,7 @@ func (c *onchainChannel) send(ctx context.Context, o *pay.PayOrder, to solana.Pu
 	}
 	_ = lastValid // 台账没有「有效期槽位」字段；权威判据是 IsBlockhashValid，不按估算值判死。
 
-	builder := solana.NewTransactionBuilder().SetRecentBlockHash(hash).SetFeePayer(c.sign.Address())
+	builder := solana.NewTransactionBuilder().SetRecentBlockHash(hash).SetFeePayer(a.wallet)
 	for _, inst := range instructions {
 		builder = builder.AddInstruction(inst)
 	}
@@ -390,8 +489,8 @@ func (c *onchainChannel) send(ctx context.Context, o *pay.PayOrder, to solana.Pu
 	if err != nil {
 		return nil, fmt.Errorf("组包失败: %w", err)
 	}
-	if err := c.sign.Sign(tx); err != nil {
-		return nil, &pay.ProviderError{Channel: c.opt.Name, Code: "sign_failed", Msg: c.redact(err.Error()), Retryable: false}
+	if err := a.sign.Sign(tx); err != nil {
+		return nil, &pay.ProviderError{Channel: c.opt.Name, Code: "sign_failed", Msg: c.redactWith(a.secret, err.Error()), Retryable: false}
 	}
 	raw, err := tx.MarshalBinary()
 	if err != nil {
@@ -401,6 +500,7 @@ func (c *onchainChannel) send(ctx context.Context, o *pay.PayOrder, to solana.Pu
 		OrderNo:     strings.TrimSpace(o.OrderNo),
 		TxID:        txSignature(tx),
 		RawTx:       raw,
+		From:        a.wallet.String(),
 		To:          to.String(),
 		Contract:    c.opt.Mint,
 		Amount:      o.Amount,
@@ -422,7 +522,7 @@ func (c *onchainChannel) send(ctx context.Context, o *pay.PayOrder, to solana.Pu
 //
 // 用 transferChecked 而不是 transfer：后者不带 decimals，代币程序按 mint 自己解释
 // 金额，一旦配置与 mint 不一致，链上不会报错、只会按另一个指数动钱。
-func (c *onchainChannel) buildInstructions(ctx context.Context, to, src, dst solana.PublicKey, amount int64) ([]solana.Instruction, error) {
+func (c *onchainChannel) buildInstructions(ctx context.Context, to, src, dst solana.PublicKey, amount int64, payer solana.PublicKey) ([]solana.Instruction, error) {
 	var out []solana.Instruction
 	if price := c.chain.PriorityFeeMicroLamports; price > 0 {
 		out = append(out,
@@ -439,7 +539,7 @@ func (c *onchainChannel) buildInstructions(ctx context.Context, to, src, dst sol
 	}
 	if !exists {
 		create, err := associatedtokenaccount.NewCreateIdempotentInstructionBuilder().
-			SetPayer(c.sign.Address()).
+			SetPayer(payer).
 			SetWallet(to).
 			SetMint(c.mint).
 			ValidateAndBuild()
@@ -449,7 +549,7 @@ func (c *onchainChannel) buildInstructions(ctx context.Context, to, src, dst sol
 		out = append(out, create)
 	}
 	xfer, err := token.NewTransferCheckedInstruction(
-		uint64(amount), uint8(c.opt.Decimals), src, c.mint, dst, c.sign.Address(), nil,
+		uint64(amount), uint8(c.opt.Decimals), src, c.mint, dst, payer, nil,
 	).ValidateAndBuild()
 	if err != nil {
 		return nil, fmt.Errorf("组 transferChecked 指令失败: %w", err)
@@ -481,7 +581,7 @@ func (c *onchainChannel) precheckFunds(ctx context.Context, src solana.PublicKey
 	}
 	if bal < uint64(amount) {
 		return &pay.ProviderError{Channel: c.opt.Name, Code: "insufficient_token",
-			Msg:       fmt.Sprintf("热钱包 USDT 余额 %d 不足以支付本单 %d（最小单位）", bal, amount),
+			Msg:       fmt.Sprintf("出款账户 USDT 余额 %d 不足以支付本单 %d（最小单位）", bal, amount),
 			Retryable: false}
 	}
 	return nil
@@ -491,16 +591,16 @@ func (c *onchainChannel) precheckFunds(ctx context.Context, src solana.PublicKey
 //
 // 手续费收在原生币上：USDT 够而 SOL 为 0 时，签名与广播都会成功、链上执行会失败，
 // 而失败也照样烧掉手续费。这笔账必须在签名之前算。
-func (c *onchainChannel) precheckFee(ctx context.Context) error {
+func (c *onchainChannel) precheckFee(ctx context.Context, from solana.PublicKey) error {
 	need := uint64(c.feeCeiling())
-	native, err := c.rpc.NativeBalance(ctx, c.sign.Address())
+	native, err := c.rpc.NativeBalance(ctx, from)
 	if err != nil {
 		return &pay.ProviderError{Channel: c.opt.Name, Code: "account_unread",
 			Msg: "读不出原生币余额: " + c.redact(err.Error()), Retryable: true}
 	}
 	if native < need {
 		return &pay.ProviderError{Channel: c.opt.Name, Code: "insufficient_gas",
-			Msg: fmt.Sprintf("热钱包 SOL 余额 %d lamports 低于本单手续费上限 %d lamports：手续费收在原生币上，USDT 够也发不出去",
+			Msg: fmt.Sprintf("出款账户 SOL 余额 %d lamports 低于本单手续费上限 %d lamports：手续费收在原生币上，USDT 够也发不出去",
 				native, need), Retryable: false}
 	}
 	return nil
@@ -617,6 +717,61 @@ func (c *onchainChannel) QueryAccount(ctx context.Context, q *pay.AccountQuery) 
 	return info, nil
 }
 
+// QueryOnchainAccount 按查询里的 owner/mint 读链上余额（缺省用配置热钱包与 mint）。
+//
+// owner 的 ATA 由 owner+mint 现算，所以按单热钱包也能查；mint 换了仍按配置的
+// decimals 复核 token account，位数不一致直接报错而不是按 10^n 倍发出去。
+func (c *onchainChannel) QueryOnchainAccount(ctx context.Context, q *pay.OnchainAccountQuery) (*pay.AccountInfo, error) {
+	owner := c.sign.Address()
+	mint := c.mint
+	currency := pay.CurrencyUSDT
+	if q != nil {
+		if v := strings.TrimSpace(q.Address); v != "" {
+			pk, err := solana.PublicKeyFromBase58(v)
+			if err != nil {
+				return nil, fmt.Errorf("通道[%s]链上余额查询的地址不是合法 Solana 地址", c.opt.Name)
+			}
+			owner = pk
+		}
+		if v := strings.TrimSpace(q.Contract); v != "" {
+			pk, err := solana.PublicKeyFromBase58(v)
+			if err != nil {
+				return nil, fmt.Errorf("通道[%s]链上余额查询的 mint 不是合法 Solana 地址", c.opt.Name)
+			}
+			mint = pk
+		}
+		if v := strings.TrimSpace(q.Currency); v != "" {
+			currency = strings.ToUpper(v)
+		}
+	}
+	if currency != pay.CurrencyUSDT {
+		return nil, fmt.Errorf("通道[%s]只发 USDT-SPL，链上余额查询不支持币种 %s", c.opt.Name, currency)
+	}
+	ata, _, err := solana.FindAssociatedTokenAddress(owner, mint)
+	if err != nil {
+		return nil, fmt.Errorf("通道[%s]算不出余额查询的 token account: %w", c.opt.Name, err)
+	}
+	bal, err := c.tokenBalance(ctx, ata)
+	if err != nil {
+		return nil, &pay.ProviderError{Channel: c.opt.Name, Code: "balance_unread",
+			Msg: "读不出代币余额: " + c.redact(err.Error()), Retryable: true}
+	}
+	info := &pay.AccountInfo{
+		MerchantID: owner.String(),
+		Currency:   pay.CurrencyUSDT,
+		Balance:    saturateUint64(bal),
+		Available:  saturateUint64(bal),
+		Status:     pay.AcctActive,
+	}
+	if bal > math.MaxInt64 {
+		info.RawNote = "余额超出 int64 可表达范围，已按上限饱和（链上真实值更大）"
+	}
+	if native, err := c.rpc.NativeBalance(ctx, owner); err == nil {
+		info.RawNote = strings.TrimSpace(info.RawNote + " gas 余额 " + strconv.FormatUint(native, 10) + " lamports")
+	}
+	return info, nil
+}
+
 // unknown 给一条「说不清」的回执：带上 txid，让对账有把手。
 func (c *onchainChannel) unknown(entry *ledger.Entry, note string) *pay.PayResult {
 	return &pay.PayResult{
@@ -645,12 +800,17 @@ func clip(s string) string {
 // 整串替换而不是只换密钥段——只换一段的话，剩下的 host 与路径仍然把接入点
 // 暴露在日志里。
 func (c *onchainChannel) redact(s string) string {
+	return c.redactWith("", s)
+}
+
+// redactWith 在全局脱敏之外再抹掉这一单的按单私钥。
+func (c *onchainChannel) redactWith(secret, s string) string {
 	if s == "" {
 		return s
 	}
-	for _, secret := range []string{c.chain.PrivateKey, c.chain.APIKey, c.chain.RPC} {
-		if secret != "" && strings.Contains(s, secret) {
-			s = strings.ReplaceAll(s, secret, "***")
+	for _, v := range []string{secret, c.chain.PrivateKey, c.chain.APIKey, c.chain.RPC} {
+		if v != "" && strings.Contains(s, v) {
+			s = strings.ReplaceAll(s, v, "***")
 		}
 	}
 	return s

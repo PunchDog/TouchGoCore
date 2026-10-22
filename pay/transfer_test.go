@@ -32,6 +32,29 @@ func (f *fakeTransfer) Withdraw(_ context.Context, o *PayOrder) (*PayResult, err
 	return &PayResult{OrderNo: o.OrderNo, Status: StatusPending}, nil
 }
 
+// fakeChannel 是完整统一调用面的假实现：四个方法各自留下调用痕迹。
+type fakeChannel struct {
+	fakeTransfer
+	orderCalls   []string
+	accountCalls int
+	onchainCalls int
+}
+
+func (f *fakeChannel) QueryOrder(_ context.Context, orderNo string) (*PayResult, error) {
+	f.orderCalls = append(f.orderCalls, orderNo)
+	return &PayResult{OrderNo: orderNo, Status: StatusPending}, nil
+}
+
+func (f *fakeChannel) QueryAccount(_ context.Context, q *AccountQuery) (*AccountInfo, error) {
+	f.accountCalls++
+	return &AccountInfo{Status: AcctActive, Available: 1}, nil
+}
+
+func (f *fakeChannel) QueryOnchainAccount(_ context.Context, q *OnchainAccountQuery) (*AccountInfo, error) {
+	f.onchainCalls++
+	return &AccountInfo{Status: AcctActive, Available: 1}, nil
+}
+
 // TestBindRejectsEmptyAndDuplicate 空 kind、空实现、重复登记都必须拒。
 //
 // 重复登记不许覆盖：覆盖等于让「哪个实现在管这条通道」取决于装配顺序，
@@ -173,5 +196,60 @@ func TestKindsCoverEveryDeclaredChannel(t *testing.T) {
 		if !want[k] {
 			t.Fatalf("Kinds() 出现未登记的值 %q", k)
 		}
+	}
+}
+
+// TestChannelForKeepsLegacyTransferCompatible 只实现 Withdraw 的旧装配方仍可绑定、
+// 仍可分派出款；但查询面必须明确报「未提供」，不能退化成空实现。
+func TestChannelForKeepsLegacyTransferCompatible(t *testing.T) {
+	legacy := &fakeTransfer{}
+	if err := Bind(KindTronUSDT, legacy); err != nil {
+		t.Fatalf("旧实现绑定失败: %v", err)
+	}
+	defer Unbind(KindTronUSDT)
+
+	if _, err := TransferTo(context.Background(), KindTronUSDT, &PayOrder{OrderNo: "O1", Amount: 1, To: &Party{Address: "TAddr"}}); err != nil {
+		t.Fatalf("旧实现出款分派失败: %v", err)
+	}
+	if _, err := ChannelFor(KindTronUSDT); err == nil {
+		t.Fatal("只实现 Withdraw 的通道不该被当成完整 Channel")
+	} else if !strings.Contains(err.Error(), "统一查询面") {
+		t.Fatalf("错误文案应指明缺查询面，实得 %v", err)
+	}
+}
+
+// TestChannelForDispatchesEveryOperation 四个动作必须落到同一个已登记实现上：
+// 统一接口的全部意义就是「按 Kind 找到同一条通道」，不允许查单/查余额各走一条。
+func TestChannelForDispatchesEveryOperation(t *testing.T) {
+	ch := &fakeChannel{}
+	if err := Bind(KindBscUSDT, ch); err != nil {
+		t.Fatal(err)
+	}
+	defer Unbind(KindBscUSDT)
+
+	got, err := ChannelFor(KindBscUSDT)
+	if err != nil {
+		t.Fatalf("已装配却取不到统一接口: %v", err)
+	}
+	if got != ch {
+		t.Fatal("ChannelFor 返回的不是登记的那个实现")
+	}
+	res, err := QueryOrderTo(context.Background(), KindBscUSDT, "O1")
+	if err != nil || res == nil || res.OrderNo != "O1" {
+		t.Fatalf("QueryOrderTo 分派失败: res=%+v err=%v", res, err)
+	}
+	if _, err := QueryAccountTo(context.Background(), KindBscUSDT, &AccountQuery{}); err != nil {
+		t.Fatalf("QueryAccountTo 分派失败: %v", err)
+	}
+	if _, err := QueryOnchainAccountTo(context.Background(), KindBscUSDT, &OnchainAccountQuery{}); err != nil {
+		t.Fatalf("QueryOnchainAccountTo 分派失败: %v", err)
+	}
+	if len(ch.orderCalls) != 1 || ch.orderCalls[0] != "O1" || ch.accountCalls != 1 || ch.onchainCalls != 1 {
+		t.Fatalf("四个动作没有落到同一实现: order=%v account=%d onchain=%d",
+			ch.orderCalls, ch.accountCalls, ch.onchainCalls)
+	}
+
+	if _, err := QueryOrderTo(context.Background(), KindTronUSDT, "O2"); err == nil {
+		t.Fatal("未装配的通道查询不该成功")
 	}
 }

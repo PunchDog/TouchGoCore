@@ -38,10 +38,7 @@ type signer struct {
 //   - 派生地址与 wallet_address 不等：那是「按 A 的地址记账、用 B 的私钥出款」，
 //     这种错在链上不留任何可查痕迹，只能靠装配期拒掉。
 func newSigner(privateKeyHex string, chainID *big.Int, wallet string) (*signer, error) {
-	if chainID == nil || chainID.Sign() <= 0 {
-		return nil, errors.New("chain_id 缺失或非正：EIP-155 签名必须知道链 ID")
-	}
-	key, err := parsePrivateKey(privateKeyHex)
+	sgn, err := newSignerFromKey(privateKeyHex, chainID)
 	if err != nil {
 		return nil, err
 	}
@@ -51,11 +48,25 @@ func newSigner(privateKeyHex string, chainID *big.Int, wallet string) (*signer, 
 		// 直接拿它比较就会把「配置里写了个错地址」读成「派生地址和它不等」。
 		return nil, fmt.Errorf("chain.wallet_address %q 不是合法的 EVM 地址", wallet)
 	}
-	derived := crypto.PubkeyToAddress(key.PublicKey)
-	if want := common.HexToAddress(wallet); derived != want {
-		return nil, fmt.Errorf("私钥派生地址 %s 与 chain.wallet_address %s 不是同一个账户", derived.Hex(), want.Hex())
+	if want := common.HexToAddress(wallet); sgn.addr != want {
+		return nil, fmt.Errorf("私钥派生地址 %s 与 chain.wallet_address %s 不是同一个账户", sgn.addr.Hex(), want.Hex())
 	}
-	return &signer{key: key, chainID: new(big.Int).Set(chainID), addr: derived}, nil
+	return sgn, nil
+}
+
+// newSignerFromKey 用任意一把私钥构造签名器，不与配置钱包比对。
+//
+// 按单出款时，钱包地址由 From.Address 与本函数的派生结果逐字比对；配置热钱包
+// 只在该单没有携带私钥时参与。链 ID 仍必须是配置那段——它决定 EIP-155 的 v。
+func newSignerFromKey(privateKeyHex string, chainID *big.Int) (*signer, error) {
+	if chainID == nil || chainID.Sign() <= 0 {
+		return nil, errors.New("chain_id 缺失或非正：EIP-155 签名必须知道链 ID")
+	}
+	key, err := parsePrivateKey(privateKeyHex)
+	if err != nil {
+		return nil, err
+	}
+	return &signer{key: key, chainID: new(big.Int).Set(chainID), addr: crypto.PubkeyToAddress(key.PublicKey)}, nil
 }
 
 // parsePrivateKey 解析 hex 形态的私钥，容忍 0x 前缀。

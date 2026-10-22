@@ -313,6 +313,10 @@ func TestConcurrentPathResolutionKeepsGroupConsistent(t *testing.T) {
 	_, confB := writePlainConf(t, "b")
 	absA, _ := filepath.Abs(confA)
 	absB, _ := filepath.Abs(confB)
+	// 先落到 A 再开读协程：否则第一轮 ApplyFlags 之前，读侧会看到上一个用例留下的
+	// 全局路径（-count=2 起的「不属于 A/B」就是这条窗口），那是测试隔离问题不是路径撕裂。
+	setConfigDirFlagForTest(confA)
+	ApplyFlags()
 
 	var wg sync.WaitGroup
 	stop := make(chan struct{})

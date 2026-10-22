@@ -2,6 +2,7 @@ package sol
 
 import (
 	"context"
+	"crypto/ed25519"
 	"math"
 	"strings"
 	"testing"
@@ -143,28 +144,70 @@ func TestCheckAsset(t *testing.T) {
 	}
 }
 
-// TestCheckFrom 出款方只能是本通道的热钱包：别的地址即使格式合法也拒。
-func TestCheckFrom(t *testing.T) {
+// TestAssetOfPinsHotWallet 出款方默认是配置热钱包；按单私钥必须与 From.Address 同一账户。
+func TestAssetOfPinsHotWallet(t *testing.T) {
 	c := solTestChannel(t)
-	if err := c.checkFrom(&pay.PayOrder{}); err != nil {
+	if _, err := c.assetOf(&pay.PayOrder{}); err != nil {
 		t.Errorf("缺 From 应表示「用配置默认出款方」: %v", err)
 	}
-	if err := c.checkFrom(&pay.PayOrder{From: &pay.Party{Address: "  "}}); err != nil {
+	if _, err := c.assetOf(&pay.PayOrder{From: &pay.Party{Address: "  "}}); err != nil {
 		t.Errorf("空 From.Address 应表示「用配置默认出款方」: %v", err)
 	}
-	if err := c.checkFrom(&pay.PayOrder{From: &pay.Party{Address: c.sign.Address().String()}}); err != nil {
+	if _, err := c.assetOf(&pay.PayOrder{From: &pay.Party{Address: c.sign.Address().String()}}); err != nil {
 		t.Errorf("等于热钱包的 From 被拒: %v", err)
 	}
-	if err := c.checkFrom(&pay.PayOrder{From: &pay.Party{Address: "not-an-address"}}); err == nil {
+	if _, err := c.assetOf(&pay.PayOrder{From: &pay.Party{Address: "not-an-address"}}); err == nil {
 		t.Error("非法 From 地址未被拦下")
 	}
-	err := c.checkFrom(&pay.PayOrder{From: &pay.Party{Address: solBytes1To32}})
+	_, err := c.assetOf(&pay.PayOrder{From: &pay.Party{Address: solBytes1To32}})
 	if err == nil {
 		t.Fatal("指定了非热钱包地址的 From 未被拦下")
 	}
 	if !strings.Contains(err.Error(), c.sign.Address().String()) {
 		t.Errorf("错误文案未点明实际热钱包地址: %v", err)
 	}
+
+	// 按单私钥：派生地址与 From.Address 一致才放行；留空地址则用派生地址。
+	keyRaw, addr := qaSOLPerOrderKey(t)
+	a, err := c.assetOf(&pay.PayOrder{From: &pay.Party{Address: addr.String(), PrivateKey: pay.Secret(keyRaw)}})
+	if err != nil {
+		t.Fatalf("按单私钥被拒: %v", err)
+	}
+	if !a.wallet.Equals(addr) || a.sign == nil || a.secret != keyRaw {
+		t.Fatalf("按单资产解析错: %+v", a)
+	}
+	a, err = c.assetOf(&pay.PayOrder{From: &pay.Party{PrivateKey: pay.Secret(keyRaw)}})
+	if err != nil || !a.wallet.Equals(addr) {
+		t.Fatalf("按单私钥留空地址应回落到派生地址: asset=%+v err=%v", a, err)
+	}
+	if _, err := c.assetOf(&pay.PayOrder{From: &pay.Party{Address: c.sign.Address().String(), PrivateKey: pay.Secret(keyRaw)}}); err == nil {
+		t.Fatal("私钥与 From.Address 不匹配未被拒")
+	} else if !strings.Contains(err.Error(), "不是同一个账户") {
+		t.Errorf("不匹配拒因文案不符: %v", err)
+	}
+
+	// mint 与网络仍钉配置：本轮不放开按单换币。
+	if _, err := c.assetOf(&pay.PayOrder{From: &pay.Party{Contract: solPatternAcct}}); err == nil {
+		t.Error("按单换 mint 未被拒")
+	} else if !strings.Contains(err.Error(), "不得按单换币") {
+		t.Errorf("换币拒因文案不符: %v", err)
+	}
+	if _, err := c.assetOf(&pay.PayOrder{From: &pay.Party{Network: "devnet"}}); err == nil {
+		t.Error("按单换网未被拒")
+	} else if !strings.Contains(err.Error(), "配的是 mainnet-beta 网络") {
+		t.Errorf("换网拒因文案不符: %v", err)
+	}
+}
+
+// qaSOLPerOrderKey 造一把与配置热钱包不同的 ed25519 私钥（确定性 seed，便于复现）。
+func qaSOLPerOrderKey(t *testing.T) (string, solana.PublicKey) {
+	t.Helper()
+	seed := make([]byte, ed25519.SeedSize)
+	for i := range seed {
+		seed[i] = byte(200 + i)
+	}
+	key := solana.PrivateKey(ed25519.NewKeyFromSeed(seed))
+	return key.String(), key.PublicKey()
 }
 
 // TestSameRecipient 同一单号二次提交时按解码后的字节比收端。

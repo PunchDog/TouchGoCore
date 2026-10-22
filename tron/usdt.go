@@ -81,16 +81,27 @@ func newUSDTClient(cfg *config.Cfg) (*client, bool) {
 	if u.Chain != nil {
 		injectKey(util.CallPayChainMsg, inlineUSDTKey, &u.Chain.PrivateKey)
 	}
-	acc, err := s.Account(strings.TrimSpace(s.AccountID))
-	if err != nil {
-		vars.Info("USDT 通道不启动: tron.usdt 的商户账户不可用: %v", err)
-		return nil, false
+	// 商户账户是供应商侧查询的可选项：纯链上部署（余额走 QueryOnchainAccount）
+	// 没有供应商账户，不能因为 accounts 为空就把整条通道拒掉。配了账户才要求它可解析。
+	merchantID := ""
+	baseURL := strings.TrimSpace(s.BaseURL)
+	if len(s.Accounts) > 0 {
+		acc, err := s.Account(strings.TrimSpace(s.AccountID))
+		if err != nil {
+			vars.Info("USDT 通道不启动: tron.usdt 的商户账户不可用: %v", err)
+			return nil, false
+		}
+		merchantID = acc.MerchantID
+	} else {
+		// 没有商户账户就没有「查供应商额度」这条链路。即使误填了 base_url 也不装配
+		// 供应商客户端：空商户号发出去的查询只会换来供应商侧的一串拒签日志。
+		baseURL = ""
 	}
 	opt := channelOptions{
 		Name:       "usdt",
 		Driver:     driver,
-		MerchantID: acc.MerchantID,
-		BaseURL:    strings.TrimSpace(s.BaseURL),
+		MerchantID: merchantID,
+		BaseURL:    baseURL,
 		Timeout:    secondsOf(s.TimeoutSec),
 		MaxRetry:   s.MaxRetries,
 		AppID:      strings.TrimSpace(s.AppID),
@@ -105,7 +116,7 @@ func newUSDTClient(cfg *config.Cfg) (*client, bool) {
 		vars.Info("USDT 通道不启动: %v", err)
 		return nil, false
 	}
-	vars.Info("USDT 通道已就绪: driver=%s 商户号=%s 合约=%s 网络=%s", driver, acc.MerchantID, contract, network)
+	vars.Info("USDT 通道已就绪: driver=%s 商户号=%s 合约=%s 网络=%s", driver, merchantID, contract, network)
 	return &client{ch: ch, network: network}, true
 }
 

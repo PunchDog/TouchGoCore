@@ -37,10 +37,13 @@ const (
 // 字段都是定位信息（链、单号、txid、收端、合约、金额、上限），不含凭证。RawTx 是已签名
 // 交易，可以持久化、也足够重广播，但反推不出私钥；它同样不许进日志与 RawNote。
 type Entry struct {
-	Chain    string
-	OrderNo  string
-	TxID     string
-	RawTx    []byte
+	Chain   string
+	OrderNo string
+	TxID    string
+	RawTx   []byte
+	// From 是这一笔的出款地址快照。按单携带热钱包时，同一单号不得换钱包重签：
+	// 换了钱包就是另一笔资金来源，台账不能把它当成同一次重试。
+	From     string
 	To       string
 	Contract string
 	Amount   int64

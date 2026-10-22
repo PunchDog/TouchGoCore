@@ -152,6 +152,57 @@ func (c *tonChannel) QueryAccount(ctx context.Context, q *pay.AccountQuery) (*pa
 	return c.supplier.QueryAccount(ctx, q)
 }
 
+// QueryOnchainAccount 读 TON 账户的原生币余额。
+//
+// 本通道只交付原生 TON，所以 Contract/jetton 查询直接拒绝；余额与 gas 是同一份资产，
+// 不像 TRON 要分代币与 TRX 两次读。账户状态只做三态归一：frozen 判冻结，
+// nonexist/uninit 判未知（没激活的账户余额不可用），其余按 active。
+func (c *tonChannel) QueryOnchainAccount(ctx context.Context, q *pay.OnchainAccountQuery) (*pay.AccountInfo, error) {
+	currency := pay.CurrencyTON
+	acct := c.acct
+	if q != nil {
+		if v := strings.TrimSpace(q.Currency); v != "" {
+			currency = strings.ToUpper(v)
+		}
+		if v := strings.TrimSpace(q.Contract); v != "" {
+			return nil, fmt.Errorf("通道[%s]只发原生 TON，链上余额查询不支持合约/jetton", c.opt.Name)
+		}
+		if v := strings.TrimSpace(q.Address); v != "" {
+			id, ok := tonAccountID(v)
+			if !ok {
+				return nil, fmt.Errorf("通道[%s]链上余额查询的地址不是合法 TON 地址", c.opt.Name)
+			}
+			acct = id
+		}
+	}
+	if currency != pay.CurrencyTON {
+		return nil, fmt.Errorf("通道[%s]只发原生 TON，链上余额查询不支持币种 %s", c.opt.Name, currency)
+	}
+	state, err := c.gw.account(ctx, acct)
+	if err != nil {
+		return nil, &pay.ProviderError{Channel: c.opt.Name, Code: "account_unread",
+			Msg: "读不出链上余额: " + c.redact(err.Error()), Retryable: true}
+	}
+	if state == nil {
+		return nil, &pay.ProviderError{Channel: c.opt.Name, Code: "account_unread",
+			Msg: "链上余额回执为空", Retryable: true}
+	}
+	status := pay.AcctActive
+	switch strings.ToLower(strings.TrimSpace(state.Status)) {
+	case "frozen":
+		status = pay.AcctFrozen
+	case "nonexist", "uninit":
+		status = pay.AcctUnknown
+	}
+	return &pay.AccountInfo{
+		Currency:  pay.CurrencyTON,
+		Balance:   state.BalanceNanoton,
+		Available: state.BalanceNanoton,
+		Status:    status,
+		RawNote:   "链上余额 status=" + state.Status,
+	}, nil
+}
+
 // Withdraw 直接上链出款：读序号、本地签名、广播，并把结果按「钱有没有动」而不是
 // 「调用有没有返回」归一。
 //
@@ -206,9 +257,23 @@ func (c *tonChannel) checkAsset(o *pay.PayOrder) error {
 // From 留空表示用配置的默认出款方（就是 c.wallet）；填了就必须与它指向同一个账户。
 // TON 的同一个账户有多种写法（用户友好 EQ…/UQ…、原始 0:hex），逐字比会把同一账户
 // 误判成两个，所以用 sameTONAddress 归一后再比；解不出账户的形态直接拒。
+//
+// 本包收到非空 PrivateKey / Contract 就地拒绝，不能静默忽略——上游以为换了钱包
+// 或币种，实际仍按配置出款，资金归属就错了。TON 的按单私钥比 EVM/SOL 多一层：
+// 同一个私钥在不同 wallet_version / sub_wallet_id 下会派生出不同地址，裸私钥
+// 无法唯一确定出款账户，因此必须由配置把这三项一起钉死。
 func (c *tonChannel) checkFrom(o *pay.PayOrder) error {
 	if o == nil || o.From == nil {
 		return nil
+	}
+	if strings.TrimSpace(o.From.PrivateKey.Reveal()) != "" {
+		return fmt.Errorf("通道[%s]暂不支持按单传入出款私钥（From.PrivateKey）：TON 钱包地址还取决于 wallet_version / sub_wallet_id，无法只从裸私钥推导；请使用配置热钱包", c.opt.Name)
+	}
+	if strings.TrimSpace(o.From.Contract) != "" {
+		return fmt.Errorf("通道[%s]只发原生 TON，不支持按单指定合约/jetton", c.opt.Name)
+	}
+	if net := strings.TrimSpace(o.From.Network); net != "" && !strings.EqualFold(net, strings.TrimSpace(c.chain.Network)) {
+		return fmt.Errorf("通道[%s]配的是 %s 网络，这一单的出款方却写着 %s", c.opt.Name, c.chain.Network, net)
 	}
 	from := strings.TrimSpace(o.From.Address)
 	if from == "" || from == c.wallet {

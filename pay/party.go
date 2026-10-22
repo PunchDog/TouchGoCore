@@ -52,10 +52,15 @@ type BankAccount struct {
 //
 // 字段按 Kind 取用，其余留空：
 //
-//	wallet   → Address（链上地址）/ Network / Memo
+//	wallet   → Address（链上地址）/ Network / Memo；出款方还可带 Contract / PrivateKey
 //	merchant → Account（商户号）
 //	bank     → Bank
 //
+// Contract / PrivateKey 只对「按单携带完整出款参数」的链上通道有意义：tron 的
+// USDT 通道消费 Contract + PrivateKey；bsc/sol 消费 PrivateKey（Address 用于核对
+// 派生结果），Contract / Network 仍须与配置一致；telegram 仍只认配置热钱包，
+// 收到按单私钥会明确拒单而不是静默忽略（TON 地址还依赖 wallet_version /
+// sub_wallet_id，裸私钥无法唯一推导）。
 // Memo 只对「链上认款靠备注」的网络有意义（TON 的 comment）：往交易所归集账户打钱时
 // 收款方是所有人共用的一个热钱包，认款全靠这一串——漏填的后果是链上确认成功、
 // 对方账上却认不出是谁的，只能走人工找回。反过来说，TRON / BSC / SOL 根本没有这个概念，
@@ -76,6 +81,18 @@ type Party struct {
 	Memo string `json:"memo,omitempty"`
 	// Account 供应商侧商户号（kind=merchant）。
 	Account string `json:"account,omitempty"`
+	// Contract 是这一单使用的代币合约（当前只有 tron 支持按单覆盖配置缺省值；
+	// bsc/sol 收到与配置不一致的合约会明确拒单）。
+	//
+	// 它属于「这一单发的是哪种币」，与 Network 正交：同一个 USDT 在 TRON 是
+	// 6 位、在 BSC 是 18 位，换合约就是换币。留空表示用通道配置里那张合约。
+	Contract string `json:"contract,omitempty"`
+	// PrivateKey 是这一单的出款私钥（按单携带，供多热钱包部署使用）。
+	//
+	// 永不出现在 JSON（json:"-"）与日志（Secret 打码）里；只有通道包在派生地址
+	// 与签名时会 Reveal()。它不参与 Party.Check 的格式校验：私钥与地址是否一致
+	// 是链侧知识，由通道在落账/广播前逐字比对。
+	PrivateKey Secret `json:"-"`
 	// Bank 银行卡（kind=bank）。指针为空与「填了一张全空白的卡」是两件事，见 Check。
 	Bank *BankAccount `json:"bank,omitempty"`
 	// Name 收/付方名称，只用于留痕与人工核对，不参与任何格式校验。

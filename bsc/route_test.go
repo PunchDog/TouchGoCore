@@ -104,6 +104,9 @@ func (s *stubChannel) QueryOrder(context.Context, string) (*pay.PayResult, error
 func (s *stubChannel) QueryAccount(context.Context, *pay.AccountQuery) (*pay.AccountInfo, error) {
 	return &pay.AccountInfo{}, nil
 }
+func (s *stubChannel) QueryOnchainAccount(context.Context, *pay.OnchainAccountQuery) (*pay.AccountInfo, error) {
+	return &pay.AccountInfo{}, nil
+}
 func (s *stubChannel) Close() error {
 	s.closed = true
 	return nil
@@ -127,6 +130,9 @@ func TestBscRouteBindsKind(t *testing.T) {
 	}
 	if got != pay.Transfer(ch) {
 		t.Errorf("分派到的通道不是刚装的那一个")
+	}
+	if chFor, err := pay.ChannelFor(pay.KindBscUSDT); err != nil || chFor != pay.Channel(ch) {
+		t.Errorf("统一调用面没落在同一条通道上: ch=%v err=%v", chFor, err)
 	}
 
 	bscRoute.stop()

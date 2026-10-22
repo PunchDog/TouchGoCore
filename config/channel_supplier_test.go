@@ -137,6 +137,18 @@ func TestValidateInlineChannels(t *testing.T) {
 	if err := base().Validate(); err != nil {
 		t.Fatalf("合法配置被拒: %v", err)
 	}
+	// 纯链上 + 按单出款参数：没有供应商、合约、热钱包也必须能开启。
+	perOrder := base()
+	perOrder.Tron.Usdt.BaseURL = ""
+	perOrder.Tron.Usdt.AppID = ""
+	perOrder.Tron.Usdt.SecretKey = ""
+	perOrder.Tron.Usdt.Accounts = nil
+	perOrder.Tron.Usdt.Contract = ""
+	perOrder.Tron.Usdt.Chain.WalletAddress = ""
+	perOrder.Tron.Usdt.Chain.PrivateKey = ""
+	if err := perOrder.Validate(); err != nil {
+		t.Fatalf("按单携带出款参数时，缺供应商/合约/热钱包应当放行: %v", err)
+	}
 
 	cases := map[string]func(*Cfg){
 		"段缺驱动标记":         func(c *Cfg) { c.Tron.Usdt.Driver = "" },
@@ -146,9 +158,7 @@ func TestValidateInlineChannels(t *testing.T) {
 		"出款引用了停用的账户":     func(c *Cfg) { c.Tron.Usdt.Accounts["default"].Enable = "off" },
 		"链上段缺失":          func(c *Cfg) { c.Tron.Usdt.Chain = nil },
 		"链上段缺接入点":        func(c *Cfg) { c.Tron.Usdt.Chain.Node = "" },
-		"链上段缺出款地址":       func(c *Cfg) { c.Tron.Usdt.Chain.WalletAddress = "" },
 		"network 填了代币标准": func(c *Cfg) { c.Tron.Usdt.Network = "trc20" },
-		"缺合约地址":          func(c *Cfg) { c.Tron.Usdt.Contract = "" },
 		"小数位与合约不符":       func(c *Cfg) { c.Tron.Usdt.Decimals = 18 },
 		"BSC 缺链 ID":      func(c *Cfg) { c.Bsc.Usdt.Chain.ChainID = 0 },
 		"BSC 小数位不符":      func(c *Cfg) { c.Bsc.Usdt.Decimals = 6 },

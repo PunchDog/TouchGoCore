@@ -93,7 +93,7 @@ func (c *onchainChannel) judge(ctx context.Context, entry *ledger.Entry, out *rp
 			RawNote: c.note("链上执行失败（手续费已消耗）: " + fmt.Sprint(meta.Err)),
 		}, nil
 	}
-	delta, err := c.tokenDelta(meta)
+	delta, err := c.tokenDelta(meta, entry)
 	if err != nil {
 		return c.unknown(entry, "读不出 token 余额变化: "+err.Error()), nil
 	}
@@ -130,12 +130,20 @@ func (c *onchainChannel) judge(ctx context.Context, entry *ledger.Entry, out *rp
 //
 // 只累计 owner 是热钱包、mint 是本通道 mint 的账户：交易里可能同时有别的
 // 代币、别人的账户，把它们算进来就会把一笔正常的转账算成对不上。
-func (c *onchainChannel) tokenDelta(meta *rpc.TransactionMeta) (*big.Int, error) {
-	pre, err := c.sumOwnedTokenBalances(meta.PreTokenBalances)
+func (c *onchainChannel) tokenDelta(meta *rpc.TransactionMeta, entry *ledger.Entry) (*big.Int, error) {
+	owner, err := c.entryOwner(entry)
 	if err != nil {
 		return nil, err
 	}
-	post, err := c.sumOwnedTokenBalances(meta.PostTokenBalances)
+	mint, err := c.entryMint(entry)
+	if err != nil {
+		return nil, err
+	}
+	pre, err := c.sumOwnedTokenBalances(meta.PreTokenBalances, owner, mint)
+	if err != nil {
+		return nil, err
+	}
+	post, err := c.sumOwnedTokenBalances(meta.PostTokenBalances, owner, mint)
 	if err != nil {
 		return nil, err
 	}
@@ -147,14 +155,14 @@ func (c *onchainChannel) tokenDelta(meta *rpc.TransactionMeta) (*big.Int, error)
 // 按「所有」而不是只按 ATA：同一钱包在同一 mint 上非 ATA 的 token account 在
 // Solana 上合法存在。求和口径下，从哪个账户转出都算进净变化，比只盯 ATA
 // 更难被一笔「先从别处归集再转出」的交易骗过去。
-func (c *onchainChannel) sumOwnedTokenBalances(list []rpc.TokenBalance) (*big.Int, error) {
+func (c *onchainChannel) sumOwnedTokenBalances(list []rpc.TokenBalance, owner, mint solana.PublicKey) (*big.Int, error) {
 	sum := new(big.Int)
 	for i := range list {
 		tb := &list[i]
-		if !tb.Mint.Equals(c.mint) {
+		if !tb.Mint.Equals(mint) {
 			continue
 		}
-		if tb.Owner == nil || !tb.Owner.Equals(c.sign.Address()) {
+		if tb.Owner == nil || !tb.Owner.Equals(owner) {
 			continue
 		}
 		if tb.UiTokenAmount == nil {
@@ -263,17 +271,17 @@ func decodeRawTx(entry *ledger.Entry) (*solana.Transaction, error) {
 // 交易 meta 比余额变化，直到这一条的 blockTime 早于 72 小时窗口。用 blockTime
 // 而不是「按 slot 估算」：Solana 的 slot 时长会漂，估算值一旦偏小，窗口就被
 // 悄悄截短，而那正是「没扫到的已上链交易」变成第二笔钱的地方。
-func (c *onchainChannel) lookupLedgerByChain(ctx context.Context, o *pay.PayOrder, now time.Time) (*ledger.Entry, error) {
+func (c *onchainChannel) lookupLedgerByChain(ctx context.Context, o *pay.PayOrder, a orderAsset, now time.Time) (*ledger.Entry, error) {
 	to, err := solana.PublicKeyFromBase58(strings.TrimSpace(o.To.Address))
 	if err != nil {
 		return nil, fmt.Errorf("反查前解析收款地址失败: %w", err)
 	}
 	cutoff := now.Add(-scanWindow).Unix()
-	probe := &ledger.Entry{To: to.String(), Amount: o.Amount}
+	probe := &ledger.Entry{From: a.wallet.String(), To: to.String(), Contract: c.opt.Mint, Amount: o.Amount}
 	var before solana.Signature
 	lookups := 0
 	for page := 0; page < maxSigPages; page++ {
-		sigs, err := c.rpc.SignaturesForAddress(ctx, c.sign.Address(), before, sigPageLimit)
+		sigs, err := c.rpc.SignaturesForAddress(ctx, a.wallet, before, sigPageLimit)
 		if err != nil {
 			return nil, err
 		}
@@ -314,7 +322,7 @@ func (c *onchainChannel) lookupLedgerByChain(ctx context.Context, o *pay.PayOrde
 			}
 			entry := &ledger.Entry{
 				OrderNo: strings.TrimSpace(o.OrderNo), TxID: s.Signature.String(),
-				To: to.String(), Contract: c.opt.Mint, Amount: o.Amount,
+				From: a.wallet.String(), To: to.String(), Contract: c.opt.Mint, Amount: o.Amount,
 				FeeLimit: c.feeCeiling(), State: ledger.StateBroadcast, UpdatedAtMS: ledger.NowMS(now),
 				// ExpiresAtMS 留 0：反查回来的已经是在链上的笔，不再有「过期」可言。
 			}
@@ -348,7 +356,7 @@ func (c *onchainChannel) paidTo(meta *rpc.TransactionMeta, entry *ledger.Entry) 
 	if meta == nil || entry == nil {
 		return false
 	}
-	delta, err := c.tokenDelta(meta)
+	delta, err := c.tokenDelta(meta, entry)
 	if err != nil {
 		return false
 	}
@@ -359,9 +367,13 @@ func (c *onchainChannel) paidTo(meta *rpc.TransactionMeta, entry *ledger.Entry) 
 	if err != nil {
 		return false
 	}
+	mint, err := c.entryMint(entry)
+	if err != nil {
+		return false
+	}
 	for i := range meta.PostTokenBalances {
 		tb := &meta.PostTokenBalances[i]
-		if !tb.Mint.Equals(c.mint) {
+		if !tb.Mint.Equals(mint) {
 			continue
 		}
 		if tb.Owner != nil && tb.Owner.Equals(to) {

@@ -3,9 +3,9 @@
 //
 // 地址算法与出款链路都在 tron，因为 TRC20 与原生 TRX 是同一条链上的两种币：
 // 「地址怎么编码」「能不能带 memo」是链侧知识，两份实现迟早漂移，漂到后来就是
-// 一侧拒掉的地址被另一侧广播出去。登记点同理只能有一处——pay.RegisterChainRule
-// 重名即报错，而下游（whatapp 服务 cmd/t1jobserver/main.go）会同时 blank-import
-// touchgocore/tron 与 touchgocore/usdt，各登记一次就在启动期 panic。
+// 一侧拒掉的地址被另一侧广播出去。所以校验只留在 tron 包内一处（chainrule.go 的
+// checkOrderAddress），本包只做转发：下游（whatapp 服务 cmd/t1jobserver/main.go）
+// 同时 blank-import touchgocore/tron 与 touchgocore/usdt，也不会把同一份规则装上两回。
 //
 // 这个包留着只是因为下游把 usdt.UsdtXxx 与 util.CallUsdtMsg+"Xxx" 写死在了源码里。
 // 本包不读配置、不拼报文、不做状态归一：trc20 当网络填、合约地址校验和不过这类误配

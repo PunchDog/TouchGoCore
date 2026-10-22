@@ -22,25 +22,28 @@ Go 游戏服务框架：WebSocket、gRPC、定时器、Lua、Telegram、Gin、Re
 - WebSocket 路径取自 `ws.url` / `ws.inurl`（可为 `/ws` 或完整 `wss://host/path`），缺省 `/ws`。
 - 队列容量与背压：`server.read_buffer` / `write_buffer` / `backpressure`。
 - Prometheus：`metrics.enabled`，可选 `metrics.token` 保护 `/metrics`。
-- 资金通道：供应商接入集中在顶层 `pay_sdks` 表，一段=一套供应商（`driver` 驱动标记、`base_url`、
-  凭证、`endpoints` 端点表、`accounts` 我方商户账户，链上出款另带 `chain` 子段）。
-  **真正会动钱的出款有两条**：`usdt.provider`（USDT/TRC20）与 `telegram.ton.provider`（原生 TON）。
-  USDT 的提现与查单是本地组交易、私钥签名、经节点 gRPC 广播（`pay_sdks.<段>.chain` 给节点、
-  热钱包地址与 API Key，私钥由 `util.CallPayChainMsg+"<段名>"` 钩子注入）；TON 的提现同样是
-  本地签名（`tongo` 组外部消息），但广播与查证走 `chain.http_base` 指向的 TonAPI HTTP 接口
-  （本仓不接 lite server，原因见 `telegram/ton_gateway_tonapi.go` 头部注释），金额单位是纳吨。
-  两条都用 `touchgocore/ledger` 的同一套出款台账保证「同一单号不签第二笔」（各持一个实例，
-  键带链维度），商户账户查询仍走各自段引用的 HTTP 供应商。
-  其余原生币/代币通道（`tron` 的 TRX、`bsc`、`sol`）与三条社交通道的
-  资金实现已在 2026-10 的资金面收口里删除：提现/查单/查账户三个门面的函数签名保留，
-  一律返回各包的 `ErrPayoutNotWired` 哨兵（`errors.Is` 可判），对应通道段不再有
-  `provider` 配置项；充值/收款接口则整条删除（全仓只留提现）。
-  各链的地址校验与 `pay` 的币种收款端规则**刻意不随提现实现删除**——删掉规则登记会让该币种
-  的单走「未登记即放行」，那是资金安全退化而不是简化。
-  三条社交通道里，facebook/instagram 仍走 HTTP 供应商登录（各引一段 `supplier_fb`/`supplier_ig`
-  消息网关）；登录之所以一家一段，是因为 `endpoints` 的键是全局逻辑名、不带平台维度，
-  一段服务不了 `/fb/login` 与 `/ig/login` 两种实际路径；代价是密钥注入钩子按段名注册
-  （`util.CallPaySDKMsg+段名`），同一供应商登记多段时下游要逐段注入，别把密钥抄进版本库。
+- 资金通道：每条通道的全部事实内联在它自己的链段里——`tron.usdt`（USDT-TRC20）、
+  `telegram.ton`（原生 TON）、`bsc.usdt`（USDT-BEP20）与 `sol.usdt`（USDT-SPL）。
+  一段=一套事实：`enable` 总闸、`driver` 驱动标记、币种事实（`network` / `contract` /
+  `decimals`）与链上接入点 `chain`；`tron.usdt` / `telegram.ton` 还带供应商接入
+  （`base_url`、凭证、`endpoints`、`accounts`，只用于查商户账户）。没有集中登记表，
+  也没有跨段的 `provider` 引用：写一段就够，读配置的人不必在两处拼一个人。
+  **出款一律本地签名后广播**：USDT-TRC20 本地组交易、热钱包私钥签名、经 `chain.node` 的
+  gRPC 广播；原生 TON 用 `tongo` 组外部消息、经 `chain.http_base`（TonAPI）广播（本仓不接
+  lite server，原因见 `telegram/ton_gateway_tonapi.go` 头部注释），金额单位是纳吨；
+  USDT-BEP20 用 EIP-155 本地签名、经 `chain.rpc` 的 JSON-RPC 广播；USDT-SPL 用
+  `solana-go` 组包签名、经 `chain.rpc` 广播（寿命由 blockhash 而非 nonce 决定）。
+  四条都用 `touchgocore/ledger` 的同一套出款台账保证「同一单号不签第二笔」（各持一个实例，
+  键带链维度）；账户查询分两种口径：tron/telegram 读供应商账本，bsc/sol 直接读链上余额。
+  密钥分两个钩子、按段名各注一次：`util.CallPaySDKMsg+"<段名>"` 注供应商签名密钥
+  （只有 tron.usdt / telegram.ton 需要），`util.CallPayChainMsg+"<段名>"` 注热钱包私钥
+  （段名即 `tron.usdt` / `telegram.ton` / `bsc.usdt` / `sol.usdt`），且只认这一个键名——
+  同一段有两个名字都能塞密钥，等于让「密钥从哪来」变成猜的事。
+  其余原生币/代币通道（`tron` 的 TRX、`bsc` 的 BNB、`sol` 的 SOL）的资金实现已在 2026-10 的
+  资金面收口里删除：提现/查单/查账户三个门面的函数签名保留，一律返回各包的
+  `ErrPayoutNotWired` 哨兵（`errors.Is` 可判）；充值/收款接口则整条删除（全仓只留提现）。
+  各链的地址校验与 `pay` 的收款方规则**刻意不随提现实现删除**——删掉校验会让该币种的单
+  走「没规则即放行」，那是资金安全退化而不是简化。
   Zalo 已改走 **zcago 协议直连**（非官方客户端，不再有 `supplier_zalo`）：扫码配对在本仓
   （`ZaloStartPairing` + WebSocket 端点 `GET /zalo/qr/{session_id}`），也可用
   `ZaloLoginWithCookie` 导入浏览器 cookie；账号凭证存 `zalo.sessions.dsn` 指向的 Postgres
@@ -75,16 +78,19 @@ Go 游戏服务框架：WebSocket、gRPC、定时器、Lua、Telegram、Gin、Re
   两处都到位才是开；缺段或写 `off` 都不阻断整机。出款引用必须点到一个 `enable: "on"` 的商户账户
   （只有验证码链路可以没有账户）；whatsapp 通道在这两处之前还要先过 `whatsapp.enable` 总闸。
   键名与逐项说明见 [config/example.json](config/example.json)。
-  `secret_key` 建议留空，由下游按 SDK 段名注册 `util.CallPaySDKMsg+"<段名>"` 钩子在启动前注入，
+  `secret_key` 建议留空，由下游按段名注册 `util.CallPaySDKMsg+"<段名>"` 钩子在启动前注入，
   不写进版本库；金额一律整数最小单位、手续费走万分比整数，全链路禁浮点。
-- 资金动作的调用面：`pay.Channel` 三件事——提现 `Withdraw`、查单 `QueryOrder`、
-  查商户账户 `QueryAccount`（充值/收款接口已在资金面收口中整条删除）。上游按包名调用门面函数即可（`UsdtWithdraw` /
-  `UsdtAccount` 等），不必先知道配置里写的是哪家实现；`driver` 标记由 `pay` 装配层
-  （`Open`/`OpenService`/`OpenChain`，pay/assemble.go）读表后交给驱动注册表（`OpenDriver`）
-  解析成实现，`OpenChain` 则是「出款直接上链」那类通道的装配入口（合约与网络
-  由通道段给出，节点与凭证由 `chain` 子段给出，两个维度各只有一处真相）。接一家新供应商 =
-  在它自己的包里 `pay.Register("驱动名", 构造函数)` + 配置里改 `driver`，通道包与上游都不动。
-  其余通道的同名门面仍在（`TonWithdraw` / `TronAccount` 等），但它们一律
+- 资金动作的调用面：上游按种类分派 `pay.TransferTo(ctx, pay.KindTronUSDT, order)`，
+  或直接调各包门面（`tron.UsdtWithdraw` / `telegram.TonWithdraw` …）。分派表只有一条契约
+  （`pay.Transfer.Withdraw`）：查单与查账户的入参在不同通道上各不相同，硬塞进一个接口只会
+  催生一批「本通道不支持」的空实现。装配归各通道包，`Start` 成功即 `pay.Bind(kind, ch)`、
+  `Stop` 先 `pay.Unbind` 再关连接——「这条通道起来了」与「分派找得到它」必须是同一件事。
+  `pay` 包因此只剩契约：不 import `config`、不 import 任何通道包；传输实现（超时、指数退避、
+  `Retry-After`、响应体上限）已下沉到 `internal/httpx`。接一家新供应商 = 在它自己的包里读
+  自己那段配置、装配、`pay.Bind` + 配置里改 `driver`，`pay` 与上游都不动。
+  前置校验口径：`To.Kind` 为 `bank` 时通道直接给明确错误、不进地址解析；`From` 留空即用配置
+  的热钱包，链上通道只接受空或等于 `chain.wallet_address`；同一单号二次提交时 from/to 必须一致。
+  其余通道的同名门面仍在（`TronWithdraw` / `BscWithdraw` / `SolWithdraw` 等），但它们一律
   返回 `ErrPayoutNotWired`：接口保留是为了不破坏调用面，不代表这条链路可用。
 - NFT 资产通道：代码在 `nft` 包，四件事——查询持有 `NftHoldings`、单币详情 `NftToken`、
   铸造 `NftMint`、转账 `NftTransfer`，外加查单 `NftQuery` 与对账 `NftReconcile`。它与数字货币资金链路刻意不耦合：
@@ -99,7 +105,7 @@ Go 游戏服务框架：WebSocket、gRPC、定时器、Lua、Telegram、Gin、Re
 
 ```bash
 go build ./... && go vet ./...
-go test ./config ./corectx ./db ./rpc ./util ./websocket ./telegram ./whatsapp ./zalo ./facebook ./instagram ./nft .
+go test ./... -count=1
 ```
 
 `go build ./...` 会连带编译 `example/` 的 3 个包（同属主模块），那里的编译错误是真错误。

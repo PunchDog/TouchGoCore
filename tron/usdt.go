@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"touchgocore/config"
 	"touchgocore/pay"
@@ -17,13 +18,15 @@ import (
 // 登记点分两处就会在下游同时 blank-import 两个包时重名 panic（见 chainrule.go）。
 // touchgocore/usdt 这个 import 路径已被下游写死，所以它退成薄转发留在原地。
 
-// usdtRoute 是 USDT 侧门面实例：装配读 cfg.Usdt，回执走 CallUsdtMsg。
+// usdtRoute 是 USDT 侧门面实例：装配读 tron.usdt，回执走 CallUsdtMsg，
+// 装配成功即登记到 pay 的 tron.usdt 种类。
 var usdtRoute = route{
 	label:     "USDT",
 	channel:   "usdt",
 	callback:  util.CallUsdtMsg,
 	currency:  pay.CurrencyUSDT,
 	newClient: newUSDTClient,
+	kind:      pay.KindTronUSDT,
 }
 
 // UsdtStart 按配置装配 USDT 资金链路。
@@ -35,48 +38,146 @@ func UsdtStart(ctx context.Context) { usdtRoute.start(ctx) }
 // UsdtStop 摘掉供应商客户端。本包无常驻协程，清空指针即可；可重复调用。
 func UsdtStop(ctx context.Context) { usdtRoute.stop() }
 
-// newUSDTClient 按配置装配 USDT 链路。引用缺失、SDK 段没开、商户账户没点名，都返回 ok=false：
-// USDT 出款链路宁可不起，也不能带着「不知道该从哪个商户号出钱」的快照上线。
+// inlineUSDTKey 是密钥注入钩子键名。
 //
-// 合约地址作为通道特有字段交给 pay 装配层：它会并进报文并追加到签名域末尾，
-// 所以登记顺序由这里（唯一知道报文形态的一方）决定。
+// 键名直接取分派表里的种类（等价于配置段名 tron.usdt）：供应商字段已经在段内，
+// 再另找一个名字当键名只会多一层对不上的可能；与 Kind 同源则连“两边各写一遍、
+// 改一处忘一处”的路都不留。
+const inlineUSDTKey = string(pay.KindTronUSDT)
+
+// newUSDTClient 按 tron.usdt 的内联字段构造本包的 channelOptions 与 chainConfig。
+//
+// 报告口径与旧装配层逐条对齐：密钥必须在构造前注入、商户账户必须点得出来、
+// 驱动名必须是本包登记的那一个。任何一条不成立都返回 ok=false——USDT 出款链路宁可不起，
+// 也不能带着「不知道该从哪个商户号出钱」的快照上线。
 func newUSDTClient(cfg *config.Cfg) (*client, bool) {
-	if cfg == nil || cfg.Usdt == nil {
+	if cfg == nil || cfg.Tron == nil || cfg.Tron.Usdt == nil {
+		vars.Info("USDT 通道不启动: 缺 tron.usdt 段")
 		return nil, false
 	}
-	contract := strings.TrimSpace(cfg.Usdt.Contract)
-	// 合约地址在这里就要过一遍格式：它是供应商广播时的收端之一，写错等于把这一通道
-	// 的每一单都送进黑洞，而报错要等到第一笔出款之后。
-	if contract != "" && !IsValidTRONAddress(contract) {
-		vars.Info("USDT 通道不启动: 配置的 TRC20 合约地址 %s 不合法（长度、版本字节或末尾 4 字节校验和对不上）", contract)
+	u := cfg.Tron.Usdt
+	if !u.Enabled() {
+		vars.Info("USDT 通道不启动: tron.usdt.enable 不是 on")
 		return nil, false
 	}
-	network := strings.TrimSpace(cfg.Usdt.Network)
-	if isTokenStandard(network) {
-		// trc20 是「这张合约跑在 TRON 上」的标准名，不是网络名。混填进 network 的
-		// 后果是换测试网时无从表达，而且供应商侧多半按主网口径处理。
-		vars.Info("USDT 通道不启动: usdt.network=%s 是代币标准而不是公链网络，网络取值用 mainnet / shasta / nile，合约在 usdt.contract", network)
+	contract, network, ok := usdtAsset(u)
+	if !ok {
 		return nil, false
 	}
-	var extras []pay.ExtraField
-	if contract != "" {
-		extras = append(extras, pay.ExtraField{Name: "contract", Value: contract})
+	s := &u.ChannelSupplierConfig
+	driver := strings.TrimSpace(s.Driver)
+	if driver != DriverTronGrid {
+		// 驱动名必须自己把住：写错驱动名在这里放行，就等于“配置写着换实现、
+		// 实际还是这一套”静默通过。
+		vars.Info("USDT 通道不启动: tron.usdt.driver=%q 不是本包登记的链上驱动 %s", driver, DriverTronGrid)
+		return nil, false
 	}
-	// 通道名写死而不是读 usdtRoute.channel：route 的字面量引用了本函数，本函数再回头
-	// 取 route 的字段就成包级变量初始化循环（go build 报 initialization cycle）。
+	// 两把秘密分开注入（两个钩子前缀）：一次 Do 只交出一个 *string，
+	// 共用键名会把密钥和私钥写进同一格。
 	//
-	// 出款恒定走链上入口：本通道的提现是本地签名广播，商户账户查询仍留在
-	// pay_sdks 段的 HTTP 供应商实现里（链上通道内部委托）。
-	// 这里不给「退回供应商提现」留任何静默路径——被引用的段没配 chain 子段就装配失败、
-	// 通道不启动并记下原因，因为「配置看起来开了链上、实际把单发给别人」是这一层最贵的错。
-	res, err := pay.OpenChain(cfg, "usdt", cfg.Usdt.Provider,
-		pay.ChainParams{Contract: contract, Network: network}, extras)
+	// P6 起不再回落旧段名（supplier_a）：双读期为「部署脚本与二进制分开发版」留了一条活路，
+	// 而保留它意味着同一个段有两个名字都能把密钥塞进来——密钥从哪来变成了猜的事。
+	injectKey(util.CallPaySDKMsg, inlineUSDTKey, &s.SecretKey)
+	if u.Chain != nil {
+		injectKey(util.CallPayChainMsg, inlineUSDTKey, &u.Chain.PrivateKey)
+	}
+	acc, err := s.Account(strings.TrimSpace(s.AccountID))
+	if err != nil {
+		vars.Info("USDT 通道不启动: tron.usdt 的商户账户不可用: %v", err)
+		return nil, false
+	}
+	opt := channelOptions{
+		Name:       "usdt",
+		Driver:     driver,
+		MerchantID: acc.MerchantID,
+		BaseURL:    strings.TrimSpace(s.BaseURL),
+		Timeout:    secondsOf(s.TimeoutSec),
+		MaxRetry:   s.MaxRetries,
+		AppID:      strings.TrimSpace(s.AppID),
+		SecretKey:  strings.TrimSpace(s.SecretKey),
+		AuthHeader: strings.TrimSpace(s.AuthHeader),
+		Endpoint:   s.Endpoint,
+		Extras:     usdtExtras(contract),
+		Chain:      inlineChainOptions(u.Chain, contract, network),
+	}
+	ch, err := newOnchainChannel(opt)
 	if err != nil {
 		vars.Info("USDT 通道不启动: %v", err)
 		return nil, false
 	}
-	vars.Info("USDT 通道已就绪: sdk=%s 商户号=%s 合约=%s 网络=%s", res.Section, res.MerchantID, contract, network)
-	return &client{ch: res.Channel, network: network}, true
+	vars.Info("USDT 通道已就绪: driver=%s 商户号=%s 合约=%s 网络=%s", driver, acc.MerchantID, contract, network)
+	return &client{ch: ch, network: network}, true
+}
+
+// usdtAsset 校验并给出这条通道发的是哪张合约、哪张网。
+//
+// 合约地址在这里就要过一遍格式：它是广播时的收端，写错等于把这一通道的每一单
+// 都送进黑洞，而报错要等到第一笔出款之后。
+func usdtAsset(u *config.TronUsdtConfig) (contract, network string, ok bool) {
+	contract = strings.TrimSpace(u.Contract)
+	if contract != "" && !IsValidTRONAddress(contract) {
+		vars.Info("USDT 通道不启动: 配置的 TRC20 合约地址 %s 不合法（长度、版本字节或末尾 4 字节校验和对不上）", contract)
+		return "", "", false
+	}
+	network = strings.TrimSpace(u.Network)
+	if isTokenStandard(network) {
+		// trc20 是「这张合约跑在 TRON 上」的标准名，不是网络名。混填进 network 的
+		// 后果是换测试网时无从表达，而且供应商侧多半按主网口径处理。
+		vars.Info("USDT 通道不启动: tron.usdt.network=%s 是代币标准而不是公链网络，网络取值用 mainnet / shasta / nile，合约在 tron.usdt.contract", network)
+		return "", "", false
+	}
+	return contract, network, true
+}
+
+// usdtExtras 是 USDT 通道特有字段：它并进报文并追加到签名域末尾，
+// 所以登记顺序由这里（唯一知道报文形态的一方）决定。
+func usdtExtras(contract string) []extraField {
+	if contract == "" {
+		return nil
+	}
+	return []extraField{{Name: "contract", Value: contract}}
+}
+
+// inlineChainOptions 把 tron.usdt.chain 与通道段声明的合约/网络合成链上接入点。
+func inlineChainOptions(c *config.TronChainConfig, contract, network string) *chainConfig {
+	if c == nil {
+		return nil
+	}
+	return &chainConfig{
+		Node: strings.TrimSpace(c.Node),
+		// TLS 只有写成 "off" 才降级为明文：grpc-go 拒绝「没声明传输安全」的拨号，
+		// 这一项不能留给驱动去猜缺省。
+		PlaintextNode: strings.EqualFold(strings.TrimSpace(c.TLS), "off"),
+		HTTPBase:      strings.TrimSpace(c.HTTPBase),
+		APIKey:        strings.TrimSpace(c.APIKey),
+		WalletAddress: strings.TrimSpace(c.WalletAddress),
+		PrivateKey:    strings.TrimSpace(c.PrivateKey),
+		Contract:      contract,
+		Network:       network,
+		FeeLimitSun:   c.FeeLimit,
+		Timeout:       secondsOf(c.TimeoutSec),
+		MaxRetry:      c.MaxRetries,
+	}
+}
+
+// secondsOf 把配置里的秒数换算成超时；<=0 交给驱动用缺省值。
+// 不复用上层 timeout_sec 的语义差异：供应商 HTTP 与链上操作量级不同。
+func secondsOf(n int) time.Duration {
+	if n <= 0 {
+		return 0
+	}
+	return time.Duration(n) * time.Second
+}
+
+// injectKey 执行一次密钥注入：只认段名这一个键。
+//
+// 注入钩子是密钥进进程的唯一通道（配置里恒留空）。只认一个键名时，「密钥没注入」
+// 与「注入到了别的键」不再混为一谈：前者通道不启动，后者同样不启动，日志里都指向同一个键。
+func injectKey(prefix, key string, field *string) {
+	if field == nil || key == "" {
+		return
+	}
+	util.DefaultCallFunc.Do(prefix+key, field)
 }
 
 // isTokenStandard 判断 network 里填的是不是代币标准名。

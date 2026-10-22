@@ -27,7 +27,7 @@ var (
 // 门面在没启动时按 USDT 口径报错，地址判定与 tron 侧同一份实现结果一致。
 func TestCompatSurfaceIsLive(t *testing.T) {
 	usdt.UsdtStop(nil)
-	if _, err := usdt.UsdtWithdraw(nil, &pay.PayOrder{OrderNo: "O1", Amount: 1, Address: "T9yED5xMV5ARV98BexN97aLZ1UUq7eKSxm"}); err == nil {
+	if _, err := usdt.UsdtWithdraw(nil, &pay.PayOrder{OrderNo: "O1", Amount: 1, To: &pay.Party{Address: "T9yED5xMV5ARV98BexN97aLZ1UUq7eKSxm"}}); err == nil {
 		t.Fatal("未启动时提现应当被拒")
 	}
 	if !usdt.IsValidTRONAddress("TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t") {

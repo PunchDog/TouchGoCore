@@ -1,6 +1,8 @@
 package usdt
 
 import (
+	"crypto/md5"
+	"encoding/hex"
 	"errors"
 	"io"
 	"net/http"
@@ -12,6 +14,15 @@ import (
 	"touchgocore/pay"
 	"touchgocore/tron"
 )
+
+// expectedSignMD5 是供应商签名算法的测试侧实现：值直连拼接后追加密钥，取 32 位小写 MD5。
+//
+// 生产侧那份住在 tron/account.go 且不导出；这里独立重算一遍，恰好也是一道对照：
+// 两边算不一致时，签名域或算法就被改过了。
+func expectedSignMD5(secret string, values ...string) string {
+	sum := md5.Sum([]byte(strings.Join(values, "") + secret))
+	return hex.EncodeToString(sum[:])
+}
 
 // 本包没有装配代码了，这里钉的是「转发有没有转错」：
 // 门面必须落到 USDT 那条 route 上（币种缺省、contract 进签名域、回执键前缀），
@@ -98,7 +109,7 @@ func TestShimForwardsToUsdtRouteOnWire(t *testing.T) {
 		!strings.Contains(req.body, `"contract":"`+testContract+`"`) {
 		t.Fatalf("报文未按 USDT 通道装配: %s", req.body)
 	}
-	want := pay.SignMD5(testSecret,
+	want := expectedSignMD5(testSecret,
 		"app1", merchantID, pay.CurrencyUSDT,
 		testContract)
 	if req.sign != want {
@@ -134,8 +145,8 @@ func TestShimKeepsRoutesIndependent(t *testing.T) {
 func TestShimErrorWordingUnchanged(t *testing.T) {
 	UsdtStop(nil)
 	recorded()
-	_, err := UsdtWithdraw(nil, &pay.PayOrder{OrderNo: "O1", Amount: 1, Address: "a"})
-	if err == nil || err.Error() != "USDT 通道未启动（检查 usdt.provider 是否引用了已开启的 pay_sdks 段与商户账户）" {
+	_, err := UsdtWithdraw(nil, &pay.PayOrder{OrderNo: "O1", Amount: 1, To: &pay.Party{Address: "a"}})
+	if err == nil || err.Error() != "USDT 通道未启动（检查 tron.usdt 的 enable / chain / 商户账户是否齐备）" {
 		t.Fatalf("未启动文案变了: %v", err)
 	}
 	if _, err := UsdtQuery(nil, "  "); err == nil || err.Error() != "USDT Query 失败: 订单号（幂等键）为空" {

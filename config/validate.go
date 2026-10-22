@@ -147,8 +147,7 @@ func (c *Cfg) Validate() error {
 		return err
 	}
 
-	err = validatePayChannels(c)
-	if err != nil {
+	if err := validateInlineChannels(c); err != nil {
 		return err
 	}
 
@@ -206,118 +205,197 @@ func (c *Cfg) Validate() error {
 
 // validateZaloConfig 拦下旧 Zalo 供应商登录配置。
 //
-// Zalo 已从「pay_sdks 供应商网关」改为 zcago 协议直连，登录凭证改存 Postgres 的
+// Zalo 已从「HTTP 供应商网关」改为 zcago 协议直连，登录凭证改存 Postgres 的
 // zalo_sessions 表。旧配置里的 login/templates 如果不报错，会被 encoding/json 静默
 // 丢弃，运维却以为登录链路还配着——通道打开后扫码/发消息才发现不对。
 // 这里在启动期就把迁移动作说清楚，比留到运行期省事。
+//
+// login 的类型是 json.RawMessage（旧供应商 SDK 表已整张删除，这里只需要「这个键
+// 出现过没有」），所以判空看的是字节长度：写了 "login": {} 也算写了。
 func validateZaloConfig(c *Cfg) error {
 	if c == nil || c.Zalo == nil {
 		return nil
 	}
-	if c.Zalo.Login != nil || len(c.Zalo.Templates) > 0 {
+	if len(c.Zalo.Login) > 0 || len(c.Zalo.Templates) > 0 {
 		return fmt.Errorf("zalo.login/zalo.templates 已废弃：Zalo 已改为 zcago 协议直连，请改用 zalo.enable 与 zalo.sessions（会话凭证存 Postgres 的 zalo_sessions 表）")
 	}
 	return nil
 }
 
-// validatePayChannels 校验资金通道的 SDK 引用是否指得通。
+// validateInlineChannels 校验四个资金通道段（tron.usdt / telegram.ton / bsc.usdt / sol.usdt）。
 //
-// 这里拦的是「配置写错」而不是「供应商挂了」：sdk 名字打错一个字母、引用了
-// 不存在的商户账户、SDK 段没标驱动，都是部署期就能确定的错，让它启动只会在
-// 第一笔出款时暴露。至于驱动名有没有登记，由通道包在 Start 时按入口判定
-// （usdt 走 pay.OpenChain，facebook/instagram 走 pay.OpenService；pay.Open
-// 在本仓已无调用点），本包不引 pay，避免配置层依赖资金契约层。
-//
-// 判定范围只有「已经开启的部分」：enable 不为 on 的段整体跳过——把一条通道关掉
-// 不该同时要求它的每一项配置都仍然完整。唯一的例外是段名本身指不到：那是纯粹的
-// 拼写错，跟开没开无关，趁启动报出来比留到某天打开时炸掉省事。
-func validatePayChannels(c *Cfg) error {
-	refs := map[string]*PaySDKRef{}
-	// service 标记这条引用只做验证码下发/登录换会话，不动资金：
-	// 这样的 SDK 本就没有商户账户，按资金链路口径要求它等于逼配置里填个假商户号。
-	service := map[string]bool{
-		"facebook.login":  true,
-		"instagram.login": true,
+// 每个段自己一个函数：不同链的必填项与“什么算写错”本就不是一回事（TRON 只认
+// node/http_base，BSC/SOL 只认 rpc，TON 连合约都没有），合成一个大函数只会用一段
+// 模糊的“接入点为空”抹掉三条链各自的差别。
+func validateInlineChannels(c *Cfg) error {
+	if c.Tron != nil && c.Tron.Usdt != nil {
+		if err := validateTronUsdtChannel(c.Tron.Usdt); err != nil {
+			return fmt.Errorf("tron.usdt: %w", err)
+		}
 	}
-	if c.Usdt != nil {
-		refs["usdt.provider"] = c.Usdt.Provider
-	}
-	// telegram.ton 是 TON 资金链路对 pay_sdks 的引用（实现归 telegram 包，因为它与 Bot
-	// 同段配置）。这里只查引用指得通与账户点得名，网络取值与 jetton 那些 TON 自己的
-	// 知识由 telegram 在装配时判——本包不引 pay，也不该知道 TON 的事。
 	if c.Telegram != nil && c.Telegram.Ton != nil {
-		refs["telegram.ton.provider"] = c.Telegram.Ton.Provider
-	}
-	if c.Facebook != nil {
-		refs["facebook.login"] = c.Facebook.Login
-	}
-	if c.Instagram != nil {
-		refs["instagram.login"] = c.Instagram.Login
-	}
-	for _, name := range sortedMapKeys(refs) {
-		ref := refs[name]
-		if ref.Empty() {
-			continue // 没引用即不启用，属正常缺省
-		}
-		section := c.PaySDks[strings.TrimSpace(ref.SDK)]
-		if section == nil {
-			// 段名打错一个字母是纯配置错，无论开没开都要当场报出来：
-			// 它不会因为「这条通道还没启用」就变正确，只会在某天真打开时炸成启动失败。
-			return fmt.Errorf("%s: pay_sdks 里没有名为 %s 的 SDK 段", name, strings.TrimSpace(ref.SDK))
-		}
-		if !section.Enabled() {
-			continue // 段没开＝这条引用当前不参与判定，属合法的「写好待开」
-		}
-		_, _, err := ref.Resolve(c.PaySDks)
-		if service[name] {
-			_, _, err = ref.ResolveService(c.PaySDks)
-		}
-		if err != nil {
-			return fmt.Errorf("%s: %w", name, err)
+		if err := validateTonChannel(c.Telegram.Ton); err != nil {
+			return fmt.Errorf("telegram.ton: %w", err)
 		}
 	}
-	for _, name := range sortedMapKeys(c.PaySDks) {
-		sdk := c.PaySDks[name]
-		if !sdk.Enabled() {
-			// enable 不为 on 的段整体不参与判定：关掉一条通道不该同时要求
-			// 它的每一项配置都仍然完整。
-			continue
+	if c.Bsc != nil && c.Bsc.Usdt != nil {
+		if err := validateBscUsdtChannel(c.Bsc.Usdt); err != nil {
+			return fmt.Errorf("bsc.usdt: %w", err)
 		}
-		if strings.TrimSpace(sdk.Driver) == "" {
-			return fmt.Errorf("pay_sdks.%s 缺 sdk 驱动标记（应为 pay 包登记过的驱动名）", name)
-		}
-		if strings.TrimSpace(sdk.BaseURL) == "" {
-			return fmt.Errorf("pay_sdks.%s 已登记但 base_url 为空", name)
-		}
-		// 链上接入点段只查「广播这一侧必需的三项」：base_url 仍然必填，因为带 chain 段
-		// 不等于放弃供应商侧——商户账户查询照旧走 HTTP 供应商，只有出款与查单
-		// 换成直接动链。把 base_url 改成可选会让账户查询链路在没人注意时静默失效。
-		if chain := sdk.Chain; chain != nil {
-			// 接入点按驱动而异：TRON 的链上驱动只认 gRPC 的 node，TON 的只认 HTTP 的 http_base。
-			// 本包不知道哪个驱动叫什么，所以闸只能问「两样有没有一样」——
-			// 两样都空才是真的没接入点，具体该配哪一样由驱动在装配时点名报错。
-			if strings.TrimSpace(chain.Node) == "" && strings.TrimSpace(chain.HTTPBase) == "" {
-				return fmt.Errorf("pay_sdks.%s.chain 已配置但 node 与 http_base 都为空：链上通道不知道该把交易广播给谁", name)
-			}
-			if strings.TrimSpace(chain.WalletAddress) == "" {
-				return fmt.Errorf("pay_sdks.%s.chain 已配置但 wallet_address 为空：出款主体必须是配置里读得出的那个地址，不能只由私钥决定", name)
-			}
-			// private_key 恒为空是设计而非漏配（它由注入钩子在启动前填），这里不查；
-			// 真正「没注私钥」的表现要由链上驱动在装配时拒掉整条通道。
-		}
-		// accounts 是否为空不在这里查：只做验证码下发的 SDK 本就没有商户账户，
-		// 真正需要出账主体的引用在 Resolve 里会报「未配置 accounts」。
-		for _, alias := range sortedMapKeys(sdk.Accounts) {
-			acc := sdk.Accounts[alias]
-			if acc == nil || strings.TrimSpace(acc.MerchantID) == "" {
-				return fmt.Errorf("pay_sdks.%s.accounts.%s 缺 merchant_id", name, alias)
-			}
+	}
+	if c.Sol != nil && c.Sol.Usdt != nil {
+		if err := validateSolUsdtChannel(c.Sol.Usdt); err != nil {
+			return fmt.Errorf("sol.usdt: %w", err)
 		}
 	}
 	return nil
 }
 
-// validateNftChannels 校验 NFT 资产通道的 SDK 引用与登记段是否指得通（对 validatePayChannels 同构）。
+// validateTronUsdtChannel 校验 tron.usdt（只查已开启的段）。
+func validateTronUsdtChannel(u *TronUsdtConfig) error {
+	if u == nil || !u.Enabled() {
+		return nil
+	}
+	if err := validateSupplierFields(&u.ChannelSupplierConfig); err != nil {
+		return err
+	}
+	if n := strings.TrimSpace(u.Network); isTokenStandardName(n) {
+		return fmt.Errorf("network=%s 是代币标准而不是公链网络，网络取值用 mainnet / shasta / nile", n)
+	}
+	if strings.TrimSpace(u.Contract) == "" {
+		return fmt.Errorf("contract 为空：USDT 通道必须点明合约地址（原生 TRX 不走本通道）")
+	}
+	if u.Decimals != 0 && u.Decimals != 6 {
+		return fmt.Errorf("decimals=%d 与 USDT-TRC20 的 6 位不一致：小数位差一位就是 10^n 倍", u.Decimals)
+	}
+	if u.Chain == nil {
+		return fmt.Errorf("chain 为空：链上出款必须要接入点与热钱包")
+	}
+	if strings.TrimSpace(u.Chain.Node) == "" && strings.TrimSpace(u.Chain.HTTPBase) == "" {
+		return fmt.Errorf("chain.node 与 chain.http_base 都为空：链上通道不知道该把交易广播给谁")
+	}
+	if strings.TrimSpace(u.Chain.WalletAddress) == "" {
+		return fmt.Errorf("chain.wallet_address 为空：出款主体必须是配置里读得出的那个地址")
+	}
+	return nil
+}
+
+// validateTonChannel 校验 telegram.ton 的内联字段（只查已开启的段）。
+func validateTonChannel(t *TonChannelConfig) error {
+	if t == nil || !t.Enabled() {
+		return nil
+	}
+	if err := validateSupplierFields(&t.ChannelSupplierConfig); err != nil {
+		return err
+	}
+	if strings.TrimSpace(t.Jetton) != "" {
+		return fmt.Errorf("jetton=%s：本仓只发原生 TON，jetton 的小数位没有可验证的来源", strings.TrimSpace(t.Jetton))
+	}
+	if t.Chain == nil {
+		return fmt.Errorf("chain 为空：链上出款必须要接入点与热钱包")
+	}
+	if strings.TrimSpace(t.Chain.WalletAddress) == "" {
+		return fmt.Errorf("chain.wallet_address 为空：出款主体必须是配置里读得出的那个地址")
+	}
+	return nil
+}
+
+// validateBscUsdtChannel 校验 bsc.usdt（只查已开启的段）。
+func validateBscUsdtChannel(u *BscUsdtConfig) error {
+	if u == nil || !u.Enabled() {
+		return nil
+	}
+	if strings.TrimSpace(u.Driver) == "" {
+		return fmt.Errorf("缺 driver 驱动标记")
+	}
+	if strings.TrimSpace(u.Contract) == "" {
+		return fmt.Errorf("contract 为空：USDT 通道必须点明合约地址")
+	}
+	if u.Decimals != 0 && u.Decimals != 18 {
+		return fmt.Errorf("decimals=%d 与 USDT-BEP20 的 18 位不一致：小数位差一位就是 10^n 倍", u.Decimals)
+	}
+	if u.Chain == nil {
+		return fmt.Errorf("chain 为空：链上出款必须要 RPC 与热钱包")
+	}
+	if strings.TrimSpace(u.Chain.RPC) == "" {
+		return fmt.Errorf("chain.rpc 为空：链上通道不知道该把交易广播给谁")
+	}
+	if u.Chain.ChainID <= 0 {
+		return fmt.Errorf("chain.chain_id <= 0：EIP-155 签名必须带正确的链 ID（BSC 主网 56，Chapel 97）")
+	}
+	if strings.TrimSpace(u.Chain.WalletAddress) == "" {
+		return fmt.Errorf("chain.wallet_address 为空：出款主体必须是配置里读得出的那个地址")
+	}
+	return nil
+}
+
+// validateSolUsdtChannel 校验 sol.usdt（只查已开启的段）。
+func validateSolUsdtChannel(u *SolUsdtConfig) error {
+	if u == nil || !u.Enabled() {
+		return nil
+	}
+	if strings.TrimSpace(u.Driver) == "" {
+		return fmt.Errorf("缺 driver 驱动标记")
+	}
+	if strings.TrimSpace(u.Contract) == "" {
+		return fmt.Errorf("contract 为空：SPL USDT 通道必须点明 mint 地址")
+	}
+	if u.Decimals != 0 && u.Decimals != 6 {
+		return fmt.Errorf("decimals=%d 与 USDT-SPL 的 6 位不一致：小数位差一位就是 10^n 倍", u.Decimals)
+	}
+	if u.Chain == nil {
+		return fmt.Errorf("chain 为空：链上出款必须要 RPC 与热钱包")
+	}
+	if strings.TrimSpace(u.Chain.RPC) == "" {
+		return fmt.Errorf("chain.rpc 为空：链上通道不知道该把交易交给谁")
+	}
+	if strings.TrimSpace(u.Chain.WalletAddress) == "" {
+		return fmt.Errorf("chain.wallet_address 为空：出款主体必须是配置里读得出的那个地址")
+	}
+	return nil
+}
+
+// validateSupplierFields 内联供应商字段的共同必填项（driver / base_url / 商户账户）。
+//
+// 最后一步走与装配期同一个 `Account(AccountID)`：两边判定必须同源，否则「校验放行、
+// 装配拒绝」的配置会带着一条干净的启动日志停在半路上。这一道闸对资金通道是必要的：
+// 没有可用的商户账户就是不知道该从哪个号出钱。
+func validateSupplierFields(s *ChannelSupplierConfig) error {
+	if strings.TrimSpace(s.Driver) == "" {
+		return fmt.Errorf("缺 driver 驱动标记（应为该链的链上驱动名）")
+	}
+	if strings.TrimSpace(s.BaseURL) == "" {
+		return fmt.Errorf("base_url 为空：商户账户查询仍走供应商 HTTP，缺基址这一链路会静默失效")
+	}
+	for _, alias := range sortedMapKeys(s.Accounts) {
+		acc := s.Accounts[alias]
+		if acc == nil || strings.TrimSpace(acc.MerchantID) == "" {
+			return fmt.Errorf("accounts.%s 缺 merchant_id", alias)
+		}
+	}
+	// 多账户不点名就没人知道这一单从哪个商户号出钱：静默挑一个是不可接受的歧义。
+	if len(s.Accounts) > 1 && strings.TrimSpace(s.AccountID) == "" {
+		return fmt.Errorf("accounts 里有 %d 个商户账户，必须用 account 点名", len(s.Accounts))
+	}
+	if _, err := s.Account(strings.TrimSpace(s.AccountID)); err != nil {
+		return err
+	}
+	return nil
+}
+
+// isTokenStandardName 判断 network 里填的是不是代币标准名。
+//
+// 只列已被误用过的写法，不做「不在已知网络表里就拒」：供应商自己的网络叫法
+// 本包没资格断言，硬拦会把能用的配置拦死。
+func isTokenStandardName(network string) bool {
+	switch strings.ToLower(strings.TrimSpace(network)) {
+	case "trc20", "trc-20", "trc10", "erc20", "bep20", "bep-20", "spl":
+		return true
+	}
+	return false
+}
+
+// validateNftChannels 校验 NFT 资产通道的 SDK 引用与登记段是否指得通（对资金侧同构）。
 //
 // 与资金侧的差别只在驱动名空间与 endpoints 键集（§6.3）：这里钉死 endpoints 的合法键是
 // holdings/token/mint/transfer/query 五个，把「把资金端点抄进 nft 段」这种复用惯性钉在

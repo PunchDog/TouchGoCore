@@ -1,11 +1,12 @@
-// Package pay 是资金通道（提现）的共用契约、出站客户端与配置装配层。
+// Package pay 是资金通道（提现）的纯契约层：订单与回执的形状、收款方与账户的
+// 校验口径，以及一张「哪条通道已经起来了」的分派表。
 //
-// 分层口径：本包只认「把一单资金请求送出去、把供应商回执读回来」这件事，
-// 不碰 SQL、不碰业务积分、不定义配置结构体（结构体与 Cfg 同住 config 包）。
+// 分层口径：本包只认「一单资金请求长什么样、该交给谁」，不碰 SQL、不碰业务积分、
+// 不定义配置结构体（它们与 Cfg 同住 config 包），也没有任何传输与装配实现——
+// HTTP 客户端已下沉到 internal/httpx，供应商与链上的装配归各通道包。
 // 落库、额度校验、状态机跃迁都由下游业务工程负责。
-// 「不引 config」曾是包级边界（装配逻辑住在独立的 paysdk 包）；合并后降为文件级——
-// 仅 assemble.go 引 config，channel/client/provider/types/chainoptions/chainrule
-// 继续保持零 config 引用。
+// 「不引 config、不引任何通道包」是包级边界：这条边界一破，契约层就会重新
+// 长出「按配置构造实现」的能力，分派与装配的先后顺序也就无从保证。
 package pay
 
 import (
@@ -84,20 +85,15 @@ func IsFinal(status string) bool {
 
 // 端点逻辑名。供应商路径写在配置的 endpoints 里，键就是这几个名字：
 // 代码里固定逻辑名、配置里填实际路径，换供应商只改配置不改代码。
+//
+// 登录/好友列表类端点（send_code / login / friend_list）已随 facebook、instagram
+// 两条 login 链路整包删除；出款全部上链后 withdraw 端点也不再由契约层定义。
+// 留在契约层的只剩两条通道今天仍在用的：query 与 account。
 const (
-	EndpointSendCode = "send_code"
-	EndpointLogin    = "login"
-	EndpointQuery    = "query"
-	EndpointWithdraw = "withdraw"
+	EndpointQuery = "query"
 	// EndpointAccount 是查商户账户的逻辑名。它排在下单之前是有原因的：
 	// 提现前先看一眼可用余额与账户状态，比把单发出去再等供应商拒要省一次资金动作。
 	EndpointAccount = "account"
-	// EndpointFriendList 是按账号查好友列表的逻辑名（zalo/facebook/instagram 三条登录链路的消息侧；
-	// Instagram 没有好友概念，同名沿用，读作按账号返回的关联账号列表）。
-	// whatsapp 不再用它：消息侧已改由 whatsmeow 直连 WhatsApp 协议，没有 HTTP 好友接口。
-	// 它不在资金契约里流转——报文形态由通道包给出，pay 只登记逻辑名，
-	// 与 send_code/login 同一个口径：代码里固定名字、配置里填实际路径。
-	EndpointFriendList = "friend_list"
 )
 
 // 商户账户状态。
@@ -133,6 +129,9 @@ func IsActive(status string) bool { return status == AcctActive }
 
 // PayOrder 是一次提现请求的全部输入。
 //
+// 收付两端结构体化（见 party.go）：Address / Network / Memo 三个平铺字段已整条删除，
+// 改由 To（必填）与 From（可空＝用通道配置的默认出款方）承载，不保留回落。
+//
 // Amount 是币种最小单位的整数值，全链路禁用浮点：一旦中途出现 float64，大额出款
 // 就会在元/分转换上丢精度。最小单位是几位**由那一单实际走的合约决定**，不由包名决定：
 // USDT-TRC20 是 6 位，原生 TON 是 9 位 nanoton，而 jetton 的小数位数写在该代币自己的
@@ -145,28 +144,27 @@ type PayOrder struct {
 	OrderNo  string `json:"order_no"`
 	Amount   int64  `json:"amount"`
 	Currency string `json:"currency,omitempty"`
-	Network  string `json:"network,omitempty"`
-	// Address 是收款地址（提现）：出款的收端，必填（见 CheckOrder）。
-	Address string `json:"address,omitempty"`
-	Phone   string `json:"phone,omitempty"`
-	// Memo 是附在转账上的备注（TON 侧的 comment / message）。
+	// To 是收款方，必填（见 Check）。Kind 留空时按 Bank / Address / Account 推断，
+	// 推断规则与各性质的必填项见 party.go。
+	To *Party `json:"to"`
+	// From 是出款方。留空表示「用本通道配置的默认出款方」——链上通道是热钱包地址，
+	// 供应商账本通道是付款商户号。填了就必须与配置一致：链上指定非热钱包地址即拒单，
+	// 因为本仓没有第二个钱包的私钥，那样的单只会在签名那一步失败。
+	From  *Party `json:"from,omitempty"`
+	Phone string `json:"phone,omitempty"`
+	// Decimals 是 Amount 这个整数对应的小数位数，0 表示「不声明」。
 	//
-	// 它不是可选的装饰：往交易所归集账户打钱时，收款方是所有人共用的一个热钱包，
-	// 认款全靠这一串——漏填的后果是链上确认成功、对方账上却认不出是谁的，
-	// 只能走人工找回。反过来说，TRC20 根本没有这个概念，给 USDT 单填 Memo
-	// 会被 usdt 登记的规则直接拒掉（见 ChainRule.CheckMemo）。
-	// 明文可以进报文，但不得进日志与 RawNote。
-	Memo string `json:"memo,omitempty"`
+	// 它不是从 Currency 推出来的：同一个 USDT 在 TRON 是 6 位、在 BSC 是 18 位、
+	// 在 SOL 是 6 位，币种名相同而最小单位不同。填了就必须与通道配置的 decimals
+	// 逐字相等，否则拒单——位数取错的后果是 10^n 倍的不可逆多付。
+	Decimals int `json:"decimals,omitempty"`
 	// Code 是登录验证码明文。它不得进入日志、错误文案或 PayResult.RawNote。
 	Code string `json:"code,omitempty"`
 	// Extra 放通道特有字段（如 remark、供应商自定义的回调键名）。值同样不得含凭证。
-	// 这些键值会并进报文同一层，并按 key 字典序追加到签名域末尾——报文与签名域
-	// 由同一次遍历产出，不会出现「带出去了却没签」的情况。
 	//
-	// 键名不得与那些已签名量同字（app_id / merchant_id / order_no / amount /
-	// currency / network / address / phone / memo / notify_url），命中即拒单：
-	// 能覆盖已签名字段的逃生口，等于给签名域开了个后门。
-	// 无特有字段时不出现在报文里，避免供应商把 null 当成显式清空指令。
+	// 契约层不消费它：拼报文与算签名是各通道自己的事（见 tron/account.go 的
+	// mergeExtraFields）。这里只负责把「这一单带哪些额外键值」作为订单的一部分
+	// 透传下去，无特有字段时不出现在报文里，避免供应商把 null 当成显式清空指令。
 	Extra map[string]string `json:"extra,omitempty"`
 }
 

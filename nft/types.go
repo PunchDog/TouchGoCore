@@ -110,10 +110,10 @@ type NftOrder struct {
 	// MetadataURI 是资产元数据链接（铸造侧的资产描述唯一书面输入）。
 	// 明文可以进报文，但不得进日志与 RawNote（可能含未公开资产信息）。
 	MetadataURI string `json:"metadata_uri,omitempty"`
-	// Memo 是链上备注。不得进日志与 RawNote（口径对 pay.PayOrder Memo）。
+	// Memo 是链上备注。不得进日志与 RawNote（口径对 pay.Party.Memo）。
 	Memo string `json:"memo,omitempty"`
 	// Extra 放通道特有字段。值不得含凭证。键值并进报文同一层，并按 key 字典序
-	// 追加到签名域末尾（mergeExtras 同一次遍历产出，对 pay/provider.go:265-365 同构）。
+	// 追加到签名域末尾（报文与签名域由 mergeExtras 同一次遍历产出，不得两处各算一遍）。
 	// 键名不得与已签名量同字（app_id/merchant_id/order_no/chain/network/contract/
 	// standard/token_id/from_address/to_address/quantity/metadata_uri/memo/notify_url），
 	// 命中即拒单——能覆盖已签名字段的逃生口等于给签名域开后门。
@@ -136,11 +136,11 @@ type NftResult struct {
 	// GasFee 是本次实际扣的手续费，int64 链上原生币最小单位。
 	GasFee int64 `json:"gas_fee,omitempty"`
 	// GasFeeToken 是 GasFee 的计价代币标识（"ETH"/"BNB"/"TRX"/"SOL"…）。
-	// 它是字符串值不是 import——与 gas 侧「手续费币种不同于动作资产」的事实一致，
-	// 口径对 pay.PayResult.FeeCurrency。
+	// 它是字符串值不是 import——与 gas 侧「手续费币种不同于动作资产」的事实一致：
+	// 同一笔代币转账，扣的是那条链的原生币。
 	GasFeeToken string `json:"gas_fee_token,omitempty"`
-	// Confirmations 是链上确认数。nil=供应商没回，0=已进块未确认，必须区分
-	// （对 pay.PayResult.Confirmations 同构）。
+	// Confirmations 是链上确认数。nil=供应商没回，0=已进块未确认，必须区分：
+	// 把 nil 读成 0 会把「供应商没给证据」当成「刚进块」。
 	Confirmations *int64 `json:"confirmations,omitempty"`
 	// RawNote 是可公开给日志的响应摘要（超 64 rune 由 clip 截断）。
 	// 凭证、助记词、私钥、会话 token、MetadataURI 一律不得出现（脱敏面比 pay 多

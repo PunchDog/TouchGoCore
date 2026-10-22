@@ -11,7 +11,7 @@ import (
 	"touchgocore/pay"
 )
 
-// 本文件是 BSC（EVM 形态）侧的收款端校验，登记给 pay 的 ChainRule 用。
+// 本文件是 BSC（EVM 形态）侧的收款端校验，供包内 checkOrderAddress 直接调用。
 //
 // 之所以写在这个包而不是 pay：地址怎么编码、校验和怎么算，是 EVM 那条链的知识，
 // 不是资金契约的知识。EVM 地址自带大小写校验和（EIP-55），白送的错误拦截——
@@ -29,7 +29,11 @@ func evmChecksumHash(lower string) []byte {
 }
 
 // toEIP55 把 40 位十六进制地址（不含前缀、可带大小写）转成 EIP-55 校验和形态：
-// 摘要对应 nibble >= 8 的字母大写，其余小写。
+// 摘要第 i 个 nibble >= 8 时把第 i 位字母大写，其余小写。
+//
+// 取 nibble 必须按奇偶分开：偶数下标用字节的高半字节，奇数下标用低半字节。
+// 直接拿整个字节（0–255）去比 >= 8 会让几乎每个奇数位都变成大写——算出来的串
+// 与真正的校验和形态不符，结果是所有正常的混合大小写地址都被判成非法。
 func toEIP55(hex40 string) string {
 	lower := strings.ToLower(hex40)
 	sum := evmChecksumHash(lower)
@@ -39,9 +43,9 @@ func toEIP55(hex40 string) string {
 		if c < 'a' || c > 'f' {
 			continue
 		}
-		nibble := sum[i/2]
-		if i%2 == 0 {
-			nibble >>= 4
+		nibble := sum[i/2] >> 4
+		if i%2 == 1 {
+			nibble = sum[i/2] & 0x0f
 		}
 		if nibble >= 8 {
 			out[i] = c - 32
@@ -89,7 +93,10 @@ type bnbRule struct{}
 
 // CheckAddress 空地址放行：提现侧的非空检查在 pay.CheckOrder 里已经做过，这里只管格式。
 func (bnbRule) CheckAddress(o *pay.PayOrder) error {
-	addr := strings.TrimSpace(o.Address)
+	if o == nil || o.To == nil {
+		return nil
+	}
+	addr := strings.TrimSpace(o.To.Address)
 	if addr == "" {
 		return nil
 	}
@@ -104,15 +111,16 @@ func (bnbRule) CheckAddress(o *pay.PayOrder) error {
 // 填了就拒而不是忽略：上游给不许带备注的链填上备注，说明它把 TON 的规则套错了对象，
 // 这种错配在 TON 侧表现为「钱进了别人账户」，在这里静默吞掉等于放它去别处发作。
 func (bnbRule) CheckMemo(o *pay.PayOrder) error {
-	if strings.TrimSpace(o.Memo) != "" {
+	if o == nil || o.To == nil {
+		return nil
+	}
+	if strings.TrimSpace(o.To.Memo) != "" {
 		return errors.New("BSC 转账不支持备注（memo）：交易所归集账户的认款机制是 TON 那条链的事")
 	}
 	return nil
 }
 
-func init() {
-	// 登记失败只可能是本包把币种名写错了，让它炸在启动期。
-	if err := pay.RegisterChainRule(pay.CurrencyBNB, bnbRule{}); err != nil {
-		panic(err)
-	}
-}
+// 注册表已随 pay 瘦身消失：原来这里的 init() 会把 bnbRule 登记进 pay 的 ChainRule 表，
+// 而那张表「未登记即放行」——币种名拼错一个字母，地址校验就静默失效。
+// 规则留在包里，BSC 链上实现（onchain.go）在自己的出款路径上直接调 bnbRule
+// （包内 checkOrderAddress），不再需要一张全局表来「启用」它。

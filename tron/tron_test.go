@@ -61,17 +61,14 @@ func TestIsValidTRONAddress(t *testing.T) {
 	}
 }
 
-// TestTRXRuleRegistered 本包必须把 TRX 规则登记进 pay 的注册表：
-// 地址规则归属链包，usdt 侧只剩薄包装，这里的接线断了两边会同时失去校验。
-func TestTRXRuleRegistered(t *testing.T) {
-	rule, ok := pay.ChainRuleFor(pay.CurrencyTRX)
-	if !ok {
-		t.Fatalf("TRX 规则未登记，已登记的是 %v", pay.CurrenciesWithRules())
-	}
-	if err := rule.CheckAddress(&pay.PayOrder{Address: tronRangeAcct}); err != nil {
+// TestTRXRuleLivesInThisPackage 地址规则归属于链包，且不再经 pay 的注册表：
+// checkOrderAddress 的调用点就是接线，漏接是编译错误而不是「未登记即放行」。
+func TestTRXRuleLivesInThisPackage(t *testing.T) {
+	rule := TRONRule{}
+	if err := rule.CheckAddress(&pay.PayOrder{To: &pay.Party{Address: tronRangeAcct}}); err != nil {
 		t.Errorf("合法地址被拒: %v", err)
 	}
-	if err := rule.CheckAddress(&pay.PayOrder{Address: tronBogusChecksum}); err == nil {
+	if err := rule.CheckAddress(&pay.PayOrder{To: &pay.Party{Address: tronBogusChecksum}}); err == nil {
 		t.Error("校验和不过的地址未被拦下")
 	}
 }
@@ -79,20 +76,17 @@ func TestTRXRuleRegistered(t *testing.T) {
 // TestTRXRuleRejectsMemo TRON 原生转账没有 memo 概念：填了就拒而不是忽略，
 // 上游把 TON 的认款机制套到这条链上是错配，静默吞掉等于放它去别处发作。
 func TestTRXRuleRejectsMemo(t *testing.T) {
-	rule, ok := pay.ChainRuleFor(pay.CurrencyTRX)
-	if !ok {
-		t.Fatal("TRX 规则未登记")
-	}
+	rule := TRONRule{}
 	if err := rule.CheckMemo(&pay.PayOrder{}); err != nil {
 		t.Errorf("不带备注被拒: %v", err)
 	}
 	for _, memo := range []string{"123", " 12 ", "复转到交易所"} {
-		if err := rule.CheckMemo(&pay.PayOrder{Memo: memo}); err == nil {
+		if err := rule.CheckMemo(&pay.PayOrder{To: &pay.Party{Memo: memo}}); err == nil {
 			t.Errorf("备注 %q 未被拦下", memo)
 		}
 	}
 	// 纯空白按「没有备注」处理：真正不发出去的那一步在 NewOrderRequest 的 trim。
-	if err := rule.CheckMemo(&pay.PayOrder{Memo: "   "}); err != nil {
+	if err := rule.CheckMemo(&pay.PayOrder{To: &pay.Party{Memo: "   "}}); err != nil {
 		t.Errorf("纯空白备注被当成有值: %v", err)
 	}
 }
@@ -106,7 +100,7 @@ func TestPayoutInterfaceStaysWired(t *testing.T) {
 	var _ func(context.Context, string) (*pay.PayResult, error) = TronQuery
 	var _ func(context.Context, *pay.AccountQuery) (*pay.AccountInfo, error) = TronAccount
 
-	o := &pay.PayOrder{OrderNo: "O1", Amount: 10, Address: tronAllZeroAcct}
+	o := &pay.PayOrder{OrderNo: "O1", Amount: 10, To: &pay.Party{Address: tronAllZeroAcct}}
 	cases := []struct {
 		name string
 		run  func() error
@@ -144,7 +138,7 @@ func TestPayoutNotWiredDoesNotBroadcast(t *testing.T) {
 		})
 		defer util.DefaultCallFunc.Unregister(util.CallTronMsg+k, id)
 	}
-	o := &pay.PayOrder{OrderNo: "O9", Amount: 1, Address: tronAllZeroAcct}
+	o := &pay.PayOrder{OrderNo: "O9", Amount: 1, To: &pay.Party{Address: tronAllZeroAcct}}
 	_, _ = TronWithdraw(nil, o)
 	_, _ = TronQuery(nil, "O9")
 	mu.Lock()

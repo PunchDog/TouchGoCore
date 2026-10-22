@@ -221,7 +221,7 @@ func (c *tonChannel) lookupLedgerByChain(ctx context.Context, o *pay.PayOrder, n
 		}
 		seen++
 		for _, out := range tx.Outs {
-			if out.AmountNanoton != o.Amount || !sameTONAddress(out.To, o.Address) {
+			if out.AmountNanoton != o.Amount || !sameTONAddress(out.To, o.To.Address) {
 				continue
 			}
 			if strings.TrimSpace(tx.InMsgHash) == "" {
@@ -232,7 +232,7 @@ func (c *tonChannel) lookupLedgerByChain(ctx context.Context, o *pay.PayOrder, n
 			entry := &ledger.Entry{
 				OrderNo: strings.TrimSpace(o.OrderNo),
 				TxID:    strings.ToLower(strings.TrimSpace(tx.InMsgHash)),
-				To:      strings.TrimSpace(o.Address),
+				To:      strings.TrimSpace(o.To.Address),
 				Amount:  o.Amount,
 				// Contract 留空：原生 TON 没有合约地址这一维，本通道也已在装配期拒掉了 jetton。
 				FeeLimit:    c.feeReserve(),

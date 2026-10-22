@@ -14,7 +14,7 @@ import (
 // 用假网关把广播打成超时，断言这里没有签出第二笔。
 //
 // 未导出的刻意性：通道外部（含下游 whatapp）不该拿到「直接广播一笔交易」的能力，
-// 出款只有 pay.Channel.Withdraw 一个入口。
+// 出款只有 chainChannel.Withdraw 一个入口。
 type chainGateway interface {
 	// buildTransfer 让节点组装一笔未签名的 TRC20 转账（from 是热钱包地址）。
 	// 返回的交易自带 refBlock/expiration/fee_limit，这三项都不该由本地凭空填。

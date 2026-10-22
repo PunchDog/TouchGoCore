@@ -160,8 +160,8 @@ func newTestTONChannel(t *testing.T, gw tonGateway, j ledger.Journal) (*tonChann
 	}
 	c := &tonChannel{
 		gw:  gw,
-		opt: pay.ProviderOptions{Name: "ton", Driver: DriverTonAPI},
-		chain: &pay.ChainOptions{
+		opt: channelOptions{Name: "ton", Driver: DriverTonAPI},
+		chain: &chainConfig{
 			HTTPBase:      "https://tonapi.invalid",
 			APIKey:        tonFakeAPIKey,
 			WalletAddress: tonDeriveAddrV5R1,
@@ -184,10 +184,13 @@ func newTONOrder(no string) *pay.PayOrder {
 	return &pay.PayOrder{
 		OrderNo:  no,
 		Currency: pay.CurrencyTON,
-		Network:  pay.NetworkMainnet,
 		Amount:   1_000_000_000,
-		Address:  tonAcctBounceable,
-		Memo:     tonFakeMemo,
+		To: &pay.Party{
+			Kind:    pay.PartyWallet,
+			Network: pay.NetworkMainnet,
+			Address: tonAcctBounceable,
+			Memo:    tonFakeMemo,
+		},
 	}
 }
 
@@ -230,13 +233,13 @@ func TestPreparedEntryIsRebroadcastNotResigned(t *testing.T) {
 	gw := &fakeTONGateway{}
 	c, sign := newTestTONChannel(t, gw, nil)
 	o := newTONOrder("WD-2")
-	prepared, err := c.sign(mustTONAccount(t, o.Address), o, true, 5, tonTestClock)
+	prepared, err := c.sign(mustTONAccount(t, o.To.Address), o, true, 5, tonTestClock)
 	if err != nil {
 		t.Fatal(err)
 	}
 	// 手工摆出一条 prepared 条目：等价于「签好并落账，但还没走到广播」。
 	if err := c.led.Put(&ledger.Entry{
-		OrderNo: o.OrderNo, TxID: prepared.MsgHash, RawTx: prepared.Boc, To: o.Address,
+		OrderNo: o.OrderNo, TxID: prepared.MsgHash, RawTx: prepared.Boc, To: o.To.Address,
 		Amount: o.Amount, FeeLimit: c.feeReserve(), State: ledger.StatePrepared,
 		ExpiresAtMS: prepared.ValidUntil.UnixMilli(), UpdatedAtMS: ledger.NowMS(tonTestClock),
 	}); err != nil {
@@ -295,7 +298,7 @@ func TestSettledOrderRefusesSecondSpend(t *testing.T) {
 	o := newTONOrder("WD-4")
 	gw := &fakeTONGateway{}
 	c, sign := newTestTONChannel(t, gw, nil)
-	prepared, err := c.sign(mustTONAccount(t, o.Address), o, true, 4, tonTestClock)
+	prepared, err := c.sign(mustTONAccount(t, o.To.Address), o, true, 4, tonTestClock)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -303,10 +306,10 @@ func TestSettledOrderRefusesSecondSpend(t *testing.T) {
 		Hash: strings.Repeat("cd", 32), UnixTime: tonTestClock.Unix(),
 		InMsgHash: prepared.MsgHash, InMsgKind: tonExtInKind, Success: true, VerdictKnown: true,
 		TotalFeesNanoton: 5_000_000,
-		Outs:             []tonOut{{To: o.Address, AmountNanoton: o.Amount}},
+		Outs:             []tonOut{{To: o.To.Address, AmountNanoton: o.Amount}},
 	}}
 	if err := c.led.Put(&ledger.Entry{OrderNo: o.OrderNo, TxID: prepared.MsgHash, RawTx: prepared.Boc,
-		To: o.Address, Amount: o.Amount, State: ledger.StateBroadcast,
+		To: o.To.Address, Amount: o.Amount, State: ledger.StateBroadcast,
 		ExpiresAtMS: prepared.ValidUntil.UnixMilli(), UpdatedAtMS: ledger.NowMS(tonTestClock)}); err != nil {
 		t.Fatal(err)
 	}
@@ -344,7 +347,7 @@ func TestUnreadableVerdictStaysUnknown(t *testing.T) {
 		t.Fatal(err)
 	}
 	entry := &ledger.Entry{OrderNo: o.OrderNo, TxID: prepared.MsgHash, RawTx: prepared.Boc,
-		To: o.Address, Amount: o.Amount, State: ledger.StateBroadcast,
+		To: o.To.Address, Amount: o.Amount, State: ledger.StateBroadcast,
 		ExpiresAtMS: tonTestClock.Add(time.Minute).UnixMilli(), UpdatedAtMS: ledger.NowMS(tonTestClock)}
 	if err := c.led.Put(entry); err != nil {
 		t.Fatal(err)
@@ -385,7 +388,7 @@ func TestExpiryRulingNeedsCoverage(t *testing.T) {
 		c, _ := newTestTONChannel(t, gw, nil)
 		o := newTONOrder("WD-" + cs.name)
 		entry := &ledger.Entry{OrderNo: o.OrderNo, TxID: strings.Repeat("11", 32),
-			RawTx: []byte("boc"), To: o.Address, Amount: o.Amount, State: ledger.StateBroadcast,
+			RawTx: []byte("boc"), To: o.To.Address, Amount: o.Amount, State: ledger.StateBroadcast,
 			ExpiresAtMS: tonTestClock.Add(-time.Minute).UnixMilli(), UpdatedAtMS: ledger.NowMS(tonTestClock)}
 		if err := c.led.Put(entry); err != nil {
 			t.Fatal(err)
@@ -412,7 +415,7 @@ func TestBouncedTransferIsFailedButSettled(t *testing.T) {
 	gw.txs = []tonTx{{Hash: "tx-b", UnixTime: tonTestClock.Unix(), InMsgHash: prepared.MsgHash,
 		InMsgKind: tonExtInKind, Success: true, VerdictKnown: true, Bounced: true, TotalFeesNanoton: 7}}
 	if err := c.led.Put(&ledger.Entry{OrderNo: o.OrderNo, TxID: prepared.MsgHash, RawTx: prepared.Boc,
-		To: o.Address, Amount: o.Amount, State: ledger.StateBroadcast,
+		To: o.To.Address, Amount: o.Amount, State: ledger.StateBroadcast,
 		ExpiresAtMS: prepared.ValidUntil.UnixMilli(), UpdatedAtMS: ledger.NowMS(tonTestClock)}); err != nil {
 		t.Fatal(err)
 	}
@@ -550,7 +553,7 @@ func TestBounceFlagComesFromOurParser(t *testing.T) {
 		counters.bounces = counters.bounces[:0]
 		counters.mu.Unlock()
 		o := newTONOrder("WD-bounce-" + cs.desc)
-		o.Address = cs.addr
+		o.To.Address = cs.addr
 		if _, err := c.Withdraw(context.Background(), o); err != nil {
 			t.Fatalf("%s：提现失败 %v", cs.desc, err)
 		}
@@ -713,12 +716,12 @@ func TestWithdrawRejectsWrongAssetAndNetwork(t *testing.T) {
 		want string
 	}{
 		{"发 USDT 的单", func(o *pay.PayOrder) { o.Currency = pay.CurrencyUSDT }, "只发原生 TON"},
-		{"跨到测试网", func(o *pay.PayOrder) { o.Network = pay.NetworkTestnet; o.Address = tonAcctTestnet }, "换网就是换币"},
-		{"测试网地址配主网单", func(o *pay.PayOrder) { o.Address = tonAcctTestnet }, "测试网地址"},
+		{"跨到测试网", func(o *pay.PayOrder) { o.To.Network = pay.NetworkTestnet; o.To.Address = tonAcctTestnet }, "换网就是换币"},
+		{"测试网地址配主网单", func(o *pay.PayOrder) { o.To.Address = tonAcctTestnet }, "测试网地址"},
 		{"金额为零", func(o *pay.PayOrder) { o.Amount = 0 }, "金额"},
-		{"地址为空", func(o *pay.PayOrder) { o.Address = "" }, "地址"},
-		{"备注越界", func(o *pay.PayOrder) { o.Memo = strings.Repeat("x", maxMemoRunes+1) }, "备注"},
-		{"备注带换行", func(o *pay.PayOrder) { o.Memo = "a\nb" }, "控制字符"},
+		{"地址为空", func(o *pay.PayOrder) { o.To.Address = "" }, "地址"},
+		{"备注越界", func(o *pay.PayOrder) { o.To.Memo = strings.Repeat("x", maxMemoRunes+1) }, "备注"},
+		{"备注带换行", func(o *pay.PayOrder) { o.To.Memo = "a\nb" }, "控制字符"},
 	} {
 		gw := &fakeTONGateway{}
 		c, sign := newTestTONChannel(t, gw, nil)

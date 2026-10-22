@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"touchgocore/config"
 	"touchgocore/corectx"
@@ -18,9 +19,9 @@ import (
 // 收付入口在 Telegram 这一侧，配置也是 telegram.ton 一段；与 Bot 长连接的区别只在
 // 凭证与失败路径，不在归属（口径与被删前的 telegram/ton.go 一致）。
 //
-// 出款不再经过供应商：本包按 telegram.ton 引用的 pay_sdks 段装配一条链上通道
-// （telegram/ton_onchain.go），提现单在本地签名后直接广播，结论从链上读回。
-// 商户账户查询仍然留在被引用段的 HTTP 供应商实现里（没配就没有这一项）。
+// 出款不经供应商：本包按 telegram.ton 内联字段装配一条链上通道（telegram/ton_onchain.go），
+// 提现单在本地签名后直接广播，结论从链上读回。
+// 商户账户查询仍走同段的 HTTP 供应商（没配就没有这一项）。
 
 var (
 	// tonActive 为 nil 表示资金链路未启动，对应操作会就地拒绝而不是发出请求。
@@ -33,8 +34,20 @@ var (
 //
 // 两者必须同时生效：只换通道不换网络，会出现用新网关发旧链的单子。
 type tonClient struct {
-	ch      pay.Channel
+	ch      tonChainChannel
 	network string
+}
+
+// tonChainChannel 是本包对「一条链上资金通道」的全部要求。
+//
+// 它曾经是 pay.Channel——住在契约层、被三家通道共用。那张接口的 Driver/MerchantID
+// 两个方法只服务于驱动注册表：表没了，它们就只剩「接口上多两个没人调的方法」。
+// 现在接口收在这里，宽度正好是本包门面真正要调的四件事。
+type tonChainChannel interface {
+	Withdraw(ctx context.Context, o *pay.PayOrder) (*pay.PayResult, error)
+	QueryOrder(ctx context.Context, orderNo string) (*pay.PayResult, error)
+	QueryAccount(ctx context.Context, q *pay.AccountQuery) (*pay.AccountInfo, error)
+	Close() error
 }
 
 // tonNetworkLabel 是配置里允许的 TON 网络名。
@@ -63,24 +76,40 @@ func TonStart(ctx context.Context) {
 	setRunCtx(ctx)
 	if c, ok := newTonClient(corectx.CfgFrom(ctx)); ok {
 		tonActive.Store(c)
+		bindTransfer(c)
 		return
 	}
 	vars.Info("不启动TON")
 }
 
+// bindTransfer 把这条已装配的通道登记进 pay 的分派表（telegram.ton）。
+//
+// 先 Unbind 再 Bind：Start 可被调用两次（管线重启路径、测试里的交叉用例），
+// 而 tonActive 已被新快照换掉。分派表若还指着上一条，出款会走一条已经 Close 的通道。
+func bindTransfer(c *tonClient) {
+	if c == nil {
+		return
+	}
+	pay.Unbind(pay.KindTON)
+	if err := pay.Bind(pay.KindTON, c.ch); err != nil {
+		vars.Info("TON 通道登记分派失败: %v", err)
+	}
+}
+
 // TonStop 摘掉 TON 资金通道并释放接入点。可重复调用。
 func TonStop(ctx context.Context) {
+	// 先摘分派再关连接：反过来的话，正在分派的那一单会拿到一条正在关的通道，
+	// 报出来的是「连接已关闭」而不是「通道未启动」。
+	pay.Unbind(pay.KindTON)
 	c := tonActive.Swap(nil)
 	if c == nil {
 		return
 	}
 	// 链上通道背后是带超时的 HTTP 客户端与连接池：只清空指针的话，
 	// 第二次 start 就多一条不会关的连接，停启几次就把进程挂在泄漏的 socket 上。
-	// 走接口断言而不是按类型开关——供应商侧的 pay.Provider 没有要释放的东西。
-	if cl, ok := c.ch.(interface{ Close() error }); ok {
-		if err := cl.Close(); err != nil {
-			vars.Info("TON 通道停服时释放连接失败: %v", err)
-		}
+	// Close 已经收进 tonChainChannel，所以这里直接调。
+	if err := c.ch.Close(); err != nil {
+		vars.Info("TON 通道停服时释放连接失败: %v", err)
 	}
 }
 
@@ -89,38 +118,131 @@ func currentTon() (*tonClient, error) {
 	if c := tonActive.Load(); c != nil {
 		return c, nil
 	}
-	return nil, errors.New("TON 通道未启动（检查 telegram.ton.provider 是否引用了已开启的 pay_sdks 段与商户账户）")
+	return nil, errors.New("TON 通道未启动（检查 telegram.ton.enable 是否为 on、chain 与商户账户是否齐备）")
 }
 
-// newTonClient 按配置装配 TON 链路。引用缺失、SDK 段没开、商户账户没点名，都返回 ok=false：
-// 出款链路宁可不起，也不能带着「不知道该从哪个商户号出钱」的快照上线。
+// inlineTONKey 是密钥注入钩子键名；键名直接取分派表里的种类（等价于配置段名
+// telegram.ton）——供应商字段已经在段内，再另找一个名字当键名只会多一层对不上的可能。
+const inlineTONKey = string(pay.KindTON)
+
+// newTonClient 按 telegram.ton 的内联字段构造本包的 channelOptions 与 chainConfig。
+//
+// 报告口径与旧装配层逐条对齐：密钥必须在构造前注入、驱动名必须是本包登记的那一个、
+// 商户账户必须点得出来。任何一条不成立都返回 ok=false——出款链路宁可不起，
+// 也不能带着「不知道该从哪个商户号出钱」的快照上线。
 func newTonClient(cfg *config.Cfg) (*tonClient, bool) {
 	if cfg == nil || cfg.Telegram == nil || cfg.Telegram.Ton == nil {
+		vars.Info("TON 通道不启动: 缺 telegram.ton 段")
 		return nil, false
 	}
 	tg := cfg.Telegram.Ton
-	network := strings.TrimSpace(tg.Network)
-	if !isKnownTONNetwork(network) {
-		vars.Info("TON 通道不启动: telegram.ton.network=%s 不是 TON 的网络取值（mainnet / testnet，留空按主网）", network)
+	network, ok := tonNetworkOf(tg)
+	if !ok {
 		return nil, false
 	}
-	jetton := strings.TrimSpace(tg.Jetton)
-	if jetton != "" {
-		// 硬拒而不是忽略：配了 jetton 的人想发的是代币，静默按原生币发出去就是把钱
-		// 发成了另一种资产。本版只发原生 TON 的原因见 pay.ChainOptions 的 Decimals 注释
-		// ——jetton 的小数位没有可验证的单一来源时，「按猜的位数转帐」是 10^n 倍的多付。
-		vars.Info("TON 通道不启动: telegram.ton.jetton=%s 指向 jetton 合约，本仓的 TON 通道只发原生 TON", jetton)
+	if !tg.Enabled() {
+		vars.Info("TON 通道不启动: telegram.ton.enable 不是 on")
 		return nil, false
 	}
-	// 通道名写死而不是读包级变量：本函数与 pay 装配层之间只有一个字面量的契约，
-	// 换成变量引用就可能与错误文案里的键名对不上。
-	res, err := pay.OpenChain(cfg, "ton", tg.Provider, pay.ChainParams{Network: network}, nil)
+	s := &tg.ChannelSupplierConfig
+	driver := strings.TrimSpace(s.Driver)
+	if driver != DriverTonAPI {
+		// 驱动名必须自己把住：写错驱动名在这里放行，就等于“配置写着换实现、
+		// 实际还是这一套”静默通过。
+		vars.Info("TON 通道不启动: telegram.ton.driver=%q 不是本包登记的链上驱动 %s", driver, DriverTonAPI)
+		return nil, false
+	}
+	// 两把秘密分开注入（两个钩子前缀）：一次 Do 只交出一个 *string。
+	// P6 起不再回落旧段名（supplier_ton）：同一个段有两个名字都能把密钥塞进来，
+	// 密钥从哪来就成了猜的事。
+	injectKey(util.CallPaySDKMsg, inlineTONKey, &s.SecretKey)
+	if tg.Chain != nil {
+		injectKey(util.CallPayChainMsg, inlineTONKey, &tg.Chain.PrivateKey)
+	}
+	acc, err := s.Account(strings.TrimSpace(s.AccountID))
+	if err != nil {
+		vars.Info("TON 通道不启动: telegram.ton 的商户账户不可用: %v", err)
+		return nil, false
+	}
+	opt := channelOptions{
+		Name:       "ton",
+		Driver:     driver,
+		MerchantID: acc.MerchantID,
+		BaseURL:    strings.TrimSpace(s.BaseURL),
+		Timeout:    secondsOf(s.TimeoutSec),
+		MaxRetry:   s.MaxRetries,
+		AppID:      strings.TrimSpace(s.AppID),
+		SecretKey:  strings.TrimSpace(s.SecretKey),
+		AuthHeader: strings.TrimSpace(s.AuthHeader),
+		Endpoint:   s.Endpoint,
+		// 本通道只发原生 TON，没有通道特有字段（jetton 已在 tonNetworkOf 里硬拒）。
+		Chain: tonChainOptions(tg.Chain, network),
+	}
+	ch, err := newTonOnchainChannel(opt)
 	if err != nil {
 		vars.Info("TON 通道不启动: %v", err)
 		return nil, false
 	}
-	vars.Info("TON 通道已就绪: sdk=%s 商户号=%s 网络=%s", res.Section, res.MerchantID, network)
-	return &tonClient{ch: res.Channel, network: network}, true
+	vars.Info("TON 通道已就绪: driver=%s 商户号=%s 网络=%s", driver, acc.MerchantID, network)
+	return &tonClient{ch: ch, network: network}, true
+}
+
+// tonNetworkOf 校验并给出这条通道发到哪张 TON 网络。
+func tonNetworkOf(tg *config.TonChannelConfig) (string, bool) {
+	network := strings.TrimSpace(tg.Network)
+	if !isKnownTONNetwork(network) {
+		vars.Info("TON 通道不启动: telegram.ton.network=%s 不是 TON 的网络取值（mainnet / testnet，留空按主网）", network)
+		return "", false
+	}
+	if jetton := strings.TrimSpace(tg.Jetton); jetton != "" {
+		// 硬拒而不是忽略：配了 jetton 的人想发的是代币，静默按原生币发出去就是把钱
+		// 发成了另一种资产。jetton 的小数位与账户模型都不同于原生币，而本包的 TON 出款
+		// 是链上直发原生币，没有 jetton 的组装与查单实现，所以宁可不开通道。
+		vars.Info("TON 通道不启动: telegram.ton.jetton=%s 指向 jetton 合约，本仓的 TON 通道只发原生 TON", jetton)
+		return "", false
+	}
+	return network, true
+}
+
+// tonChainOptions 把 telegram.ton.chain 与通道段声明的网络合成链上接入点。
+//
+// 合成口径逐字段对着 config.TonChainConfig：字段名两处能对上，读配置的人
+// 不必在配置与装配之间做一次翻译。
+func tonChainOptions(c *config.TonChainConfig, network string) *chainConfig {
+	if c == nil {
+		return nil
+	}
+	return &chainConfig{
+		HTTPBase:      strings.TrimSpace(c.HTTPBase),
+		APIKey:        strings.TrimSpace(c.APIKey),
+		WalletAddress: strings.TrimSpace(c.WalletAddress),
+		WalletVersion: strings.TrimSpace(c.WalletVersion),
+		SubWalletID:   c.SubWalletID,
+		PrivateKey:    strings.TrimSpace(c.PrivateKey),
+		Network:       network,
+		FeeLimitSun:   c.FeeLimit,
+		Timeout:       secondsOf(c.TimeoutSec),
+		MaxRetry:      c.MaxRetries,
+	}
+}
+
+// secondsOf 把配置里的秒数换算成超时；<=0 交给驱动用缺省值。
+func secondsOf(n int) time.Duration {
+	if n <= 0 {
+		return 0
+	}
+	return time.Duration(n) * time.Second
+}
+
+// injectKey 执行一次密钥注入：只认段名这一个键。
+//
+// 注入钩子是密钥进进程的唯一通道（配置里恒留空）。只认一个键名时，「密钥没注入」
+// 与「注入到了别的键」不再混为一谈：前者通道不启动，后者同样不启动，日志里都指向同一个键。
+func injectKey(prefix, key string, field *string) {
+	if field == nil || key == "" {
+		return
+	}
+	util.DefaultCallFunc.Do(prefix+key, field)
 }
 
 // tonPublish 把归一后的资金回执广播给下游，键为 util.CallTonMsg+kind。
@@ -155,10 +277,17 @@ func tonOrderCall(ctx context.Context, kind string, call func(context.Context) (
 // tonOrder 把链路配置补进订单里未指定的字段。
 //
 // 本通道只管 TON：调用方漏填币种时补成 TON，而不是发出一张「币种为空」的单。
-// 复制而不是就地改：调用方交来的 PayOrder 可能还要用于重试与落库，
+// 网络补在 To.Network 上而不是订单顶层：网络是收款端那一侧的属性。
+// 复制（含 To 深拷贝）而不是就地改：调用方交来的 PayOrder 可能还要用于重试与落库，
 // 门面把它改了就等于替上游决定了「这一单实际发出去的是什么」。
 func tonOrder(c *tonClient, o *pay.PayOrder) *pay.PayOrder {
-	network := strings.TrimSpace(o.Network)
+	if o == nil {
+		return nil
+	}
+	network := ""
+	if o.To != nil {
+		network = strings.TrimSpace(o.To.Network)
+	}
 	if network == "" {
 		network = c.network
 	}
@@ -166,11 +295,22 @@ func tonOrder(c *tonClient, o *pay.PayOrder) *pay.PayOrder {
 	if currency == "" {
 		currency = pay.CurrencyTON
 	}
-	if network == o.Network && currency == o.Currency {
+	if o.To == nil {
+		if currency == o.Currency {
+			return o
+		}
+		cp := *o
+		cp.Currency = currency
+		return &cp
+	}
+	if network == o.To.Network && currency == o.Currency {
 		return o
 	}
 	cp := *o
-	cp.Network, cp.Currency = network, currency
+	cp.Currency = currency
+	to := *o.To
+	to.Network = network
+	cp.To = &to
 	return &cp
 }
 
@@ -178,7 +318,7 @@ func tonOrder(c *tonClient, o *pay.PayOrder) *pay.PayOrder {
 //
 // order.OrderNo 是幂等键，但保证它的不再是供应商，而是本包的出款台账：
 // 同一单号永不签第二笔，广播结果说不清时按外部消息 hash 查证并回 UNKNOWN（带 TxHash 供对账）。
-// 收款地址与备注走 pay 的 ChainRule 唯一那一份校验，网络与币种不符本通道的单一律拒。
+// 收款地址与备注走本包的 checkOrderAddress 唯一那一份校验，网络与币种不符本通道的单一律拒。
 func TonWithdraw(ctx context.Context, order *pay.PayOrder) (*pay.PayResult, error) {
 	c, err := currentTon()
 	if err != nil {

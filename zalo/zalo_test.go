@@ -28,7 +28,7 @@ func TestPayoutInterfaceStaysWired(t *testing.T) {
 	var _ func(context.Context, string) (*pay.PayResult, error) = ZaloQuery
 	var _ func(context.Context, *pay.AccountQuery) (*pay.AccountInfo, error) = ZaloAccount
 
-	o := &pay.PayOrder{OrderNo: "O1", Amount: 10, Currency: pay.CurrencyUSDT, Address: "TTargetAddr"}
+	o := &pay.PayOrder{OrderNo: "O1", Amount: 10, Currency: pay.CurrencyUSDT, To: &pay.Party{Address: "TTargetAddr"}}
 	cases := []struct {
 		name string
 		run  func() error

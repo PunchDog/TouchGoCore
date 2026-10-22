@@ -12,17 +12,17 @@
 // 「把提现单交给 HTTP 供应商」的路径只是多一个能被配置点亮的出资口。三个 TRX 门面
 // 保留（签名是包外可见调用面），一律返回 ErrPayoutNotWired。
 //
-// 地址算法与两条链规则的登记点都在本包（address.go、chainrule.go）：「地址怎么编码」
-// 是这条链的知识，两种币共用同一个地址形态，两份实现迟早漂移。usdt 包只剩薄转发，
-// 目的是保住 touchgocore/usdt 这个已被下游按 import 路径写死的接入点。
-// TRX 的规则登记不随提现实现删除：删了它，带 TRX 币种的单会走「未登记即放行」，
-// 那是资金安全退化而不是简化（口径见 pay/chainrule.go）。
+// 地址算法与链规则都收在本包（address.go 实现规则、chainrule.go 是唯一调用点）：
+// 「地址怎么编码」是这条链的知识，两种币共用同一个地址形态，两份实现迟早漂移。
+// usdt 包只剩薄转发，目的是保住 touchgocore/usdt 这个已被下游按 import 路径写死的接入点。
+// TRX 的规则不随提现实现删除：链规则表已随 pay 瘦身消失，「未登记即放行」那条失效
+// 通道也不复存在——规则现在是包内函数调用，漏接就是编译错误。
 //
 // 本包不碰 SQL、不碰积分与额度；下游按 util.CallTronMsg+"Xxx" / util.CallUsdtMsg+"Xxx"
 // 注册回调接手结果。与 whatsapp 通道相比这里没有登录链路：收付靠签名凭证即可。
 //
-// 供应商接入不在这个包里配置：usdt.provider 只是对 pay_sdks 一段的引用，凭证、端点表
-// 与商户账户都集中在 pay_sdks，装配动作在 pay（assemble.go）。
+// 供应商接入配置就在本包读的那一段里：tron.usdt 同时写着凭证/端点表/商户账户与链上
+// 接入点，装配动作也在本包（usdt.go 的 newUSDTClient），不再经 pay 的中转。
 package tron
 
 import (

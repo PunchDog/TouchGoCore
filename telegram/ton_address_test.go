@@ -113,16 +113,13 @@ func TestParseTONAddressForms(t *testing.T) {
 
 // TestTonRuleMatchesTestnetBit 地址自带的测试网位必须与订单的 network 对齐。
 func TestTonRuleMatchesTestnetBit(t *testing.T) {
-	rule, ok := pay.ChainRuleFor(pay.CurrencyTON)
-	if !ok {
-		t.Fatal("TON 的收款端规则没登记，本包可能没被链进测试二进制")
-	}
+	rule := tonRule{}
 	okCases := []pay.PayOrder{
-		{Address: tonAcctBounceable, Network: pay.NetworkMainnet},
-		{Address: tonAcctNonBounce, Network: pay.NetworkMainnet},
-		{Address: tonAcctTestnet, Network: pay.NetworkTestnet},
-		{Address: tonAcctRaw, Network: pay.NetworkMainnet},
-		{Address: ""},
+		{To: &pay.Party{Kind: pay.PartyWallet, Address: tonAcctBounceable, Network: pay.NetworkMainnet}},
+		{To: &pay.Party{Kind: pay.PartyWallet, Address: tonAcctNonBounce, Network: pay.NetworkMainnet}},
+		{To: &pay.Party{Kind: pay.PartyWallet, Address: tonAcctTestnet, Network: pay.NetworkTestnet}},
+		{To: &pay.Party{Kind: pay.PartyWallet, Address: tonAcctRaw, Network: pay.NetworkMainnet}},
+		{To: &pay.Party{Kind: pay.PartyWallet, Address: ""}},
 	}
 	for i := range okCases {
 		if err := rule.CheckAddress(&okCases[i]); err != nil {
@@ -130,9 +127,9 @@ func TestTonRuleMatchesTestnetBit(t *testing.T) {
 		}
 	}
 	badCases := []pay.PayOrder{
-		{Address: tonAcctTestnet, Network: pay.NetworkMainnet},
-		{Address: tonAcctBounceable, Network: pay.NetworkTestnet},
-		{Address: tonAcctBounceable, Network: pay.NetworkShasta},
+		{To: &pay.Party{Kind: pay.PartyWallet, Address: tonAcctTestnet, Network: pay.NetworkMainnet}},
+		{To: &pay.Party{Kind: pay.PartyWallet, Address: tonAcctBounceable, Network: pay.NetworkTestnet}},
+		{To: &pay.Party{Kind: pay.PartyWallet, Address: tonAcctBounceable, Network: pay.NetworkShasta}},
 	}
 	for i := range badCases {
 		if err := rule.CheckAddress(&badCases[i]); err == nil {
@@ -140,23 +137,23 @@ func TestTonRuleMatchesTestnetBit(t *testing.T) {
 		}
 	}
 	// network 留空按主网口径处理：测试网地址此时同样被拒，方向是宁可拒单不可错投。
-	if err := rule.CheckAddress(&pay.PayOrder{Address: tonAcctTestnet}); err == nil {
+	if err := rule.CheckAddress(&pay.PayOrder{To: &pay.Party{Address: tonAcctTestnet}}); err == nil {
 		t.Error("network 留空时测试网地址应当被拒")
 	}
 }
 
 func TestTonRuleMemo(t *testing.T) {
-	rule, _ := pay.ChainRuleFor(pay.CurrencyTON)
+	rule := tonRule{}
 	if err := rule.CheckMemo(&pay.PayOrder{}); err != nil {
 		t.Errorf("不带备注被拒: %v", err)
 	}
 	for _, memo := range []string{"8890", "复转到交易所 A 账户", strings.Repeat("x", maxMemoRunes)} {
-		if err := rule.CheckMemo(&pay.PayOrder{Memo: memo}); err != nil {
+		if err := rule.CheckMemo(&pay.PayOrder{To: &pay.Party{Memo: memo}}); err != nil {
 			t.Errorf("合法备注被拒 %q: %v", memo, err)
 		}
 	}
 	for _, memo := range []string{strings.Repeat("x", maxMemoRunes+1), "第一行\n第二行", "tab\t分隔"} {
-		if err := rule.CheckMemo(&pay.PayOrder{Memo: memo}); err == nil {
+		if err := rule.CheckMemo(&pay.PayOrder{To: &pay.Party{Memo: memo}}); err == nil {
 			t.Errorf("越界备注未被拦下（长度 %d）", len(memo))
 		}
 	}

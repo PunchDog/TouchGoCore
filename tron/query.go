@@ -167,7 +167,7 @@ func (c *onchainChannel) lookupLedgerByChain(ctx context.Context, o *pay.PayOrde
 		return nil, err
 	}
 	for _, h := range hits {
-		if !strings.EqualFold(strings.TrimSpace(h.To), strings.TrimSpace(o.Address)) || h.Amount != o.Amount {
+		if !strings.EqualFold(strings.TrimSpace(h.To), strings.TrimSpace(o.To.Address)) || h.Amount != o.Amount {
 			continue
 		}
 		if strings.TrimSpace(h.TxID) == "" {
@@ -175,7 +175,7 @@ func (c *onchainChannel) lookupLedgerByChain(ctx context.Context, o *pay.PayOrde
 		}
 		entry := &ledger.Entry{
 			OrderNo: strings.TrimSpace(o.OrderNo), TxID: strings.TrimSpace(h.TxID),
-			To: strings.TrimSpace(o.Address), Contract: c.chain.Contract, Amount: o.Amount,
+			To: strings.TrimSpace(o.To.Address), Contract: c.chain.Contract, Amount: o.Amount,
 			FeeLimit: c.feeLimit(), State: ledger.StateBroadcast, UpdatedAtMS: ledger.NowMS(now),
 			// ExpiresAtMS 留 0：反查回来的已经是在链上的笔，不再有「过期」可言。
 		}

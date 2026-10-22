@@ -11,8 +11,8 @@ import (
 	"touchgocore/pay"
 )
 
-// 本文件是 TRON 侧的收款端校验，登记给 pay 的 ChainRule 用（登记点在 chainrule.go，
-// TRX 与 USDT 两条币种共用这里的 TRONRule）。
+// 本文件是 TRON 侧的收款端校验。规则由 chainrule.go 的 checkOrderAddress 在包内
+// 直接调用（不再经 pay 的链规则注册表），TRX 与 USDT 两条币种共用这里的 TRONRule。
 //
 // 之所以写在这个包而不是 pay：地址怎么编码是 TRON 的知识，不是资金契约的知识。
 // 之所以值得写：TRON 地址自带 4 字节校验和，白送的错误拦截——一次手抖、一次
@@ -74,12 +74,15 @@ func IsValidTRONAddress(s string) bool {
 }
 
 // TRONRule 是 TRON 收款端规则的可复用实现：地址校验与 memo 拒绝都是链侧知识，
-// 同一条链上的两个币种（原生 TRX 与 usdt 包转发的 TRC20）在 chainrule.go 一起登记它。
+// 同一条链上的两个币种（原生 TRX 与 usdt 包转发的 TRC20）共用这一份。
 type TRONRule struct{}
 
 // CheckAddress 空地址放行：提现侧的非空检查在 pay.CheckOrder 里已经做过，这里只管格式。
 func (TRONRule) CheckAddress(o *pay.PayOrder) error {
-	addr := strings.TrimSpace(o.Address)
+	if o == nil || o.To == nil {
+		return nil
+	}
+	addr := strings.TrimSpace(o.To.Address)
 	if addr == "" {
 		return nil
 	}
@@ -94,7 +97,10 @@ func (TRONRule) CheckAddress(o *pay.PayOrder) error {
 // 填了就拒而不是忽略：上游给不许带备注的链填上备注，说明它把 TON 的规则套错了对象，
 // 这种错配在 TON 侧表现为「钱进了别人账户」，在这里静默吞掉等于放它去别处发作。
 func (TRONRule) CheckMemo(o *pay.PayOrder) error {
-	if strings.TrimSpace(o.Memo) != "" {
+	if o == nil || o.To == nil {
+		return nil
+	}
+	if strings.TrimSpace(o.To.Memo) != "" {
 		return errors.New("TRON 转账不支持备注（memo）：交易所归集账户的认款机制是 TON 那条链的事")
 	}
 	return nil

@@ -71,7 +71,7 @@ type tonAddress struct {
 	// 出款侧据此决定缺省方向，不能把 false 当成「对方要不可退回」。
 	HasBounceFlag bool
 	// HasTestnetFlag 标记这一形态是否真的带了测试网位——
-	// 没有位的形态就没法与 PayOrder.Network 比对，不能当成「比过且一致」。
+	// 没有位的形态就没法与 PayOrder.To.Network 比对，不能当成「比过且一致」。
 	HasTestnetFlag bool
 }
 
@@ -150,7 +150,10 @@ type tonRule struct{}
 // network 留空按主网口径处理：带测试网标记的地址此时会被拒。方向是选过的——
 // 拒单一准错，把测试网地址送进主网报文则是不可逆的资损。
 func (tonRule) CheckAddress(o *pay.PayOrder) error {
-	addr := strings.TrimSpace(o.Address)
+	if o == nil || o.To == nil {
+		return nil
+	}
+	addr := strings.TrimSpace(o.To.Address)
 	if addr == "" {
 		return nil
 	}
@@ -158,11 +161,11 @@ func (tonRule) CheckAddress(o *pay.PayOrder) error {
 	if !ok {
 		return fmt.Errorf("TON 收款地址 %s 不合法：既不是 48 位用户友好地址（或 CRC16 校验不过），也不是 0: 或 -1: 开头的原始形态", addr)
 	}
-	if a.HasTestnetFlag && a.Testnet != pay.IsTestnet(o.Network) {
+	if a.HasTestnetFlag && a.Testnet != pay.IsTestnet(o.To.Network) {
 		if a.Testnet {
-			return fmt.Errorf("TON 收款地址是测试网地址，但本单 network=%s", o.Network)
+			return fmt.Errorf("TON 收款地址是测试网地址，但本单 network=%s", o.To.Network)
 		}
-		return fmt.Errorf("TON 收款地址是主网地址，但本单 network=%s", o.Network)
+		return fmt.Errorf("TON 收款地址是主网地址，但本单 network=%s", o.To.Network)
 	}
 	return nil
 }
@@ -173,7 +176,10 @@ func (tonRule) CheckAddress(o *pay.PayOrder) error {
 // 本包既看不到对方是谁，也没有一份能据此判断的地址表，硬要就会把所有
 // 普通钱包提现一并拒掉。必填规则由下游在发起前按自己的账户名录把门。
 func (tonRule) CheckMemo(o *pay.PayOrder) error {
-	memo := strings.TrimSpace(o.Memo)
+	if o == nil || o.To == nil {
+		return nil
+	}
+	memo := strings.TrimSpace(o.To.Memo)
 	if memo == "" {
 		return nil
 	}
@@ -190,9 +196,18 @@ func (tonRule) CheckMemo(o *pay.PayOrder) error {
 	return nil
 }
 
-func init() {
-	// 登记失败只可能是本包把币种名写错了，让它炸在启动期。
-	if err := pay.RegisterChainRule(pay.CurrencyTON, tonRule{}); err != nil {
-		panic(err)
+// checkOrderAddress 用 TON 的地址与备注规则校验这一单的收款方。
+//
+// 它曾经注册到 pay 的 ChainRule 表里（键是币种名，未登记即放行）。那张表随 pay
+// 瘦身一起消失，而「未登记即放行」本来就是一道默认放行的闸：币种名拼错一个字母，
+// 地址校验就静默失效。现在门收在包内：TON 的出款路径只有一条，规则也就只有一个调用点。
+//
+// 调用点在 tonChannel.Withdraw 里，已先经 pay.CheckTarget{Wallet:true}——
+// 到这里收款方一定是钱包性质，不再重复判 kind。
+func checkOrderAddress(o *pay.PayOrder) error {
+	rule := tonRule{}
+	if err := rule.CheckAddress(o); err != nil {
+		return err
 	}
+	return rule.CheckMemo(o)
 }

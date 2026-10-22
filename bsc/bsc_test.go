@@ -9,16 +9,17 @@ import (
 	"touchgocore/pay"
 )
 
-// EVM 地址夹具：两个 EIP-55 校验和形态由 Keccak-256 现算（不是抄来的），
-// 单一大小写的历史形态不带校验和语义，格式过关即放行。
+// EVM 地址夹具：两个 EIP-55 校验和形态按官方规则现算（并与 go-ethereum 的
+// Address.Hex() 逐字对拍过），单一大小写的历史形态不带校验和语义，格式过关即放行。
 const (
-	evmChecksumMixed  = "0xfB6916095CA1d6AB8C1E3E5E1C0E5A2C2B4D0F3A"
-	evmChecksumMixed2 = "0xDEaDbEeFdEADbEeFdEaDbEEFdEaDbeEFdEaDbeeF"
+	evmChecksumMixed  = "0xfb6916095cA1d6Ab8C1E3E5E1C0e5a2C2b4d0F3A"
+	evmChecksumMixed2 = "0xDeaDbeefdEAdbeefdEadbEEFdeadbeEFdEaDbeeF"
 	evmAllLower       = "0xfb6916095ca1d6ab8c1e3e5e1c0e5a2c2b4d0f3a"
 	evmAllUpper       = "0xFB6916095CA1D6AB8C1E3E5E1C0E5A2C2B4D0F3A"
 	evmAllDigits      = "0x1234567890123456789012345678901234567890"
-	// evmBogusChecksum 长度、前缀、字符集全对，只有大小写与校验和不符。
-	evmBogusChecksum = "0xfB6916095CA1d6AB8C1E3E5E1C0E5A2C2B4D0F3B"
+	// evmBogusChecksum 与 evmChecksumMixed 只差一位字母的大小写，
+	// 长度、前缀、字符集全对，只有校验和不符。
+	evmBogusChecksum = "0xfb6916095ca1d6Ab8C1E3E5E1C0e5a2C2b4d0F3A"
 )
 
 // TestIsValidEVMAddress EIP-55 的正负用例：混合大小写必须等于校验和形态；
@@ -78,51 +79,86 @@ func TestIsValidEVMAddress(t *testing.T) {
 	}
 }
 
-// TestToEIP55Derivation oracle 单独钉一次：对已知摘要手工推导前几位的大小写，
-// 防止 toEIP55 的 nibble 取位（高低半字节 / 奇偶下标）被改反而无人察觉。
-func TestToEIP55Derivation(t *testing.T) {
-	// 夹具已核：evmChecksumHash("fb69...") 前两字节 0xF4 0x6C——
-	// 第 0 位看高 nibble F >= 8，'f' 大写；第 1 位看低 nibble 4 < 8，'b' 保持小写；
-	// 第 2 位看下一字节高 nibble 6 < 8，'6' 无字母；第 3 位看低 nibble C >= 8，'9' 无字母。
-	want := "fB6916095CA1d6AB8C1E3E5E1C0E5A2C2B4D0F3A"
-	if got := toEIP55("fb6916095ca1d6ab8c1e3e5e1c0e5a2c2b4d0f3a"); got != want {
-		t.Fatalf("toEIP55 推导不符:\n got=%s\nwant=%s", got, want)
+// TestToEIP55OfficialVectors 用 EIP-55 的官方测试向量钉住推导本身。
+//
+// 这些向量是本包唯一的「外部真源」：只用自算的夹具时，推导与校验一旦同错同对
+// （比如把摘要的整个字节拿去比 >= 8，而不是按奇偶取高低半字节），用例会全绿，
+// 而真实地址全被判成非法。下面八个向量覆盖了全大写、全小写与真正带校验和的形态。
+func TestToEIP55OfficialVectors(t *testing.T) {
+	vectors := []string{
+		"0x52908400098527886E0F7030069857D2E4169EE7",
+		"0x8617E340B3D01FA5F11F306F4090FD50E238070D",
+		"0xde709f2102306220921060314715629080e2fb77",
+		"0x27b1fdb04752bbc536007a920d24acb045561c26",
+		"0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed",
+		"0xfB6916095ca1df60bB79Ce92cE3Ea74c37c5d359",
+		"0xdbF03B407c01E7cD3CBea99509d93f8DDDC8C6FB",
+		"0xD1220A0cf47c7B9Be7A2E6BA89F429762e7b9aDb",
 	}
-	// 反向钉 nibble 取位：大小写颠倒的串不能等于自身推导结果。
-	if got := toEIP55("Fb6916095ca1d6ab8c1e3e5e1c0e5a2c2b4d0f3a"); got == "Fb6916095CA1d6AB8C1E3E5E1C0E5A2C2B4D0F3A" {
-		t.Fatal("nibble 取位方向不符：颠倒大小写的串应被推导回校验和形态")
+	for _, v := range vectors {
+		body := v[2:]
+		if got := "0x" + toEIP55(strings.ToLower(body)); got != v {
+			t.Errorf("EIP-55 推导不符:\n got=%s\nwant=%s", got, v)
+		}
+		if !IsValidEVMAddress(v) {
+			t.Errorf("官方校验和形态被拒: %s", v)
+		}
+	}
+
+	// 逐位翻转字母大小写：只要翻转后仍是混合大小写，就必须被校验和拦下。
+	// 这是比「固定几个坏串」更硬的判据——五分之四种单点手抖都能被它覆盖。
+	body := []byte(evmChecksumMixed)
+	for i := 2; i < len(body); i++ {
+		orig := body[i]
+		var flipped byte
+		switch {
+		case orig >= 'a' && orig <= 'f':
+			flipped = orig - 32
+		case orig >= 'A' && orig <= 'F':
+			flipped = orig + 32
+		default:
+			continue
+		}
+		body[i] = flipped
+		addr := string(body)
+		hex40 := addr[2:]
+		mixed := hex40 != strings.ToLower(hex40) && hex40 != strings.ToUpper(hex40)
+		if got := IsValidEVMAddress(addr); got == mixed {
+			t.Errorf("翻转第 %d 位大小写后的 %q 判定不符：混合大小写=%v，实得 ok=%v", i, addr, mixed, got)
+		}
+		body[i] = orig
+	}
+	if string(body) != evmChecksumMixed {
+		t.Fatal("翻转循环把夹具改坏了")
 	}
 }
 
-// TestBNBRuleRegistered 本包必须把 BNB 规则登记进 pay 的注册表。
-func TestBNBRuleRegistered(t *testing.T) {
-	rule, ok := pay.ChainRuleFor(pay.CurrencyBNB)
-	if !ok {
-		t.Fatalf("BNB 规则未登记，已登记的是 %v", pay.CurrenciesWithRules())
-	}
-	if err := rule.CheckAddress(&pay.PayOrder{Address: evmAllLower}); err != nil {
+// TestBNBRuleChecksAddress 本包的规则直接以 bnbRule 存在，不再经 pay 的注册表。
+//
+// 注册表已在 P5 随 pay 瘦身删除：规则只服务「本包自己那条链」，改成包内函数调用后
+// 就不存在「忘了登记 ⇒ 未登记即放行」这条静默通道了。
+func TestBNBRuleChecksAddress(t *testing.T) {
+	rule := bnbRule{}
+	if err := rule.CheckAddress(&pay.PayOrder{To: &pay.Party{Address: evmAllLower}}); err != nil {
 		t.Errorf("全小写合法地址被拒: %v", err)
 	}
-	if err := rule.CheckAddress(&pay.PayOrder{Address: evmBogusChecksum}); err == nil {
+	if err := rule.CheckAddress(&pay.PayOrder{To: &pay.Party{Address: evmBogusChecksum}}); err == nil {
 		t.Error("校验和不过的地址未被拦下")
 	}
 }
 
 // TestBNBRuleRejectsMemo EVM 转账没有 memo 概念：填了就拒而不是忽略。
 func TestBNBRuleRejectsMemo(t *testing.T) {
-	rule, ok := pay.ChainRuleFor(pay.CurrencyBNB)
-	if !ok {
-		t.Fatal("BNB 规则未登记")
-	}
+	rule := bnbRule{}
 	if err := rule.CheckMemo(&pay.PayOrder{}); err != nil {
 		t.Errorf("不带备注被拒: %v", err)
 	}
 	for _, memo := range []string{"123", " 12 ", "复转到交易所"} {
-		if err := rule.CheckMemo(&pay.PayOrder{Memo: memo}); err == nil {
+		if err := rule.CheckMemo(&pay.PayOrder{To: &pay.Party{Memo: memo}}); err == nil {
 			t.Errorf("备注 %q 未被拦下", memo)
 		}
 	}
-	if err := rule.CheckMemo(&pay.PayOrder{Memo: "   "}); err != nil {
+	if err := rule.CheckMemo(&pay.PayOrder{To: &pay.Party{Memo: "   "}}); err != nil {
 		t.Errorf("纯空白备注被当成有值: %v", err)
 	}
 }
@@ -136,7 +172,7 @@ func TestPayoutInterfaceStaysWired(t *testing.T) {
 	var _ func(context.Context, string) (*pay.PayResult, error) = BscQuery
 	var _ func(context.Context, *pay.AccountQuery) (*pay.AccountInfo, error) = BscAccount
 
-	o := &pay.PayOrder{OrderNo: "O1", Amount: 10, Address: evmAllLower}
+	o := &pay.PayOrder{OrderNo: "O1", Amount: 10, To: &pay.Party{Address: evmAllLower}}
 	cases := []struct {
 		name string
 		run  func() error

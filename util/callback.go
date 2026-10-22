@@ -123,26 +123,20 @@ const (
 	// *zalo.InboundMessage，kind=QR 的载荷是 *zalo.QREvent；不播资金回执（Zalo 资金
 	// 链路只剩哨兵）。
 	//
-	// CallFacebookMsg / CallInstagramMsg 仍是 HTTP 登录链路的前缀，广播口径与
-	// CallWhatsappMsg 一致：按 <前缀>+<动作> 注册，载荷是 *pay.PayResult，通道包
-	// 本身不落库。
+	// 两条社交通道各自占一个前缀，而不是共用一个「社交类」前缀：它们各有不同的消息侧
+	// 链路（whatsapp 是 whatsmeow 协议事件，kind=Inbound/Receipt/Connection/QR；
+	// zalo 是 zcago 消息/扫码事件），下游对「会话失效要重登」和「消息送达」的处理
+	// 本就不同，合到一个前缀等于让订阅方在回调里靠载荷猜通道。
+	CallZaloMsg = "ZaloMsg"
+	// CallPaySDKMsg + 通道段名（tron.usdt / bsc.usdt / sol.usdt / telegram.ton）=
+	// 该通道签名密钥的注入钩子，载荷是 *string（指向该段的 secret_key 字段本身）。
 	//
-	// 这四条各自占一个前缀，而不是共用一个「社交类」前缀：它们不止走资金，还各有
-	// 资金之外的链路（whatsapp 是 whatsmeow 协议消息事件，kind=Inbound/Receipt/
-	// Connection/QR；zalo 是 zcago 消息/扫码事件；facebook/instagram 是 HTTP 登录
-	// 链路），下游对「会话失效要重登」和「充值到账要加积分」的处理本就不同，合到
-	// 一个前缀等于让订阅方在回调里靠载荷猜通道——猜错就是把 A 家的单记到 B 家头上。
-	CallZaloMsg      = "ZaloMsg"
-	CallFacebookMsg  = "FacebookMsg"
-	CallInstagramMsg = "InstagramMsg"
-	// CallPaySDKMsg + pay_sdks 的段名 = 该段签名密钥的注入钩子，载荷是 *string
-	// （指向该段的 secret_key 字段本身）。
-	//
-	// 钩子按 SDK 段而不是按通道命名：同一供应商的凭证只有一份，常被两三条通道共用。
-	// 若让下游为 whatsapp/usdt/ton 各注册一次同一个密钥，迟早出现「只注入了两家、
-	// 第三家用空密钥出款」这种只有供应商会发现的错。
+	// 钩子按通道段命名而不是按供应商命名：供应商字段已经内联在各段里，供应商凭证
+	// 不再是一张共享表里的一段——同一份密钥要在几条通道上用，就在那几段各配一份
+	// （或让下游按多个键分别注册）。让下游为 whatsapp/usdt/ton 共用一个键，迟早出现
+	// 「只注入了两家、第三家用空密钥出款」这种只有供应商会发现的错。
 	CallPaySDKMsg = "PaySDK"
-	// CallPayChainMsg + pay_sdks 的段名 = 该段热钱包私钥的注入钩子，载荷是 *string
+	// CallPayChainMsg + 通道段名（同上）= 该段热钱包私钥的注入钩子，载荷是 *string
 	// （指向该段 chain.private_key 字段本身）。
 	//
 	// 它与 CallPaySDKMsg 是两个键而不是复用同一个：一次 Do 只交出一个 *string，

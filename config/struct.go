@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -209,14 +210,13 @@ type TelegramConfig struct {
 	Ton *TonChannelConfig `json:"ton"`
 }
 
-// TonChannelConfig 是 telegram.ton 段：这条 TON 链路引用哪个 SDK 段、面向哪张网。
+// TonChannelConfig 是 telegram.ton 段：这条 TON 链路自己的供应商字段、面向哪张网、
+// 以及链上接入点与热钱包。
 //
-// 凭证、接入点、热钱包地址与私钥都不在这里（那是 pay_sdks.<段>.chain 的事实，
-// 同一个接入点服务多条链时不该复制两份）；这里只描述「这个 Bot 发的钱走哪条路」。
+// P1 起供应商字段内联在本段（ChannelSupplierConfig）：凭证、端点表、商户账户不再
+// 借用集中登记表的某一段，而是与「这条通道用哪张网」写在一起。
 type TonChannelConfig struct {
-	// Provider 是对 pay_sdks 表的引用。留空即本通道不启用（口径与 usdt.provider 一致：
-	// SDK 段的 enable 决定凭证能不能用，这里的 sdk 决定这条通道用不用它，两处都开才是开）。
-	Provider *PaySDKRef `json:"provider"`
+	ChannelSupplierConfig
 	// Network 是公链网络标识，取值 mainnet / testnet；留空按主网。
 	// 它同时决定链上驱动连的是哪个接入点默认基址、以及接受哪种带测试网位的地址。
 	Network string `json:"network"`
@@ -224,199 +224,94 @@ type TonChannelConfig struct {
 	// 填了不会静默忽略——装配期直接拒绝并说明原因，因为「配了 jetton、实际发的是原生币」
 	// 是能把钱发错形状的一类错（见 telegram/ton_onchain.go 与 config/validate.go）。
 	Jetton string `json:"jetton"`
+	// Chain 是 TON 接入点与热钱包（内联形态）。
+	Chain *TonChainConfig `json:"chain"`
 }
 
-// PaySDKConfig 是一段资金 SDK 配置：一套供应商接入的全部事实——驱动标记、
-// 基址、凭证、端点表，以及我方在该供应商名下的商户账户表。
-//
-// 集中登记的用意：同一个供应商往往同时供着提现、查单、验证码下发几条链路，
-// 凭证与端点抄几份之后必然改漏一处，出款那侧还留着旧密钥。SDK 段写一次，
-// 各通道只留「用哪个 SDK、用哪个商户账户」两个名字。
-//
-// 配置结构体留在 config 包：pay 的核心文件（channel/client/provider/types）只认
-// 与配置无关的 ProviderOptions（端点表也是以取值函数的形式交进去），只有装配层
-// pay/assemble.go 按值引用这里的结构体——config 不反向引 pay，这个方向不成环。
-// 各通道包（whatsapp/zalo/facebook/instagram/usdt/telegram）负责把本结构逐字段转成
-// pay.ProviderOptions。
-//
-// Enable 必须显式为 "on" 才启动。出款接口的新配置段默认不启动，
-// 比「写了 base_url 就以为开了」更安全：漏一个开关的代价是少一条通道，
-// 多开一条通道的代价是真金出款。
-type PaySDKConfig struct {
-	Enable string `json:"enable"` // "on" 启动；空或 "off" 时引用它的通道一律不启动
-	// Driver 是驱动标记，取值是 pay.Register 登记过的驱动名（内置为 pay.DriverGeneric）。
-	// 换一家供应商=换这一个名字加一份凭证，通道代码不动。
-	Driver  string `json:"driver"`
-	BaseURL string `json:"base_url"` // 供应商接口基址，不含末尾斜杠
-	AppID   string `json:"app_id"`   // 应用标识，参与签名域
-	// SecretKey 是签名密钥。只允许经配置或环境变量注入，禁止写入日志、
-	// error 文案与任何对外摘要字段。
-	SecretKey   string `json:"secret_key"`
-	AuthHeader  string `json:"auth_header"`  // 签名所在请求头名，如 X-Sign；留空按驱动默认
-	TokenHeader string `json:"token_header"` // 登录态 token 所在请求头名，如 Authorization
-	TimeoutSec  int    `json:"timeout_sec"`  // 单次请求超时（秒），<=0 用 pay.DefaultTimeout
-	MaxRetries  int    `json:"max_retries"`  // 可重试错误的重试次数，<0 用 pay.DefaultMaxRetry
-	// NotifyURL 只进 HTTP 供应商的下单报文（pay.Open 那条路径）；本仓 usdt 走链上、
-	// 三条登录链路也不读它。
-	NotifyURL string `json:"notify_url"` // 本侧回执接收地址，下单时随报文交出去
-	// Endpoints 是「接口文档到位后只改这里」的注入点之一：
-	// 键是本仓代码里固定的逻辑名（account/query/withdraw/login/send_code/friend_list），
-	// 值是供应商的实际路径。缺某个键 ⇒ 对应操作返回明确错误，不发请求。
-	// withdraw 只对纯 HTTP 供应商资金通道有效：本仓 usdt 的出款走链上驱动，示例段不登记它。
-	Endpoints map[string]string `json:"endpoints"`
-	// Accounts 是我方在该供应商名下的商户账户表，键是本地别名（default/reserve…），
-	// 通道段用别名引用。商户号是路由信息不是凭证，可以进日志。
-	Accounts map[string]*PayMerchantAccount `json:"accounts"`
-	// Chain 是「直接动公链」那一类驱动的接入点与凭证，nil 即这一段只是 HTTP 供应商配置。
-	//
-	// 它挂在 SDK 段而不是通道段：节点、API Key、热钱包是「我用哪个接入点、以谁的身份出资」，
-	// 与这一单发的是 USDT 还是 TRX 无关；同一接入点服务同链多币种时不该复制两份。
-	// 合约地址与网络不在这里（那是通道段的 usdt.contract / usdt.network，权威值只有一处）。
-	Chain *PayChainConfig `json:"chain"`
-}
+// ==================== 通道内联供应商字段（P1 起） ====================
 
-// PayChainConfig 是链上接入点配置（pay_sdks.<段>.chain）。
+// ChannelAccountConfig 是通道段内联的「我方在供应商侧的一个商户账户」。
 //
-// 单位与币种名不进配置：fee_limit 明确写死是「该链原生币的最小单位」（TRON 为 sun），
-// 因为链上 gas 收的是原生币而不是本单币种（见 pay.AccountInfo.CanWithdraw 的注释），
-// 把它写成不带单位的 fee_limit 就会有人填 65 而不是 65000000。
-type PayChainConfig struct {
-	// Node 是链节点接入点（TRON 为 gRPC 的 host:port，如 grpc.trongrid.io:50051）。
-	// 出款广播只走它；以 gRPC 节点广播的驱动（tron_trongrid）必填它。
-	// 走 HTTP 接入点的驱动（ton_tonapi）不读这一项，它必填的是 http_base。
-	Node string `json:"node"`
-	// TLS 是接入点的传输安全开关："off" 才走明文，其余（含留空）一律按 TLS 建连。
-	//
-	// 反向缺省是刻意的：公共接入点必须 TLS，把「明文」写成需要显式声明的例外，
-	// 才不会有人照抄一份自建节点的配置就把热钱包私钥签名链路挂到了明文中转上。
-	TLS string `json:"tls"`
-	// HTTPBase 是同链的 REST 基址（TRON 如 https://api.trongrid.io，TON 如 https://tonapi.io）。
-	// TRON 侧只用于读侧兜底（查单、余额、近期转出反查），广播仍只走 node——多一条会动钱的
-	// 未验证路径，出事时连该信哪条都不知道。
-	// TON 侧它就是广播与查证的唯一入口（本仓不接 lite server，见 telegram/ton_gateway_tonapi.go），
-	// 留空由驱动按 network 取该链接入点的公开基址。
-	HTTPBase string `json:"http_base"`
-	// APIKey 是接入点要求的访问凭证（TRON 侧为 TRON-PRO-API-KEY）。
-	// 它不是资金密钥，但同样禁止写入日志、error 文案与摘要字段。
-	APIKey string `json:"api_key"`
-	// WalletAddress 是我方出款账户的链上地址。它是路由信息不是凭证，可以进日志，
-	// 且必须与私钥派生出的地址逐字相等，否则「配了 A 的地址、实际用 B 的私钥出款」
-	// 这种错要到对账时才看得见。
-	WalletAddress string `json:"wallet_address"`
-	// WalletVersion 是热钱包合约的版本名，只有需要它的链读它（TON 为 v5R1/v4R2/v3R2/v4R1/v3R1，
-	// TRON 不填也一样能出款）。留空由驱动探测；探测不出来就拒装配，不猜第二个候选。
-	WalletVersion string `json:"wallet_version"`
-	// SubWalletID 是钱包合约的子账户号（TON 的 v3/v4 系用它区分同一把公钥下的不同账户）。
-	// 指针：0 是合法取值，用 0 表达「没配」会把显式配 0 的人推到默认值上，那派生出来的是
-	// 另一个账户——本包宁可让「没配」与「配 0」在结构体里就是两种形状。
-	SubWalletID *uint32 `json:"sub_wallet_id"`
-	// PrivateKey 是热钱包私钥（hex）。配置里恒为空，由下游在启动前经
-	// util.CallPayChainMsg+段名 钩子注入；它不得进入日志、error 文案与任何摘要字段。
-	PrivateKey string `json:"private_key"`
-	// FeeLimit 是允许为本单烧掉的手续费上限，单位是该链原生币的最小单位（TRON 为 sun、TON 为纳吨）。
-	// <=0 由驱动按该链缺省值定，配置不必知道缺省是多少。
-	FeeLimit int64 `json:"fee_limit"`
-	// TimeoutSec 是单次链上操作的超时（秒），<=0 由驱动用缺省值。
-	//
-	// 它不复用上层的 timeout_sec：那一个是「供应商 HTTP 接口响应要多久」，这一个管的是
-	// 「链节点取一份 raw transaction / 广播 / 查回执要多久」，两者量级与失败形态都不同，
-	// 共用一格会让调过 HTTP 超时的人顺手改坏链上超时。
-	TimeoutSec int `json:"timeout_sec"`
-	// MaxRetries 是链上读操作（查单、余额、近期转出反查）的重试次数，0 即不重试。
-	//
-	// 写侧永远不看它：广播不是「失败了再来一次」的操作，重试由链上驱动的台账判定决定
-	// （见 pay.ChainOptions.MaxRetry 的注释）。
-	MaxRetries int `json:"max_retries"`
-}
-
-// PayMerchantAccount 是「我方在供应商侧的一个商户账户」的配置。
-//
-// 余额、可用额度、授信、费率都是供应商侧的事实，由 pay 的账户查询接口读回来，
+// 余额、可用额度、授信、费率都是供应商侧的事实，由 AccountQuery 读回来，
 // 不写在这里：把读来的值抄进配置，就等于给对账留了一份会过期的假账。
-type PayMerchantAccount struct {
-	// Enable 必须显式为 "on"。停用某个商户号（怀疑泄露、额度冻结）时改这一处，
-	// 不必删整段 SDK 配置、也不影响同供应商的其它通道。
+type ChannelAccountConfig struct {
+	// Enable 必须显式为 "on"。停用某个商户号（怀疑泄露、额度冻结）时改这一处。
 	Enable string `json:"enable"`
 	// MerchantID 是我方在供应商侧的商户号，进报文并参与签名域。
 	MerchantID string `json:"merchant_id"`
 }
 
-// Enabled 该商户账户是否可用（口径与 SDK 段一致：显式 "on" 才算开）。
-func (a *PayMerchantAccount) Enabled() bool {
+// Enabled 该商户账户是否可用（口径与通道段一致：显式 "on" 才算开）。
+func (a *ChannelAccountConfig) Enabled() bool {
 	return a != nil && strings.EqualFold(strings.TrimSpace(a.Enable), "on")
 }
 
-// PaySDKRef 是通道段对 pay_sdks 表的引用：只留两个名字，不留任何凭证。
+// ChannelSupplierConfig 是内联到通道段里的供应商接入字段。
 //
-// 通道段（usdt.provider / facebook.login / instagram.login）
-// 各自的开关就是这里填不填名字：留空即该通道不启用。之所以不再单独放一个
-// enable，是为了让「开不开」只有一处真相——SDK 段的 enable 决定凭证能不能用，
-// 这里的 sdk 决定这条通道用不用它；两处都开才是开。
-// Zalo 已改由 zcago 协议直连，不再引用这张表。
-type PaySDKRef struct {
-	SDK string `json:"sdk"` // pay_sdks 的键名
-	// Account 是 SDK 段 accounts 里的键名。该 SDK 只有一个账户时留空即取那一个；
-	// 多于一个账户时必须点名，否则「这一单从哪个商户号出」就成了初始化顺序的函数。
-	Account string `json:"account"`
+// 它相当于旧集中登记表里一段的内容，只是不再集中登记、而是写在用它的那段通道里：
+// 「这条通道的凭证和开关」只有一处可看，不必在两个段之间来回对。
+// 链上接入点不在这里（每链一份，见 TronChainConfig / TonChainConfig / ...）。
+type ChannelSupplierConfig struct {
+	// Enable 必须显式为 "on" 才启用这条通道。
+	Enable string `json:"enable"`
+	// Driver 是驱动标记（启动时按这个名字取实现）。链上出款写该链的链上驱动名。
+	Driver  string `json:"driver"`
+	BaseURL string `json:"base_url"` // 供应商 HTTP 基址，不含末尾斜杠
+	AppID   string `json:"app_id"`   // 应用标识，参与签名域
+	// SecretKey 是签名密钥。只允许经配置或 CallPaySDKMsg+段名 钩子注入，
+	// 禁止写入日志、error 文案与任何对外摘要字段。
+	SecretKey  string `json:"secret_key"`
+	AuthHeader string `json:"auth_header"` // 签名所在请求头名；留空按驱动默认
+	TimeoutSec int    `json:"timeout_sec"` // 单次供应商请求超时（秒），<=0 用驱动缺省
+	MaxRetries int    `json:"max_retries"` // 可重试错误的重试次数，<0 用驱动缺省
+	// Endpoints 是「接口文档到位后只改这里」的注入点：键是本仓固定的逻辑名
+	// （account/query/withdraw），值是供应商的实际路径。缺某个键 ⇒ 该操作就地拒绝。
+	Endpoints map[string]string `json:"endpoints"`
+	// Accounts 是我方在该供应商名下的商户账户表，键是本地别名。
+	// 单账户可留空别名；多账户必须用 AccountID 点名。
+	Accounts map[string]*ChannelAccountConfig `json:"accounts"`
+	// AccountID 是「本通道用哪个商户账户出账」，取 Accounts 的键。
+	// 留空且表中只有一个账户时取那一个，多于一个则拒——静默挑一个商户号出钱
+	// 是不可接受的歧义（口径与旧 provider.account 一致，但不再寄生在引用上）。
+	AccountID string `json:"account"`
 }
 
-// Empty 该通道是否未绑定任何 SDK（未绑定即不启用）。
-func (r *PaySDKRef) Empty() bool { return r == nil || strings.TrimSpace(r.SDK) == "" }
-
-// Resolve 在全表里取被引用的 SDK 段与商户账户。资金通道（提现）用它：
-// 出款必须有一个明确的商户主体，取不到账户就是配置错。
-//
-// 报错文案只说名字与缺项，绝不带出基址之外的敏感值；SDK 段里可能的密钥
-// 一旦顺着 error 扩散，就会出现在日志和上层包装里。
-func (r *PaySDKRef) Resolve(sdks map[string]*PaySDKConfig) (*PaySDKConfig, *PayMerchantAccount, error) {
-	return r.resolve(sdks, true)
+// Enabled 该通道是否被显式开启（enable 大小写不敏感的 "on"）。
+func (s *ChannelSupplierConfig) Enabled() bool {
+	return s != nil && strings.EqualFold(strings.TrimSpace(s.Enable), "on")
 }
 
-// ResolveService 取「只发消息、不动资金」的链路（验证码下发、登录换会话）。
-//
-// 这类 SDK 本就没有商户账户，要求它配一个只会逼人填个假商户号；但一旦配了账户，
-// 歧义规则与资金链路完全一样：多个账户就必须点名。
-func (r *PaySDKRef) ResolveService(sdks map[string]*PaySDKConfig) (*PaySDKConfig, *PayMerchantAccount, error) {
-	return r.resolve(sdks, false)
-}
-
-func (r *PaySDKRef) resolve(sdks map[string]*PaySDKConfig, needAccount bool) (*PaySDKConfig, *PayMerchantAccount, error) {
-	if r.Empty() {
-		return nil, nil, errors.New("未配置 sdk 引用，该通道不启用")
+// Endpoint 按逻辑名取供应商路径。未登记时 ok=false——配置不全的操作
+// 必须在发请求之前就拒掉。
+func (s *ChannelSupplierConfig) Endpoint(name string) (string, bool) {
+	if s == nil {
+		return "", false
 	}
-	name := strings.TrimSpace(r.SDK)
-	cfg := sdks[name]
-	if cfg == nil {
-		return nil, nil, fmt.Errorf("pay_sdks 里没有名为 %s 的 SDK 段", name)
+	v := strings.TrimSpace(s.Endpoints[name])
+	if v == "" {
+		return "", false
 	}
-	if !cfg.Enabled() {
-		return nil, nil, fmt.Errorf("pay_sdks.%s 未显式开启（enable 需为 on）", name)
+	if !strings.HasPrefix(v, "/") {
+		v = "/" + v
 	}
-	if !needAccount && len(cfg.Accounts) == 0 {
-		return cfg, nil, nil
-	}
-	acc, err := cfg.Account(strings.TrimSpace(r.Account))
-	if err != nil {
-		return nil, nil, fmt.Errorf("pay_sdks.%s: %w", name, err)
-	}
-	return cfg, acc, nil
+	return v, true
 }
 
 // Account 按别名取商户账户。别名留空且表中只有一个账户时取那一个；
 // 多于一个则报错要求点名——静默挑一个商户号出钱是不可接受的歧义。
-func (p *PaySDKConfig) Account(alias string) (*PayMerchantAccount, error) {
-	if p == nil || len(p.Accounts) == 0 {
+func (s *ChannelSupplierConfig) Account(alias string) (*ChannelAccountConfig, error) {
+	if s == nil || len(s.Accounts) == 0 {
 		return nil, errors.New("未配置 accounts 商户账户")
 	}
 	if alias == "" {
-		if len(p.Accounts) > 1 {
-			return nil, fmt.Errorf("accounts 里有 %d 个商户账户，通道段必须用 account 点名", len(p.Accounts))
+		if len(s.Accounts) > 1 {
+			return nil, fmt.Errorf("accounts 里有 %d 个商户账户，通道段必须用 account 点名", len(s.Accounts))
 		}
-		for k := range p.Accounts {
+		for k := range s.Accounts {
 			alias = k
 		}
 	}
-	a, ok := p.Accounts[alias]
+	a, ok := s.Accounts[alias]
 	if !ok {
 		return nil, fmt.Errorf("accounts 里没有名为 %s 的商户账户", alias)
 	}
@@ -429,28 +324,6 @@ func (p *PaySDKConfig) Account(alias string) (*PayMerchantAccount, error) {
 	return a, nil
 }
 
-// Enabled 该 SDK 段是否被显式开启（enable 大小写不敏感的 "on"）。
-// nil 接收者可安全调用，三通道统一用它判「启不启动」，避免各写一份口径。
-func (p *PaySDKConfig) Enabled() bool {
-	return p != nil && strings.EqualFold(strings.TrimSpace(p.Enable), "on")
-}
-
-// Endpoint 按逻辑名取供应商路径。未登记时 ok=false——配置不全的操作
-// 必须在发请求之前就拒掉，不能让会员看到一个点了必失败的入口。
-func (p *PaySDKConfig) Endpoint(name string) (string, bool) {
-	if p == nil {
-		return "", false
-	}
-	v := strings.TrimSpace(p.Endpoints[name])
-	if v == "" {
-		return "", false
-	}
-	if !strings.HasPrefix(v, "/") {
-		v = "/" + v
-	}
-	return v, true
-}
-
 // WhatsappConfig 是 WhatsApp 通道配置。
 //
 // 与其它三条社交通道不同，这里**没有 login/templates**：消息侧（QR 配对、发信、
@@ -459,7 +332,7 @@ func (p *PaySDKConfig) Endpoint(name string) (string, bool) {
 // 资金侧（提现门面与充值接口）已随 2026-10 的资金面收口删除，本包只剩消息侧，所以只有 sessions 一段。
 type WhatsappConfig struct {
 	// Enable 是通道总闸：显式为 "on" 才装配本通道，闸的是 whatsmeow 消息侧（资金链路已删除，无资金侧可闸）。
-	// 整段不写、键不写、写成 off 或任何别的值都读作「不开」——口径与 pay_sdks/nft_sdks
+	// 整段不写、键不写、写成 off 或任何别的值都读作「不开」——口径与 nft_sdks
 	// 段一致：默认不启动。whatsmeow 是非官方协议客户端，「没配即不连 WhatsApp 服务器」
 	// 必须是缺省，而不是靠「记得别填 dsn」。
 	Enable string `json:"enable"`
@@ -468,7 +341,7 @@ type WhatsappConfig struct {
 	Sessions *WhatsappSessionsConfig `json:"sessions"`
 }
 
-// Enabled 该通道是否被显式开启（口径与 PaySDKConfig.Enabled 一致：enable 大小写
+// Enabled 该通道是否被显式开启（口径与 ChannelSupplierConfig.Enabled 一致：enable 大小写
 // 不敏感的 "on"，nil 接收者可安全调用）。段缺失即未开，调用侧不必先判 nil。
 func (c *WhatsappConfig) Enabled() bool {
 	return c != nil && strings.EqualFold(strings.TrimSpace(c.Enable), "on")
@@ -519,7 +392,7 @@ type WhatsappSessionsConfig struct {
 
 // ZaloConfig 是 Zalo 通道配置。
 //
-// 与 Facebook/Instagram 的供应商网关形态不同：Zalo 消息侧已改由 github.com/amrakk/zcago
+// 消息侧已改由 github.com/amrakk/zcago
 // 直连 Zalo 个人号协议（非官方客户端），会话凭证（cookies/IMEI/UA）持久化在 Postgres 的
 // zalo_sessions 表里，与 WhatsApp 一样按会话库管理。资金链路已在 2026-10 收口里删除，
 // 本通道只剩消息/登录面，所以只有 enable + sessions 两段。
@@ -531,13 +404,14 @@ type ZaloConfig struct {
 	Sessions *ZaloSessionsConfig `json:"sessions"`
 	// Deprecated: Login 是旧 HTTP 供应商登录链路的 SDK 引用，已随 zcago 直连替换。
 	// 保留字段只为让旧配置在 Validate 阶段得到明确报错，而不是被 JSON 静默丢弃后
-	// 通道悄悄不工作。
-	Login *PaySDKRef `json:"login,omitempty"`
+	// 通道悄悄不工作。类型取 RawMessage 而不是具体结构：供应商 SDK 表已整张删除，
+	// 这里只需要「这个键出现过没有」，不需要（也不应该）再认识它的形状。
+	Login json.RawMessage `json:"login,omitempty"`
 	// Deprecated: Templates 是旧验证码模板名表，已废弃。保留理由同 Login。
 	Templates map[string]string `json:"templates,omitempty"`
 }
 
-// Enabled 该通道是否被显式开启（口径与 WhatsappConfig/PaySDKConfig 一致：enable
+// Enabled 该通道是否被显式开启（口径与 WhatsappConfig/ChannelSupplierConfig 一致：enable
 // 大小写不敏感的 "on"，nil 接收者可安全调用）。段缺失即未开，调用侧不必先判 nil。
 func (c *ZaloConfig) Enabled() bool {
 	return c != nil && strings.EqualFold(strings.TrimSpace(c.Enable), "on")
@@ -585,40 +459,30 @@ type ZaloSessionsConfig struct {
 	Language  string `json:"language"`
 }
 
-// FacebookConfig 是 Facebook 通道配置，与 ZaloConfig 同构，差异只在供应商口径。
-//
-// 真实世界 Facebook 走 OAuth 跳转授权，但本包登录的是供应商代持账号，登录链路仍然只有
-// 「下发一次性凭证、拿凭证换会话」两步。那个 code 到底是短信验证码、OAuth 授权码还是
-// 回调 ticket，由供应商在 pay_sdks 里的登记口径决定，本层不猜：签名形状保持与另两条通道
-// 同构，换成 OAuth 形态改的是 SDK 段与供应商适配代码，不是这里的一个字段。
-//
-// 供应商压根没有「下发验证码」这一环时，就在该 SDK 段的 endpoints 里不登记 send_code：
-// 缺键的操作就地拒绝、不发请求，比为了凑齐两段而配一个假的登录网关省事，也不会让会员
-// 看到一个点了必失败的入口。
-type FacebookConfig struct {
-	Login *PaySDKRef `json:"login"` // 登录/验证码下发通道引用的 SDK
-	// Templates 是消息模板名表，逻辑名口径与 zalo/facebook/instagram 三条通道一致。
-	Templates map[string]string `json:"templates"`
+// ==================== 三条链的配置块（P1 起） ====================
+
+// TronConfig 是 tron 段：TRON 链上的全部通道（当前只有 TRC20 USDT）。
+type TronConfig struct {
+	Usdt *TronUsdtConfig `json:"usdt"`
 }
 
-// InstagramConfig 是 Instagram 通道配置，与 FacebookConfig 同构。
-//
-// 两家同属 Meta、多半复用同一段 SDK，仍然拆成两个配置段：两条通道的账号、商户账户
-// 与开关各自独立，合并成一段就等于让「只关 Instagram」这件事没法表达。
-// code 形态的口径同 FacebookConfig 所述，也不在这里区分。
-//
-// Instagram 没有「好友」概念，好友列表操作的逻辑名仍沿用 friend_list，读作「按账号
-// 返回的关联账号列表」：三条社交通道各起一个逻辑名的话，端点表就散成三个名字，
-// 而取路径那侧只按逻辑名查，多一个名字就是多一处配漏了静默失败的地方。
-type InstagramConfig struct {
-	Login *PaySDKRef `json:"login"` // 登录/验证码下发通道引用的 SDK
-	// Templates 是消息模板名表，逻辑名口径与 zalo/facebook/instagram 三条通道一致。
-	Templates map[string]string `json:"templates"`
+// BscConfig 是 bsc 段：BSC 链上的全部通道（当前只有 BEP20 USDT）。
+type BscConfig struct {
+	Usdt *BscUsdtConfig `json:"usdt"`
 }
 
-// UsdtConfig 是 USDT（TRC20）通道配置。
-type UsdtConfig struct {
-	Provider *PaySDKRef `json:"provider"`
+// SolConfig 是 sol 段：Solana 链上的全部通道（当前只有 SPL USDT）。
+type SolConfig struct {
+	Usdt *SolUsdtConfig `json:"usdt"`
+}
+
+// TronUsdtConfig 是 tron.usdt 段：USDT-TRC20 通道的全部配置。
+//
+// 供应商字段内联（商户账户查询仍走供应商 HTTP），Network/Contract/Decimals 是本
+// 通道的币种事实，Chain 是链上出款与查单的接入点与热钱包。三层写在同一段里，
+// 意思是「这条通道的所有事实都在这里」，不必再去另一张表里对一遍。
+type TronUsdtConfig struct {
+	ChannelSupplierConfig
 	// Network 是公链网络标识（mainnet/shasta/nile），留空按供应商默认。
 	// 这里要填的是「在哪条链上发」，不是代币标准：trc20 是标准名，填进来会在
 	// 装配时被拒——网络决定单号能否跨链复用，标准名只是合约的属性。
@@ -627,6 +491,132 @@ type UsdtConfig struct {
 	// 原生 TRX 留空。网络与合约是两个正交维度：同一网络下 USDT 与原生币
 	// 靠合约区分，同一合约在不同网络下又是两个不同的币，都不能靠通道名区分。
 	Contract string `json:"contract"`
+	// Decimals 是合约的小数位（USDT-TRC20 恒为 6）。<=0 由驱动按该币缺省值定；
+	// PayOrder.Decimals 填了就必须与本值一致，否则拒单——小数位差一位就是 10^n 倍。
+	Decimals int `json:"decimals"`
+	// Chain 是 TRON 接入点与热钱包。
+	Chain *TronChainConfig `json:"chain"`
+}
+
+// BscUsdtConfig 是 bsc.usdt 段：USDT-BEP20 通道配置。
+//
+// 与 TRON 那段的差别：账户查询走链上 balanceOf，所以没有供应商 HTTP 字段
+// （无 base_url/app_id/secret_key/endpoints/accounts），只有开闸、驱动、网络、
+// 合约、小数位与接入点。
+type BscUsdtConfig struct {
+	// Enable 必须显式为 "on" 才启动这条通道。
+	Enable   string `json:"enable"`
+	Driver   string `json:"driver"`
+	Network  string `json:"network"` // mainnet / chapel
+	Contract string `json:"contract"`
+	// Decimals 是合约小数位（USDT-BEP20 为 18，以链上合约的 decimals 为准）。
+	Decimals int             `json:"decimals"`
+	Chain    *BscChainConfig `json:"chain"`
+}
+
+// Enabled 该通道是否被显式开启。
+func (b *BscUsdtConfig) Enabled() bool {
+	return b != nil && strings.EqualFold(strings.TrimSpace(b.Enable), "on")
+}
+
+// SolUsdtConfig 是 sol.usdt 段：SPL USDT 通道配置。
+//
+// 与 TRON 那段的差别同 BSC：余额走链上 token account，没有供应商 HTTP 字段。
+type SolUsdtConfig struct {
+	Enable   string `json:"enable"`
+	Driver   string `json:"driver"`
+	Network  string `json:"network"` // mainnet-beta / devnet
+	Contract string `json:"contract"`
+	// Decimals 是 mint 的小数位（USDT-SPL 为 6）。
+	Decimals int             `json:"decimals"`
+	Chain    *SolChainConfig `json:"chain"`
+}
+
+// Enabled 该通道是否被显式开启。
+func (s *SolUsdtConfig) Enabled() bool {
+	return s != nil && strings.EqualFold(strings.TrimSpace(s.Enable), "on")
+}
+
+// TronChainConfig 是 tron.usdt.chain：TRON 的接入点与热钱包。
+type TronChainConfig struct {
+	// Node 是链节点接入点（gRPC 的 host:port，如 grpc.trongrid.io:50051），
+	// 出款广播只走它。
+	Node string `json:"node"`
+	// TLS 是接入点的传输安全开关：只有显式写 "off" 才走明文，留空按 TLS 建连。
+	TLS string `json:"tls"`
+	// HTTPBase 是同链的 REST 基址，只用于读侧兜底（查单、余额、近期转出反查）。
+	HTTPBase string `json:"http_base"`
+	// APIKey 是接入点要求的访问凭证（TRON-PRO-API-KEY）。不是资金密钥，
+	// 但同样禁止进日志与 error 文案。
+	APIKey string `json:"api_key"`
+	// WalletAddress 是我方出款账户的链上地址，必须与私钥派生的地址逐字相等。
+	WalletAddress string `json:"wallet_address"`
+	// PrivateKey 是热钱包私钥（hex）。配置里恒为空，由 CallPayChainMsg+段名 注入。
+	PrivateKey string `json:"private_key"`
+	// FeeLimit 是本单允许烧掉的手续费上限，单位 sun。<=0 用驱动缺省值。
+	FeeLimit int64 `json:"fee_limit"`
+	// TimeoutSec 是单次链上操作的超时（秒），<=0 用驱动缺省。
+	TimeoutSec int `json:"timeout_sec"`
+	// MaxRetries 是链上读操作的重试次数；写侧从不看它。
+	MaxRetries int `json:"max_retries"`
+}
+
+// TonChainConfig 是 telegram.ton.chain：TON 的接入点与热钱包。
+//
+// 没有 node/tls：本仓不接 lite server，出款广播与查证都走 http_base 指向的 TonAPI。
+type TonChainConfig struct {
+	// HTTPBase 是 TonAPI v2 的基址；留空按 network 取公开基址。
+	HTTPBase string `json:"http_base"`
+	// APIKey 是 TonAPI 的访问令牌（Authorization: Bearer）。
+	APIKey        string `json:"api_key"`
+	WalletAddress string `json:"wallet_address"`
+	// WalletVersion 是热钱包合约版本名（v5R1/v4R2/v3R2/v4R1/v3R1）；留空由驱动探测。
+	WalletVersion string `json:"wallet_version"`
+	// SubWalletID 是 v3/v4 系钱包的子账户号。指针：0 是合法取值，
+	// 用 0 表达「没配」会把显式配 0 的人推到默认值上，那派生出来的是另一个账户。
+	SubWalletID *uint32 `json:"sub_wallet_id"`
+	PrivateKey  string  `json:"private_key"`
+	// FeeLimit 是本单之外必须仍留在热钱包里的余量，单位纳吨。
+	FeeLimit   int64 `json:"fee_limit"`
+	TimeoutSec int   `json:"timeout_sec"`
+	MaxRetries int   `json:"max_retries"`
+}
+
+// BscChainConfig 是 bsc.usdt.chain：BSC 的 JSON-RPC 接入点与热钱包。
+type BscChainConfig struct {
+	// RPC 是 BSC 节点的 JSON-RPC 基址（出款广播、查回执、balanceOf 都走它）。
+	RPC string `json:"rpc"`
+	// ChainID 是 EIP-155 的链 ID（BSC 主网 56，Chapel 97）。它与 RPC 对不上时
+	// 签名会被节点拒——这个错必须在启动期看得见，不能等第一笔出款。
+	ChainID       int64  `json:"chain_id"`
+	WalletAddress string `json:"wallet_address"`
+	PrivateKey    string `json:"private_key"`
+	// GasLimit 是 ERC-20 transfer 的 gas 上限，<=0 用驱动缺省。
+	GasLimit uint64 `json:"gas_limit"`
+	// GasPriceGwei 是 gas 价下限（gwei）。节点报价超过它的 2 倍时拒单——
+	// 没有上限的 gas 价等于把「本单可能烧掉多少钱」交给节点说了算。
+	GasPriceGwei float64 `json:"gas_price_gwei"`
+	TimeoutSec   int     `json:"timeout_sec"`
+	MaxRetries   int     `json:"max_retries"`
+}
+
+// SolChainConfig 是 sol.usdt.chain：Solana 的 RPC 接入点与热钱包。
+type SolChainConfig struct {
+	// RPC 是 Solana 节点的 JSON-RPC 基址。
+	RPC string `json:"rpc"`
+	// APIKey 是 RPC 服务商的访问令牌（如 Helius/QuickNode）；公开节点留空。
+	APIKey        string `json:"api_key"`
+	WalletAddress string `json:"wallet_address"`
+	// PrivateKey 是热钱包私钥（base58 或 64 字节数组的 hex），由钩子注入。
+	PrivateKey string `json:"private_key"`
+	// Commitment 是查单/查余额使用的确认级别（processed/confirmed/finalized）；
+	// 留空按 confirmed——finalized 在出款回执上往往要等很久。
+	Commitment string `json:"commitment"`
+	// PriorityFeeMicrolamports 是 ComputeBudget 的优先费（micro-lamports/CU）。
+	// <=0 不附 ComputeBudget 指令。
+	PriorityFeeMicrolamports uint64 `json:"priority_fee_microlamports"`
+	TimeoutSec               int    `json:"timeout_sec"`
+	MaxRetries               int    `json:"max_retries"`
 }
 
 // Lua 配置
@@ -763,7 +753,7 @@ func (c *ModelAPIConfig) StrategyValid() bool {
 }
 
 // NftConfig 是 NFT 通道段。开不开有两处真相、必须都开：
-// ref 留空即本通道不启用；nft_sdks 段 enable 不为 "on" 即凭证不可用（口径对 PaySDKRef 注释）。
+// ref 留空即本通道不启用；nft_sdks 段 enable 不为 "on" 即凭证不可用（口径对 NftSDKRef 注释）。
 //
 // 配置结构体刻意留在 config 包而不是 nft 包：本包的 Cfg 要引用它，而 nft 只认与配置无关的
 // ProviderOptions（端点表也是以取值函数的形式交进去）。若把结构体挪到 nft，
@@ -779,7 +769,7 @@ type NftConfig struct {
 	Contract string `json:"contract"`
 }
 
-// NftSDKConfig 是一段 NFT SDK 配置：字段形态对 PaySDKConfig 同构复刻，类型独立。
+// NftSDKConfig 是一段 NFT SDK 配置：字段形态对 ChannelSupplierConfig 同构复刻，类型独立。
 // 与资金段的差别只在 driver 名空间与 endpoints 键集（§6.3）。
 //
 // Enable 必须显式为 "on" 才启动。资产通道的新配置段默认不启动，比「写了 base_url 就
@@ -851,7 +841,7 @@ func (p *NftSDKConfig) Account(alias string) (*NftMerchantAccount, error) {
 }
 
 // NftMerchantAccount 是「我方在 NFT 供应商侧的一个签发主体」。
-// 余额类事实不写在这里（由查询动作当场读回），抄进来就是会过期的假账（PayMerchantAccount 论证同构）。
+// 余额类事实不写在这里（由查询动作当场读回），抄进来就是会过期的假账（ChannelAccountConfig 论证同构）。
 type NftMerchantAccount struct {
 	Enable     string `json:"enable"`      // 显式 "on"
 	MerchantID string `json:"merchant_id"` // 进报文并参与签名域；是路由信息不是凭证，可进日志

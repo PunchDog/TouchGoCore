@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// TestZaloEnabled 总闸口径与 whatsapp/pay_sdks 一致：只有显式 on（大小写不敏感）才算开，
+// TestZaloEnabled 总闸口径与 whatsapp/ChannelSupplierConfig 一致：只有显式 on（大小写不敏感）才算开，
 // nil 接收者安全，缺省不开。
 func TestZaloEnabled(t *testing.T) {
 	cases := []struct {
@@ -147,10 +147,14 @@ func TestZaloUserAgentLanguageTrim(t *testing.T) {
 
 // TestZaloLegacyConfigRejected 旧 zalo.login/templates 必须在启动期报错，
 // 不能被 encoding/json 静默丢弃。
+//
+// login 的类型是 json.RawMessage（旧供应商 SDK 表已整张删除，这里只需要「这个键
+// 出现过没有」），所以字面量直接给原始 JSON 字节；`{}` 这种空对象也算写了——
+// 它同样说明部署还在按旧形态配置。
 func TestZaloLegacyConfigRejected(t *testing.T) {
 	cases := []*ZaloConfig{
-		{Login: &PaySDKRef{SDK: "supplier_zalo"}},
-		{Login: &PaySDKRef{}},
+		{Login: json.RawMessage(`{"sdk":"supplier_zalo"}`)},
+		{Login: json.RawMessage(`{}`)},
 		{Templates: map[string]string{"auth_verify": "tpl"}},
 	}
 	for _, zc := range cases {

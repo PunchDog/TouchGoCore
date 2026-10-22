@@ -82,16 +82,16 @@ func TestIsValidSolanaAddress(t *testing.T) {
 	}
 }
 
-// TestSOLRuleRegistered 本包必须把 SOL 规则登记进 pay 的注册表。
-func TestSOLRuleRegistered(t *testing.T) {
-	rule, ok := pay.ChainRuleFor(pay.CurrencySOL)
-	if !ok {
-		t.Fatalf("SOL 规则未登记，已登记的是 %v", pay.CurrenciesWithRules())
-	}
-	if err := rule.CheckAddress(&pay.PayOrder{Address: solBytes1To32}); err != nil {
+// TestSOLRuleChecksAddress 本包的规则直接以 solRule 存在，不再经 pay 的注册表。
+//
+// 注册表已在 P5 随 pay 瘦身删除：规则只服务「本包自己那条链」，改成包内函数调用后
+// 就不存在「忘了登记 ⇒ 未登记即放行」这条静默通道了。
+func TestSOLRuleChecksAddress(t *testing.T) {
+	rule := solRule{}
+	if err := rule.CheckAddress(&pay.PayOrder{To: &pay.Party{Address: solBytes1To32}}); err != nil {
 		t.Errorf("合法地址被拒: %v", err)
 	}
-	if err := rule.CheckAddress(&pay.PayOrder{Address: solBytes1To32[:42]}); err == nil {
+	if err := rule.CheckAddress(&pay.PayOrder{To: &pay.Party{Address: solBytes1To32[:42]}}); err == nil {
 		t.Error("长度不足的地址未被拦下")
 	}
 }
@@ -99,19 +99,16 @@ func TestSOLRuleRegistered(t *testing.T) {
 // TestSOLRuleRejectsMemo Solana 原生与 SPL 转账都没有 TON comment 那种认款机制：
 // 填了就拒而不是忽略。
 func TestSOLRuleRejectsMemo(t *testing.T) {
-	rule, ok := pay.ChainRuleFor(pay.CurrencySOL)
-	if !ok {
-		t.Fatal("SOL 规则未登记")
-	}
+	rule := solRule{}
 	if err := rule.CheckMemo(&pay.PayOrder{}); err != nil {
 		t.Errorf("不带备注被拒: %v", err)
 	}
 	for _, memo := range []string{"123", " 12 ", "复转到交易所"} {
-		if err := rule.CheckMemo(&pay.PayOrder{Memo: memo}); err == nil {
+		if err := rule.CheckMemo(&pay.PayOrder{To: &pay.Party{Memo: memo}}); err == nil {
 			t.Errorf("备注 %q 未被拦下", memo)
 		}
 	}
-	if err := rule.CheckMemo(&pay.PayOrder{Memo: "   "}); err != nil {
+	if err := rule.CheckMemo(&pay.PayOrder{To: &pay.Party{Memo: "   "}}); err != nil {
 		t.Errorf("纯空白备注被当成有值: %v", err)
 	}
 }
@@ -125,7 +122,7 @@ func TestPayoutInterfaceStaysWired(t *testing.T) {
 	var _ func(context.Context, string) (*pay.PayResult, error) = SolQuery
 	var _ func(context.Context, *pay.AccountQuery) (*pay.AccountInfo, error) = SolAccount
 
-	o := &pay.PayOrder{OrderNo: "O1", Amount: 1000000000, Address: solBytes1To32}
+	o := &pay.PayOrder{OrderNo: "O1", Amount: 1000000000, To: &pay.Party{Address: solBytes1To32}}
 	cases := []struct {
 		name string
 		run  func() error

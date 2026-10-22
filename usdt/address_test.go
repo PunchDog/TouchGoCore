@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"touchgocore/pay"
+	"touchgocore/tron"
 )
 
 // TRON 地址夹具：官方 USDT-TRC20 合约，以及用 20 字节账户哈希现算校验和造出的几个。
@@ -22,8 +23,8 @@ const (
 )
 
 // 本文件的用例都只走导出符号：地址判定走 usdt.IsValidTRONAddress（转发 tron），
-// 规则走 pay 的注册表。装配期的合约/网络校验用例（newClient 那两个）跟着实现
-// 搬到了 tron/usdt_test.go。
+// 规则直接取 tron.TRONRule——P5 删了 pay 的链规则注册表后，规则只以包内类型存在。
+// 装配期的合约/网络校验用例（newClient 那两个）跟着实现搬到了 tron/usdt_test.go。
 
 func TestIsValidTRONAddress(t *testing.T) {
 	cases := []struct {
@@ -61,49 +62,43 @@ func TestIsValidTRONAddress(t *testing.T) {
 	}
 }
 
-// TestTRC20RuleRejectsBadAddressBeforeSending USDT 侧规则在注册表里，且判法与链侧一致。
+// TestTRC20RuleRejectsBadAddressBeforeSending USDT 侧规则与链侧是同一份实现。
 //
-// 登记点合并后这条是本包存在的意义所在：宿主只链接 usdt（不直接引 tron）时，
-// 规则仍要生效——usdt 包 import tron 就是为了把那份 init 链进来。
+// usdt 包 import tron 就是为了这个：宿主只链接 usdt（不直接引 tron）时，
+// 地址规则仍要生效——规则是函数调用，不是进程级登记。
 func TestTRC20RuleRejectsBadAddressBeforeSending(t *testing.T) {
-	rule, ok := pay.ChainRuleFor(pay.CurrencyUSDT)
-	if !ok {
-		t.Fatal("USDT 的收款端规则没登记，本包可能没被链进测试二进制")
-	}
+	rule := tron.TRONRule{}
 	// 空地址放行是规则本层的口径：非空检查只在提现侧，由 pay.CheckOrder 负责。
-	if err := rule.CheckAddress(&pay.PayOrder{Address: ""}); err != nil {
+	if err := rule.CheckAddress(&pay.PayOrder{To: &pay.Party{Address: ""}}); err != nil {
 		t.Errorf("空地址被拒: %v", err)
 	}
-	if err := rule.CheckAddress(&pay.PayOrder{Address: tronRangeAcct}); err != nil {
+	if err := rule.CheckAddress(&pay.PayOrder{To: &pay.Party{Address: tronRangeAcct}}); err != nil {
 		t.Errorf("合法地址被拒: %v", err)
 	}
 	for _, bad := range []string{tronBogusChecksum, "UQAAAQIDBAUGBwgJCgsMDQ4PEBESExQVFhcY", "0x0000"} {
-		if err := rule.CheckAddress(&pay.PayOrder{Address: bad}); err == nil {
+		if err := rule.CheckAddress(&pay.PayOrder{To: &pay.Party{Address: bad}}); err == nil {
 			t.Errorf("非法地址 %s 未被拦下", bad)
 		}
 	}
 	// 报错文案带原地址便于定位，但不得带密钥。
-	err := rule.CheckAddress(&pay.PayOrder{Address: tronBogusChecksum})
+	err := rule.CheckAddress(&pay.PayOrder{To: &pay.Party{Address: tronBogusChecksum}})
 	if err == nil || strings.Contains(err.Error(), testSecret) {
 		t.Errorf("报错文案不安全或未给出: %v", err)
 	}
 }
 
 func TestTRC20RuleRejectsMemo(t *testing.T) {
-	rule, ok := pay.ChainRuleFor(pay.CurrencyTRX)
-	if !ok {
-		t.Fatal("TRX 规则已移交 tron 包登记（地址规则归属链包）；usdt 经 tron 的薄包装依赖它，这里没登记说明接线断了")
-	}
+	rule := tron.TRONRule{}
 	if err := rule.CheckMemo(&pay.PayOrder{}); err != nil {
 		t.Errorf("不带备注被拒: %v", err)
 	}
 	for _, memo := range []string{"123", " 12 ", "复转到交易所"} {
-		if err := rule.CheckMemo(&pay.PayOrder{Memo: memo}); err == nil {
+		if err := rule.CheckMemo(&pay.PayOrder{To: &pay.Party{Memo: memo}}); err == nil {
 			t.Errorf("TRC20 侧的备注 %q 未被拦下", memo)
 		}
 	}
 	// 纯空白按「没有备注」处理：真正不发出去的那一步在 NewOrderRequest 的 trim。
-	if err := rule.CheckMemo(&pay.PayOrder{Memo: "   "}); err != nil {
+	if err := rule.CheckMemo(&pay.PayOrder{To: &pay.Party{Memo: "   "}}); err != nil {
 		t.Errorf("纯空白备注被当成有值: %v", err)
 	}
 }
@@ -115,10 +110,10 @@ func TestUsdtRejectsBadChainFieldsWithoutSending(t *testing.T) {
 	startWith(t, payCfg(url, allEndpoints()))
 	recorded()
 
-	if _, err := UsdtWithdraw(nil, &pay.PayOrder{OrderNo: "O9", Amount: 10, Address: tronRangeAcct, Memo: "8890"}); err == nil {
+	if _, err := UsdtWithdraw(nil, &pay.PayOrder{OrderNo: "O9", Amount: 10, To: &pay.Party{Address: tronRangeAcct, Memo: "8890"}}); err == nil {
 		t.Fatal("TRC20 带备注的提现应当被拒")
 	}
-	if _, err := UsdtWithdraw(nil, &pay.PayOrder{OrderNo: "O8", Amount: 10, Address: "TAddr1"}); err == nil {
+	if _, err := UsdtWithdraw(nil, &pay.PayOrder{OrderNo: "O8", Amount: 10, To: &pay.Party{Address: "TAddr1"}}); err == nil {
 		t.Fatal("格式不对的收款地址应当被拒")
 	}
 	if n := len(f.seen()); n != 0 {
@@ -130,7 +125,7 @@ func TestUsdtRejectsBadChainFieldsWithoutSending(t *testing.T) {
 	// 纯空白备注按「没有备注」处理：门禁不该因为它把钱拦下。
 	// 出款已改为本地签名上链，这里断言的是「过了前置校验」而不是「供应商收到了报文」——
 	// 节点是夹具里的本地不可达地址，所以到链上网关这一步才失败。
-	if _, err := UsdtWithdraw(nil, &pay.PayOrder{OrderNo: "O7", Amount: 10, Address: tronRangeAcct, Memo: "  "}); err == nil {
+	if _, err := UsdtWithdraw(nil, &pay.PayOrder{OrderNo: "O7", Amount: 10, To: &pay.Party{Address: tronRangeAcct, Memo: "  "}}); err == nil {
 		t.Fatal("链上出款在节点不可达时应当报错")
 	} else if strings.Contains(err.Error(), "备注") || strings.Contains(err.Error(), "memo") {
 		t.Fatalf("空白备注被门禁当成有值拦下了: %v", err)

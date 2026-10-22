@@ -16,7 +16,7 @@ func TestStartNilCfgDoesNotPanic(t *testing.T) {
 	UsdtStart(corectx.WithCfg(context.Background(), nil))
 	UsdtStart(corectx.WithCfg(context.Background(), &config.Cfg{}))
 	UsdtStart(nil)
-	UsdtStart(corectx.WithCfg(context.Background(), &config.Cfg{Usdt: &config.UsdtConfig{}}))
+	UsdtStart(corectx.WithCfg(context.Background(), &config.Cfg{Tron: &config.TronConfig{Usdt: &config.TronUsdtConfig{}}}))
 	if _, err := UsdtQuery(nil, "O1"); err == nil {
 		t.Fatal("未启动时查询应当被拒")
 	}
@@ -30,8 +30,8 @@ func TestStartNilCfgDoesNotPanic(t *testing.T) {
 // 它们的超时口径由链上网关自己管）。
 func TestTimeoutAndRetryDefaults(t *testing.T) {
 	cfg := payCfg("https://pay.invalid", map[string]string{pay.EndpointAccount: "/api/account"})
-	cfg.PaySDks[testSection].TimeoutSec = 0
-	cfg.PaySDks[testSection].MaxRetries = -1
+	cfg.Tron.Usdt.TimeoutSec = 0
+	cfg.Tron.Usdt.MaxRetries = -1
 	startWith(t, cfg)
 	// 域名不可解析：一次请求 + 默认重试次数后返回错误即可，不 panic 也不无限等待。
 	if _, err := UsdtAccount(nil, nil); err == nil {

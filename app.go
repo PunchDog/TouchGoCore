@@ -267,9 +267,12 @@ func (app *App) registerServices() {
 		// 不影响前面任何服务起来。
 		&whatsappService{},
 		&zaloService{},
-		&facebookService{},
-		&instagramService{},
 		&usdtService{},
+		// BSC 排在 usdt 之后：两条链各读自己那一段、各持自己的台账与连接，
+		// 顺序上只有「都晚于 telegram」这个共同约束（回执广播的订阅方先就位）。
+		&bscService{},
+		// SOL 同理排在 BSC 之后：独立配置段、独立台账、独立接入点。
+		&solService{},
 		&nftService{},
 		&ginService{},
 		&modelAPIService{},

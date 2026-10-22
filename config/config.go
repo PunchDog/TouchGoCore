@@ -13,34 +13,28 @@ import (
 )
 
 type Cfg struct {
-	Redis     *RedisConfig     `json:"redis"`
-	MySql     *MySqlDBConfig   `json:"mysql"`
-	Postgre   *PostgreDBConfig `json:"postgres"`
-	Mongo     *MongoDBConfig   `json:"mongo"`
-	Cache     *CacheConfig     `json:"cache"`      // 两级缓存（Redis+DB 回源）；nil=不启用
-	Ws        *WebsocketConfig `json:"ws"`         //websocket启动模式:off不启动;:1234启动监听详细配置
-	LuaConfig *LuaConfig       `json:"lua_config"` // Lua 详细配置,如果没有就不启动lua
-	LogLevel  string           `json:"log_level"`  //日志等级，off为不开,其次为INFO,DEBUG,WARN,ERROR
-	MapPath   string           `json:"map_path"`   //地图配置位置
-	Web       *WebConfig       `json:"web"`        //web配置
-	Rpc       *RpcConfig       `json:"rpc"`        // gRPC 配置
-	Telegram  *TelegramConfig  `json:"telegram"`   //telegram配置
-	Whatsapp  *WhatsappConfig  `json:"whatsapp"`   //WhatsApp 通道（消息）配置，资金链路已删除
-	Zalo      *ZaloConfig      `json:"zalo"`       //Zalo 通道（zcago 协议直连，Postgres 会话库）配置
-	Facebook  *FacebookConfig  `json:"facebook"`   //Facebook 通道（登录）配置，资金链路已删除
-	Instagram *InstagramConfig `json:"instagram"`  //Instagram 通道（登录）配置，资金链路已删除
-	Usdt      *UsdtConfig      `json:"usdt"`       //USDT(TRC20) 通道（提现/账户查询）配置
-	Nft       *NftConfig       `json:"nft"`        // NFT 资产通道（查询持有/详情/铸造/转账/对账）配置
-	// PaySDks 是资金 SDK 集中登记表，键是 SDK 段名；usdt.provider 与
-	// facebook.login / instagram.login 各段用 {sdk, account} 引用这里的一段。
-	// Zalo 已改由 zcago 协议直连，不再引用这张表。
-	// 凭证只在这里出现一次——两条社交通道尤其需要这条：它们和资金通道常常共用同一家
-	// 供应商，凭证抄四份必然改漏一处。
-	PaySDks  map[string]*PaySDKConfig `json:"pay_sdks"`
-	NftSDks  map[string]*NftSDKConfig `json:"nft_sdks"`  // NFT SDK 集中登记表，键是段名；nft.provider 用 {sdk, account} 引用这里的一段
-	Server   *ServerConfig            `json:"server"`    // 服务器全局配置
-	Metrics  *MetricsConfig           `json:"metrics"`   // Prometheus 监控配置
-	ModelAPI *ModelAPIConfig          `json:"model_api"` // 模型API接入配置（OpenAI 兼容接口）
+	Redis     *RedisConfig             `json:"redis"`
+	MySql     *MySqlDBConfig           `json:"mysql"`
+	Postgre   *PostgreDBConfig         `json:"postgres"`
+	Mongo     *MongoDBConfig           `json:"mongo"`
+	Cache     *CacheConfig             `json:"cache"`      // 两级缓存（Redis+DB 回源）；nil=不启用
+	Ws        *WebsocketConfig         `json:"ws"`         //websocket启动模式:off不启动;:1234启动监听详细配置
+	LuaConfig *LuaConfig               `json:"lua_config"` // Lua 详细配置,如果没有就不启动lua
+	LogLevel  string                   `json:"log_level"`  //日志等级，off为不开,其次为INFO,DEBUG,WARN,ERROR
+	MapPath   string                   `json:"map_path"`   //地图配置位置
+	Web       *WebConfig               `json:"web"`        //web配置
+	Rpc       *RpcConfig               `json:"rpc"`        // gRPC 配置
+	Telegram  *TelegramConfig          `json:"telegram"`   //telegram配置
+	Whatsapp  *WhatsappConfig          `json:"whatsapp"`   //WhatsApp 通道（消息）配置，资金链路已删除
+	Zalo      *ZaloConfig              `json:"zalo"`       //Zalo 通道（zcago 协议直连，Postgres 会话库）配置
+	Tron      *TronConfig              `json:"tron"`       //TRON 链通道集合（当前只有 tron.usdt）
+	Bsc       *BscConfig               `json:"bsc"`        //BSC 链通道集合（当前只有 bsc.usdt）
+	Sol       *SolConfig               `json:"sol"`        //Solana 链通道集合（当前只有 sol.usdt）
+	Nft       *NftConfig               `json:"nft"`        // NFT 资产通道（查询持有/详情/铸造/转账/对账）配置
+	NftSDks   map[string]*NftSDKConfig `json:"nft_sdks"`   // NFT SDK 集中登记表，键是段名；nft.provider 用 {sdk, account} 引用这里的一段
+	Server    *ServerConfig            `json:"server"`     // 服务器全局配置
+	Metrics   *MetricsConfig           `json:"metrics"`    // Prometheus 监控配置
+	ModelAPI  *ModelAPIConfig          `json:"model_api"`  // 模型API接入配置（OpenAI 兼容接口）
 	//其他配置
 	Other interface{} `json:"other_data"` //其他配置,需要自行传入想要的数据模型
 }

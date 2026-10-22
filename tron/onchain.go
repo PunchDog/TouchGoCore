@@ -48,18 +48,18 @@ type signFunc func(tx *core.Transaction) (*core.Transaction, error)
 type onchainChannel struct {
 	gw       chainGateway
 	sign     signFunc
-	opt      pay.ProviderOptions
-	chain    *pay.ChainOptions
+	opt      channelOptions
+	chain    *chainConfig
 	ledger   *ledger.Ledger
 	wallet   string
-	supplier pay.Channel // 可为 nil：只上链不接供应商时，账户查询就地拒绝
+	supplier accountQuerier // 可为 nil：只上链不接供应商时，账户查询就地拒绝
 	nowFn    func() time.Time
 }
 
-func newOnchainChannel(opt pay.ProviderOptions) (pay.Channel, error) {
+func newOnchainChannel(opt channelOptions) (chainChannel, error) {
 	chain := opt.Chain
 	if chain == nil {
-		return nil, fmt.Errorf("通道[%s]的驱动 %s 需要 pay_sdks.<段>.chain（节点与热钱包地址）", opt.Name, opt.Driver)
+		return nil, fmt.Errorf("通道[%s]的驱动 %s 需要 tron.usdt.chain（节点与热钱包地址）", opt.Name, opt.Driver)
 	}
 	if strings.TrimSpace(chain.Node) == "" {
 		return nil, fmt.Errorf("通道[%s]的 chain.node 为空，出款不知道该广播给哪个节点", opt.Name)
@@ -97,11 +97,10 @@ func newOnchainChannel(opt pay.ProviderOptions) (pay.Channel, error) {
 	}
 	// 供应商侧可选：没配 base_url 与端点表时不硬要——纯自托管部署确实没有供应商账户查询链路。
 	if strings.TrimSpace(opt.BaseURL) != "" && opt.Endpoint != nil {
-		// 交出去的那一份必须摘掉 Chain：通用驱动看到 chain 配置会当场拒（那条闸是为了
-		// 拦「配了 chain 却没换驱动名」，而这里正是同一份配置被两个实现各取所需）。
+		// 交出去的那一份必须摘掉 Chain：账户客户端不消费链上接入点，两者各取所需。
 		supOpt := opt
 		supOpt.Chain = nil
-		sup, err := pay.NewProvider(supOpt)
+		sup, err := newAccountClient(supOpt)
 		if err != nil {
 			return nil, fmt.Errorf("通道[%s]装配供应商侧失败（账户查询仍需要它）: %w", opt.Name, err)
 		}
@@ -118,7 +117,7 @@ func softSigner(key *btcec.PrivateKey) signFunc {
 }
 
 // buildGateway 建接入点：gRPC 是正门，REST 只做读侧兜底。
-func buildGateway(chain *pay.ChainOptions, opt pay.ProviderOptions) (chainGateway, error) {
+func buildGateway(chain *chainConfig, opt channelOptions) (chainGateway, error) {
 	grpcGW, err := newGRPCGateway(chain.Node, chain.APIKey, chain.Timeout, chain.PlaintextNode)
 	if err != nil {
 		return nil, err
@@ -229,6 +228,9 @@ func isReadFallbackWorthwhile(err error) bool {
 }
 
 // Driver 返回驱动标记。
+//
+// 它不在 chainChannel 接口里：驱动名只用于日志与错误定位，登记表消失之后
+// 没有人再靠它找实现，留着接口方法只会让「窄接口」变成一个可以往上堆无关方法的开口。
 func (c *onchainChannel) Driver() string { return c.opt.Driver }
 
 // MerchantID 返回配置里的商户号；链上通道没有商户概念，它只是这段配置的定位信息。
@@ -258,7 +260,15 @@ func (c *onchainChannel) Withdraw(ctx context.Context, o *pay.PayOrder) (*pay.Pa
 	if err := pay.CheckOrder(o); err != nil {
 		return nil, err
 	}
-	if err := pay.CheckChainRules(o); err != nil {
+	// 收款方性质先过：银行代付/商户号收款本包发不了，必须在地址解析之前就给出
+	// 「走错了通道」而不是「地址不合法」。
+	if err := pay.CheckTarget(o, pay.WithdrawTarget{Wallet: true}); err != nil {
+		return nil, err
+	}
+	if err := c.checkFrom(o); err != nil {
+		return nil, err
+	}
+	if err := checkOrderAddress(o); err != nil {
 		return nil, err
 	}
 	if err := c.checkAsset(o); err != nil {
@@ -276,12 +286,29 @@ func (c *onchainChannel) Withdraw(ctx context.Context, o *pay.PayOrder) (*pay.Pa
 	return res, nil
 }
 
+// checkFrom 钉住「这一单的出款方只能是本通道的热钱包」。
+//
+// From 留空表示用通道配置的默认出款方（就是 c.wallet）；填了就必须与它逐字相等。
+// 不相等时拒单而不是忽略：本仓只有这一个钱包的私钥，写别的地址出去只会在签名
+// 那一步失败——而那时组包已经算过一遍 gas，白烧一次。
+func (c *onchainChannel) checkFrom(o *pay.PayOrder) error {
+	if o == nil || o.From == nil {
+		return nil
+	}
+	from := strings.TrimSpace(o.From.Address)
+	if from == "" || from == c.wallet {
+		return nil
+	}
+	return fmt.Errorf("通道[%s]的默认出款方是热钱包 %s，这一单却指定了 %s：本仓只持有那一个钱包的私钥",
+		c.opt.Name, c.wallet, from)
+}
+
 // checkAsset 钉住「这一单发的确实是本通道配置的那张合约、那张网」。
 func (c *onchainChannel) checkAsset(o *pay.PayOrder) error {
 	if c.chain.Contract == "" {
 		return fmt.Errorf("通道[%s]未配置代币合约（chain 侧无 contract、通道段也没给出），链上出款拒绝", c.opt.Name)
 	}
-	if net := strings.TrimSpace(o.Network); net != "" && !strings.EqualFold(net, c.chain.Network) {
+	if net := strings.TrimSpace(o.To.Network); net != "" && !strings.EqualFold(net, c.chain.Network) {
 		return fmt.Errorf("通道[%s]配的是 %s 网络的合约 %s，这一单却写着 %s：换网就是换币，不在这里替他做决定",
 			c.opt.Name, c.chain.Network, c.chain.Contract, net)
 	}
@@ -295,6 +322,14 @@ func (c *onchainChannel) withdrawLocked(ctx context.Context, o *pay.PayOrder) (*
 	orderNo := strings.TrimSpace(o.OrderNo)
 	entry, found := c.ledger.Get(orderNo)
 	now := c.nowFn()
+
+	// 同一单号二次提交时收端必须一致：单号是幂等键，拿同一个号发往另一个地址，
+	// 要么是上游把两笔单搞混了，要么是想借幂等位改收款方——两种都不能往下走。
+	// 逐字比（不做大小写归一）：TRON 的 base58 大小写不同就是另一个地址。
+	if found && strings.TrimSpace(entry.To) != strings.TrimSpace(o.To.Address) {
+		return nil, fmt.Errorf("订单号 %s 已在台账里且收款地址是 %s，这一单却写着 %s：同一幂等键不得改收款方",
+			orderNo, entry.To, strings.TrimSpace(o.To.Address))
+	}
 
 	switch {
 	case found && entry.Terminal():
@@ -327,7 +362,7 @@ func (c *onchainChannel) withdrawLocked(ctx context.Context, o *pay.PayOrder) (*
 	if err := c.precheckFunds(ctx, o, feeLimit); err != nil {
 		return nil, err
 	}
-	tx, err := c.gw.buildTransfer(ctx, c.wallet, o.Address, c.chain.Contract, o.Amount, feeLimit)
+	tx, err := c.gw.buildTransfer(ctx, c.wallet, strings.TrimSpace(o.To.Address), c.chain.Contract, o.Amount, feeLimit)
 	if err != nil {
 		return nil, &pay.ProviderError{Channel: c.opt.Name, Code: "build_rejected", Msg: c.redact(err.Error()), Retryable: true}
 	}
@@ -356,7 +391,7 @@ func (c *onchainChannel) prepare(o *pay.PayOrder, tx *core.Transaction) (*ledger
 		OrderNo:     strings.TrimSpace(o.OrderNo),
 		TxID:        txID,
 		RawTx:       raw,
-		To:          strings.TrimSpace(o.Address),
+		To:          strings.TrimSpace(o.To.Address),
 		Contract:    c.chain.Contract,
 		Amount:      o.Amount,
 		FeeLimit:    c.feeLimit(),

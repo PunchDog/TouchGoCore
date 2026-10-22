@@ -56,7 +56,7 @@ var _ tonGateway = (*tonAPIGateway)(nil)
 //
 // http_base 留空时按网络取 TonAPI 的公开基址；配了就用它（自建或代理出去的同一套接口）。
 // api_key 留空即匿名：实测匿名可用但会被限流，限流在本网关里判不确定而不是判失败。
-func newTonAPIGateway(chain *pay.ChainOptions) (*tonAPIGateway, error) {
+func newTonAPIGateway(chain *chainConfig) (*tonAPIGateway, error) {
 	base := strings.TrimSpace(chain.HTTPBase)
 	if base == "" {
 		if pay.IsTestnet(chain.Network) {

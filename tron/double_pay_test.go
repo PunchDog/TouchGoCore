@@ -156,8 +156,8 @@ func newTestChannel(gw chainGateway, j ledger.Journal, sign signFunc) *onchainCh
 	return &onchainChannel{
 		gw:     gw,
 		sign:   sign,
-		opt:    pay.ProviderOptions{Name: "usdt", Driver: DriverTronGrid},
-		chain:  &pay.ChainOptions{Node: "grpc.example:50051", WalletAddress: tronRangeAcct, Contract: tronOfficialUSDT, Network: pay.NetworkMainnet, APIKey: fakeAPIKey, PrivateKey: fakePrivKey},
+		opt:    channelOptions{Name: "usdt", Driver: DriverTronGrid},
+		chain:  &chainConfig{Node: "grpc.example:50051", WalletAddress: tronRangeAcct, Contract: tronOfficialUSDT, Network: pay.NetworkMainnet, APIKey: fakeAPIKey, PrivateKey: fakePrivKey},
 		ledger: led,
 		wallet: tronRangeAcct,
 		nowFn:  func() time.Time { return testClock },
@@ -174,7 +174,7 @@ func buildableTx() *core.Transaction {
 }
 
 func order() *pay.PayOrder {
-	return &pay.PayOrder{OrderNo: "WD-001", Amount: 3_000_000_000, Currency: pay.CurrencyUSDT, Address: tronAllZeroAcct}
+	return &pay.PayOrder{OrderNo: "WD-001", Amount: 3_000_000_000, Currency: pay.CurrencyUSDT, To: &pay.Party{Address: tronAllZeroAcct}}
 }
 
 func sameRaw(a, b []byte) bool {
@@ -232,7 +232,7 @@ func TestPreparedEntryRebroadcastsIdenticalBytes(t *testing.T) {
 	gw := &fakeGateway{buildTx: buildableTx()}
 	ch := newTestChannel(gw, nil, c.signer())
 
-	tx, err := gw.buildTransfer(context.Background(), ch.wallet, order().Address, ch.chain.Contract, order().Amount, ch.feeLimit())
+	tx, err := gw.buildTransfer(context.Background(), ch.wallet, order().To.Address, ch.chain.Contract, order().Amount, ch.feeLimit())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -421,7 +421,7 @@ func TestRebuildAfterLedgerLossLooksUpChainFirst(t *testing.T) {
 	c := &counters{}
 	o := order()
 	gw := &fakeGateway{buildTx: buildableTx(), outbound: []outboundTransfer{{
-		TxID: strings.Repeat("ab", 32), To: o.Address, Amount: o.Amount, TimestampMS: testClock.UnixMilli(),
+		TxID: strings.Repeat("ab", 32), To: o.To.Address, Amount: o.Amount, TimestampMS: testClock.UnixMilli(),
 	}}}
 	ch := newTestChannel(gw, nil, c.signer())
 
@@ -660,12 +660,12 @@ func TestWithdrawGatesRunBeforeAnyChainCall(t *testing.T) {
 		return o
 	}
 	cases := map[string]*pay.PayOrder{
-		"收款地址校验和不过": mutate(func(o *pay.PayOrder) { o.Address = tronBogusChecksum }),
-		"带了备注":      mutate(func(o *pay.PayOrder) { o.Memo = "order ref" }),
-		"网络与通道不符":   mutate(func(o *pay.PayOrder) { o.Network = pay.NetworkShasta }),
+		"收款地址校验和不过": mutate(func(o *pay.PayOrder) { o.To.Address = tronBogusChecksum }),
+		"带了备注":      mutate(func(o *pay.PayOrder) { o.To.Memo = "order ref" }),
+		"网络与通道不符":   mutate(func(o *pay.PayOrder) { o.To.Network = pay.NetworkShasta }),
 		"币种不是 USDT": mutate(func(o *pay.PayOrder) { o.Currency = pay.CurrencyTRX }),
 		"金额为 0":     mutate(func(o *pay.PayOrder) { o.Amount = 0 }),
-		"收款地址为空":    mutate(func(o *pay.PayOrder) { o.Address = "" }),
+		"收款地址为空":    mutate(func(o *pay.PayOrder) { o.To.Address = "" }),
 	}
 	for name, o := range cases {
 		gw := &fakeGateway{buildTx: buildableTx()}
@@ -699,18 +699,15 @@ func TestNoSecretsInAnyOutcome(t *testing.T) {
 	}
 }
 
-// TestDriverRegisteredUnderOwnName 驱动名登记在本包，配置换个 driver 就换资金路径。
-func TestDriverRegisteredUnderOwnName(t *testing.T) {
-	found := false
-	for _, d := range pay.Drivers() {
-		if d == DriverTronGrid {
-			found = true
-		}
+// TestAssemblyRejectsHalfConfiguredChannel 装配是包内直接构造，没有注册表可漏；
+// 但「半成品通道」这道闸必须还在：缺 chain 或缺口私钥时就地拒，不能返回一个
+// 只会在第一笔出款时炸的实例。
+func TestAssemblyRejectsHalfConfiguredChannel(t *testing.T) {
+	if _, err := newOnchainChannel(channelOptions{Name: "usdt", Driver: DriverTronGrid}); err == nil {
+		t.Fatal("缺 chain 选项时必须拒绝装配，不能返回半成品通道")
 	}
-	if !found {
-		t.Fatalf("驱动 %s 未登记，可用驱动: %v", DriverTronGrid, pay.Drivers())
-	}
-	if _, err := pay.OpenDriver(DriverTronGrid, pay.ProviderOptions{Name: "usdt"}); err == nil {
-		t.Fatal("缺 chain 选项时驱动必须拒绝装配，不能返回半成品通道")
+	if _, err := newOnchainChannel(channelOptions{Name: "usdt", Driver: DriverTronGrid,
+		Chain: &chainConfig{Node: "grpc.example:50051", WalletAddress: tronRangeAcct}}); err == nil {
+		t.Fatal("空私钥必须拒绝装配")
 	}
 }

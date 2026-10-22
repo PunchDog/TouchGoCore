@@ -67,7 +67,7 @@ func SignMD5(secret string, values ...string) string {
 // retryableCodes 登记「可以原单重发」的供应商业务错误码。
 //
 // 空表是刻意的：文档没到位之前，任何业务码一律按不可重试处理（7eb7b89 口径的 nft 版）。
-// ADR-6：不复刻 pay.RetryableCodes 的裸导出 Deprecated 面——nft 无历史包袱，从第一天
+// ADR-6：不复刻 pay 旧版裸导出白名单的 Deprecated 面——nft 无历史包袱，从第一天
 // 只暴露下面三个带锁入口，race 面根本不建立。
 var retryableCodes = map[string]struct{}{}
 
@@ -88,7 +88,7 @@ var doubtCodes = map[string]struct{}{
 // SetRetryableCodes 登记「可以原单重发」的错误码（带锁写入，可重复调用）。空串与首尾空白
 // 归一后跳过；受理存疑类码（doubtCodes）硬拒。
 //
-// 警示（§5.5，7eb7b89 教训逐字沿用 pay/provider.go:62-68）：Mint/Transfer（strict 路径）
+// 警示（§5.5，7eb7b89 教训与出款通道的同一条）：Mint/Transfer（strict 路径）
 // 白名单严禁纳入 502/504 这类网关状态码——502=请求可能已被供应商受理、只是回执没穿回来，
 // 受理状态未知；把「未知」当「失败」原单重发就是二次铸造/双花转账。
 // 同理，任何「不能证明请求未被受理」的码都不得登记。
@@ -146,7 +146,7 @@ type ExtraField struct {
 	Value string
 }
 
-// ProviderOptions 是构造一个通道供应商客户端所需的全部输入（对 pay.ProviderOptions 同构）。
+// ProviderOptions 是构造一个通道供应商客户端所需的全部输入（与出款通道的装配输入同构）。
 //
 // Endpoint 是个取值函数而不是 map：配置结构体留在 config 包（否则成环），
 // 装配层把 (*config.NftSDKConfig).Endpoint 直接传进来即可（ADR-1）。
@@ -701,8 +701,8 @@ type TokenData struct {
 // NormalizeStatus 把供应商状态词映射到本包的四态。
 //
 // 映射不到的一律算 UNKNOWN，而不是 PENDING：PENDING 会让上游以为「再等等就有」而停止
-// 对账，FAILED 会诱发重下单，只有 UNKNOWN 会把它推到核对路径上（词表对 pay/provider.go:585-596
-// 同构复刻，理由逐字沿用 pay 注释）。
+// 对账，FAILED 会诱发重下单，只有 UNKNOWN 会把它推到核对路径上（词表与出款通道
+// 归一口径一致：未登记一律 UNKNOWN，不许滞到 ACTIVE 侧）。
 func NormalizeStatus(raw string) string {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
 	case "1", "ok", "success", "succeeded", "paid", "complete", "completed", "successed":
@@ -717,8 +717,7 @@ func NormalizeStatus(raw string) string {
 }
 
 // Result 把回执载荷归一成 NftResult。载荷读不出状态时给 UNKNOWN 而不是报错：
-// 请求已经发出去了，此刻报错会让上游以为「没发过」，从而重发同一张单
-// （pay/provider.go:598-628 论证同构复刻）。
+// 请求已经发出去了，此刻报错会让上游以为「没发过」，从而重发同一张单。
 func (p *Provider) Result(data json.RawMessage, orderNo string) *NftResult {
 	res := &NftResult{OrderNo: orderNo, Status: StatusUnknown}
 	if len(data) == 0 {

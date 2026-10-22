@@ -2,9 +2,11 @@ package telegram
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -51,7 +53,7 @@ func TestPayoutNoCfgRefusesEveryFacade(t *testing.T) {
 	prev := runCtx()
 	defer setRunCtx(prev)
 
-	order := &pay.PayOrder{OrderNo: "O1", Amount: 1, Address: tonAcctBounceable}
+	order := &pay.PayOrder{OrderNo: "O1", Amount: 1, To: &pay.Party{Address: tonAcctBounceable}}
 	for _, cfg := range []*config.Cfg{nil, {}, {Telegram: &config.TelegramConfig{}}} {
 		refuseAll(t, corectx.WithCfg(context.Background(), cfg), order)
 	}
@@ -104,7 +106,7 @@ func TestPayoutCallsDoNotAffectBot(t *testing.T) {
 		runTimeMu.Unlock()
 	}()
 
-	refuseAll(t, nil, &pay.PayOrder{OrderNo: "O1", Amount: 1, Address: tonAcctBounceable})
+	refuseAll(t, nil, &pay.PayOrder{OrderNo: "O1", Amount: 1, To: &pay.Party{Address: tonAcctBounceable}})
 
 	if got := globalBot.Load(); got != bot {
 		t.Fatalf("资金门面调用把 Bot 摘掉了: got=%v", got)
@@ -145,7 +147,7 @@ func TestPayoutFacadeKeepsBotConfigSnapshot(t *testing.T) {
 	}))
 	before := telegramRunCtx.Load()
 
-	order := &pay.PayOrder{OrderNo: "O1", Amount: 1, Address: tonAcctBounceable}
+	order := &pay.PayOrder{OrderNo: "O1", Amount: 1, To: &pay.Party{Address: tonAcctBounceable}}
 	refuseAll(t, nil, order)
 	refuseAll(t, context.Background(), order)
 
@@ -166,7 +168,7 @@ func TestPayoutInterfaceStaysWired(t *testing.T) {
 	var _ func(context.Context, string) (*pay.PayResult, error) = TonQuery
 	var _ func(context.Context, *pay.AccountQuery) (*pay.AccountInfo, error) = TonAccount
 
-	o := &pay.PayOrder{OrderNo: "O1", Amount: 10, Address: tonAcctBounceable}
+	o := &pay.PayOrder{OrderNo: "O1", Amount: 10, To: &pay.Party{Address: tonAcctBounceable}}
 	cases := []struct {
 		name string
 		run  func() error
@@ -197,29 +199,64 @@ func TestTonStartWithoutConfigLeavesChannelDown(t *testing.T) {
 		TonStop(context.Background())
 	}()
 
-	orders := []*pay.PayOrder{{OrderNo: "O1", Amount: 1, Address: tonAcctBounceable}}
+	orders := []*pay.PayOrder{{OrderNo: "O1", Amount: 1, To: &pay.Party{Address: tonAcctBounceable}}}
 	cases := []struct {
 		name string
 		cfg  *config.Cfg
 	}{
 		{"无 telegram 段", &config.Cfg{}},
 		{"telegram 段没有 ton", &config.Cfg{Telegram: &config.TelegramConfig{BotToken: "1:x"}}},
-		{"ton 段存在但没引用 SDK", &config.Cfg{Telegram: &config.TelegramConfig{
+		{"ton 段存在但没开", &config.Cfg{Telegram: &config.TelegramConfig{
 			Ton: &config.TonChannelConfig{}}}},
-		{"ton 引用了一个不存在的 SDK 段", &config.Cfg{Telegram: &config.TelegramConfig{
-			Ton: &config.TonChannelConfig{Provider: &config.PaySDKRef{SDK: "no_such_section"}}}}},
 		{"jetton 被填了", &config.Cfg{Telegram: &config.TelegramConfig{
 			Ton: &config.TonChannelConfig{
-				Provider: &config.PaySDKRef{SDK: "supplier_x", Account: "default"},
-				Jetton:   tonAcctBounceable}}}},
+				ChannelSupplierConfig: config.ChannelSupplierConfig{Enable: "on"},
+				Jetton:                tonAcctBounceable}}}},
 		{"network 填了 TonAPI 的自述名", &config.Cfg{Telegram: &config.TelegramConfig{
 			Ton: &config.TonChannelConfig{
-				Provider: &config.PaySDKRef{SDK: "supplier_x"}, Network: "testnet-v4"}}}},
+				Network: "testnet-v4"}}}},
+		{"开了但驱动名不对", &config.Cfg{Telegram: &config.TelegramConfig{
+			Ton: &config.TonChannelConfig{
+				ChannelSupplierConfig: config.ChannelSupplierConfig{Enable: "on", Driver: "generic_md5"}}}}},
+		{"开了但没接入点", &config.Cfg{Telegram: &config.TelegramConfig{
+			Ton: &config.TonChannelConfig{
+				ChannelSupplierConfig: config.ChannelSupplierConfig{
+					Enable: "on", Driver: DriverTonAPI,
+					BaseURL: "https://pay.invalid",
+					Accounts: map[string]*config.ChannelAccountConfig{
+						"default": {Enable: "on", MerchantID: "MCH"},
+					},
+				}}}}},
 	}
 	for _, cs := range cases {
 		TonStart(corectx.WithCfg(context.Background(), cs.cfg))
 		if _, err := TonWithdraw(nil, orders[0]); err == nil || !strings.Contains(err.Error(), "TON 通道未启动") {
 			t.Errorf("%s：通道不该起来，实得 %v", cs.name, err)
 		}
+	}
+}
+
+// TestExampleConfigLeavesTonChannelDown 示例配置本身配不出「已启动」的 TON 通道。
+//
+// 示例是给下游抄的起点：它必须过 Validate（否则用户第一反应是改配置而不是怀疑示例），
+// 但它的 enable 不是 on，所以装配必须停在 ok=false。
+// 少了这条闸，示例里多一句 enable=on 就会被抄进一批会真出款的部署。
+func TestExampleConfigLeavesTonChannelDown(t *testing.T) {
+	raw, err := os.ReadFile("../config/example.json")
+	if err != nil {
+		t.Fatalf("读取 example.json 失败: %v", err)
+	}
+	var cfg config.Cfg
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatalf("example.json 反序列化失败: %v", err)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("example.json 未通过 Validate: %v", err)
+	}
+	if cfg.Telegram == nil || cfg.Telegram.Ton == nil {
+		t.Fatal("示例缺 telegram.ton 段")
+	}
+	if ch, ok := newTonClient(&cfg); ok || ch != nil {
+		t.Fatal("示例配置装配出了 TON 通道：示例不该是「复制示例即出款」的形态")
 	}
 }

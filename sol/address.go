@@ -71,7 +71,10 @@ type solRule struct{}
 
 // CheckAddress 空地址放行：提现侧的非空检查在 pay.CheckOrder 里已经做过，这里只管格式。
 func (solRule) CheckAddress(o *pay.PayOrder) error {
-	addr := strings.TrimSpace(o.Address)
+	if o == nil || o.To == nil {
+		return nil
+	}
+	addr := strings.TrimSpace(o.To.Address)
 	if addr == "" {
 		return nil
 	}
@@ -87,15 +90,16 @@ func (solRule) CheckAddress(o *pay.PayOrder) error {
 // 填了就拒而不是忽略：上游给不许带备注的链填上备注，说明它把 TON 的规则套错了对象，
 // 这种错配在 TON 侧表现为「钱进了别人账户」，在这里静默吞掉等于放它去别处发作。
 func (solRule) CheckMemo(o *pay.PayOrder) error {
-	if strings.TrimSpace(o.Memo) != "" {
+	if o == nil || o.To == nil {
+		return nil
+	}
+	if strings.TrimSpace(o.To.Memo) != "" {
 		return errors.New("Solana 转账不支持备注（memo）：交易所归集账户的认款机制是 TON 那条链的事")
 	}
 	return nil
 }
 
-func init() {
-	// 登记失败只可能是本包把币种名写错了，让它炸在启动期。
-	if err := pay.RegisterChainRule(pay.CurrencySOL, solRule{}); err != nil {
-		panic(err)
-	}
-}
+// 注册表已随 pay 瘦身消失：原来这里的 init() 会把 solRule 登记进 pay 的 ChainRule 表，
+// 而那张表「未登记即放行」——币种名拼错一个字母，地址校验就静默失效。
+// 规则留在包里，P8 的 Solana 链上实现会在自己的出款路径上直接调 solRule（包内
+// checkOrderAddress），不再需要一张全局表来「启用」它。

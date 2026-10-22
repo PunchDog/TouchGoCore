@@ -15,6 +15,7 @@ import (
 
 	"github.com/fbsobreira/gotron-sdk/pkg/proto/core"
 
+	"touchgocore/internal/httpx"
 	"touchgocore/pay"
 )
 
@@ -23,10 +24,10 @@ import (
 // 它刻意不实现写侧（buildTransfer/broadcast 直接返回 errWriteOverHTTP）：兜底路径只负责
 // 把事实读回来，动钱的那一下永远走 gRPC 正门。两条路径都会动钱时，出事不知道该信谁。
 //
-// 出站复用 pay.Client：超时、指数退避、Retry-After 与错误分类已经在那边收口，
-// 链上读操作没有理由再立一套。
+// 出站复用 internal/httpx.Client：超时、指数退避、Retry-After 与错误分类已经在那边
+// 收口，链上读操作没有理由再立一套。
 type httpGateway struct {
-	hc     *pay.Client
+	hc     *httpx.Client
 	apiKey string
 }
 
@@ -44,7 +45,7 @@ func newHTTPGateway(base, apiKey string, timeout time.Duration, maxRetry int) (*
 	if base == "" {
 		return nil, errors.New("链上读侧兜底未配置 http_base")
 	}
-	hc, err := pay.NewClient(pay.Options{
+	hc, err := httpx.NewClient(httpx.Options{
 		Name:    "tron-rest",
 		BaseURL: base,
 		Timeout: timeout, MaxRetry: maxRetry,
@@ -64,7 +65,7 @@ func (h *httpGateway) call(ctx context.Context, method, path string, body []byte
 		values.Set(k, v)
 	}
 	var raw json.RawMessage
-	spec := pay.CallSpec{
+	spec := httpx.CallSpec{
 		Method: method,
 		Path:   path,
 		Body:   body,

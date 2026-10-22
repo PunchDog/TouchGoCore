@@ -4,16 +4,16 @@ import (
 	"context"
 
 	"touchgocore/ai"
+	"touchgocore/bsc"
 	"touchgocore/corectx"
 	"touchgocore/db"
-	"touchgocore/facebook"
 	"touchgocore/gin"
 	lua "touchgocore/golua"
-	"touchgocore/instagram"
 	"touchgocore/localtimer"
 	"touchgocore/mapmanager"
 	"touchgocore/nft"
 	"touchgocore/rpc"
+	"touchgocore/sol"
 	"touchgocore/telegram"
 	"touchgocore/usdt"
 	"touchgocore/websocket"
@@ -119,32 +119,6 @@ func (s *zaloService) Stop(ctx context.Context) error {
 	return nil
 }
 
-// facebookService Facebook 登录与提现门面服务适配器（口径同 zaloService）
-type facebookService struct{}
-
-func (s *facebookService) Name() string { return "facebook" }
-func (s *facebookService) Start(ctx context.Context) error {
-	facebook.FacebookStart(ctx)
-	return nil
-}
-func (s *facebookService) Stop(ctx context.Context) error {
-	facebook.FacebookStop(ctx)
-	return nil
-}
-
-// instagramService Instagram 登录与提现门面服务适配器（口径同 zaloService）
-type instagramService struct{}
-
-func (s *instagramService) Name() string { return "instagram" }
-func (s *instagramService) Start(ctx context.Context) error {
-	instagram.InstagramStart(ctx)
-	return nil
-}
-func (s *instagramService) Stop(ctx context.Context) error {
-	instagram.InstagramStop(ctx)
-	return nil
-}
-
 // usdtService USDT(TRC20) 提现/账户查询服务适配器
 type usdtService struct{}
 
@@ -155,6 +129,38 @@ func (s *usdtService) Start(ctx context.Context) error {
 }
 func (s *usdtService) Stop(ctx context.Context) error {
 	usdt.UsdtStop(ctx)
+	return nil
+}
+
+// bscService BSC(BEP20 USDT) 出款/查单/链上余额服务适配器
+//
+// 与 usdt 服务并列而不是合并：两条链的配置段、故障面与启停时间都彼此无关，
+// 合并成一个 Service 会让「BSC 的 RPC 不通」连带停掉 TRON 那条本来能用的通道。
+type bscService struct{}
+
+func (s *bscService) Name() string { return "bsc" }
+func (s *bscService) Start(ctx context.Context) error {
+	bsc.BscStart(ctx)
+	return nil
+}
+func (s *bscService) Stop(ctx context.Context) error {
+	bsc.BscStop(ctx)
+	return nil
+}
+
+// solService SOL(SPL USDT) 出款/查单/链上余额服务适配器
+//
+// 与 usdt / bsc 并列而不是合并：三条链的配置段、故障面与启停时间都彼此无关，
+// 合并成一个 Service 会让「SOL 的 RPC 不通」连带停掉另外两条本来能用的通道。
+type solService struct{}
+
+func (s *solService) Name() string { return "sol" }
+func (s *solService) Start(ctx context.Context) error {
+	sol.SolStart(ctx)
+	return nil
+}
+func (s *solService) Stop(ctx context.Context) error {
+	sol.SolStop(ctx)
 	return nil
 }
 

@@ -2,16 +2,19 @@ package tron
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"testing"
 
 	"touchgocore/config"
 	"touchgocore/corectx"
+	"touchgocore/internal/httpx"
 	"touchgocore/pay"
 	"touchgocore/util"
 )
@@ -21,11 +24,10 @@ import (
 // usdt 包只剩转调，摸不到这些符号，也就测不到「引用指不通」「合约没进签名域」这一整类错误。
 
 // USDT 侧夹具与 tron_test.go 的 TRX 夹具刻意分开设名（usdt 前缀）：两套配置的
-// SDK 段名、商户号、合约值即便暂时相同，语义也是一个说 USDT、一个说 TRX，
+// 商户号、合约值即便暂时相同，语义也是一个说 USDT、一个说 TRX，
 // 合并命名会让「改一边忘另一边」看起来像两边都改过了。
 const (
 	usdtTestSecret   = "TEST_SECRET_KEY"
-	usdtTestSection  = "usdt_test_a"
 	usdtTestAccount  = "default"
 	usdtMerchantID   = "MCH-TEST"
 	usdtTestContract = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
@@ -58,26 +60,25 @@ func usdtRecorded() []*pay.PayResult {
 	return got
 }
 
-// usdtPayCfg 组一份「pay_sdks 登记一段 + usdt 段引用它」的完整配置。
+// usdtPayCfg 组一份完整的内联形态配置：供应商字段、币种事实、链上接入点都写在 tron.usdt 一段里。
 //
-// 通道段只留 sdk/account 两个名字，其余全在 SDK 段里：这正是本仓的装配形态，
-// 测试若绕过 pay 装配直接喂 ProviderOptions，就测不到「引用指不通」这一整类错误。
+// 测试必须走真实的装配入口而不是直接喂 ProviderOptions，否则就测不到
+// 「驱动名写错」「商户号点不出来」这一整类错误。
 func usdtPayCfg(baseURL string, endpoints map[string]string) *config.Cfg {
 	return &config.Cfg{
-		PaySDks: map[string]*config.PaySDKConfig{
-			usdtTestSection: {
-				Enable: "on", Driver: DriverTronGrid, BaseURL: baseURL,
-				AppID: "app1", SecretKey: usdtTestSecret, Endpoints: endpoints,
-				Accounts: map[string]*config.PayMerchantAccount{
-					usdtTestAccount: {Enable: "on", MerchantID: usdtMerchantID},
+		Tron: &config.TronConfig{
+			Usdt: &config.TronUsdtConfig{
+				ChannelSupplierConfig: config.ChannelSupplierConfig{
+					Enable: "on", Driver: DriverTronGrid, BaseURL: baseURL,
+					AppID: "app1", SecretKey: usdtTestSecret, Endpoints: endpoints,
+					Accounts: map[string]*config.ChannelAccountConfig{
+						usdtTestAccount: {Enable: "on", MerchantID: usdtMerchantID},
+					},
 				},
-				Chain: usdtChainCfg(),
+				Network:  usdtTestNetwork,
+				Contract: usdtTestContract,
+				Chain:    usdtChainCfg(),
 			},
-		},
-		Usdt: &config.UsdtConfig{
-			Provider: &config.PaySDKRef{SDK: usdtTestSection, Account: usdtTestAccount},
-			Network:  usdtTestNetwork,
-			Contract: usdtTestContract,
 		},
 	}
 }
@@ -94,8 +95,8 @@ const (
 
 // usdtChainCfg 给出链上接入点：节点写死成本地不可达地址即可——构造阶段只建连接对象
 // 不拨号，真正会连节点的用例都由 double_pay_test.go 的假网关驱动。
-func usdtChainCfg() *config.PayChainConfig {
-	return &config.PayChainConfig{
+func usdtChainCfg() *config.TronChainConfig {
+	return &config.TronChainConfig{
 		Node: "127.0.0.1:50051", TLS: "off", WalletAddress: usdtTestWallet,
 		PrivateKey: usdtTestPrivKey, FeeLimit: 1000,
 	}
@@ -169,32 +170,31 @@ func usdtAllEndpoints() map[string]string {
 	}
 }
 
-// TestUsdtNewClientFailClosed 引用指不通的链路一律不启动：SDK 段没开、商户账户没点名、
-// 驱动标记写错，都只会在供应商侧留下验签失败，本地却看起来一切正常。
+// TestUsdtNewClientFailClosed 配置指不通的链路一律不启动：通道段没开、驱动名写错、
+// 商户账户点不出来、密钥/私钥没注入，只会在供应商侧留下验签失败，本地却看起来一切正常。
 func TestUsdtNewClientFailClosed(t *testing.T) {
 	full := func() *config.Cfg { return usdtPayCfg("https://pay.invalid", nil) }
 	cases := []struct {
 		name   string
 		mutate func(*config.Cfg)
 	}{
-		{"没有 usdt 段", func(c *config.Cfg) { c.Usdt = nil }},
-		{"通道段没引用 SDK", func(c *config.Cfg) { c.Usdt.Provider = nil }},
-		{"引用的段不存在", func(c *config.Cfg) { c.Usdt.Provider.SDK = "ghost" }},
-		{"SDK 段没开", func(c *config.Cfg) { c.PaySDks[usdtTestSection].Enable = "off" }},
-		{"缺驱动标记", func(c *config.Cfg) { c.PaySDks[usdtTestSection].Driver = "" }},
-		{"驱动名没登记", func(c *config.Cfg) { c.PaySDks[usdtTestSection].Driver = "no_such_driver" }},
+		{"没有 tron.usdt 段", func(c *config.Cfg) { c.Tron = nil }},
+		{"通道段没开", func(c *config.Cfg) { c.Tron.Usdt.Enable = "off" }},
+		{"缺驱动标记", func(c *config.Cfg) { c.Tron.Usdt.Driver = "" }},
+		{"驱动名没登记", func(c *config.Cfg) { c.Tron.Usdt.Driver = "no_such_driver" }},
 		{"多账户没点名", func(c *config.Cfg) {
-			c.PaySDks[usdtTestSection].Accounts["reserve"] = &config.PayMerchantAccount{Enable: "on", MerchantID: "M2"}
-			c.Usdt.Provider.Account = ""
+			c.Tron.Usdt.Accounts["reserve"] = &config.ChannelAccountConfig{Enable: "on", MerchantID: "M2"}
+			c.Tron.Usdt.AccountID = ""
 		}},
-		{"商户账户停用", func(c *config.Cfg) { c.PaySDks[usdtTestSection].Accounts[usdtTestAccount].Enable = "off" }},
-		{"缺签名密钥", func(c *config.Cfg) { c.PaySDks[usdtTestSection].SecretKey = "" }},
-		{"缺链上接入点", func(c *config.Cfg) { c.PaySDks[usdtTestSection].Chain = nil }},
-		{"链上缺节点", func(c *config.Cfg) { c.PaySDks[usdtTestSection].Chain.Node = "" }},
-		{"链上缺出款地址", func(c *config.Cfg) { c.PaySDks[usdtTestSection].Chain.WalletAddress = "" }},
-		{"没注入私钥", func(c *config.Cfg) { c.PaySDks[usdtTestSection].Chain.PrivateKey = "" }},
+		{"商户账户停用", func(c *config.Cfg) { c.Tron.Usdt.Accounts[usdtTestAccount].Enable = "off" }},
+		{"缺商户账户", func(c *config.Cfg) { c.Tron.Usdt.Accounts = nil }},
+		{"缺签名密钥", func(c *config.Cfg) { c.Tron.Usdt.SecretKey = "" }},
+		{"缺链上接入点", func(c *config.Cfg) { c.Tron.Usdt.Chain = nil }},
+		{"链上缺节点", func(c *config.Cfg) { c.Tron.Usdt.Chain.Node = "" }},
+		{"链上缺出款地址", func(c *config.Cfg) { c.Tron.Usdt.Chain.WalletAddress = "" }},
+		{"没注入私钥", func(c *config.Cfg) { c.Tron.Usdt.Chain.PrivateKey = "" }},
 		{"私钥与出款地址不是同一个账户", func(c *config.Cfg) {
-			c.PaySDks[usdtTestSection].Chain.WalletAddress = tronFFAcct
+			c.Tron.Usdt.Chain.WalletAddress = tronFFAcct
 		}},
 	}
 	for _, cs := range cases {
@@ -204,14 +204,14 @@ func TestUsdtNewClientFailClosed(t *testing.T) {
 			t.Errorf("%s 不应启动，实得 ok=%v", cs.name, ok)
 		}
 	}
-	// 端点表为空但引用齐备：装配成功，但任何操作都应在发请求之前被拒。
+	// 端点表为空但其余齐备：装配成功，但任何操作都应在发请求之前被拒。
 	if _, ok := newUSDTClient(full()); !ok {
-		t.Error("引用齐备时应当启动")
+		t.Error("字段齐备时应当启动")
 	}
 	// 没配 base_url 时照样能起：链上出款不依赖供应商，但商户账户查询必须就地拒绝，
 	// 不能拿着一个 nil 客户端去发请求。
 	noSupplier := full()
-	noSupplier.PaySDks[usdtTestSection].BaseURL = ""
+	noSupplier.Tron.Usdt.BaseURL = ""
 	noClient, ok := newUSDTClient(noSupplier)
 	if !ok || noClient == nil {
 		t.Fatal("纯自托管（不配供应商）应当允许装配链上出款")
@@ -221,18 +221,16 @@ func TestUsdtNewClientFailClosed(t *testing.T) {
 	}
 	// 只有一个账户时允许不点名；多个账户时点名即可启用备用商户号。
 	cfg := full()
-	cfg.Usdt.Provider.Account = ""
+	cfg.Tron.Usdt.AccountID = ""
 	if _, ok := newUSDTClient(cfg); !ok {
 		t.Error("唯一账户时 account 留空应当可启动")
 	}
 	cfg = full()
-	cfg.PaySDks[usdtTestSection].Accounts["reserve"] = &config.PayMerchantAccount{Enable: "on", MerchantID: "MCH-RESERVE"}
-	cfg.Usdt.Provider.Account = "reserve"
-	c, ok := newUSDTClient(cfg)
-	if !ok {
-		t.Fatal("点名备用账户后应当可启动")
+	cfg.Tron.Usdt.Accounts["reserve"] = &config.ChannelAccountConfig{Enable: "on", MerchantID: "MCH-RESERVE"}
+	cfg.Tron.Usdt.AccountID = "reserve"
+	if _, ok := newUSDTClient(cfg); !ok {
+		t.Error("点名备用账户后应当可启动")
 	}
-	_ = c
 }
 
 // TestUsdtOrderDefaultsFromChainConfig 网络标识与币种缺省由链路配置补齐，
@@ -242,16 +240,16 @@ func TestUsdtOrderDefaultsFromChainConfig(t *testing.T) {
 	if !ok {
 		t.Fatal("装配失败")
 	}
-	o := &pay.PayOrder{OrderNo: "O1", Amount: 1000000, Address: "TAddr1"}
+	o := &pay.PayOrder{OrderNo: "O1", Amount: 1000000, To: &pay.Party{Address: "TAddr1"}}
 	got := usdtRoute.order(c, o)
-	if got.Currency != pay.CurrencyUSDT || got.Network != usdtTestNetwork {
+	if got.Currency != pay.CurrencyUSDT || got.To == nil || got.To.Network != usdtTestNetwork {
 		t.Fatalf("缺省补齐不符: %+v", got)
 	}
-	if o.Currency != "" || o.Network != "" {
+	if o.Currency != "" || o.To.Network != "" {
 		t.Fatalf("就地改了调用方的订单: %+v", o)
 	}
-	other := usdtRoute.order(c, &pay.PayOrder{OrderNo: "O2", Amount: 1, Currency: pay.CurrencyTON, Network: "mainnet"})
-	if other.Currency != pay.CurrencyTON || other.Network != "mainnet" {
+	other := usdtRoute.order(c, &pay.PayOrder{OrderNo: "O2", Amount: 1, Currency: pay.CurrencyTON, To: &pay.Party{Network: "mainnet"}})
+	if other.Currency != pay.CurrencyTON || other.To.Network != "mainnet" {
 		t.Fatalf("显式字段被配置覆盖: %+v", other)
 	}
 }
@@ -264,13 +262,13 @@ func TestUsdtNewClientRejectsBogusContract(t *testing.T) {
 		t.Fatal("夹具合约应当能通过启动校验，否则本用例说明不了任何事")
 	}
 	cfg = usdtPayCfg("https://pay.invalid", nil)
-	cfg.Usdt.Contract = tronBogusChecksum
+	cfg.Tron.Usdt.Contract = tronBogusChecksum
 	if c, ok := newUSDTClient(cfg); ok || c != nil {
 		t.Errorf("校验和不过的合约地址不应让通道启动，实得 ok=%v", ok)
 	}
 	// 原生 TRX 通道留空合约是合法形态。
 	cfg = usdtPayCfg("https://pay.invalid", nil)
-	cfg.Usdt.Contract = ""
+	cfg.Tron.Usdt.Contract = ""
 	if _, ok := newUSDTClient(cfg); !ok {
 		t.Error("合约留空（原生 TRX）应当可启动")
 	}
@@ -281,14 +279,14 @@ func TestUsdtNewClientRejectsBogusContract(t *testing.T) {
 func TestUsdtNewClientRejectsTokenStandardAsNetwork(t *testing.T) {
 	for _, net := range []string{"trc20", "TRC20", "erc20", "bep-20"} {
 		cfg := usdtPayCfg("https://pay.invalid", nil)
-		cfg.Usdt.Network = net
+		cfg.Tron.Usdt.Network = net
 		if c, ok := newUSDTClient(cfg); ok || c != nil {
 			t.Errorf("network=%s 是代币标准不是网络，不该让通道启动，实得 ok=%v", net, ok)
 		}
 	}
 	for _, net := range []string{"", pay.NetworkMainnet, pay.NetworkShasta, pay.NetworkNile, "supplier_custom_net"} {
 		cfg := usdtPayCfg("https://pay.invalid", nil)
-		cfg.Usdt.Network = net
+		cfg.Tron.Usdt.Network = net
 		if _, ok := newUSDTClient(cfg); !ok {
 			t.Errorf("network=%q 应当放行（未知写法不由本包断言），实得 ok=false", net)
 		}
@@ -307,7 +305,7 @@ func TestUsdtWithdrawDoesNotReachSupplier(t *testing.T) {
 	usdtRecorded()
 
 	// 节点是本地不可达地址：出款走到链上网关就会失败，绝不会借用供应商的 HTTP 出口。
-	_, err := UsdtWithdraw(nil, &pay.PayOrder{OrderNo: "O2", Amount: 500, Address: tronFFAcct})
+	_, err := UsdtWithdraw(nil, &pay.PayOrder{OrderNo: "O2", Amount: 500, To: &pay.Party{Address: tronFFAcct}})
 	if err == nil {
 		t.Fatal("链上出款在节点不可达时必须报错，不能假装受理")
 	}
@@ -315,7 +313,7 @@ func TestUsdtWithdrawDoesNotReachSupplier(t *testing.T) {
 		t.Fatalf("提现又回到供应商链路了，发出 %d 次请求", n)
 	}
 	// 前置校验仍然排在触网之前：收款地址不合法的一单连台账都不该进。
-	if _, err := UsdtWithdraw(nil, &pay.PayOrder{OrderNo: "O3", Amount: 500, Address: tronBogusChecksum}); err == nil {
+	if _, err := UsdtWithdraw(nil, &pay.PayOrder{OrderNo: "O3", Amount: 500, To: &pay.Party{Address: tronBogusChecksum}}); err == nil {
 		t.Fatal("校验和不过的收款地址必须被拒")
 	}
 	if n := len(f.seen()); n != 0 {
@@ -376,12 +374,12 @@ func TestUsdtBusinessFailureIsNotRetried(t *testing.T) {
 // 新契约（L3）：Withdraw 严格路径仅 RetryableCodes 白名单内的码可重试，5xx 不再默认 Retryable。
 // 本用例用【虚构业务码 59901】验证白名单机制：登记后该码触发同一张单透明重发。
 // 警示：严禁拿 502/504 这类网关状态码做演示——502=受理状态未知（请求可能已被供应商受理、
-// 只是回执没穿回来），把它登记进提现白名单再原单重发就是双付；详见 pay.SetRetryableCodes 文档。
+// 只是回执没穿回来），把它登记进提现白名单再原单重发就是双付；详见 httpx.SetRetryableCodes 文档。
 func TestUsdtWhitelistedBizCodeRetryIsTransparent(t *testing.T) {
 	// 虚构业务码走带锁入口临时登记，用后即撤，不裸写 map；不用真实网关码（502/504）以免背书双付风险配置。
 	const fakeBizCode = "59901"
-	pay.SetRetryableCodes(fakeBizCode)
-	defer pay.DeleteRetryableCode(fakeBizCode)
+	httpx.SetRetryableCodes(fakeBizCode)
+	defer httpx.DeleteRetryableCode(fakeBizCode)
 
 	f, url := newUsdtSupplier(t)
 	// 供应商以 2xx 包络回一个「明确拒绝、未受理」的业务码——这类码原单重发不会双花，
@@ -391,7 +389,7 @@ func TestUsdtWhitelistedBizCodeRetryIsTransparent(t *testing.T) {
 	// 活闸只能挂在仍然经过 HTTP 的那条路上。
 	f.response["/api/account"] = `{"code":"59901","msg":"供应商明确拒绝，未受理"}`
 	cfg := usdtPayCfg(url, usdtAllEndpoints())
-	cfg.PaySDks[usdtTestSection].MaxRetries = 1
+	cfg.Tron.Usdt.MaxRetries = 1
 	usdtStartWith(t, cfg)
 
 	_, err := UsdtAccount(nil, nil)
@@ -407,14 +405,14 @@ func TestUsdtWhitelistedBizCodeRetryIsTransparent(t *testing.T) {
 	}
 }
 
-// TestUsdtSdkSectionKeyHookInjectsSecret 配置文件里不留密钥：下游按 SDK 段名注册钩子，
-// 装配时注入凭证。与 telegram 包的 BotKey 钩子同源，差别在于键名跟着 SDK 段走。
-func TestUsdtSdkSectionKeyHookInjectsSecret(t *testing.T) {
+// TestUsdtInlineKeyHookInjectsSecret 配置文件里不留密钥：下游按通道段名（tron.usdt）
+// 注册钩子，装配时注入凭证。与 telegram 包的 BotKey 钩子同源，差别在键名不再跟旧表段名走。
+func TestUsdtInlineKeyHookInjectsSecret(t *testing.T) {
 	f, url := newUsdtSupplier(t)
 	cfg := usdtPayCfg(url, usdtAllEndpoints())
-	cfg.PaySDks[usdtTestSection].SecretKey = ""
-	id := util.DefaultCallFunc.Register(util.CallPaySDKMsg+usdtTestSection, func(sk *string) { *sk = usdtTestSecret })
-	defer util.DefaultCallFunc.Unregister(util.CallPaySDKMsg+usdtTestSection, id)
+	cfg.Tron.Usdt.SecretKey = ""
+	id := util.DefaultCallFunc.Register(util.CallPaySDKMsg+inlineUSDTKey, func(sk *string) { *sk = usdtTestSecret })
+	defer util.DefaultCallFunc.Unregister(util.CallPaySDKMsg+inlineUSDTKey, id)
 
 	usdtStartWith(t, cfg)
 	if _, err := UsdtAccount(nil, nil); err != nil {
@@ -481,39 +479,59 @@ func TestUsdtAccountQueryFailureNotReportedAsZero(t *testing.T) {
 	}
 }
 
-// TestUsdtChainRulesRegisteredHere 两个币种的规则都只在本包登记一次。
+// TestUsdtChainRuleLivesInThisPackage 地址规则不再经 pay 的注册表：它就是以
+// TRONRule 形式住在本包的同一个实现，USDT 与 TRX 共用一份判法。
 //
-// 合并前 USDT 登记住在 usdt 包，只链接本包的宿主（以及本包的测试二进制）拿不到
-// USDT 规则，pay.CheckChainRules 便走「未登记即放行」，校验和不过的提现地址能一路发到供应商；
-// 两侧各登记一次又会让同时 import 两个包的下游在启动期 panic。
-func TestUsdtChainRulesRegisteredHere(t *testing.T) {
-	rule, ok := pay.ChainRuleFor(pay.CurrencyUSDT)
-	if !ok {
-		t.Fatalf("USDT 规则未登记，已登记的是 %v", pay.CurrenciesWithRules())
-	}
-	if err := rule.CheckAddress(&pay.PayOrder{Address: ""}); err != nil {
+// 注册表删掉之后，「忘了登记 ⇒ 未登记即放行」这条静默通道不存在了：调用点是
+// checkOrderAddress(o) 的函数调用，漏接就是一个编译错误。
+func TestUsdtChainRuleLivesInThisPackage(t *testing.T) {
+	rule := TRONRule{}
+	if err := rule.CheckAddress(&pay.PayOrder{To: &pay.Party{Address: ""}}); err != nil {
 		t.Errorf("空地址被拒: %v", err)
 	}
-	if err := rule.CheckAddress(&pay.PayOrder{Address: tronRangeAcct}); err != nil {
+	if err := rule.CheckAddress(&pay.PayOrder{To: &pay.Party{Address: tronRangeAcct}}); err != nil {
 		t.Errorf("合法地址被拒: %v", err)
 	}
 	for _, bad := range []string{tronBogusChecksum, "UQAAAQIDBAUGBwgJCgsMDQ4PEBESExQVFhcY", "0x0000"} {
-		if err := rule.CheckAddress(&pay.PayOrder{Address: bad}); err == nil {
+		if err := rule.CheckAddress(&pay.PayOrder{To: &pay.Party{Address: bad}}); err == nil {
 			t.Errorf("非法地址 %s 未被拦下", bad)
 		}
 	}
 	for _, memo := range []string{"123", "复转到交易所"} {
-		if err := rule.CheckMemo(&pay.PayOrder{Memo: memo}); err == nil {
+		if err := rule.CheckMemo(&pay.PayOrder{To: &pay.Party{Memo: memo}}); err == nil {
 			t.Errorf("TRC20 侧的备注 %q 未被拦下", memo)
 		}
 	}
 	// 同一个实现服务两个币种：USDT 与 TRX 的地址形态本来就是一样的。
-	trx, ok := pay.ChainRuleFor(pay.CurrencyTRX)
-	if !ok {
-		t.Fatal("TRX 规则未登记")
-	}
-	addr := &pay.PayOrder{Address: tronBogusChecksum}
+	// 这里钉的是「两币不再各有一份规则」：同一个值经同一份实现判定，结论必须一致。
+	trx := TRONRule{}
+	addr := &pay.PayOrder{To: &pay.Party{Address: tronBogusChecksum}}
 	if (rule.CheckAddress(addr) == nil) != (trx.CheckAddress(addr) == nil) {
 		t.Error("两条币种对同一个地址判法不一致")
+	}
+}
+
+// TestExampleConfigLeavesUsdtChannelDown 示例配置本身配不出「已启动」的 USDT 通道。
+//
+// 示例是给下游抄的起点：它必须过 Validate（否则用户第一反应是改配置而不是怀疑示例），
+// 但它的 enable 不是 on、也没有 provider 引用，所以装配必须停在 ok=false。
+// 少了这条闸，示例里多一句 enable=on 或 provider 就会被抄进一批会真出款的部署。
+func TestExampleConfigLeavesUsdtChannelDown(t *testing.T) {
+	raw, err := os.ReadFile("../config/example.json")
+	if err != nil {
+		t.Fatalf("读取 example.json 失败: %v", err)
+	}
+	var cfg config.Cfg
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatalf("example.json 反序列化失败: %v", err)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("example.json 未通过 Validate: %v", err)
+	}
+	if cfg.Tron == nil || cfg.Tron.Usdt == nil {
+		t.Fatal("示例缺 tron.usdt 段")
+	}
+	if ch, ok := newUSDTClient(&cfg); ok || ch != nil {
+		t.Fatal("示例配置装配出了 USDT 通道：示例不该是「复制示例即出款」的形态")
 	}
 }

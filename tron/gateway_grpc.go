@@ -38,7 +38,7 @@ var errNoTransferListing = errors.New("gRPC 接入点没有转账历史列表接
 
 func newGRPCGateway(node, apiKey string, timeout time.Duration, plaintextNode bool, dialOpts ...grpc.DialOption) (*grpcGateway, error) {
 	if node == "" {
-		return nil, errors.New("链上通道未配置节点接入点（pay_sdks.<段>.chain.node）")
+		return nil, errors.New("链上通道未配置节点接入点（tron.usdt.chain.node）")
 	}
 	if timeout <= 0 {
 		timeout = defaultChainTimeout

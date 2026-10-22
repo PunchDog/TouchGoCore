@@ -171,7 +171,7 @@ func TestLiveTONWalletDerivationAgainstChain(t *testing.T) {
 // 阶段少任一项时本包必须退回「判不了」而不是判失败。
 func TestLiveTONGatewayReadSideParsesRealPayload(t *testing.T) {
 	tonLiveEnabled(t)
-	gw, err := newTonAPIGateway(&pay.ChainOptions{
+	gw, err := newTonAPIGateway(&chainConfig{
 		HTTPBase: tonapi.TonApiURL, Network: pay.NetworkMainnet, Timeout: 45 * time.Second, MaxRetry: 1,
 	})
 	if err != nil {
@@ -237,7 +237,7 @@ func TestLiveTONTestnetWithdrawEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("测试网私钥不可用: %v", err)
 	}
-	gw, err := newTonAPIGateway(&pay.ChainOptions{
+	gw, err := newTonAPIGateway(&chainConfig{
 		HTTPBase: tonapi.TestnetTonApiURL, Network: pay.NetworkTestnet,
 		APIKey: os.Getenv("TONAPI_TOKEN"), Timeout: 45 * time.Second, MaxRetry: 2,
 	})
@@ -271,9 +271,9 @@ func TestLiveTONTestnetWithdrawEndToEnd(t *testing.T) {
 	}
 	c := &tonChannel{
 		gw: gw,
-		opt: pay.ProviderOptions{Name: "ton", Driver: DriverTonAPI,
+		opt: channelOptions{Name: "ton", Driver: DriverTonAPI,
 			MerchantID: "live-testnet"},
-		chain: &pay.ChainOptions{HTTPBase: tonapi.TestnetTonApiURL, Network: pay.NetworkTestnet,
+		chain: &chainConfig{HTTPBase: tonapi.TestnetTonApiURL, Network: pay.NetworkTestnet,
 			APIKey: os.Getenv("TONAPI_TOKEN"), WalletAddress: acct.ToRaw(),
 			PrivateKey: keyHex, FeeLimitSun: 20_000_000, Timeout: 45 * time.Second, MaxRetry: 2},
 		led:    ledger.New("ton"),
@@ -286,8 +286,8 @@ func TestLiveTONTestnetWithdrawEndToEnd(t *testing.T) {
 	c.sign = c.defaultSign
 
 	orderNo := fmt.Sprintf("LIVE-%d", time.Now().Unix())
-	res, err := c.Withdraw(ctx, &pay.PayOrder{OrderNo: orderNo, Currency: pay.CurrencyTON,
-		Network: pay.NetworkTestnet, Amount: amount, Address: dest, Memo: "live verify"})
+	res, err := c.Withdraw(ctx, &pay.PayOrder{OrderNo: orderNo, Currency: pay.CurrencyTON, Amount: amount,
+		To: &pay.Party{Kind: pay.PartyWallet, Network: pay.NetworkTestnet, Address: dest, Memo: "live verify"}})
 	if err != nil {
 		t.Fatalf("提现就地失败: %v", err)
 	}

@@ -13,7 +13,7 @@ import (
 // 双付场景才能离线复现——用假网关把广播打成不确定态，断言这里没有签出第二笔。
 //
 // 未导出的刻意性：通道外部（含下游）不该拿到「直接广播一笔外部消息」的能力，
-// 出款只有 pay.Channel.Withdraw 一个入口。
+// 出款只有 tonChainChannel.Withdraw 一个入口。
 type tonGateway interface {
 	// seqno 读钱包账户当前的序号（下一笔要用的号就是它）。
 	// 未部署的账户由调用方按状态判，不在这里猜 0。

@@ -16,9 +16,8 @@ import (
 // testSecret 是测试内用的签名密钥，与真实凭证无关。
 const testSecret = "TEST_SECRET_KEY"
 
-// testSection / testAccount 是测试里 SDK 段与商户账户的名字。
+// testAccount 是测试里的商户账户名字。
 const (
-	testSection = "test_a"
 	testAccount = "default"
 	merchantID  = "MCH-TEST"
 	// testContract 用官方 USDT-TRC20 合约：它是广播时真正的收端之一，
@@ -56,32 +55,31 @@ func recorded() []*pay.PayResult {
 	return got
 }
 
-// payCfg 组一份「pay_sdks 登记一段 + usdt 段引用它」的完整配置。
+// payCfg 组一份完整的内联形态配置：供应商字段、币种事实、链上接入点都写在 tron.usdt 一段里。
 //
-// 通道段只留 sdk/account 两个名字，其余全在 SDK 段里：这正是本仓的装配形态，
-// 测试若绕过 pay 装配直接喂 ProviderOptions，就测不到「引用指不通」这一整类错误。
+// 测试必须走真实的装配入口而不是直接喂 options 结构，否则就测不到
+// 「驱动名写错」「商户号点不出来」这一整类错误。
 func payCfg(baseURL string, endpoints map[string]string) *config.Cfg {
 	return &config.Cfg{
-		PaySDks: map[string]*config.PaySDKConfig{
-			testSection: {
-				Enable: "on", Driver: tron.DriverTronGrid, BaseURL: baseURL,
-				AppID: "app1", SecretKey: testSecret, Endpoints: endpoints,
-				Accounts: map[string]*config.PayMerchantAccount{
-					testAccount: {Enable: "on", MerchantID: merchantID},
+		Tron: &config.TronConfig{
+			Usdt: &config.TronUsdtConfig{
+				ChannelSupplierConfig: config.ChannelSupplierConfig{
+					Enable: "on", Driver: tron.DriverTronGrid, BaseURL: baseURL,
+					AppID: "app1", SecretKey: testSecret, Endpoints: endpoints,
+					Accounts: map[string]*config.ChannelAccountConfig{
+						testAccount: {Enable: "on", MerchantID: merchantID},
+					},
 				},
+				Network:  testNetwork,
+				Contract: testContract,
 				// USDT 出款恒定直接上链，所以夹具必须带 chain 子段：
 				// 缺它时装配会当场拒绝（那正是「配置写着上链、实际发给别人」的拦点）。
 				// 私钥与地址是一对可公开的测试私钥派生结果，用 gotron-sdk 现算得到。
-				Chain: &config.PayChainConfig{
+				Chain: &config.TronChainConfig{
 					Node: "127.0.0.1:50051", TLS: "off",
 					WalletAddress: testWallet, PrivateKey: testPrivKey,
 				},
 			},
-		},
-		Usdt: &config.UsdtConfig{
-			Provider: &config.PaySDKRef{SDK: testSection, Account: testAccount},
-			Network:  testNetwork,
-			Contract: testContract,
 		},
 	}
 }
@@ -107,7 +105,7 @@ func startWith(t *testing.T, cfg *config.Cfg) {
 func TestOperationsRefuseWhenNotStarted(t *testing.T) {
 	UsdtStop(nil)
 	recorded()
-	if _, err := UsdtWithdraw(nil, &pay.PayOrder{OrderNo: "O1", Amount: 1, Address: "a"}); err == nil {
+	if _, err := UsdtWithdraw(nil, &pay.PayOrder{OrderNo: "O1", Amount: 1, To: &pay.Party{Address: "a"}}); err == nil {
 		t.Error("未启动时提现应当被拒")
 	}
 	if _, err := UsdtQuery(nil, "O1"); err == nil {
@@ -128,14 +126,20 @@ func TestOrderPreChecks(t *testing.T) {
 	// 前置校验应当先于端点判定拦下来。
 	startWith(t, payCfg("https://pay.invalid", nil))
 	recorded()
+	// 收款方整段缺失：断言落在「to 为空」上，而不是旧字段名 address——
+	// 契约断代后空 To 与空地址是两种不同原因，这条闸盯的是前者。
 	if _, err := UsdtWithdraw(nil, &pay.PayOrder{OrderNo: "O1", Amount: 1}); err == nil ||
-		!strings.Contains(err.Error(), "地址") {
-		t.Errorf("提现缺地址未被拦下: %v", err)
+		!strings.Contains(err.Error(), "收款方") {
+		t.Errorf("提现缺收款方未被拦下: %v", err)
 	}
-	if _, err := UsdtWithdraw(nil, &pay.PayOrder{OrderNo: "O1", Amount: 0, Address: "a"}); err == nil {
+	if _, err := UsdtWithdraw(nil, &pay.PayOrder{OrderNo: "O1", Amount: 1, To: &pay.Party{}}); err == nil ||
+		!strings.Contains(err.Error(), "收款") {
+		t.Errorf("收款方整段空白未被拦下: %v", err)
+	}
+	if _, err := UsdtWithdraw(nil, &pay.PayOrder{OrderNo: "O1", Amount: 0, To: &pay.Party{Address: "a"}}); err == nil {
 		t.Error("零金额未被拦下")
 	}
-	if _, err := UsdtWithdraw(nil, &pay.PayOrder{Amount: 1, Address: "a"}); err == nil {
+	if _, err := UsdtWithdraw(nil, &pay.PayOrder{Amount: 1, To: &pay.Party{Address: "a"}}); err == nil {
 		t.Error("空幂等键未被拦下")
 	}
 	if _, err := UsdtQuery(nil, "   "); err == nil {

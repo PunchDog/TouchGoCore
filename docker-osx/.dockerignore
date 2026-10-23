@@ -1,0 +1,11 @@
+# 本镜像自包含: 所有上游仓库在构建期 git clone, 不 COPY 任何本地文件。
+# 保持构建上下文最小化, 防止无关文件进入 build context。
+.git/
+*.md
+docker-compose*.yml
+.env*
+macos-data/
+share/
+*.img
+*.qcow2
+*.dmg

@@ -1,0 +1,66 @@
+# Docker-OSX · macOS Tahoe — 本地实验环境 compose
+#
+# 默认: 无头 QEMU + VNC 5999，适合 Windows/WSL2、Linux 服务器或远程主机。
+# 已包含:
+#   - 文件夹共享: 宿主 ./share <-> guest /Volumes/hostshare (9p)
+#   - USB 透传:   /dev/bus/usb 映射 + USB cgroup 规则；设备参数由 USB_DEVICE 指定
+#
+# GUI:
+#   WSL2/WSLg:
+#     docker compose -f docker-compose.yml -f docker-compose.wslg.yml up --build
+#   Linux X11: 手工加 /tmp/.X11-unix 挂载与 DISPLAY，见 README。
+#
+# 使用: docker compose up --build
+# VNC : localhost:5999（无密码，仅限本机/受信网络）
+#
+# USB 示例 (WSL 先 usbipd attach --wsl --busid <BUSID>):
+#   USB_DEVICE="hostbus=1,hostaddr=5" docker compose up
+#   USB_DEVICE="vendorid=0x05ac,productid=0x12a8" docker compose up
+# USB 设备需在容器启动前 attach，入口脚本会 chown /dev/bus/usb。
+
+services:
+  macos-tahoe:
+    build:
+      context: .
+      args:
+        SIZE: "200G"
+        RANKMIRRORS: ""
+    image: docker-osx-tahoe:latest
+    tty: true
+    stdin_open: true
+    devices:
+      - /dev/kvm:/dev/kvm
+    # 允许容器访问 USB 字符设备 (major 189)；配合下面的 /dev/bus/usb 挂载。
+    device_cgroup_rules:
+      - "c 189:* rwm"
+    ports:
+      - "50922:10022"         # SSH 进 macOS guest
+      - "5900:5900"           # macOS 屏幕共享（guest 内开启后）
+      - "5999:5999"           # QEMU VNC（默认显示方式）
+    volumes:
+      - macos-data:/home/arch/OSX-KVM
+      - ./share:/mnt/hostshare      # 文件夹共享；宿主侧就是项目下的 share/
+      - /dev/bus/usb:/dev/bus/usb   # USB 设备节点
+    environment:
+      SHORTNAME: tahoe
+      SIZE: "200G"            # 仅首次创建系统盘时生效
+      RAM: "8"                # GB，支持 max / half
+      SMP: "4"
+      CORES: "4"
+      CPU: Skylake-Client
+      CPUID_FLAGS: kvm=on,vendor=GenuineIntel,+invtsc,vmware-cpuid-freq=on,-hle,-rtm,+ssse3,+sse4.2,+popcnt,+avx,+aes,+xsave,+xsaveopt,check
+      AUDIO_DRIVER: auto      # 无 PCM 自动 none；WSLg override 使用 pa
+      EXTRA: "-display none -vnc 0.0.0.0:99"
+      GENERATE_UNIQUE: "false"  # 每次启动更换硬件标识；需要时再开启
+      # 文件夹共享 (9p)；guest 内执行: sudo -S mount_9p hostshare
+      SHARE_DIR: /mnt/hostshare
+      SHARE_TAG: hostshare
+      SHARE_SECURITY_MODEL: passthrough
+      # USB: 留空不接；按上方示例设置 USB_DEVICE 后重启容器
+      USB_DEVICE: "${USB_DEVICE:-}"
+      # NOPICKER: "true"        # 已有系统盘时跳过 OpenCore 菜单与安装器下载
+      # OSX_COMMANDS: "sw_vers; uname -a"
+      # KERNEL_ARGS: "-no_compat_check"
+
+volumes:
+  macos-data:

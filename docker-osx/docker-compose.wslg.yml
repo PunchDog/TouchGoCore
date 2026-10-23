@@ -1,0 +1,19 @@
+# WSLg GUI + PulseAudio override
+#
+# 使用:
+#   docker compose -f docker-compose.yml -f docker-compose.wslg.yml up --build
+#
+# 前置条件: Windows 11 / WSL2 已启用 WSLg，且 Docker 运行在 WSL 内。
+# 该 override 会覆盖基础 compose 的无头 VNC，改为 X11 窗口 + WSLg 音频。
+
+services:
+  macos-tahoe:
+    environment:
+      DISPLAY: ":0"
+      AUDIO_DRIVER: "pa"
+      PULSE_SERVER: "unix:/mnt/wslg/runtime-dir/pulse/native"
+      XDG_RUNTIME_DIR: "/mnt/wslg/runtime-dir"
+      EXTRA: ""
+    volumes:
+      - /mnt/wslg/.X11-unix:/tmp/.X11-unix
+      - /mnt/wslg/runtime-dir:/mnt/wslg/runtime-dir

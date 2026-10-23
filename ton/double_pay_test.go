@@ -566,10 +566,11 @@ func TestBounceFlagComesFromOurParser(t *testing.T) {
 	}
 }
 
-// TestReverseLookupBlocksBroadcastAfterJournalLoss 台账丢了先反查：命中就禁止广播。
+// TestReverseLookupBlocksBroadcastAfterJournalLoss 台账丢了先反查：命中只禁止广播。
 //
-// 这是进程内默认台账重启后的兜底。反查不动或取满一页没命中时同样不许发——
-// 「查不到」在这里不等于「没有」。
+// F2：候选只能证明「本账户向本收端发过同额的一笔」，不能证明就是这一单；
+// 因此候选不落账、不查证，结果必须是 UNKNOWN（带候选 txid）。反查不动或
+// 取满一页没命中时同样不许发——「查不到」在这里不等于「没有」。
 func TestReverseLookupBlocksBroadcastAfterJournalLoss(t *testing.T) {
 	o := newTONOrder("WD-8")
 	t0 := tonTestClock.Unix()
@@ -591,11 +592,15 @@ func TestReverseLookupBlocksBroadcastAfterJournalLoss(t *testing.T) {
 		if sign.count() != 0 {
 			t.Errorf("反查命中后又签了一笔（%d 次）", sign.count())
 		}
-		if res.Status == pay.StatusFailed {
-			t.Errorf("已经在链上的那一笔不该被判失败: %+v", res)
+		if res.Status != pay.StatusUnknown {
+			t.Errorf("候选不能说明属于本单，必须回 UNKNOWN，实得 %+v", res)
 		}
-		if _, found := c.led.Get(o.OrderNo); !found {
-			t.Error("反查命中的那一笔没挂回台账，下一次重入还会再赌一遍")
+		if !strings.Contains(res.RawNote, "无法证明") {
+			t.Errorf("回执没有说明候选不能归属本单: %q", res.RawNote)
+		}
+		// 候选绝不能落账：写成 broadcast 后，下一次 query/confirm 会把它结算成 SUCCESS。
+		if _, found := c.led.Get(o.OrderNo); found {
+			t.Error("反查候选被写进了台账，下一次 confirm 会把别人的转账结算成本单成功")
 		}
 	})
 

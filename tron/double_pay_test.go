@@ -419,8 +419,10 @@ func TestPrepareMustBeJournaledBeforeBroadcast(t *testing.T) {
 	}
 }
 
-// TestRebuildAfterLedgerLossLooksUpChainFirst 台账丢了（重启）时，先按收端+金额反查链上，
-// 命中就禁止广播并挂回台账。
+// TestRebuildAfterLedgerLossLooksUpChainFirst 台账丢了（重启）时，先按收端+金额反查链上。
+//
+// F2：命中只能证明「历史上有过同址同额的一笔」，不能证明就是这一单。正确处置是
+// 禁止广播并回 UNKNOWN（带候选 txid），候选不落账、不查证、不结算。
 func TestRebuildAfterLedgerLossLooksUpChainFirst(t *testing.T) {
 	c := &counters{}
 	o := order()
@@ -440,14 +442,17 @@ func TestRebuildAfterLedgerLossLooksUpChainFirst(t *testing.T) {
 		t.Fatalf("反查命中后仍组了笔: 签名 %d、构造 %d", c.calls, gw.buildCalls)
 	}
 	if res.TxHash != gw.outbound[0].TxID {
-		t.Fatalf("结果应带回链上那一笔的 txid，实得 %+v", res)
+		t.Fatalf("结果应带回候选的 txid 供对账，实得 %+v", res)
 	}
-	if res.Status != pay.StatusPending && res.Status != pay.StatusSuccess {
-		t.Fatalf("反查命中后应继续查证，实得 %s", res.Status)
+	if res.Status != pay.StatusUnknown {
+		t.Fatalf("候选不能说明属于本单，必须回 UNKNOWN，实得 %s", res.Status)
 	}
-	// 命中必须落回台账，否则下一次重入还会再赌一遍。
-	if _, found := ch.ledger.Get(o.OrderNo); !found {
-		t.Error("反查命中的那一笔没挂回台账")
+	if !strings.Contains(res.RawNote, "无法证明") {
+		t.Fatalf("回执没有说明候选不能归属本单: %q", res.RawNote)
+	}
+	// 候选绝不能落账：写成 broadcast 后，下一次 query/confirm 会把它结算成 SUCCESS。
+	if _, found := ch.ledger.Get(o.OrderNo); found {
+		t.Error("反查候选被写进了台账，下一次 confirm 会把别人的转账结算成本单成功")
 	}
 }
 

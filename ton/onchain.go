@@ -269,15 +269,19 @@ func (c *tonChannel) withdrawLocked(ctx context.Context, o *pay.PayOrder, orderN
 	}
 
 	if !found {
-		// 没有台账（多半是重启把进程内实现清了）：先向链上反查，命中就禁止广播。
-		if hit, err := c.lookupLedgerByChain(ctx, o, now); err != nil {
+		// 没有台账（多半是重启把进程内实现清了）：先向链上反查。
+		// 命中只禁止广播，不把候选当本单结论：候选 txid 交出去供对账，
+		// 状态保持 UNKNOWN，绝不写台账、绝不调用 confirm。
+		candidate, err := c.lookupLedgerByChain(ctx, o, now)
+		if err != nil {
 			// 查不动不等于没发生：此时广播就是赌一次双付。
 			// 原因要跟着报错一起交出去（「取满一页没命中」和「接入点没答上来」是两种处置），
 			// 但先过一遍抹除——链上错误的原文可能带着凭证。
 			return nil, &pay.ProviderError{Channel: c.opt.Name, Code: "journal_unverified",
 				Msg: "无法确认这一单是否已上过链，已放弃广播: " + c.redact(err.Error()), Retryable: true}
-		} else if hit != nil {
-			return c.confirm(ctx, hit, now)
+		}
+		if candidate != nil {
+			return c.unknown(candidate, "链上反查命中同收端同金额候选，但无法证明属于本单；已停止广播，请对账或注入持久台账"), nil
 		}
 	}
 

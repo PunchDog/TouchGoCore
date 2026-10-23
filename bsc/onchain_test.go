@@ -500,3 +500,30 @@ func TestPrepareRecordsLargeAmountUnits(t *testing.T) {
 		t.Fatalf("int64 兼容金额应饱和，实得 %d", entry.Amount)
 	}
 }
+
+// TestReverseCandidateNeverSettles F2：反查命中同址同额候选时只禁止广播，
+// 候选不落账、不查证，结果必须是 UNKNOWN + 候选 txid。
+func TestReverseCandidateNeverSettles(t *testing.T) {
+	c := newTestChannel(t)
+	o := walletOrder(evmAllLower)
+	txid := "0x" + strings.Repeat("ab", 32)
+	c.reverseLookup = func(context.Context, *pay.PayOrder, orderAsset, time.Time) (*ledger.Entry, error) {
+		return &ledger.Entry{
+			OrderNo: o.OrderNo, TxID: txid, From: testWallet, To: evmAllLower,
+			Contract: evmAllLower, Amount: o.Amount, AmountUnits: "1000000",
+		}, nil
+	}
+	res, err := c.Withdraw(context.Background(), o)
+	if err != nil {
+		t.Fatalf("候选路径不应报错: %v", err)
+	}
+	if res.Status != pay.StatusUnknown || res.TxHash != txid {
+		t.Fatalf("候选必须回 UNKNOWN 并带 txid: %+v", res)
+	}
+	if !strings.Contains(res.RawNote, "无法证明") {
+		t.Fatalf("回执没有说明候选不能归属本单: %q", res.RawNote)
+	}
+	if _, found := c.ledger.Get(o.OrderNo); found {
+		t.Fatal("反查候选被写进了台账，下一次 confirm 会结算成 SUCCESS")
+	}
+}

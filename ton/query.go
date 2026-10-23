@@ -203,11 +203,12 @@ func (c *tonChannel) QueryOrder(ctx context.Context, orderNo string) (*pay.PayRe
 	return c.confirm(ctx, entry, c.nowFn())
 }
 
-// lookupLedgerByChain 在台账查不到时向链上反查「这一单是不是其实已经上过链」。
+// lookupLedgerByChain 在台账查不到时向链上反查「有没有一笔像本单的转出」。
 //
-// 它是进程内默认台账重启后的兜底，不是持久台账的替身：命中条件是本账户发出的、
-// 同一收端、同一金额，两条都对上才算。宁可因为「查不到/查不全」而放弃广播
-// （返回错误，让上游重试一次查证），也不在没查清时赌一次双付。
+// 返回值是**候选**，不是本单的已落账条目：命中只能证明「本账户向本收端发过
+// 同额的一笔」，不能证明那一笔就是这一单（TON 的 memo 也没有参与匹配）。
+// 调用方只能据此禁止广播并回 UNKNOWN，绝不能把它写进台账或交给 confirm——
+// 否则历史上同址同额的另一笔会被结算成本单的 SUCCESS（F2）。
 func (c *tonChannel) lookupLedgerByChain(ctx context.Context, o *pay.PayOrder, now time.Time) (*ledger.Entry, error) {
 	txs, err := c.gw.transactions(ctx, c.acct, tonScanLimit)
 	if err != nil {
@@ -225,26 +226,19 @@ func (c *tonChannel) lookupLedgerByChain(ctx context.Context, o *pay.PayOrder, n
 				continue
 			}
 			if strings.TrimSpace(tx.InMsgHash) == "" {
-				// 认领不上外部消息 hash 的交易不能挂回台账：那等于凭空造一条
-				// 「有据可查但其实没把手」的广播记录，下一次查证会一直 UNKNOWN。
+				// 认领不上外部消息 hash 的交易连候选都不是：无法给出可对账的 txid。
 				continue
 			}
-			entry := &ledger.Entry{
+			// 只构造候选，不 Put：台账一旦落成 broadcast，后续 confirm 会把
+			// 「同收端同金额的任意一笔」读成本单成功的证据。
+			return &ledger.Entry{
 				OrderNo: strings.TrimSpace(o.OrderNo),
 				TxID:    strings.ToLower(strings.TrimSpace(tx.InMsgHash)),
 				From:    c.wallet,
 				To:      strings.TrimSpace(o.To.Address),
 				Amount:  o.Amount,
-				// Contract 留空：原生 TON 没有合约地址这一维，本通道也已在装配期拒掉了 jetton。
-				FeeLimit:    c.feeReserve(),
-				State:       ledger.StateBroadcast,
-				UpdatedAtMS: ledger.NowMS(now),
-				// ExpiresAtMS 留 0：反查回来的已经是在链上的笔，不再有「过期」可言。
-			}
-			if err := c.led.Put(entry); err != nil {
-				return nil, err
-			}
-			return entry, nil
+				// Contract 留空：原生 TON 没有合约地址这一维。
+			}, nil
 		}
 	}
 	if len(txs) >= tonScanLimit && seen == len(txs) {

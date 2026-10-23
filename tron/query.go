@@ -158,11 +158,12 @@ func (c *onchainChannel) QueryOrder(ctx context.Context, orderNo string) (*pay.P
 	return c.confirm(ctx, entry, c.nowFn())
 }
 
-// lookupLedgerByChain 在台账查不到时向链上反查「这一单是不是其实已经上过链」。
+// lookupLedgerByChain 在台账查不到时向链上反查「有没有一笔像本单的转出」。
 //
-// 它是进程内默认台账重启后的兜底，不是持久台账的替身：命中条件是本地址、本合约、
-// 同一收端、同一金额，四条都对上才算。宁可因为「查不到/查不全」而放弃广播
-// （返回错误，让上游重试一次查证），也不在没查清时赌一次双付。
+// 返回值是**候选**，不是本单的已落账条目：命中只能证明「本地址向本收端发过
+// 同额同合约的一笔」，不能证明那一笔就是这一单。调用方只能据此禁止广播并回
+// UNKNOWN，绝不能把它写进台账或交给 confirm——否则历史上同址同额的另一笔会被
+// 结算成本单的 SUCCESS（F2）。真正跨重启的幂等靠下游注入持久 journal。
 func (c *onchainChannel) lookupLedgerByChain(ctx context.Context, o *pay.PayOrder, a orderAsset, now time.Time) (*ledger.Entry, error) {
 	hits, err := c.gw.outboundTransfers(ctx, a.wallet, a.contract, now.Add(-scanWindow).UnixMilli())
 	if err != nil {
@@ -176,16 +177,12 @@ func (c *onchainChannel) lookupLedgerByChain(ctx context.Context, o *pay.PayOrde
 		if strings.TrimSpace(h.TxID) == "" {
 			continue
 		}
-		entry := &ledger.Entry{
+		// 只构造候选，不 Put：台账一旦落成 broadcast，后续 confirm 会把
+		// 「同址同额的任意一笔」读成本单成功的证据。
+		return &ledger.Entry{
 			OrderNo: strings.TrimSpace(o.OrderNo), TxID: strings.TrimSpace(h.TxID),
 			From: a.wallet, To: strings.TrimSpace(o.To.Address), Contract: a.contract, Amount: o.Amount,
-			FeeLimit: c.feeLimit(), State: ledger.StateBroadcast, UpdatedAtMS: ledger.NowMS(now),
-			// ExpiresAtMS 留 0：反查回来的已经是在链上的笔，不再有「过期」可言。
-		}
-		if err := c.ledger.Put(entry); err != nil {
-			return nil, err
-		}
-		return entry, nil
+		}, nil
 	}
 	if len(hits) >= outboundLimit {
 		// 一页取满却未命中：窗口内的转出可能还有没读完的页，「没在这一页里」

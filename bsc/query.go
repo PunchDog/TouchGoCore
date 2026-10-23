@@ -262,11 +262,12 @@ func decodeRawTx(entry *ledger.Entry) (*types.Transaction, error) {
 	return tx, nil
 }
 
-// lookupLedgerByChain 在台账查不到时向链上反查「这一单是不是其实已经上过链」。
+// lookupLedgerByChain 在台账查不到时向链上反查「有没有一笔像本单的转出」。
 //
-// 它是进程内默认台账重启后的兜底，不是持久台账的替身：命中条件是本合约、本钱包、
-// 同一收端、同一金额，四条都对上才算。宁可因为「查不到/查不全」而放弃广播
-// （返回错误，让上游重试一次查证），也不在没查清时赌一次双付。
+// 返回值是**候选**，不是本单的已落账条目：命中只能证明「本钱包向本收端付过
+// 同额同合约的一笔」，不能证明那一笔就是这一单。调用方只能据此禁止广播并回
+// UNKNOWN，绝不能把它写进台账或交给 confirm——否则历史上同址同额的另一笔会被
+// 结算成本单的 SUCCESS（F2）。真正跨重启的幂等靠下游注入持久 journal。
 //
 // 扫描方式：从链头按区块分段往回翻，每段读一次 eth_getLogs，直到这一段的区块时间
 // 早于 72 小时窗口。用区块时间而不是「按平均出块时间估区块数」：BSC 的出块间隔
@@ -306,17 +307,13 @@ func (c *onchainChannel) lookupLedgerByChain(ctx context.Context, o *pay.PayOrde
 			return nil, fmt.Errorf("链上反查在区块 %d–%d 取满 %d 条日志，无法确认本单是否已上过链", low, high, logResultCap)
 		}
 		if hit := pickTransfer(logs, amount); hit != nil {
-			entry := &ledger.Entry{
+			// 只构造候选，不 Put：台账一旦落成 broadcast，后续 confirm 会把
+			// 「同址同额的任意一笔」读成本单成功的证据。
+			return &ledger.Entry{
 				OrderNo: strings.TrimSpace(o.OrderNo), TxID: strings.ToLower(hit.TxHash.Hex()),
 				From: a.wallet.Hex(), To: target.Hex(), Contract: c.opt.Contract,
 				Amount: saturateInt64(amount), AmountUnits: amount.String(),
-				FeeLimit: int64(c.chain.GasLimit), State: ledger.StateBroadcast, UpdatedAtMS: ledger.NowMS(now),
-				// ExpiresAtMS 留 0：反查回来的已经是在链上的笔，不再有「过期」可言。
-			}
-			if err := c.ledger.Put(entry); err != nil {
-				return nil, err
-			}
-			return entry, nil
+			}, nil
 		}
 		if low == 0 {
 			return nil, nil
@@ -338,6 +335,7 @@ func (c *onchainChannel) lookupLedgerByChain(ctx context.Context, o *pay.PayOrde
 // 收端已经由 topic 过滤掉了，这里只比金额：同一收款方在窗口内可能被本钱包付过很多次，
 // 而「同额不同单」在业务上是常态（固定金额的商品），所以命中之后仍要如实返回——
 // 反查只回答「有没有一笔同额同收端的转账」，它本来就是概率性的兜底。
+// 命中只是候选，调用方不得据此写台账或结算，只能禁止广播并回 UNKNOWN。
 func pickTransfer(logs []types.Log, amount *big.Int) *types.Log {
 	want := new(big.Int).Set(amount)
 	for i := range logs {

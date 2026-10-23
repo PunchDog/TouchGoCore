@@ -6,9 +6,11 @@ import (
 	"math"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gagliardetto/solana-go"
 
+	"touchgocore/ledger"
 	"touchgocore/pay"
 )
 
@@ -310,5 +312,39 @@ func TestSolTestChannelFixtures(t *testing.T) {
 	}
 	if c.chain.Timeout != 0 || c.chain.MaxRetry != 0 {
 		t.Errorf("测试通道不应带接入点参数: timeout=%v retry=%d", c.chain.Timeout, c.chain.MaxRetry)
+	}
+}
+
+// TestReverseCandidateNeverSettles F2：反查命中同址同额候选时只禁止广播，
+// 候选不落账、不查证，结果必须是 UNKNOWN + 候选 txid。
+func TestReverseCandidateNeverSettles(t *testing.T) {
+	c := solTestChannel(t)
+	to, err := solana.PublicKeyFromBase58(solBytes1To32)
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := &pay.PayOrder{
+		OrderNo: "SOL-F2", Amount: 600, Currency: pay.CurrencyUSDT,
+		To: &pay.Party{Address: to.String()},
+	}
+	txid := solana.Signature{1, 2, 3}.String()
+	c.reverseLookup = func(context.Context, *pay.PayOrder, orderAsset, time.Time) (*ledger.Entry, error) {
+		return &ledger.Entry{
+			OrderNo: o.OrderNo, TxID: txid, From: c.sign.Address().String(),
+			To: to.String(), Contract: c.opt.Mint, Amount: o.Amount,
+		}, nil
+	}
+	res, err := c.Withdraw(context.Background(), o)
+	if err != nil {
+		t.Fatalf("候选路径不应报错: %v", err)
+	}
+	if res.Status != pay.StatusUnknown || res.TxHash != txid {
+		t.Fatalf("候选必须回 UNKNOWN 并带 txid: %+v", res)
+	}
+	if !strings.Contains(res.RawNote, "无法证明") {
+		t.Fatalf("回执没有说明候选不能归属本单: %q", res.RawNote)
+	}
+	if _, found := c.ledger.Get(o.OrderNo); found {
+		t.Fatal("反查候选被写进了台账，下一次 confirm 会结算成 SUCCESS")
 	}
 }

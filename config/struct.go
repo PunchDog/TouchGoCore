@@ -205,27 +205,10 @@ type TelegramConfig struct {
 	GameBannerUrl   string            `json:"game_banner_url"`
 	GameDescription string            `json:"game_description"`
 	GameToShort     map[string]string `json:"game_to_short"`
-	// Ton 是 TON 资金链路。它与 Bot 长连接共用一段配置但互不牵制：
-	// Bot 起不起来与钱包通道配没配好是两件事，各自的开关各自判（见 TonChannelConfig）。
-	Ton *TonChannelConfig `json:"ton"`
-}
-
-// TonChannelConfig 是 telegram.ton 段：这条 TON 链路自己的供应商字段、面向哪张网、
-// 以及链上接入点与热钱包。
-//
-// P1 起供应商字段内联在本段（ChannelSupplierConfig）：凭证、端点表、商户账户不再
-// 借用集中登记表的某一段，而是与「这条通道用哪张网」写在一起。
-type TonChannelConfig struct {
-	ChannelSupplierConfig
-	// Network 是公链网络标识，取值 mainnet / testnet；留空按主网。
-	// 它同时决定链上驱动连的是哪个接入点默认基址、以及接受哪种带测试网位的地址。
-	Network string `json:"network"`
-	// Jetton 是 jetton 合约（minter）地址，本仓当前**不使用**：出款只发原生 TON。
-	// 填了不会静默忽略——装配期直接拒绝并说明原因，因为「配了 jetton、实际发的是原生币」
-	// 是能把钱发错形状的一类错（见 telegram/ton_onchain.go 与 config/validate.go）。
-	Jetton string `json:"jetton"`
-	// Chain 是 TON 接入点与热钱包（内联形态）。
-	Chain *TonChainConfig `json:"chain"`
+	// TonLegacy 只用于识别旧版 telegram.ton 配置；不要读取。
+	// TON 已迁到顶层 ton.native，保留原始字节是为了让 Validate 明确报迁移错误，
+	// 而不是被 encoding/json 静默丢弃、通道悄悄不启动。
+	TonLegacy json.RawMessage `json:"ton,omitempty"`
 }
 
 // ==================== 通道内联供应商字段（P1 起） ====================
@@ -476,6 +459,35 @@ type SolConfig struct {
 	Usdt *SolUsdtConfig `json:"usdt"`
 }
 
+// TonConfig 是 ton 段：TON 链上的全部通道（当前只有原生 TON）。
+type TonConfig struct {
+	Native *TonNativeConfig `json:"native"`
+}
+
+// TonNativeConfig 是 ton.native 段：原生 TON 通道的全部配置。
+//
+// 与 tron/bsc/sol 的 USDT 段不同，TON 没有供应商 HTTP 字段：出款、查单与
+// 链上余额都只经 chain 指向的 TonAPI。Jetton 留一格只为了 fail-closed：
+// 填了整条通道不启动，避免「配置写着代币、实际按原生币发出去」。
+type TonNativeConfig struct {
+	// Enable 必须显式为 "on" 才启动这条通道。
+	Enable string `json:"enable"`
+	// Driver 是链上驱动标记，必须逐字等于 ton.DriverTonAPI。
+	Driver string `json:"driver"`
+	// Network 是公链网络标识，取值 mainnet / testnet；留空按主网。
+	Network string `json:"network"`
+	// Jetton 是 jetton 合约（minter）地址，本仓当前不使用：出款只发原生 TON。
+	// 填了不会静默忽略——装配期直接拒绝并说明原因。
+	Jetton string `json:"jetton"`
+	// Chain 是 TON 接入点与热钱包。
+	Chain *TonChainConfig `json:"chain"`
+}
+
+// Enabled 该通道是否被显式开启（enable 大小写不敏感的 "on"）。
+func (t *TonNativeConfig) Enabled() bool {
+	return t != nil && strings.EqualFold(strings.TrimSpace(t.Enable), "on")
+}
+
 // TronUsdtConfig 是 tron.usdt 段：USDT-TRC20 通道的全部配置。
 //
 // 供应商字段内联（商户账户查询仍走供应商 HTTP），Network/Contract/Decimals 是本
@@ -561,7 +573,7 @@ type TronChainConfig struct {
 	MaxRetries int `json:"max_retries"`
 }
 
-// TonChainConfig 是 telegram.ton.chain：TON 的接入点与热钱包。
+// TonChainConfig 是 ton.native.chain：TON 的接入点与热钱包。
 //
 // 没有 node/tls：本仓不接 lite server，出款广播与查证都走 http_base 指向的 TonAPI。
 type TonChainConfig struct {

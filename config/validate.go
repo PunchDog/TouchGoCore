@@ -147,6 +147,12 @@ func (c *Cfg) Validate() error {
 		return err
 	}
 
+	// 旧版 telegram.ton 不再被任何代码读取：不明确报错的话，encoding/json 会静默
+	// 丢弃整段，TON 通道不启动却看不出原因。
+	if c.Telegram != nil && len(c.Telegram.TonLegacy) > 0 {
+		return fmt.Errorf(`telegram.ton 已迁移：TON 是独立通道，请把整段移到顶层 ton.native；Kind 与私钥钩子键改为 ton.native`)
+	}
+
 	if err := validateInlineChannels(c); err != nil {
 		return err
 	}
@@ -222,7 +228,7 @@ func validateZaloConfig(c *Cfg) error {
 	return nil
 }
 
-// validateInlineChannels 校验四个资金通道段（tron.usdt / telegram.ton / bsc.usdt / sol.usdt）。
+// validateInlineChannels 校验四个资金通道段（tron.usdt / ton.native / bsc.usdt / sol.usdt）。
 //
 // 每个段自己一个函数：不同链的必填项与“什么算写错”本就不是一回事（TRON 只认
 // node/http_base，BSC/SOL 只认 rpc，TON 连合约都没有），合成一个大函数只会用一段
@@ -233,9 +239,9 @@ func validateInlineChannels(c *Cfg) error {
 			return fmt.Errorf("tron.usdt: %w", err)
 		}
 	}
-	if c.Telegram != nil && c.Telegram.Ton != nil {
-		if err := validateTonChannel(c.Telegram.Ton); err != nil {
-			return fmt.Errorf("telegram.ton: %w", err)
+	if c.Ton != nil && c.Ton.Native != nil {
+		if err := validateTonNativeChannel(c.Ton.Native); err != nil {
+			return fmt.Errorf("ton.native: %w", err)
 		}
 	}
 	if c.Bsc != nil && c.Bsc.Usdt != nil {
@@ -284,16 +290,24 @@ func validateTronUsdtChannel(u *TronUsdtConfig) error {
 	return nil
 }
 
-// validateTonChannel 校验 telegram.ton 的内联字段（只查已开启的段）。
-func validateTonChannel(t *TonChannelConfig) error {
+// validateTonNativeChannel 校验 ton.native（只查已开启的段）。
+//
+// 与 tron 的按单放宽不同：TON 当前不支持按单私钥/合约，热钱包地址仍是必填；
+// 私钥不在这里校验（配置恒空，由 CallPayChainMsg+"ton.native" 注入，装配期看）。
+func validateTonNativeChannel(t *TonNativeConfig) error {
 	if t == nil || !t.Enabled() {
 		return nil
 	}
-	if err := validateSupplierFields(&t.ChannelSupplierConfig); err != nil {
-		return err
+	if strings.TrimSpace(t.Driver) == "" {
+		return fmt.Errorf("缺 driver 驱动标记（应为 ton_tonapi）")
 	}
 	if strings.TrimSpace(t.Jetton) != "" {
 		return fmt.Errorf("jetton=%s：本仓只发原生 TON，jetton 的小数位没有可验证的来源", strings.TrimSpace(t.Jetton))
+	}
+	switch strings.ToLower(strings.TrimSpace(t.Network)) {
+	case "", "mainnet", "testnet":
+	default:
+		return fmt.Errorf("network=%s 不是 TON 的网络取值（mainnet / testnet，留空按主网）", strings.TrimSpace(t.Network))
 	}
 	if t.Chain == nil {
 		return fmt.Errorf("chain 为空：链上出款必须要接入点与热钱包")
@@ -360,6 +374,7 @@ func validateSolUsdtChannel(u *SolUsdtConfig) error {
 }
 
 // validateSupplierFields 内联供应商字段的共同必填项（driver / base_url / 商户账户）。
+// 当前只有 tron.usdt 使用：bsc/sol 不接供应商，ton.native 已删除供应商账户查询。
 //
 // 最后一步走与装配期同一个 `Account(AccountID)`：两边判定必须同源，否则「校验放行、
 // 装配拒绝」的配置会带着一条干净的启动日志停在半路上。这一道闸对资金通道是必要的：

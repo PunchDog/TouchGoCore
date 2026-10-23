@@ -1,9 +1,10 @@
-package telegram
+package ton
 
 import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/tonkeeper/tongo/ton"
@@ -29,26 +30,35 @@ type tonSignFunc func(to ton.AccountID, o *pay.PayOrder, bounce bool, seqno uint
 //     钱包合约里的 seqno 单调递增。好处很实在：同一单号即便被重发两次同一条报文，
 //     第二条也必然因为序号已用而被拒——所以「签好了没交出去」重建时逐字复用 RawTx 是安全的。
 type tonChannel struct {
-	gw       tonGateway
-	opt      channelOptions
-	chain    *chainConfig
-	led      *ledger.Ledger
-	acct     ton.AccountID
-	wallet   string
-	w        *wallet.Wallet
-	ver      wallet.Version
-	sign     tonSignFunc       // 签名注入点，装配时指向 defaultSign；测试用它数「签了几次」
-	supplier tonAccountQuerier // 可为 nil：只上链不接供应商时，账户查询就地拒绝
-	nowFn    func() time.Time
+	gw     tonGateway
+	opt    channelOptions
+	chain  *chainConfig
+	led    *ledger.Ledger
+	acct   ton.AccountID
+	wallet string
+	w      *wallet.Wallet
+	ver    wallet.Version
+	sign   tonSignFunc // 签名注入点，装配时指向 defaultSign；测试用它数「签了几次」
+	nowFn  func() time.Time
 }
+
+// tonWalletMu 串行所有「读 seqno → 签名 → 记账 → 广播」的路径。
+//
+// 必须是包级而不是挂在 tonChannel 上：route.Start 重复执行时旧 client 可能还有
+// 在途单，新 client 同时服务新单；每客户端一把锁会让两条路径读到同一个 seqno。
+// 只保护「会消耗 seqno 的动作」：查单、查余额与公链读都不拿它。
+//
+// 残余风险：TonAPI 索引滞后时，已受理广播后的下一次 seqno 仍可能读到旧值，
+// 表现为后一单被节点拒绝（不会双付）。这里不引入高风险的高水位 seqno。
+var tonWalletMu sync.Mutex
 
 // newTonOnchainChannel 按已解析好的配置装配一条链上通道。
 //
 // 任何一步缺项都返回错误而不是半成品：出款链路的配置错必须在启动时看得见。
-func newTonOnchainChannel(opt channelOptions) (tonChainChannel, error) {
+func newTonOnchainChannel(opt channelOptions) (chainChannel, error) {
 	chain := opt.Chain
 	if chain == nil {
-		return nil, fmt.Errorf("通道[%s]的驱动 %s 需要 telegram.ton.chain（接入点与热钱包）", opt.Name, opt.Driver)
+		return nil, fmt.Errorf("通道[%s]的驱动 %s 需要 ton.native.chain（接入点与热钱包）", opt.Name, opt.Driver)
 	}
 	walletAddress := strings.TrimSpace(chain.WalletAddress)
 	if walletAddress == "" {
@@ -97,23 +107,12 @@ func newTonOnchainChannel(opt channelOptions) (tonChainChannel, error) {
 		gw:     gw,
 		opt:    opt,
 		chain:  chain,
-		led:    ledger.New("ton"),
+		led:    tonLedger,
 		acct:   acct,
 		wallet: walletAddress,
 		w:      w,
 		ver:    ver,
 		nowFn:  time.Now,
-	}
-	// 供应商侧可选：没配 base_url 与端点表时不硬要——纯自托管部署确实没有供应商账户查询链路。
-	if strings.TrimSpace(opt.BaseURL) != "" && opt.Endpoint != nil {
-		// 交出去的那一份必须摘掉 Chain：账户客户端不消费链上接入点，两者各取所需。
-		supOpt := opt
-		supOpt.Chain = nil
-		sup, err := newTonAccountClient(supOpt)
-		if err != nil {
-			return nil, fmt.Errorf("通道[%s]装配供应商侧失败（账户查询仍需要它）: %w", opt.Name, err)
-		}
-		c.supplier = sup
 	}
 	c.sign = c.defaultSign
 	return c, nil
@@ -133,75 +132,8 @@ func tonNetLabel(testnet bool) string {
 // 没有人再靠它找实现，留着接口方法只会让「窄接口」变成一个可以往上堆无关方法的开口。
 func (c *tonChannel) Driver() string { return c.opt.Driver }
 
-// MerchantID 返回配置里的商户号；链上通道没有商户概念，它只是这段配置的定位信息。
-func (c *tonChannel) MerchantID() string { return c.opt.MerchantID }
-
-// Close 释放接入点。TON 侧走普通 HTTP，没有长连接，保留这个方法是为了让门面 stop
-// 能统一按接口收口（口径同 tron 的链上通道）。
+// Close 释放接入点。TON 侧走普通 HTTP，close 只清空闲连接，不打断在途请求。
 func (c *tonChannel) Close() error { return c.gw.close() }
-
-// QueryAccount 商户账户的余额与额度是供应商侧的事实。
-//
-// 链上确实能读到「这个热钱包还剩多少 TON」，但那是另一个口径（没有可用/冻结之分，
-// 也没人替业务侧扣过在途单），顺手拿它冒充 AccountInfo 会让下游把出资账户的余额
-// 当成可提现额度。口径与 tron 的链上通道逐字一致。
-func (c *tonChannel) QueryAccount(ctx context.Context, q *pay.AccountQuery) (*pay.AccountInfo, error) {
-	if c.supplier == nil {
-		return nil, fmt.Errorf("通道[%s]是链上出款通道，未配置供应商侧账户查询链路", c.opt.Name)
-	}
-	return c.supplier.QueryAccount(ctx, q)
-}
-
-// QueryOnchainAccount 读 TON 账户的原生币余额。
-//
-// 本通道只交付原生 TON，所以 Contract/jetton 查询直接拒绝；余额与 gas 是同一份资产，
-// 不像 TRON 要分代币与 TRX 两次读。账户状态只做三态归一：frozen 判冻结，
-// nonexist/uninit 判未知（没激活的账户余额不可用），其余按 active。
-func (c *tonChannel) QueryOnchainAccount(ctx context.Context, q *pay.OnchainAccountQuery) (*pay.AccountInfo, error) {
-	currency := pay.CurrencyTON
-	acct := c.acct
-	if q != nil {
-		if v := strings.TrimSpace(q.Currency); v != "" {
-			currency = strings.ToUpper(v)
-		}
-		if v := strings.TrimSpace(q.Contract); v != "" {
-			return nil, fmt.Errorf("通道[%s]只发原生 TON，链上余额查询不支持合约/jetton", c.opt.Name)
-		}
-		if v := strings.TrimSpace(q.Address); v != "" {
-			id, ok := tonAccountID(v)
-			if !ok {
-				return nil, fmt.Errorf("通道[%s]链上余额查询的地址不是合法 TON 地址", c.opt.Name)
-			}
-			acct = id
-		}
-	}
-	if currency != pay.CurrencyTON {
-		return nil, fmt.Errorf("通道[%s]只发原生 TON，链上余额查询不支持币种 %s", c.opt.Name, currency)
-	}
-	state, err := c.gw.account(ctx, acct)
-	if err != nil {
-		return nil, &pay.ProviderError{Channel: c.opt.Name, Code: "account_unread",
-			Msg: "读不出链上余额: " + c.redact(err.Error()), Retryable: true}
-	}
-	if state == nil {
-		return nil, &pay.ProviderError{Channel: c.opt.Name, Code: "account_unread",
-			Msg: "链上余额回执为空", Retryable: true}
-	}
-	status := pay.AcctActive
-	switch strings.ToLower(strings.TrimSpace(state.Status)) {
-	case "frozen":
-		status = pay.AcctFrozen
-	case "nonexist", "uninit":
-		status = pay.AcctUnknown
-	}
-	return &pay.AccountInfo{
-		Currency:  pay.CurrencyTON,
-		Balance:   state.BalanceNanoton,
-		Available: state.BalanceNanoton,
-		Status:    status,
-		RawNote:   "链上余额 status=" + state.Status,
-	}, nil
-}
 
 // Withdraw 直接上链出款：读序号、本地签名、广播，并把结果按「钱有没有动」而不是
 // 「调用有没有返回」归一。
@@ -211,6 +143,13 @@ func (c *tonChannel) QueryOnchainAccount(ctx context.Context, q *pay.OnchainAcco
 //  2. 同一单号永不签第二笔——除「签好了但确定没交给节点」这一种情形；
 //  3. 说不清就是 UNKNOWN 并交出消息 hash，等对账，绝不当成失败去重下单。
 func (c *tonChannel) Withdraw(ctx context.Context, o *pay.PayOrder) (*pay.PayResult, error) {
+	// 锁键与台账键必须同源：台账 Get/Put 用 trim 后的单号，锁若还用原值，
+	// "WD-1" 与 "WD-1 " 会各拿一把锁、同时看不到台账，各自签一笔。
+	if o != nil {
+		cp := *o
+		cp.OrderNo = strings.TrimSpace(o.OrderNo)
+		o = &cp
+	}
 	if err := pay.CheckOrder(o); err != nil {
 		return nil, err
 	}
@@ -231,10 +170,11 @@ func (c *tonChannel) Withdraw(ctx context.Context, o *pay.PayOrder) (*pay.PayRes
 	if err := c.checkAsset(o); err != nil {
 		return nil, err
 	}
+	orderNo := o.OrderNo
 	var res *pay.PayResult
-	err := c.led.WithLock(o.OrderNo, func() error {
+	err := c.led.WithLock(orderNo, func() error {
 		var e error
-		res, e = c.withdrawLocked(ctx, o)
+		res, e = c.withdrawLocked(ctx, o, orderNo)
 		return e
 	})
 	if err != nil {
@@ -269,6 +209,9 @@ func (c *tonChannel) checkFrom(o *pay.PayOrder) error {
 	if o == nil || o.From == nil {
 		return nil
 	}
+	if k := o.From.KindOf(); k != "" && k != pay.PartyWallet {
+		return fmt.Errorf("通道[%s]只能从链上钱包出款，这一单的 From 性质是 %s", c.opt.Name, k)
+	}
 	if strings.TrimSpace(o.From.PrivateKey.Reveal()) != "" {
 		return fmt.Errorf("通道[%s]暂不支持按单传入出款私钥（From.PrivateKey）：TON 钱包地址还取决于 wallet_version / sub_wallet_id，无法只从裸私钥推导；请使用配置热钱包", c.opt.Name)
 	}
@@ -289,8 +232,7 @@ func (c *tonChannel) checkFrom(o *pay.PayOrder) error {
 		c.opt.Name, c.wallet, from)
 }
 
-func (c *tonChannel) withdrawLocked(ctx context.Context, o *pay.PayOrder) (*pay.PayResult, error) {
-	orderNo := strings.TrimSpace(o.OrderNo)
+func (c *tonChannel) withdrawLocked(ctx context.Context, o *pay.PayOrder, orderNo string) (*pay.PayResult, error) {
 	entry, found := c.led.Get(orderNo)
 	now := c.nowFn()
 
@@ -300,16 +242,25 @@ func (c *tonChannel) withdrawLocked(ctx context.Context, o *pay.PayOrder) (*pay.
 		return nil, fmt.Errorf("订单号 %s 已在台账里且收款地址是 %s，这一单却写着 %s：同一幂等键不得改收款方",
 			orderNo, entry.To, strings.TrimSpace(o.To.Address))
 	}
+	// TON 只有配置热钱包；台账里记过的 From 必须仍指向同一个账户（EQ/UQ/0: 归一比较）。
+	// 空值表示旧条目没有这一维，不在这里补判。
+	if found && strings.TrimSpace(entry.From) != "" && !sameTONAddress(entry.From, c.wallet) {
+		return nil, fmt.Errorf("订单号 %s 已在台账里且出款钱包是 %s，这一单却写着 %s：同一幂等键不得换钱包",
+			orderNo, entry.From, c.wallet)
+	}
 
 	switch {
 	case found && entry.Terminal():
-		return nil, fmt.Errorf("%w（order_no=%s msg=%s）", ledger.ErrAlreadySettled, orderNo, entry.TxID)
+		return nil, fmt.Errorf("%w（order_no=%s msg=%s）", ErrOrderAlreadySettled, orderNo, entry.TxID)
 	case found && entry.State == ledger.StateBroadcast:
 		// 已经交给过接入点：唯一允许的动作是查证，任何重建都是第二笔钱。
 		return c.confirm(ctx, entry, now)
 	case found && entry.State == ledger.StatePrepared && !entry.Expired(now):
 		// 签好了却没交出去（或交出去前就失败）：把同一份 BOC 再广播一次。
 		// 钱包合约按 seqno 单调去重，重发同一条不可能变成第二笔。
+		// 仍要拿钱包锁：新单若同时读到同一个 seqno，会签出一条注定被拒的报文。
+		tonWalletMu.Lock()
+		defer tonWalletMu.Unlock()
 		return c.broadcastEntry(ctx, entry, now)
 	case found && entry.State == ledger.StatePrepared:
 		// prepared 且已过链上有效期：这一笔不可能再上链，也没有第二笔的风险，重建。
@@ -350,6 +301,11 @@ func (c *tonChannel) withdrawLocked(ctx context.Context, o *pay.PayOrder) (*pay.
 	if flags != nil && flags.HasBounceFlag && !flags.Bounceable {
 		bounce = false
 	}
+	// 从这里到广播交出必须串行：不同单号并发时，第二个签名者若在前一笔上链前
+	// 读到同一个 seqno，会签出一条永远不可能执行的报文。precheck 与反查在锁外，
+	// 它们只读且耗时，没必要把整条钱包串起来。
+	tonWalletMu.Lock()
+	defer tonWalletMu.Unlock()
 	seqno, err := c.gw.seqno(ctx, c.acct)
 	if err != nil {
 		return nil, &pay.ProviderError{Channel: c.opt.Name, Code: "seqno_unread",
@@ -384,6 +340,7 @@ func (c *tonChannel) prepare(o *pay.PayOrder, prepared *tonPrepared) (*ledger.En
 		OrderNo:  strings.TrimSpace(o.OrderNo),
 		TxID:     prepared.MsgHash,
 		RawTx:    prepared.Boc,
+		From:     c.wallet,
 		To:       strings.TrimSpace(o.To.Address),
 		Amount:   o.Amount,
 		FeeLimit: c.feeReserve(),
@@ -522,5 +479,7 @@ func (c *tonChannel) redact(s string) string {
 	return s
 }
 
-// 编译期钉子：本通道必须满足 pay 的契约，缺方法要在构建期就看见而不是装配期。
-var _ tonChainChannel = (*tonChannel)(nil)
+// 编译期钉子：本通道必须满足 pay 的统一调用面与门面窄接口，
+// 缺方法要在构建期就看见而不是装配期。
+var _ pay.Channel = (*tonChannel)(nil)
+var _ chainChannel = (*tonChannel)(nil)

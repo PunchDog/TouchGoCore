@@ -1,4 +1,4 @@
-package telegram
+package ton
 
 import (
 	"context"
@@ -45,6 +45,7 @@ var tonBusinessRejectStatuses = map[int]bool{
 // tonAPIGateway 把 TonAPI v2 的生成客户端接成窄网关。
 type tonAPIGateway struct {
 	cli      *tonapi.Client
+	hc       *http.Client
 	base     string
 	timeout  time.Duration
 	maxRetry int
@@ -83,7 +84,7 @@ func newTonAPIGateway(chain *chainConfig) (*tonAPIGateway, error) {
 	if err != nil {
 		return nil, fmt.Errorf("TON 接入点 %s 建客户端失败: %w", base, err)
 	}
-	return &tonAPIGateway{cli: cli, base: base, timeout: timeout, maxRetry: chain.MaxRetry}, nil
+	return &tonAPIGateway{cli: cli, hc: hc, base: base, timeout: timeout, maxRetry: chain.MaxRetry}, nil
 }
 
 // readAttempts 读侧的总尝试次数。
@@ -199,7 +200,14 @@ func (g *tonAPIGateway) transactions(ctx context.Context, account ton.AccountID,
 	return out, nil
 }
 
-func (g *tonAPIGateway) close() error { return nil }
+// close 只清空闲连接，不取消在途请求：route.Start 重复执行时，旧 client 可能
+// 还有一单正在广播/查证，关闭底层连接会把一次本可查清的出款打断。
+func (g *tonAPIGateway) close() error {
+	if g.hc != nil {
+		g.hc.CloseIdleConnections()
+	}
+	return nil
+}
 
 // tonErrorStatus 从 ogen 客户端的错误里取 HTTP 状态码。
 //

@@ -1,5 +1,5 @@
 // 本文件是 config 的外部测试包：它要钉的是「示例配置里的链上地址是真地址」，
-// 而地址规则住在各资金通道包里（tron / telegram / bsc / sol 各自的 address.go）。
+// 而地址规则住在各资金通道包里（tron / ton / bsc / sol 各自的 address.go）。
 // config 不导入这些包（配置层只认数据形状），所以这份核对放在外部测试包，
 // 由测试二进制把三方同时链进来。
 //
@@ -18,7 +18,7 @@ import (
 
 	"touchgocore/bsc"
 	"touchgocore/sol"
-	"touchgocore/telegram"
+	"touchgocore/ton"
 	"touchgocore/tron"
 )
 
@@ -33,9 +33,9 @@ func loadExample(t *testing.T) *config.Cfg {
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		t.Fatalf("example.json 反序列化失败: %v", err)
 	}
-	// telegram 段仍在示例里（Bot 配置），它的 TON 资金段在 P1 也已内联成型。
-	if cfg.Tron == nil || cfg.Tron.Usdt == nil || cfg.Telegram == nil {
-		t.Fatalf("示例缺 tron.usdt / telegram 段")
+	// telegram 段仍在示例里（Bot 配置）；TON 资金段已独立为 ton.native。
+	if cfg.Tron == nil || cfg.Tron.Usdt == nil || cfg.Ton == nil || cfg.Ton.Native == nil {
+		t.Fatalf("示例缺 tron.usdt / ton.native 段")
 	}
 	return &cfg
 }
@@ -51,7 +51,7 @@ func TestChainValidatorsLinked(t *testing.T) {
 		bad  string
 	}{
 		{"tron", tron.IsValidTRONAddress, "not-a-tron-address"},
-		{"telegram", telegram.IsValidTONAddress, "not-a-ton-address"},
+		{"ton", ton.IsValidTONAddress, "not-a-ton-address"},
 		{"bsc", bsc.IsValidEVMAddress, "0xnothex"},
 		{"sol", sol.IsValidSolanaAddress, "0OIl-not-base58"},
 	}
@@ -109,7 +109,7 @@ func TestExampleAddressRejectionsStillHold(t *testing.T) {
 		ok         func(string) bool
 	}{
 		{"旧 usdt.contract", "TR7NharAcTPb3DHchqPguF36bXqWRRCbqR", tron.IsValidTRONAddress},
-		{"旧 jetton 夹具", "EQDtFpEwcR-fm552Nv6h3FDFdv3TbHx8w9Wm7FqYqU8dBB1q", telegram.IsValidTONAddress},
+		{"旧 jetton 夹具", "EQDtFpEwcR-fm552Nv6h3FDFdv3TbHx8w9Wm7FqYqU8dBB1q", ton.IsValidTONAddress},
 	}
 	for _, c := range cases {
 		if c.ok(c.addr) {

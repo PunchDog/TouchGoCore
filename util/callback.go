@@ -102,8 +102,8 @@ const (
 	// 通道包本身不落库，结果只经这里交出去。
 	//
 	// 2026-10 的资金面收口后，播资金回执的通道是 CallUsdtMsg（Withdraw/Query 走链上
-	// 台账，Account 走供应商）与 CallTonMsg（同一套台账口径，实现见 telegram 包的
-	// ton_onchain.go / ton_query.go）；充值已整条删除。CallWhatsappMsg 只剩消息事件
+	// 台账，Account 走供应商）与 CallTonMsg（同一套台账口径，实现见 ton 包的
+	// onchain.go / query.go）；充值已整条删除。CallWhatsappMsg 只剩消息事件
 	// （Inbound/Receipt/Connection/QR/SendResult）。
 	//
 	// CallTonMsg 在 2026-10 收口时一度没有播报方（TON 出款实现被删），2026-10-20 随
@@ -128,16 +128,17 @@ const (
 	// zalo 是 zcago 消息/扫码事件），下游对「会话失效要重登」和「消息送达」的处理
 	// 本就不同，合到一个前缀等于让订阅方在回调里靠载荷猜通道。
 	CallZaloMsg = "ZaloMsg"
-	// CallPaySDKMsg + 通道段名（tron.usdt / bsc.usdt / sol.usdt / telegram.ton）=
-	// 该通道签名密钥的注入钩子，载荷是 *string（指向该段的 secret_key 字段本身）。
+	// CallPaySDKMsg + 通道段名（当前只有 tron.usdt）= 该通道供应商签名密钥的
+	// 注入钩子，载荷是 *string（指向该段的 secret_key 字段本身）。
+	// bsc/sol 不接供应商，ton.native 已删除供应商账户查询，都没有这个钩子。
 	//
 	// 钩子按通道段命名而不是按供应商命名：供应商字段已经内联在各段里，供应商凭证
 	// 不再是一张共享表里的一段——同一份密钥要在几条通道上用，就在那几段各配一份
 	// （或让下游按多个键分别注册）。让下游为 whatsapp/usdt/ton 共用一个键，迟早出现
 	// 「只注入了两家、第三家用空密钥出款」这种只有供应商会发现的错。
 	CallPaySDKMsg = "PaySDK"
-	// CallPayChainMsg + 通道段名（同上）= 该段热钱包私钥的注入钩子，载荷是 *string
-	// （指向该段 chain.private_key 字段本身）。
+	// CallPayChainMsg + 通道段名（tron.usdt / ton.native / bsc.usdt / sol.usdt）=
+	// 该段热钱包私钥的注入钩子，载荷是 *string（指向该段 chain.private_key 字段本身）。
 	//
 	// 它与 CallPaySDKMsg 是两个键而不是复用同一个：一次 Do 只交出一个 *string，
 	// 下游同一个订阅方会把两个秘密写到同一格里。签名密钥（供应商侧）与私钥（链上出资主体）

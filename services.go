@@ -15,6 +15,7 @@ import (
 	"touchgocore/rpc"
 	"touchgocore/sol"
 	"touchgocore/telegram"
+	"touchgocore/ton"
 	"touchgocore/usdt"
 	"touchgocore/websocket"
 	"touchgocore/whatsapp"
@@ -72,20 +73,32 @@ func (s *rpcService) Stop(ctx context.Context) error {
 	return nil
 }
 
-// telegramService Telegram Bot服务适配器（Bot 长连接 + telegram.ton 的 TON 资金链路）
+// telegramService Telegram Bot服务适配器（只有 Bot 长连接；TON 已独立成 tonService）
 type telegramService struct{}
 
 func (s *telegramService) Name() string { return "telegram" }
 func (s *telegramService) Start(ctx context.Context) error {
 	telegram.TelegramStart(ctx)
-	// TON 通道与 Bot 同段起停但互不牵制：钱包没配好只记日志、不阻断 Bot（两侧各自的
-	// 「不启动」判断都在包内留痕）。拆成两个 Service 反而会让停服顺序多一个变量。
-	telegram.TonStart(ctx)
 	return nil
 }
 func (s *telegramService) Stop(ctx context.Context) error {
-	telegram.TonStop(ctx)
 	telegram.TelegramStop(ctx)
+	return nil
+}
+
+// tonService TON（原生 TON）出款/查单/链上余额服务适配器。
+//
+// 与 telegramService 分开：TON 通道有自己的配置段 ton.native 与失败面，
+// Bot 起不起来与钱包通道配没配好互不牵制。
+type tonService struct{}
+
+func (s *tonService) Name() string { return "ton" }
+func (s *tonService) Start(ctx context.Context) error {
+	ton.TonStart(ctx)
+	return nil
+}
+func (s *tonService) Stop(ctx context.Context) error {
+	ton.TonStop(ctx)
 	return nil
 }
 

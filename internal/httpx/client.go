@@ -9,7 +9,7 @@
 // pay 不得反向 import 本包：契约层一旦知道传输细节，通道包就得跟着它一起动。
 //
 // 这里同样不含「供应商报文」的知识：包络长什么样、签哪几个字段，属于各通道包对
-// 那家供应商文档的理解，见 tron/account.go 与 telegram/ton_account.go。
+// 那家供应商文档的理解，见 tron/account.go（TON 已删除供应商账户查询）。
 package httpx
 
 import (

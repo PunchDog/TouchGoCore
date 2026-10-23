@@ -1,4 +1,4 @@
-package telegram
+package ton
 
 import (
 	"context"
@@ -181,7 +181,7 @@ func (c *tonChannel) settle(entry *ledger.Entry, note string) error {
 	entry.State = ledger.StateSettled
 	entry.UpdatedAtMS = ledger.NowMS(c.nowFn())
 	if err := c.led.Put(entry); err != nil {
-		return fmt.Errorf("%w（%s 这一结论没能落账，先不要重发）: %v", ledger.ErrJournalUnavailable, note, err)
+		return fmt.Errorf("%w（%s 这一结论没能落账，先不要重发）: %v", ErrJournalUnavailable, note, err)
 	}
 	return nil
 }
@@ -232,6 +232,7 @@ func (c *tonChannel) lookupLedgerByChain(ctx context.Context, o *pay.PayOrder, n
 			entry := &ledger.Entry{
 				OrderNo: strings.TrimSpace(o.OrderNo),
 				TxID:    strings.ToLower(strings.TrimSpace(tx.InMsgHash)),
+				From:    c.wallet,
 				To:      strings.TrimSpace(o.To.Address),
 				Amount:  o.Amount,
 				// Contract 留空：原生 TON 没有合约地址这一维，本通道也已在装配期拒掉了 jetton。

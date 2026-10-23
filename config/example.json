@@ -189,7 +189,7 @@
             "token": ""
         }
     },
-    "nft_sdks说明": "NFT 资产链路的 SDK 集中登记表，代码在 nft 包。资金通道已改为在各段内联（tron.usdt / telegram.ton / bsc.usdt / sol.usdt 各写自己的凭证与接入点，不再有集中登记表），NFT 仍保留这张表：NFT 的驱动登记在 nft.Register（内置 nft_generic_md5），端点逻辑名是 holdings/token/mint/transfer/query 五个，与资金契约的 account/query/withdraw 不同域。把两者并进一张表会让「换资金供应商」与「换 NFT 供应商」两个互不相关的运维动作互相牵连。密钥由下游对 util.CallPaySDKMsg+段名 与 util.CallNftSDKMsg+段名 两个钩子各注一次，配置里 secret_key 保持留空、不进版本库",
+    "nft_sdks说明": "NFT 资产链路的 SDK 集中登记表，代码在 nft 包。资金通道已改为在各段内联（tron.usdt / bsc.usdt / sol.usdt / ton.native 各写自己的接入点与开关，不再有集中登记表；tron.usdt 另有供应商凭证），NFT 仍保留这张表：NFT 的驱动登记在 nft.Register（内置 nft_generic_md5），端点逻辑名是 holdings/token/mint/transfer/query 五个，与资金契约的 account/query/withdraw 不同域。把两者并进一张表会让「换资金供应商」与「换 NFT 供应商」两个互不相关的运维动作互相牵连。密钥由下游对 util.CallPaySDKMsg+段名 与 util.CallNftSDKMsg+段名 两个钩子各注一次，配置里 secret_key 保持留空、不进版本库",
     "nft_sdks": {
         "mynft": {
             "enable": "off",
@@ -230,56 +230,6 @@
         "game_to_short": {
             "game_1": "g1",
             "game_2": "g2"
-        },
-        "ton说明": "TON 资金链路（提现/查单/查账户），实现就在 telegram 包内——收付入口在 Telegram 这一侧，配置也归这一段，但与 Bot 长连接是两件事：不同凭证、不同失败路径，Bot 起不起来与钱包通道配没配好互不牵制。出款不经供应商：用 tongo 在本地组外部消息、热钱包私钥签名，经 chain.http_base（TonAPI）广播，结论按外部消息 hash 从链上读回。金额单位是纳吨（1 TON = 1000000000 纳吨），PayOrder.Amount 直接按最小单位填，配置里不出现小数位与浮点。只发原生 TON：jetton 一旦配置整条通道不启动。幂等由本包出款台账保证（先记账后广播，同单号永不签第二笔），回执按 util.CallTonMsg+\"Withdraw|Query|Account\" 广播给下游",
-        "ton": {
-            "enable": "off",
-            "enable说明": "通道总闸：必须显式为 on 才启动。示例写 off——这一段一旦开启就真的能动钱（热钱包私钥签名后直接上链广播），不该是「复制示例即生效」的形态",
-            "driver": "ton_tonapi",
-            "driver说明": "链上驱动标记，与 chain.http_base 一起把出款路径钉成「本地签名 + 经 TonAPI 广播」",
-            "base_url": "https://supplier.example/api",
-            "base_url说明": "供应商 HTTP 基址，本通道只用于「查商户账户」；出款与查单都不走 HTTP 供应商",
-            "app_id": "CHANGE-ME",
-            "secret_key": "",
-            "secret_key说明": "签名密钥。留空由下游在启动前经 util.CallPaySDKMsg+\"telegram.ton\" 钩子注入（只认这一个键，不再读旧段名）；不得进入日志、error 文案与任何摘要字段",
-            "auth_header": "X-Sign",
-            "timeout_sec": 30,
-            "timeout_sec说明": "单次供应商 HTTP 请求超时（秒），<=0 用驱动缺省。链上那一侧的超时看 chain.timeout_sec",
-            "max_retries": 2,
-            "max_retries说明": "可重试错误的重试次数；广播永远不看它（广播出去之后是「结果不确定」，要靠台账按外部消息 hash 查清）",
-            "endpoints说明": "链上驱动只在「查商户账户」这一件事上回落供应商 HTTP，所以只登记 account",
-            "endpoints": {
-                "account": "/pay/account"
-            },
-            "accounts说明": "我方在该供应商名下的商户账户表。链上出款不需要商户号也能动钱，但这一格让「谁在出资」在配置里可读，而不是由初始化顺序决定",
-            "account": "default",
-            "accounts": {
-                "default": {
-                    "enable": "on",
-                    "merchant_id": "MCH-TON-0001"
-                }
-            },
-            "network说明": "公链网络标识：mainnet / testnet，留空按主网。它同时决定接入点默认基址与接受哪种带测试网位的地址（测试网地址配主网单一律拒，方向选成这样是因为拒单一准错，把测试网地址送进主网报文则是不可逆的资损）。别把 testnet-v4（TonAPI 自己回显的写法）当网络填：本包只认 pay 的规范名，否则校验按主网走而配置写着测试网",
-            "network": "mainnet",
-            "jetton说明": "jetton 合约（minter）地址。本仓的 TON 通道只发原生 TON，这一格填了不会被静默忽略：整条通道不启动并记下原因。要发 jetton 得先给小数位找一个可验证的来源（链上元数据只覆盖 on-chain content，链外元数据读不到），否则「按猜的小数位转帐」就是 10^n 倍多付",
-            "jetton": "",
-            "chain说明": "TON 接入点与热钱包。本仓不接 lite server（裸 TCP + ADNL，要逐字登记节点公钥，且协议层没有按消息 hash 反查交易），出款广播与查证都走 http_base 指向的 TonAPI，所以这一段没有 node/tls 两格",
-            "chain": {
-                "http_base说明": "TON 出款的唯一入口——TonAPI v2 的基址。留空即按 network 取公开基址（主网 https://tonapi.io、测试网 https://testnet.tonapi.io）",
-                "http_base": "https://tonapi.io",
-                "api_key说明": "TonAPI 的访问令牌，作为 Authorization: Bearer 交出（写在错的地方不会报错，只会安静退化成匿名额度）",
-                "api_key": "CHANGE-ME",
-                "wallet_address说明": "我方 TON 热钱包地址，必须与私钥派生出的地址逐字相等（EQ/UQ/0: 三种写法都收）",
-                "wallet_address": "EQ-CHANGE-ME-HOT-WALLET",
-                "wallet_version说明": "热钱包合约版本名：v5R1 / v4R2 / v3R2 / v4R1 / v3R1。留空则由本包探测；探测不出来整条通道不启动",
-                "wallet_version": "v5R1",
-                "private_key说明": "热钱包私钥。恒留空，由下游在启动前经 util.CallPayChainMsg+\"telegram.ton\" 钩子注入；没注入时整条链上通道不启动",
-                "private_key": "",
-                "fee_limit说明": "本单允许烧掉的手续费上限，单位纳吨。<=0 由驱动按该链缺省值定",
-                "fee_limit": 0,
-                "timeout_sec": 30,
-                "max_retries": 2
-            }
         }
     },
     "whatsapp说明": "WhatsApp 通道（消息门面），代码在 whatsapp 包。消息侧走 go.mau.fi/whatsmeow 直连 WhatsApp 多设备协议（QR 扫码配对、发文本、删会话框），会话密钥材料存在 sessions.dsn 指向的 Postgres 库里，不经任何 HTTP 消息网关；资金链路已在 2026-10 收口里整段删除——WhatsApp 协议里没有任何可发起转账的 API，三个资金门面（提现/查单/查账户）只剩 ErrPayoutNotWired 哨兵，充值接口亦整条删除，本通道不引用任何资金通道段（tron.usdt / bsc.usdt / sol.usdt）",
@@ -464,6 +414,36 @@
                 "commitment说明": "查单/查余额的确认级别（processed/confirmed/finalized）；留空按 confirmed",
                 "priority_fee_microlamports": 0,
                 "priority_fee_microlamports说明": "ComputeBudget 优先费（micro-lamports/CU），<=0 不附该指令",
+                "timeout_sec": 30,
+                "max_retries": 2
+            }
+        }
+    },
+    "ton说明": "TON 链通道集合。当前只有 ton.native（原生 TON），代码在 ton 包。出款、查单与链上余额都只经 chain.http_base 指向的 TonAPI；没有供应商 HTTP 字段。金额单位是纳吨（1 TON = 1000000000 纳吨），TON 只接受 PayOrder.Amount 的 int64 最小单位，amount_units 会被显式拒绝。只发原生 TON：jetton 一旦配置整条通道不启动",
+    "ton": {
+        "native": {
+            "enable": "off",
+            "enable说明": "通道总闸：必须显式为 on 才启动。示例写 off——开启后会真的用热钱包私钥签名并广播，不该是「复制示例即生效」的形态",
+            "driver": "ton_tonapi",
+            "driver说明": "链上驱动标记，必须逐字等于 ton.DriverTonAPI",
+            "network": "mainnet",
+            "network说明": "公链网络标识：mainnet / testnet，留空按主网。它决定接入点默认基址与接受哪种带测试网位的地址；别把 testnet-v4 当网络填",
+            "jetton": "",
+            "jetton说明": "jetton 合约（minter）地址。本仓只发原生 TON，这一格填了不会被静默忽略：整条通道不启动。要发 jetton 得先给小数位找一个可验证的来源，否则「按猜的小数位转账」就是 10^n 倍多付",
+            "chain说明": "TON 接入点与热钱包。本仓不接 lite server，出款广播与查证都走 http_base 指向的 TonAPI，所以这一段没有 node/tls 两格",
+            "chain": {
+                "http_base说明": "TonAPI v2 的基址。留空即按 network 取公开基址（主网 https://tonapi.io、测试网 https://testnet.tonapi.io）",
+                "http_base": "https://tonapi.io",
+                "api_key说明": "TonAPI 访问令牌，作为 Authorization: Bearer 交出；不是资金密钥，但同样禁入日志与 error 文案",
+                "api_key": "CHANGE-ME",
+                "wallet_address说明": "我方 TON 热钱包地址，必须与私钥派生出的地址逐字相等（EQ/UQ/0: 三种写法都收）。TON 不支持按单私钥，这一格是装配必需",
+                "wallet_address": "EQ-CHANGE-ME-HOT-WALLET",
+                "wallet_version说明": "热钱包合约版本名：v5R1 / v4R2 / v3R2 / v4R1 / v3R1。留空由本包探测；探测不出来整条通道不启动",
+                "wallet_version": "v5R1",
+                "private_key说明": "热钱包私钥。恒留空，由下游在启动前经 util.CallPayChainMsg+\"ton.native\" 钩子注入；没注入时整条链上通道不启动。TON 不支持 PayOrder.From.PrivateKey",
+                "private_key": "",
+                "fee_limit说明": "本单之外必须仍留在热钱包里的手续费余量，单位纳吨。<=0 用驱动缺省（0.01 TON）",
+                "fee_limit": 0,
                 "timeout_sec": 30,
                 "max_retries": 2
             }

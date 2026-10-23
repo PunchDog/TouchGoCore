@@ -273,6 +273,8 @@ func (app *App) registerServices() {
 		&bscService{},
 		// SOL 同理排在 BSC 之后：独立配置段、独立台账、独立接入点。
 		&solService{},
+		// TON 已从 telegram 拆出：独立配置段 ton.native、独立台账与接入点。
+		&tonService{},
 		&nftService{},
 		&ginService{},
 		&modelAPIService{},

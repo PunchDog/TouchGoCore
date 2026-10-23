@@ -1,4 +1,4 @@
-package telegram
+package ton
 
 import (
 	"encoding/base64"
@@ -12,7 +12,7 @@ import (
 	"touchgocore/pay"
 )
 
-// 本文件是 TON 侧的收款端校验，登记给 pay 的 ChainRule 用。
+// 本文件是 TON 侧的地址解析与收款端规则；出款路径的唯一调用点是 chainrule.go。
 //
 // TON 的用户友好地址自带 CRC16，格式判定的成本是一次 base64 解码加两次循环——
 // 相比「钱进了一个谁也解不出私钥的地址」，这道校验便宜到没有理由省。
@@ -194,20 +194,4 @@ func (tonRule) CheckMemo(o *pay.PayOrder) error {
 		}
 	}
 	return nil
-}
-
-// checkOrderAddress 用 TON 的地址与备注规则校验这一单的收款方。
-//
-// 它曾经注册到 pay 的 ChainRule 表里（键是币种名，未登记即放行）。那张表随 pay
-// 瘦身一起消失，而「未登记即放行」本来就是一道默认放行的闸：币种名拼错一个字母，
-// 地址校验就静默失效。现在门收在包内：TON 的出款路径只有一条，规则也就只有一个调用点。
-//
-// 调用点在 tonChannel.Withdraw 里，已先经 pay.CheckTarget{Wallet:true}——
-// 到这里收款方一定是钱包性质，不再重复判 kind。
-func checkOrderAddress(o *pay.PayOrder) error {
-	rule := tonRule{}
-	if err := rule.CheckAddress(o); err != nil {
-		return err
-	}
-	return rule.CheckMemo(o)
 }

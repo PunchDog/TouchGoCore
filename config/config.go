@@ -30,6 +30,7 @@ type Cfg struct {
 	Tron      *TronConfig              `json:"tron"`       //TRON 链通道集合（当前只有 tron.usdt）
 	Bsc       *BscConfig               `json:"bsc"`        //BSC 链通道集合（当前只有 bsc.usdt）
 	Sol       *SolConfig               `json:"sol"`        //Solana 链通道集合（当前只有 sol.usdt）
+	Ton       *TonConfig               `json:"ton"`        //TON 链通道集合（当前只有 ton.native）
 	Nft       *NftConfig               `json:"nft"`        // NFT 资产通道（查询持有/详情/铸造/转账/对账）配置
 	NftSDks   map[string]*NftSDKConfig `json:"nft_sdks"`   // NFT SDK 集中登记表，键是段名；nft.provider 用 {sdk, account} 引用这里的一段
 	Server    *ServerConfig            `json:"server"`     // 服务器全局配置

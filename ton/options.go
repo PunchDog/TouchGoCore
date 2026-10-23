@@ -1,36 +1,18 @@
-package telegram
+package ton
 
 import "time"
 
 // 本文件是 TON 侧的两个装配输入结构。
 //
-// 它们曾经是 pay.ProviderOptions 与 pay.ChainOptions——被三家通道共用的同一副形状。
-// 共用把 TON 真正需要的两样东西挤掉了：wallet_version 与 sub_wallet_id（v3/v4 系钱包
-// 的子账户号，0 是合法取值）。它们在共用结构里只占一行「这条通道不读它」的注释，
-// 而 TON 这边得靠指针类型才敢表达「没配」与「配了 0」的区别。
-//
-// 现在各包各有自己的一份：字段少而准。与 tron 侧刻意重复，不抽公共包——
-// 两条链的供应商不一定是同一家，抽一层「通用供应商客户端」只会把两家差异
-// 挤进同一个袋子里，而袋子越长，改一家就得担心另一家。
+// 与 tron 侧刻意重复，不抽公共包：两条链的接入点、签名库与失败路径都不同，
+// 抽一层「通用链接入」只会把两家差异挤进同一个袋子里。TON 的供应商账户查询
+// 已删除，所以这里不再保留 merchant/base_url/secret_key 等字段——通道只认链。
 
 // channelOptions 是构造一条 TON 资金通道所需的全部输入。
 type channelOptions struct {
 	// Name 是通道名（ton），进错误文案与日志。
 	Name   string
 	Driver string
-	// MerchantID 是我方在供应商侧的商户号，进报文并参与签名域。
-	MerchantID string
-	// BaseURL 是供应商侧的基址；账户查询走它。留空即没有供应商账户查询链路。
-	BaseURL   string
-	Timeout   time.Duration
-	MaxRetry  int
-	AppID     string
-	SecretKey string
-	// AuthHeader 是签名头的名字，留空取缺省值。
-	AuthHeader string
-	NotifyURL  string
-	// Endpoint 是按逻辑端点名取路径的取值函数。
-	Endpoint func(name string) (string, bool)
 	// Chain 是链上接入点与热钱包。nil 即「这一段不是链上通道」。
 	Chain *chainConfig
 }

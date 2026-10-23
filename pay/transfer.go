@@ -31,8 +31,8 @@ type Kind string
 const (
 	// KindTronUSDT 是 TRON 上的 USDT-TRC20，由 tron 包装配与持有。
 	KindTronUSDT Kind = "tron.usdt"
-	// KindTON 是 TON 链，由 telegram 包装配与持有。
-	KindTON Kind = "telegram.ton"
+	// KindTON 是 TON 链，由 ton 包装配与持有。
+	KindTON Kind = "ton.native"
 	// KindBscUSDT 是 BSC 上的 USDT-BEP20，由 bsc 包装配与持有。
 	KindBscUSDT Kind = "bsc.usdt"
 	// KindSolUSDT 是 Solana 上的 USDT-SPL，由 sol 包装配与持有。

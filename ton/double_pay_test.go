@@ -1,4 +1,4 @@
-package telegram
+package ton
 
 import (
 	"context"
@@ -736,12 +736,25 @@ func TestWithdrawRejectsWrongAssetAndNetwork(t *testing.T) {
 	}
 }
 
-// TestQueryAccountNeedsSupplier 没配供应商侧时账户查询就地拒绝，不冒充链上余额。
-func TestQueryAccountNeedsSupplier(t *testing.T) {
-	c, _ := newTestTONChannel(t, &fakeTONGateway{}, nil)
-	if _, err := c.QueryAccount(context.Background(), &pay.AccountQuery{}); err == nil ||
-		!strings.Contains(err.Error(), "未配置供应商侧") {
-		t.Errorf("链上通道不该把热钱包余额冒充成商户额度，实得 %v", err)
+// TestQueryAccountReadsChainBalance 供应商账户查询已删除，账户门面读默认热钱包链上余额。
+func TestQueryAccountReadsChainBalance(t *testing.T) {
+	const balance int64 = 100_000_000
+	c, _ := newTestTONChannel(t, &fakeTONGateway{balance: balance, status: "active"}, nil)
+	info, err := c.QueryAccount(context.Background(), &pay.AccountQuery{})
+	if err != nil {
+		t.Fatalf("链上余额查询失败: %v", err)
+	}
+	if info.Balance != balance {
+		t.Errorf("余额=%d，期望 %d", info.Balance, balance)
+	}
+	if want := balance - defaultTONFeeReserveNanoton; info.Available != want {
+		t.Errorf("可动用=%d，期望扣掉手续费余量后的 %d", info.Available, want)
+	}
+	if info.Status != pay.AcctActive {
+		t.Errorf("状态=%s，期望 active", info.Status)
+	}
+	if info.Currency != pay.CurrencyTON || strings.TrimSpace(info.MerchantID) == "" {
+		t.Errorf("账户快照缺币种/地址: %+v", info)
 	}
 	if c.Driver() != DriverTonAPI {
 		t.Errorf("Driver 应回登记名，实得 %s", c.Driver())

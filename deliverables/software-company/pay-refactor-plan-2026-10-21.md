@@ -4,6 +4,7 @@
 - 日期：2026-10-21
 - 状态：计划（未实施）
 - 范围：`config/`、`pay/`、`tron/`、`telegram/`、`usdt/`、`bsc/`、`sol/`、`facebook/`、`instagram/`、`services.go`、`app.go`、`util/`
+- **2026-10-22 更新**：TON 已迁出 `telegram` 成独立 `ton` 包，配置段 `ton.native`，Kind `ton.native`；本文中 `telegram.ton` 的描述均为历史方案。
 
 ---
 

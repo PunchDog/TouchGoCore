@@ -1,4 +1,4 @@
-package telegram
+package ton
 
 import (
 	"context"
@@ -270,9 +270,8 @@ func TestLiveTONTestnetWithdrawEndToEnd(t *testing.T) {
 		amount = n
 	}
 	c := &tonChannel{
-		gw: gw,
-		opt: channelOptions{Name: "ton", Driver: DriverTonAPI,
-			MerchantID: "live-testnet"},
+		gw:  gw,
+		opt: channelOptions{Name: "ton", Driver: DriverTonAPI},
 		chain: &chainConfig{HTTPBase: tonapi.TestnetTonApiURL, Network: pay.NetworkTestnet,
 			APIKey: os.Getenv("TONAPI_TOKEN"), WalletAddress: acct.ToRaw(),
 			PrivateKey: keyHex, FeeLimitSun: 20_000_000, Timeout: 45 * time.Second, MaxRetry: 2},

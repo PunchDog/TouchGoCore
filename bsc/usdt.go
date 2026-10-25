@@ -2,11 +2,10 @@ package bsc
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"strings"
 	"time"
 
+	"touchgocore/chainroute"
 	"touchgocore/config"
 	"touchgocore/pay"
 	"touchgocore/util"
@@ -36,7 +35,7 @@ const bscUSDTKey = string(pay.KindBscUSDT)
 // 校验口径与 tron 侧逐条对齐：驱动名必须是本包登记的那一个、合约必须过 EIP-55、
 // 网络必须显式、私钥必须在构造前注入、chain 必须在。任何一条不成立都返回 ok=false——
 // 本通道宁可不起，也不能带着「不知道该发哪张合约」的快照上线。
-func newBscUSDTClient(cfg *config.Cfg) (*client, bool) {
+func newBscUSDTClient(cfg *config.Cfg) (*chainroute.Snapshot, bool) {
 	if cfg == nil || cfg.Bsc == nil || cfg.Bsc.Usdt == nil {
 		vars.Info("BSC-USDT 通道不启动: 缺 bsc.usdt 段")
 		return nil, false
@@ -94,7 +93,7 @@ func newBscUSDTClient(cfg *config.Cfg) (*client, bool) {
 	vars.Info("BSC-USDT 通道已就绪: driver=%s 合约=%s 网络=%s 小数位=%d 热钱包=%s",
 		driver, contract, network, decimals, strings.TrimSpace(u.Chain.WalletAddress))
 	vars.Info("BSC-USDT 金额口径: 18 位最小单位，超出 int64 的金额走 PayOrder.AmountUnits（十进制字符串）")
-	return &client{ch: ch, network: network}, true
+	return &chainroute.Snapshot{Ch: ch, Network: network}, true
 }
 
 // inlineBscChainOptions 把 bsc.usdt.chain 合成本包的接入点结构。
@@ -137,14 +136,9 @@ func injectKey(prefix, key string, field *string) {
 //
 // order.OrderNo 仍然是幂等键，但保证它的不再是供应商，而是本包的出款台账：
 // 同一单号永不签第二笔，广播结果说不清时按哈希查证并回 UNKNOWN（带 TxHash 供对账）。
+// 补单、回执广播与未启动拒绝的机器见 chainroute.Route.Withdraw。
 func BscUsdtWithdraw(ctx context.Context, order *pay.PayOrder) (*pay.PayResult, error) {
-	c, err := bscRoute.currentClient()
-	if err != nil {
-		return nil, err
-	}
-	return bscRoute.orderCall(ctx, "Withdraw", func(ctx context.Context) (*pay.PayResult, error) {
-		return c.ch.Withdraw(ctx, bscRoute.order(c, order))
-	})
+	return bscRoute.Withdraw(ctx, order)
 }
 
 // BscUsdtQuery 按订单号查链上处置结果（台账里的哈希 → 回执 → 确认数）。
@@ -152,17 +146,7 @@ func BscUsdtWithdraw(ctx context.Context, order *pay.PayOrder) (*pay.PayResult, 
 // 台账里没有这一单号时给 UNKNOWN 而不是 FAILED：把「查不到」说成失败，
 // 上游就会重下一单，而那正是双付。
 func BscUsdtQuery(ctx context.Context, orderNo string) (*pay.PayResult, error) {
-	orderNo = strings.TrimSpace(orderNo)
-	if orderNo == "" {
-		return nil, errors.New(bscRoute.label + " Query 失败: 订单号（幂等键）为空")
-	}
-	c, err := bscRoute.currentClient()
-	if err != nil {
-		return nil, err
-	}
-	return bscRoute.orderCall(ctx, "Query", func(ctx context.Context) (*pay.PayResult, error) {
-		return c.ch.QueryOrder(ctx, orderNo)
-	})
+	return bscRoute.Query(ctx, orderNo)
 }
 
 // BscUsdtAccount 读热钱包在 USDT 合约上的链上余额。
@@ -170,28 +154,8 @@ func BscUsdtQuery(ctx context.Context, orderNo string) (*pay.PayResult, error) {
 // 与 tron 那侧的 UsdtAccount 不是同一个口径：那边读供应商账本里的额度
 // （可用 / 冻结 / 授信），这边只读得到一个数——链上余额。契约里没有「可用 / 冻结」
 // 之说，所以 Available 与 Balance 同值、其余留 0，RawNote 里附上 gas 余额。
-//
 // 这是读操作，不广播回执：下游要的是当场判断（能不能发这么多），
 // 而真正的资金闸在出款前置里（见 precheckFunds），那里比的是大整数。
 func BscUsdtAccount(ctx context.Context, q *pay.AccountQuery) (*pay.AccountInfo, error) {
-	c, err := bscRoute.currentClient()
-	if err != nil {
-		return nil, err
-	}
-	if q == nil {
-		q = &pay.AccountQuery{}
-	}
-	if strings.TrimSpace(q.Currency) == "" {
-		cp := *q
-		cp.Currency = bscRoute.currency
-		q = &cp
-	}
-	if ctx == nil {
-		ctx = bscRoute.runCtx()
-	}
-	info, err := c.ch.QueryAccount(ctx, q)
-	if err != nil {
-		return nil, fmt.Errorf("%s 账户查询失败: %w", bscRoute.label, err)
-	}
-	return info, nil
+	return bscRoute.Account(ctx, q)
 }

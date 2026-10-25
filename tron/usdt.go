@@ -2,11 +2,10 @@ package tron
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"strings"
 	"time"
 
+	"touchgocore/chainroute"
 	"touchgocore/config"
 	"touchgocore/pay"
 	"touchgocore/util"
@@ -17,26 +16,9 @@ import (
 // 收款端校验与地址算法只有 TRON 一份（address.go），代币通道复用同一条链的规则，
 // 登记点分两处就会在下游同时 blank-import 两个包时重名 panic（见 chainrule.go）。
 // touchgocore/usdt 这个 import 路径已被下游写死，所以它退成薄转发留在原地。
-
-// usdtRoute 是 USDT 侧门面实例：装配读 tron.usdt，回执走 CallUsdtMsg，
-// 装配成功即登记到 pay 的 tron.usdt 种类。
-var usdtRoute = route{
-	label:     "USDT",
-	channel:   "usdt",
-	callback:  util.CallUsdtMsg,
-	currency:  pay.CurrencyUSDT,
-	newClient: newUSDTClient,
-	kind:      pay.KindTronUSDT,
-}
-
-// UsdtStart 按配置装配 USDT 资金链路。
 //
-// 配置段缺失、SDK 段没开、密钥未注入，都只记日志并返回：
-// 资金通道没配好不该阻断整机启动，但必须留下可查的痕迹。
-func UsdtStart(ctx context.Context) { usdtRoute.start(ctx) }
-
-// UsdtStop 摘掉供应商客户端。本包无常驻协程，清空指针即可；可重复调用。
-func UsdtStop(ctx context.Context) { usdtRoute.stop() }
+// 门面实例 usdtRoute 与启停入口在 route.go；本文件只留装配入口 newUSDTClient、
+// 三扇转发门面与它们的私有 helper。
 
 // inlineUSDTKey 是密钥注入钩子键名。
 //
@@ -50,7 +32,7 @@ const inlineUSDTKey = string(pay.KindTronUSDT)
 // 报告口径与旧装配层逐条对齐：密钥必须在构造前注入、商户账户必须点得出来、
 // 驱动名必须是本包登记的那一个。任何一条不成立都返回 ok=false——USDT 出款链路宁可不起，
 // 也不能带着「不知道该从哪个商户号出钱」的快照上线。
-func newUSDTClient(cfg *config.Cfg) (*client, bool) {
+func newUSDTClient(cfg *config.Cfg) (*chainroute.Snapshot, bool) {
 	if cfg == nil || cfg.Tron == nil || cfg.Tron.Usdt == nil {
 		vars.Info("USDT 通道不启动: 缺 tron.usdt 段")
 		return nil, false
@@ -117,7 +99,7 @@ func newUSDTClient(cfg *config.Cfg) (*client, bool) {
 		return nil, false
 	}
 	vars.Info("USDT 通道已就绪: driver=%s 商户号=%s 合约=%s 网络=%s", driver, merchantID, contract, network)
-	return &client{ch: ch, network: network}, true
+	return &chainroute.Snapshot{Ch: ch, Network: network}, true
 }
 
 // usdtAsset 校验并给出这条通道发的是哪张合约、哪张网。
@@ -208,14 +190,9 @@ func isTokenStandard(network string) bool {
 // order.OrderNo 仍然是幂等键，但保证它的不再是供应商，而是本包的出款台账：
 // 同一单号永不签第二笔，广播结果说不清时按 txid 查证并回 UNKNOWN（带 TxHash 供对账）。
 // 收款地址与备注走 pay 的 ChainRule 唯一那一份校验，网络与合约不符本通道的单一律拒。
+// 补单、回执广播与未启动拒绝的机器见 chainroute.Route.Withdraw。
 func UsdtWithdraw(ctx context.Context, order *pay.PayOrder) (*pay.PayResult, error) {
-	c, err := usdtRoute.currentClient()
-	if err != nil {
-		return nil, err
-	}
-	return usdtRoute.orderCall(ctx, "Withdraw", func(ctx context.Context) (*pay.PayResult, error) {
-		return c.ch.Withdraw(ctx, usdtRoute.order(c, order))
-	})
+	return usdtRoute.Withdraw(ctx, order)
 }
 
 // UsdtQuery 按订单号查链上处置结果（台账里的 txid → 区块高度 → 确认数）。
@@ -223,45 +200,15 @@ func UsdtWithdraw(ctx context.Context, order *pay.PayOrder) (*pay.PayResult, err
 // 台账里没有这一单号时给 UNKNOWN 而不是 FAILED：把「查不到」说成失败，
 // 上游就会重下一单，而那正是双付。
 func UsdtQuery(ctx context.Context, orderNo string) (*pay.PayResult, error) {
-	orderNo = strings.TrimSpace(orderNo)
-	if orderNo == "" {
-		return nil, errors.New(usdtRoute.label + " Query 失败: 订单号（幂等键）为空")
-	}
-	c, err := usdtRoute.currentClient()
-	if err != nil {
-		return nil, err
-	}
-	return usdtRoute.orderCall(ctx, "Query", func(ctx context.Context) (*pay.PayResult, error) {
-		return c.ch.QueryOrder(ctx, orderNo)
-	})
+	return usdtRoute.Query(ctx, orderNo)
 }
 
 // UsdtAccount 查我方在该供应商名下的 USDT 商户账户（余额/可用/授信/费率/状态）。
 //
 // 注意这与链上热钱包余额是两件事：本方法读的是供应商侧的额度事实，
 // 链上那个账户还有多少 USDT/TRX 只有出款前置闸会去看（见 onchain.go 的 precheckFunds）。
-//
 // 这是读操作，不广播回执：下游要的是当场判断（能不能提这么多），
 // 而额度账本与风控都在业务侧，本包给的只是一次供应商侧的快照。
 func UsdtAccount(ctx context.Context, q *pay.AccountQuery) (*pay.AccountInfo, error) {
-	c, err := usdtRoute.currentClient()
-	if err != nil {
-		return nil, err
-	}
-	if q == nil {
-		q = &pay.AccountQuery{}
-	}
-	if strings.TrimSpace(q.Currency) == "" {
-		cp := *q
-		cp.Currency = usdtRoute.currency
-		q = &cp
-	}
-	if ctx == nil {
-		ctx = usdtRoute.runCtx()
-	}
-	info, err := c.ch.QueryAccount(ctx, q)
-	if err != nil {
-		return nil, fmt.Errorf("%s 账户查询失败: %w", usdtRoute.label, err)
-	}
-	return info, nil
+	return usdtRoute.Account(ctx, q)
 }

@@ -7,6 +7,7 @@ import (
 	"context"
 	"math/big"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -115,5 +116,36 @@ func TestNonceCacheIsPerAddress(t *testing.T) {
 	}
 	if got := c.nonces[a2]; got != 10 {
 		t.Fatalf("地址 B 的 next nonce=%d，期望 10（不能被 A 的缓存覆盖）", got)
+	}
+}
+
+// TestAdoptNonceConcurrentSafe 复现审查里的严重并发路径：prepared 态重广播不持 sendMu
+// 就经 adoptNonce 写 nonces map，与其他 goroutine 并发读写同一张 map。无锁实现会被
+// Go 运行时判为 "concurrent map writes" 直接 fatal，-race 下本用例即回归护栏。
+// 同时验证单调推进：乱序并发写不会把某个地址的缓存回退。
+func TestAdoptNonceConcurrentSafe(t *testing.T) {
+	c := newTestChannel(t)
+	_, a1 := qaBSCPerOrderKey(t)
+	_, a2 := qaBSCPerOrderKey(t)
+	const goroutines = 64
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for i := 0; i < goroutines; i++ {
+		go func(i int) {
+			defer wg.Done()
+			// 两个地址混合写：同桶覆盖与跨桶新增都要在锁内完成。
+			c.adoptNonce(a1, uint64(i))
+			c.adoptNonce(a2, uint64(i*2))
+		}(i)
+	}
+	wg.Wait()
+	c.nonceMu.Lock()
+	got1, got2 := c.nonces[a1], c.nonces[a2]
+	c.nonceMu.Unlock()
+	if want := uint64(goroutines); got1 != want {
+		t.Errorf("a1 的 next nonce=%d，期望 %d（应单调推进到 max+1）", got1, want)
+	}
+	if want := uint64((goroutines-1)*2 + 1); got2 != want {
+		t.Errorf("a2 的 next nonce=%d，期望 %d", got2, want)
 	}
 }

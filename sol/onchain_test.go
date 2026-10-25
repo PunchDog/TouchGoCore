@@ -72,16 +72,25 @@ func TestNewSolOnchainChannelRejectsIncomplete(t *testing.T) {
 }
 
 // TestFeeCeiling 手续费上限必须与「预检余额」和「台账 FeeLimit」用同一个数。
+// 优先费单价是 micro-lamports/CU，换算到 lamports 要除回 1e6——这组用例把这条
+// 换算钉死：曾经漏掉除数会让上限虚高 10^6 倍，配了优先费的出款几乎必被预检误拒。
 func TestFeeCeiling(t *testing.T) {
 	c := solTestChannel(t)
 	c.chain.PriorityFeeMicroLamports = 0
 	if got := c.feeCeiling(); got != signatureFeeLamports {
 		t.Errorf("不配优先费时上限=%d，期望 %d", got, signatureFeeLamports)
 	}
-	c.chain.PriorityFeeMicroLamports = 1
-	want := int64(signatureFeeLamports + computeUnitLimit)
+	// 5 micro-lamports/CU × 200000 CU = 1e6 micro-lamports = 1 lamport。
+	c.chain.PriorityFeeMicroLamports = 5
+	want := int64(signatureFeeLamports + 1)
 	if got := c.feeCeiling(); got != want {
-		t.Errorf("优先费=1 时上限=%d，期望 %d", got, want)
+		t.Errorf("优先费=5 时上限=%d，期望 %d（换算漏除 1e6 会虚高）", got, want)
+	}
+	// 1 lamport/CU（=1e6 micro-lamports/CU）× 200000 CU = 200000 lamports。
+	c.chain.PriorityFeeMicroLamports = 1_000_000
+	want = int64(signatureFeeLamports + computeUnitLimit)
+	if got := c.feeCeiling(); got != want {
+		t.Errorf("优先费=1e6 时上限=%d，期望 %d", got, want)
 	}
 	c.chain.PriorityFeeMicroLamports = math.MaxUint64
 	if got := c.feeCeiling(); got != math.MaxInt64 {

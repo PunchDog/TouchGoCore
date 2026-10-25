@@ -37,8 +37,8 @@ func refuseAll(t *testing.T, ctx context.Context, order *pay.PayOrder) {
 
 // TestPayoutNoCfgRefusesEveryFacade 没有 ton 段、连配置快照都没有时，三个门面一律被拒。
 func TestPayoutNoCfgRefusesEveryFacade(t *testing.T) {
-	prev := tonNativeRoute.runCtx()
-	defer tonNativeRoute.setRunCtx(prev)
+	prev := tonNativeRoute.RunCtx()
+	defer tonNativeRoute.SetRunCtx(prev)
 
 	order := &pay.PayOrder{OrderNo: "O1", Amount: 1, To: &pay.Party{Address: tonAcctBounceable}}
 	for _, cfg := range []*config.Cfg{nil, {}, {Ton: &config.TonConfig{}}} {
@@ -76,9 +76,9 @@ func TestPayoutInterfaceStaysWired(t *testing.T) {
 
 // TestTonStartWithoutConfigLeavesChannelDown 装配入口对空配置只留日志、不点亮通道。
 func TestTonStartWithoutConfigLeavesChannelDown(t *testing.T) {
-	prev := tonNativeRoute.runCtx()
+	prev := tonNativeRoute.RunCtx()
 	defer func() {
-		tonNativeRoute.setRunCtx(prev)
+		tonNativeRoute.SetRunCtx(prev)
 		TonStop(context.Background())
 	}()
 

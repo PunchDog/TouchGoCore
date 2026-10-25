@@ -43,9 +43,9 @@ func mustTONChannel(t *testing.T, cfg *config.Cfg) *tonChannel {
 	if !ok || c == nil {
 		t.Fatal("装配失败")
 	}
-	ch, ok := c.ch.(*tonChannel)
+	ch, ok := c.Ch.(*tonChannel)
 	if !ok {
-		t.Fatalf("装配出的通道类型不是 *tonChannel: %T", c.ch)
+		t.Fatalf("装配出的通道类型不是 *tonChannel: %T", c.Ch)
 	}
 	return ch
 }

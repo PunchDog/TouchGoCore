@@ -16,6 +16,7 @@ import (
 
 	"touchgocore/ledger"
 	"touchgocore/pay"
+	"touchgocore/util"
 	"touchgocore/vars"
 )
 
@@ -73,7 +74,7 @@ type onchainChannel struct {
 	nowFn    func() time.Time
 }
 
-func newOnchainChannel(opt channelOptions) (chainChannel, error) {
+func newOnchainChannel(opt channelOptions) (*onchainChannel, error) {
 	chain := opt.Chain
 	if chain == nil {
 		return nil, fmt.Errorf("通道[%s]的驱动 %s 需要 tron.usdt.chain（节点与热钱包地址）", opt.Name, opt.Driver)
@@ -642,17 +643,7 @@ func (c *onchainChannel) unknown(entry *ledger.Entry, note string) *pay.PayResul
 // note 是对外摘要的唯一出口：先抹凭证再截断。
 //
 // 顺序不能反——截断可能正好把一个凭证切在中间留下片段，而抹除必须看得到整串。
-func (c *onchainChannel) note(s string) string { return clip(c.redact(s)) }
-
-// clip 复用 pay 侧的摘要截断口径（链上消息可能很长，日志不该整段吞下）。
-func clip(s string) string {
-	r := []rune(s)
-	const max = 160
-	if len(r) <= max {
-		return s
-	}
-	return string(r[:max]) + "…"
-}
+func (c *onchainChannel) note(s string) string { return util.Clip(c.redact(s)) }
 
 // redact 把凭证从对外文案里摘掉。
 //

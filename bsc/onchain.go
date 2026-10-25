@@ -14,6 +14,7 @@ import (
 
 	"touchgocore/ledger"
 	"touchgocore/pay"
+	"touchgocore/util"
 )
 
 // 本文件是 USDT-BEP20 的链上出款机器：组 ERC-20 transfer、本地签名、广播。
@@ -75,13 +76,21 @@ type onchainChannel struct {
 	// 同一热钱包的两笔交易若各拿到同一个 nonce，链上只会执行其中一笔，
 	// 另一笔变成死单——而两边的上游都以为自己的单发出去了。
 	sendMu sync.Mutex
+	// nonceMu 只保护下面这张 nonces map 的并发读写，与 sendMu 是两回事。
+	//
+	// sendMu 串行化「新单」的取号→签名→广播；但 prepared 态的重广播走的是
+	// withdrawLocked 的另一条分支，不持 sendMu，却同样会经 adoptNonce 写这张 map。
+	// 两条路并发时对同一张 map 一读一写就是数据竞争（Go 运行时直接 fatal）。
+	// 给 map 配一把自己的锁，把「map 的内存安全」与「新单的业务串行」解耦：
+	// 前者由 nonceMu 保证，后者仍由 sendMu 保证。
+	nonceMu sync.Mutex
 	// nonces 是「每个出款地址本地已知被占用过的下一个 nonce」。
 	//
 	// 它只覆盖节点集群短暂不同步的那一小段：广播成功后 pendingNonce 立刻应该 +1，
 	// 但负载均衡后面的节点可能还没看见。**失败时不推进**——推进一个从未进池的
 	// nonce 会在链上留一个空洞，后续交易全部堆在它后面等（EVM 的 nonce 必须连续）。
 	// 按地址分桶是必须的：按单私钥允许多个热钱包，共用一个 uint64 会让 A 钱包
-	// 的缓存去推进 B 钱包的 nonce。
+	// 的缓存去推进 B 钱包的 nonce。所有读写都在 nonceMu 内进行。
 	nonces map[common.Address]uint64
 }
 
@@ -511,13 +520,19 @@ func (c *onchainChannel) gasLimit(ctx context.Context, data []byte, from common.
 //
 // 以节点的 pendingNonce 为准，用本地缓存兜住「节点集群还没同步到上一笔」的窗口。
 // 缓存只增不减：链上 nonce 只会往前走，回头只会撞上已落块的交易。
+//
+// 读缓存要在 nonceMu 内：prepared 重广播那条路不持 sendMu，却会并发写这张 map。
+// 节点 RPC 调用留在锁外，免得把不同地址的取号也串行化。
 func (c *onchainChannel) allocateNonce(ctx context.Context, from common.Address) (uint64, error) {
 	pending, err := c.rpc.PendingNonce(ctx, from)
 	if err != nil {
 		return 0, &pay.ProviderError{Channel: c.opt.Name, Code: "nonce_unread",
 			Msg: "读不出账户 nonce: " + c.redact(err.Error()), Retryable: true}
 	}
-	if next, ok := c.nonces[from]; ok && next > pending {
+	c.nonceMu.Lock()
+	next, ok := c.nonces[from]
+	c.nonceMu.Unlock()
+	if ok && next > pending {
 		return next, nil
 	}
 	return pending, nil
@@ -527,11 +542,19 @@ func (c *onchainChannel) allocateNonce(ctx context.Context, from common.Address)
 //
 // 只在节点明确受理（含 already known）时推进：失败时推进一个从未进池的 nonce，
 // 会在链上留一个空洞，后面每一笔都要等它被填上。
+//
+// 单调推进（只增不减）：本方法也会在 prepared 重广播那条不持 sendMu 的路上被调用，
+// 一条旧 nonce 的重广播若把缓存从 10 拉回 6，后续新单在节点还没同步时就会撞已用号。
+// 写 map 在 nonceMu 内，与 allocateNonce 的读互斥。
 func (c *onchainChannel) adoptNonce(from common.Address, nonce uint64) {
+	c.nonceMu.Lock()
+	defer c.nonceMu.Unlock()
 	if c.nonces == nil {
 		c.nonces = make(map[common.Address]uint64)
 	}
-	c.nonces[from] = nonce + 1
+	if next := nonce + 1; next > c.nonces[from] {
+		c.nonces[from] = next
+	}
 }
 
 // precheckFunds 在签名之前把「发出去必然失败」的两种情况拦下来。
@@ -758,17 +781,7 @@ func (c *onchainChannel) unknown(entry *ledger.Entry, note string) *pay.PayResul
 }
 
 // note 是对外摘要的唯一出口：先抹凭证再截断（顺序不能反，理由见 tron 同名函数）。
-func (c *onchainChannel) note(s string) string { return clip(c.redact(s)) }
-
-// clip 把摘要截到 160 个字符：RPC 的报错可能很长，日志不该整段吞下。
-func clip(s string) string {
-	r := []rune(s)
-	const max = 160
-	if len(r) <= max {
-		return s
-	}
-	return string(r[:max]) + "…"
-}
+func (c *onchainChannel) note(s string) string { return util.Clip(c.redact(s)) }
 
 // redact 把凭证从对外文案里摘掉。
 //

@@ -17,6 +17,7 @@ import (
 
 	"touchgocore/ledger"
 	"touchgocore/pay"
+	"touchgocore/util"
 )
 
 // 本文件是 USDT-SPL 的链上出款机器：组 transferChecked、本地签名、广播。
@@ -45,8 +46,12 @@ const (
 	//
 	// 一笔 ATA 创建（约 25k）+ transferChecked（约 5k）远低于这个值，
 	// 取 200k 是为了给「目标账户状态在模拟与落块之间变化」留余量。
-	// 优先费按「price × 这个上限」封顶，因此它同时也是本单手续费上限的乘数。
+	// 优先费上限（lamports）= price（micro-lamports/CU）× 这个上限 ÷ 1e6，
+	// 因此它同时也是本单手续费上限的乘数。
 	computeUnitLimit = 200_000
+	// microLamportsPerLamport 是优先费单价（micro-lamports/CU）换算到 lamports 的除数。
+	// ComputeBudget 的 compute_unit_price 以 micro-lamport 计价，1 lamport = 1e6 micro-lamport。
+	microLamportsPerLamport = 1_000_000
 	// mintDecimalsOffset 是 SPL mint 账户布局里 decimals 的字节偏移：
 	// mint_authority(4+32) + supply(8) 之后就是它。
 	mintDecimalsOffset = 44
@@ -627,10 +632,13 @@ func (c *onchainChannel) precheckFee(ctx context.Context, from solana.PublicKey)
 func (c *onchainChannel) feeCeiling() int64 {
 	fee := uint64(signatureFeeLamports)
 	if p := c.chain.PriorityFeeMicroLamports; p > 0 {
+		// p 的单位是 micro-lamports/CU，乘上 CU 上限得到的是 micro-lamports，
+		// 还要除回 1e6 才是 lamports。用 CU 上限而非实际消耗已是 generous 上界，
+		// 整除向下取的误差不足 1 lamport，相对基础签名费可忽略。
 		if p > (math.MaxUint64-signatureFeeLamports)/computeUnitLimit {
 			return math.MaxInt64
 		}
-		fee += p * computeUnitLimit
+		fee += p * computeUnitLimit / microLamportsPerLamport
 	}
 	if fee > math.MaxInt64 {
 		return math.MaxInt64
@@ -799,17 +807,7 @@ func (c *onchainChannel) unknown(entry *ledger.Entry, note string) *pay.PayResul
 }
 
 // note 是对外摘要的唯一出口：先抹凭证再截断（顺序不能反，理由见 tron 同名函数）。
-func (c *onchainChannel) note(s string) string { return clip(c.redact(s)) }
-
-// clip 把摘要截到 160 个字符：RPC 的报错可能很长，日志不该整段吞下。
-func clip(s string) string {
-	r := []rune(s)
-	const max = 160
-	if len(r) <= max {
-		return s
-	}
-	return string(r[:max]) + "…"
-}
+func (c *onchainChannel) note(s string) string { return util.Clip(c.redact(s)) }
 
 // redact 把凭证从对外文案里摘掉。
 //

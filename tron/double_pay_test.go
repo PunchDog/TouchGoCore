@@ -728,3 +728,65 @@ func TestAssemblyRejectsHalfConfiguredChannel(t *testing.T) {
 		t.Fatalf("没带 From 私钥的单必须在签名前拒单，实得 %v", werr)
 	}
 }
+
+// TestQueryOrderTakesLedgerLock 查单必须取同单号的台账锁：与同一单号的 Withdraw 串行，
+// 否则 confirm 里的 settle 会与出款的状态迁移并发盖写台账（把 settled 覆盖回 broadcast 一类）。
+// 本用例持住同单号的台账锁，查单应被阻塞到锁释放为止；不同单号不受影响。
+// 旧实现（QueryOrder 直接 Get+confirm、不取 WithLock）会让同单号查单立即返回 → 本用例红。
+func TestQueryOrderTakesLedgerLock(t *testing.T) {
+	gw := &fakeGateway{buildTx: buildableTx(), receipt: &txReceipt{}}
+	ch := newTestChannel(gw, nil, (&counters{}).signer())
+	for _, on := range []string{"WD-LOCK", "WD-OTHER"} {
+		if err := ch.ledger.Put(&ledger.Entry{
+			OrderNo: on, TxID: strings.Repeat("11", 32), State: ledger.StatePrepared,
+			Amount: 1, ExpiresAtMS: testClock.Add(time.Minute).UnixMilli(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	release := make(chan struct{})
+	held := make(chan struct{})
+	go func() {
+		_ = ch.ledger.WithLock("WD-LOCK", func() error {
+			close(held)
+			<-release
+			return nil
+		})
+	}()
+	<-held
+
+	// 同单号：查单必须被台账锁挡住。
+	sameDone := make(chan struct{})
+	go func() {
+		_, _ = ch.QueryOrder(context.Background(), "WD-LOCK")
+		close(sameDone)
+	}()
+	select {
+	case <-sameDone:
+		t.Fatal("同单号查单没有被台账锁挡住（绕锁查证，settle 会与 Withdraw 并发盖写）")
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	// 不同单号：不能被这把锁挡住。
+	otherDone := make(chan error, 1)
+	go func() {
+		_, err := ch.QueryOrder(context.Background(), "WD-OTHER")
+		otherDone <- err
+	}()
+	select {
+	case err := <-otherDone:
+		if err != nil {
+			t.Fatalf("不同单号查单失败: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("不同单号查单被同单号的台账锁误挡")
+	}
+
+	close(release)
+	select {
+	case <-sameDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("释放台账锁后同单号查单没有完成")
+	}
+}

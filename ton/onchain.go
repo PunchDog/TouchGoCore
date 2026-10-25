@@ -10,8 +10,10 @@ import (
 	"github.com/tonkeeper/tongo/ton"
 	"github.com/tonkeeper/tongo/wallet"
 
+	"touchgocore/chainroute"
 	"touchgocore/ledger"
 	"touchgocore/pay"
+	"touchgocore/util"
 )
 
 // tonSignFunc 把「这一单号」变成一条签好的外部消息。
@@ -55,7 +57,7 @@ var tonWalletMu sync.Mutex
 // newTonOnchainChannel 按已解析好的配置装配一条链上通道。
 //
 // 任何一步缺项都返回错误而不是半成品：出款链路的配置错必须在启动时看得见。
-func newTonOnchainChannel(opt channelOptions) (chainChannel, error) {
+func newTonOnchainChannel(opt channelOptions) (*tonChannel, error) {
 	chain := opt.Chain
 	if chain == nil {
 		return nil, fmt.Errorf("通道[%s]的驱动 %s 需要 ton.native.chain（接入点与热钱包）", opt.Name, opt.Driver)
@@ -457,17 +459,7 @@ func (c *tonChannel) unknown(entry *ledger.Entry, note string) *pay.PayResult {
 // note 是对外摘要的唯一出口：先抹凭证再截断。
 //
 // 顺序不能反——截断可能正好把一个凭证切在中间留下片段，而抹除必须看得到整串。
-func (c *tonChannel) note(s string) string { return clipTON(c.redact(s)) }
-
-// clipTON 截断过长的链上摘要（日志不该整段吞下一条 BOC 报错）。
-func clipTON(s string) string {
-	r := []rune(s)
-	const max = 160
-	if len(r) <= max {
-		return s
-	}
-	return string(r[:max]) + "…"
-}
+func (c *tonChannel) note(s string) string { return util.Clip(c.redact(s)) }
 
 // redact 把凭证从对外文案里摘掉。
 //
@@ -486,4 +478,4 @@ func (c *tonChannel) redact(s string) string {
 // 编译期钉子：本通道必须满足 pay 的统一调用面与门面窄接口，
 // 缺方法要在构建期就看见而不是装配期。
 var _ pay.Channel = (*tonChannel)(nil)
-var _ chainChannel = (*tonChannel)(nil)
+var _ chainroute.Channel = (*tonChannel)(nil)

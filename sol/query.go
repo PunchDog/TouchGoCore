@@ -237,12 +237,24 @@ func (c *onchainChannel) QueryOrder(ctx context.Context, orderNo string) (*pay.P
 	if orderNo == "" {
 		return nil, errors.New("订单号（幂等键）为空")
 	}
-	entry, found := c.ledger.Get(orderNo)
-	if !found {
-		return &pay.PayResult{OrderNo: orderNo, Status: pay.StatusUnknown,
-			RawNote: "出款台账没有这一单号（可能是进程重启且未注入持久台账）"}, nil
+	// 持同单号的台账锁：confirm 里的 settle 会 Put 覆盖台账状态，必须与同一单号的
+	// Withdraw 串行，否则查证的 settle 与出款的状态迁移会互相盖写。
+	var res *pay.PayResult
+	err := c.ledger.WithLock(orderNo, func() error {
+		entry, found := c.ledger.Get(orderNo)
+		if !found {
+			res = &pay.PayResult{OrderNo: orderNo, Status: pay.StatusUnknown,
+				RawNote: "出款台账没有这一单号（可能是进程重启且未注入持久台账）"}
+			return nil
+		}
+		var e error
+		res, e = c.confirm(ctx, entry, c.nowFn())
+		return e
+	})
+	if err != nil {
+		return nil, err
 	}
-	return c.confirm(ctx, entry, c.nowFn())
+	return res, nil
 }
 
 // decodeRawTx 把台账里的已签名交易还原出来。

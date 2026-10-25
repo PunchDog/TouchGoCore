@@ -267,3 +267,17 @@ func ParseDbData(des, src interface{}) {
 		}
 	}
 }
+
+// clipMaxRunes 是 Clip 保留的最大字符数（按 rune 计，不是字节）。
+const clipMaxRunes = 160
+
+// Clip 把过长文本截断到 clipMaxRunes 个字符并追加省略号，用于日志与对外摘要：
+// 链上节点的一句报错（BOC、RPC 回执）可能很长，整段吞进日志/回执没有意义。
+// 按 rune 截而不是按字节，避免在多字节字符中间切出乱码。
+func Clip(s string) string {
+	r := []rune(s)
+	if len(r) <= clipMaxRunes {
+		return s
+	}
+	return string(r[:clipMaxRunes]) + "…"
+}

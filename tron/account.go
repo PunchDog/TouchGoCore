@@ -14,6 +14,7 @@ import (
 
 	"touchgocore/internal/httpx"
 	"touchgocore/pay"
+	"touchgocore/util"
 )
 
 // 本文件是 TRON 侧的供应商账户查询客户端。
@@ -277,7 +278,7 @@ func (c *accountClient) toAccountInfo(data json.RawMessage, req accountRequest) 
 		Status:     pay.NormalizeAccountStatus(d.Status),
 	}
 	if info.Status == pay.AcctUnknown {
-		info.RawNote = "账户状态词未登记: " + clip(d.Status)
+		info.RawNote = "账户状态词未登记: " + util.Clip(d.Status)
 	}
 	return info, nil
 }

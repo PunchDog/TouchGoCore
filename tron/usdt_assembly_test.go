@@ -19,9 +19,9 @@ func mustOnchain(t *testing.T, cfg *config.Cfg) *onchainChannel {
 	if !ok || c == nil {
 		t.Fatal("装配失败")
 	}
-	ch, ok := c.ch.(*onchainChannel)
+	ch, ok := c.Ch.(*onchainChannel)
 	if !ok {
-		t.Fatalf("装配出的通道类型不是 *onchainChannel: %T", c.ch)
+		t.Fatalf("装配出的通道类型不是 *onchainChannel: %T", c.Ch)
 	}
 	return ch
 }
@@ -62,7 +62,7 @@ func TestUsdtInlineKeyHooks(t *testing.T) {
 		t.Fatalf("旧键 supplier_a 仍能注入密钥：段里的 secret_key=%q", got)
 	}
 	if c != nil {
-		if ch, ok := c.ch.(*onchainChannel); ok && ch.opt.SecretKey != "" {
+		if ch, ok := c.Ch.(*onchainChannel); ok && ch.opt.SecretKey != "" {
 			t.Fatalf("旧键 supplier_a 仍能注入密钥：通道快照 SecretKey=%q", ch.opt.SecretKey)
 		}
 	}

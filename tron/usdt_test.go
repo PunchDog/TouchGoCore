@@ -216,7 +216,7 @@ func TestUsdtNewClientFailClosed(t *testing.T) {
 	if !ok || perOrderClient == nil {
 		t.Fatal("按单携带出款参数时，配置缺钱包/私钥/商户账户也应能装配")
 	}
-	_, err := perOrderClient.ch.Withdraw(context.Background(), &pay.PayOrder{
+	_, err := perOrderClient.Ch.Withdraw(context.Background(), &pay.PayOrder{
 		OrderNo: "O-ASSET-1", Amount: 1, Currency: pay.CurrencyUSDT,
 		To: &pay.Party{Kind: pay.PartyWallet, Address: usdtTestContract},
 	})
@@ -231,7 +231,7 @@ func TestUsdtNewClientFailClosed(t *testing.T) {
 	if !ok || noClient == nil {
 		t.Fatal("纯自托管（不配供应商）应当允许装配链上出款")
 	}
-	if _, err := noClient.ch.QueryAccount(context.Background(), &pay.AccountQuery{}); err == nil {
+	if _, err := noClient.Ch.QueryAccount(context.Background(), &pay.AccountQuery{}); err == nil {
 		t.Error("没有供应商侧时账户查询必须明确拒绝")
 	}
 	// 只有一个账户时允许不点名；多个账户时点名即可启用备用商户号。
@@ -248,24 +248,18 @@ func TestUsdtNewClientFailClosed(t *testing.T) {
 	}
 }
 
-// TestUsdtOrderDefaultsFromChainConfig 网络标识与币种缺省由链路配置补齐，
-// 调用方显式给的值不得被覆盖，交进来的订单对象也不得被就地改动。
-func TestUsdtOrderDefaultsFromChainConfig(t *testing.T) {
+// TestUsdtClientCarriesChainNetwork newUSDTClient 装配出的网络标识来自链路配置。
+//
+// 门面补全订单缺省值（缺网络时深拷贝 To 回填、显式值不覆盖、交来的订单不就地改）
+// 是 chainroute 机器的一部分，其行为基线在 chainroute/route_test.go 只写一份、四链
+// 共用；这里只钉「TRON 侧的网络来自 tron.usdt.chain 配置」这条接线事实。
+func TestUsdtClientCarriesChainNetwork(t *testing.T) {
 	c, ok := newUSDTClient(usdtPayCfg("https://pay.invalid", nil))
 	if !ok {
 		t.Fatal("装配失败")
 	}
-	o := &pay.PayOrder{OrderNo: "O1", Amount: 1000000, To: &pay.Party{Address: "TAddr1"}}
-	got := usdtRoute.order(c, o)
-	if got.Currency != pay.CurrencyUSDT || got.To == nil || got.To.Network != usdtTestNetwork {
-		t.Fatalf("缺省补齐不符: %+v", got)
-	}
-	if o.Currency != "" || o.To.Network != "" {
-		t.Fatalf("就地改了调用方的订单: %+v", o)
-	}
-	other := usdtRoute.order(c, &pay.PayOrder{OrderNo: "O2", Amount: 1, Currency: pay.CurrencyTON, To: &pay.Party{Network: "mainnet"}})
-	if other.Currency != pay.CurrencyTON || other.To.Network != "mainnet" {
-		t.Fatalf("显式字段被配置覆盖: %+v", other)
+	if c.Network != usdtTestNetwork {
+		t.Fatalf("快照网络不是链路配置里的 %s: %q", usdtTestNetwork, c.Network)
 	}
 }
 

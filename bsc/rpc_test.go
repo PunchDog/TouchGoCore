@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"math/big"
-	"strings"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -238,16 +237,9 @@ func TestLooksLikeRPCURL(t *testing.T) {
 	}
 }
 
-// TestClipAndBigString 对外摘要的截断与 nil 大整数的字面量。
-func TestClipAndBigString(t *testing.T) {
-	if got := clip("  abc  "); got != "  abc  " {
-		t.Errorf("短串被改动: %q", got)
-	}
-	long := strings.Repeat("错", 200)
-	got := clip(long)
-	if r := []rune(got); len(r) != 161 || !strings.HasSuffix(got, "…") {
-		t.Errorf("长串截断不符: %d 个字符", len(r))
-	}
+// TestBigString nil 大整数给 "0"，免得日志里出现 "<nil>"。
+// （摘要截断 clip 已上移为 util.Clip，其用例见 util/string_test.go。）
+func TestBigString(t *testing.T) {
 	if bigString(nil) != "0" {
 		t.Errorf("nil 大整数应给 0，实得 %q", bigString(nil))
 	}

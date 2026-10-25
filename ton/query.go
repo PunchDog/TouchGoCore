@@ -190,17 +190,32 @@ func (c *tonChannel) settle(entry *ledger.Entry, note string) error {
 //
 // 台账里没有这一单号时不给 FAILED 也不去链上瞎猜：本方法只回答「这一单我们知不知道」，
 // 不知道就是 UNKNOWN，把结论留给能查到的人（对账或人工）。
+//
+// 持同单号的台账锁：confirm 里的 settle 会 Put 覆盖台账状态，必须与同一单号的
+// Withdraw 串行，否则查证的 settle 与出款的状态迁移会互相盖写。取的是每单台账锁
+// （c.led.WithLock），不是全局钱包锁 tonWalletMu——查单是只读路径，不能因为钱包
+// 正在给别的单签名就被串行（见 TestQueryOrderDoesNotTakeWalletLock）。
 func (c *tonChannel) QueryOrder(ctx context.Context, orderNo string) (*pay.PayResult, error) {
 	orderNo = strings.TrimSpace(orderNo)
 	if orderNo == "" {
 		return nil, errors.New("订单号（幂等键）为空")
 	}
-	entry, found := c.led.Get(orderNo)
-	if !found {
-		return &pay.PayResult{OrderNo: orderNo, Status: pay.StatusUnknown,
-			RawNote: "TON 出款台账没有这一单号（可能是进程重启且未注入持久台账）"}, nil
+	var res *pay.PayResult
+	err := c.led.WithLock(orderNo, func() error {
+		entry, found := c.led.Get(orderNo)
+		if !found {
+			res = &pay.PayResult{OrderNo: orderNo, Status: pay.StatusUnknown,
+				RawNote: "TON 出款台账没有这一单号（可能是进程重启且未注入持久台账）"}
+			return nil
+		}
+		var e error
+		res, e = c.confirm(ctx, entry, c.nowFn())
+		return e
+	})
+	if err != nil {
+		return nil, err
 	}
-	return c.confirm(ctx, entry, c.nowFn())
+	return res, nil
 }
 
 // lookupLedgerByChain 在台账查不到时向链上反查「有没有一笔像本单的转出」。

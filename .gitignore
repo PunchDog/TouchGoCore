@@ -58,3 +58,10 @@ testdata/
 .qoder/repowiki/
 .qoder/
 tasks/
+
+# 本地验证/工具产物，不发布也不进版本库：
+#   .dev/ 放 go test -json 的输出与排障记录（一份 race JSON 可达数万行）；
+#   .qoder-credits/ 是编辑器工具生成的用量/画布工件。
+# 两者都是本机一次性文件，入库只会把大块噪声带进 clone。
+.dev/
+.qoder-credits/

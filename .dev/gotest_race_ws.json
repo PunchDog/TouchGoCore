@@ -17789,3 +17789,52 @@
 {"Time":"2026-10-26T09:25:56.6458399+08:00","Action":"output","Package":"touchgocore/whatsapp","Output":"09:25:56 [INFO] [D:\\TouchGoCore\\whatsapp\\wa_pairing.go:318 WhatsApp QR 配对会话已创建: session=qr-20395ed5fc92c790732d46b2b4e3c90e（5m0s 内有效）]\n"}
 {"Time":"2026-10-26T09:25:57.6171202+08:00","Action":"output","Package":"touchgocore/whatsapp","Output":"ok  \ttouchgocore/whatsapp\t36.406s\n"}
 {"Time":"2026-10-26T09:25:57.6171202+08:00","Action":"pass","Package":"touchgocore/whatsapp","Elapsed":36.406}
+{"Time":"2026-10-26T09:34:34.5931369+08:00","Action":"output","Package":"touchgocore/localtimer","Test":"TestWheel_MigrationOrphanProbe","Output":"panic: test timed out after 10m0s\n"}
+{"Time":"2026-10-26T09:34:34.5931369+08:00","Action":"output","Package":"touchgocore/localtimer","Test":"TestWheel_MigrationOrphanProbe","Output":"\trunning tests:\n"}
+{"Time":"2026-10-26T09:34:34.5931369+08:00","Action":"output","Package":"touchgocore/localtimer","Test":"TestWheel_MigrationOrphanProbe","Output":"\t\tTestWheel_MigrationOrphanProbe (9m54s)\n"}
+{"Time":"2026-10-26T09:34:34.5931369+08:00","Action":"output","Package":"touchgocore/localtimer","Test":"TestWheel_MigrationOrphanProbe","Output":"\n"}
+{"Time":"2026-10-26T09:34:34.5931369+08:00","Action":"output","Package":"touchgocore/localtimer","Test":"TestWheel_MigrationOrphanProbe","Output":"goroutine 173 [running]:\n"}
+{"Time":"2026-10-26T09:34:34.5931369+08:00","Action":"output","Package":"touchgocore/localtimer","Test":"TestWheel_MigrationOrphanProbe","Output":"testing.(*M).startAlarm.func1()\n"}
+{"Time":"2026-10-26T09:34:34.5931369+08:00","Action":"output","Package":"touchgocore/localtimer","Test":"TestWheel_MigrationOrphanProbe","Output":"\tC:/Program Files/Go/src/testing/testing.go:2802 +0x605\n"}
+{"Time":"2026-10-26T09:34:34.5931369+08:00","Action":"output","Package":"touchgocore/localtimer","Test":"TestWheel_MigrationOrphanProbe","Output":"created by time.goFunc\n"}
+{"Time":"2026-10-26T09:34:34.5931369+08:00","Action":"output","Package":"touchgocore/localtimer","Test":"TestWheel_MigrationOrphanProbe","Output":"\tC:/Program Files/Go/src/time/sleep.go:215 +0x45\n"}
+{"Time":"2026-10-26T09:34:34.5931369+08:00","Action":"output","Package":"touchgocore/localtimer","Test":"TestWheel_MigrationOrphanProbe","Output":"\n"}
+{"Time":"2026-10-26T09:34:34.5931369+08:00","Action":"output","Package":"touchgocore/localtimer","Test":"TestWheel_MigrationOrphanProbe","Output":"goroutine 1 [chan receive, 9 minutes]:\n"}
+{"Time":"2026-10-26T09:34:34.5931369+08:00","Action":"output","Package":"touchgocore/localtimer","Test":"TestWheel_MigrationOrphanProbe","Output":"testing.(*T).Run(0xc00022a200, {0x140b5570f, 0x1e}, 0x140b7be60)\n"}
+{"Time":"2026-10-26T09:34:34.5931369+08:00","Action":"output","Package":"touchgocore/localtimer","Test":"TestWheel_MigrationOrphanProbe","Output":"\tC:/Program Files/Go/src/testing/testing.go:2109 +0xb56\n"}
+{"Time":"2026-10-26T09:34:34.5931369+08:00","Action":"output","Package":"touchgocore/localtimer","Test":"TestWheel_MigrationOrphanProbe","Output":"testing.runTests.func1(0xc00022a200)\n"}
+{"Time":"2026-10-26T09:34:34.5931369+08:00","Action":"output","Package":"touchgocore/localtimer","Test":"TestWheel_MigrationOrphanProbe","Output":"\tC:/Program Files/Go/src/testing/testing.go:2585 +0x85\n"}
+{"Time":"2026-10-26T09:34:34.5931369+08:00","Action":"output","Package":"touchgocore/localtimer","Test":"TestWheel_MigrationOrphanProbe","Output":"testing.tRunner(0xc00022a200, 0xc0001abad0)\n"}
+{"Time":"2026-10-26T09:34:34.5931369+08:00","Action":"output","Package":"touchgocore/localtimer","Test":"TestWheel_MigrationOrphanProbe","Output":"\tC:/Program Files/Go/src/testing/testing.go:2036 +0x1cb\n"}
+{"Time":"2026-10-26T09:34:34.593896+08:00","Action":"output","Package":"touchgocore/localtimer","Test":"TestWheel_MigrationOrphanProbe","Output":"testing.runTests({0x140b44701, 0xb}, {0x140b4db77, 0x16}, 0xc000196780, {0x1409d7580, 0x8b, 0x8b}, {0xc2afc96aa32e9654, 0x8bb3f6d5d1, ...})\n"}
+{"Time":"2026-10-26T09:34:34.593896+08:00","Action":"output","Package":"touchgocore/localtimer","Test":"TestWheel_MigrationOrphanProbe","Output":"\tC:/Program Files/Go/src/testing/testing.go:2583 +0x9f8\n"}
+{"Time":"2026-10-26T09:34:34.593896+08:00","Action":"output","Package":"touchgocore/localtimer","Test":"TestWheel_MigrationOrphanProbe","Output":"testing.(*M).Run(0xc0002194a0)\n"}
+{"Time":"2026-10-26T09:34:34.593896+08:00","Action":"output","Package":"touchgocore/localtimer","Test":"TestWheel_MigrationOrphanProbe","Output":"\tC:/Program Files/Go/src/testing/testing.go:2443 +0xf4c\n"}
+{"Time":"2026-10-26T09:34:34.593896+08:00","Action":"output","Package":"touchgocore/localtimer","Test":"TestWheel_MigrationOrphanProbe","Output":"main.main()\n"}
+{"Time":"2026-10-26T09:34:34.593896+08:00","Action":"output","Package":"touchgocore/localtimer","Test":"TestWheel_MigrationOrphanProbe","Output":"\t_testmain.go:360 +0x165\n"}
+{"Time":"2026-10-26T09:34:34.593896+08:00","Action":"output","Package":"touchgocore/localtimer","Test":"TestWheel_MigrationOrphanProbe","Output":"\n"}
+{"Time":"2026-10-26T09:34:34.593896+08:00","Action":"output","Package":"touchgocore/localtimer","Test":"TestWheel_MigrationOrphanProbe","Output":"goroutine 66 [select]:\n"}
+{"Time":"2026-10-26T09:34:34.593896+08:00","Action":"output","Package":"touchgocore/localtimer","Test":"TestWheel_MigrationOrphanProbe","Output":"touchgocore/vars.startConsoleFlusherLocked.func1()\n"}
+{"Time":"2026-10-26T09:34:34.593896+08:00","Action":"output","Package":"touchgocore/localtimer","Test":"TestWheel_MigrationOrphanProbe","Output":"\tD:/TouchGoCore/vars/vars.go:332 +0xad\n"}
+{"Time":"2026-10-26T09:34:34.593896+08:00","Action":"output","Package":"touchgocore/localtimer","Test":"TestWheel_MigrationOrphanProbe","Output":"created by touchgocore/vars.startConsoleFlusherLocked in goroutine 56\n"}
+{"Time":"2026-10-26T09:34:34.593896+08:00","Action":"output","Package":"touchgocore/localtimer","Test":"TestWheel_MigrationOrphanProbe","Output":"\tD:/TouchGoCore/vars/vars.go:330 +0x17a\n"}
+{"Time":"2026-10-26T09:34:34.593896+08:00","Action":"output","Package":"touchgocore/localtimer","Test":"TestWheel_MigrationOrphanProbe","Output":"\n"}
+{"Time":"2026-10-26T09:34:34.593896+08:00","Action":"output","Package":"touchgocore/localtimer","Test":"TestWheel_MigrationOrphanProbe","Output":"goroutine 306 [sync.WaitGroup.Wait, 9 minutes]:\n"}
+{"Time":"2026-10-26T09:34:34.593896+08:00","Action":"output","Package":"touchgocore/localtimer","Test":"TestWheel_MigrationOrphanProbe","Output":"sync.runtime_SemacquireWaitGroup(0x1408114f8?, 0xa0?)\n"}
+{"Time":"2026-10-26T09:34:34.593896+08:00","Action":"output","Package":"touchgocore/localtimer","Test":"TestWheel_MigrationOrphanProbe","Output":"\tC:/Program Files/Go/src/runtime/sema.go:114 +0x2e\n"}
+{"Time":"2026-10-26T09:34:34.593896+08:00","Action":"output","Package":"touchgocore/localtimer","Test":"TestWheel_MigrationOrphanProbe","Output":"sync.(*WaitGroup).Wait(0xc000200510)\n"}
+{"Time":"2026-10-26T09:34:34.593896+08:00","Action":"output","Package":"touchgocore/localtimer","Test":"TestWheel_MigrationOrphanProbe","Output":"\tC:/Program Files/Go/src/sync/waitgroup.go:206 +0xc5\n"}
+{"Time":"2026-10-26T09:34:34.593896+08:00","Action":"output","Package":"touchgocore/localtimer","Test":"TestWheel_MigrationOrphanProbe","Output":"touchgocore/localtimer.TestWheel_MigrationOrphanProbe(0xc00019aa00)\n"}
+{"Time":"2026-10-26T09:34:34.593896+08:00","Action":"output","Package":"touchgocore/localtimer","Test":"TestWheel_MigrationOrphanProbe","Output":"\tD:/TouchGoCore/localtimer/p1_migration_release_test.go:507 +0x4bc\n"}
+{"Time":"2026-10-26T09:34:34.593896+08:00","Action":"output","Package":"touchgocore/localtimer","Test":"TestWheel_MigrationOrphanProbe","Output":"testing.tRunner(0xc00019aa00, 0x140b7be60)\n"}
+{"Time":"2026-10-26T09:34:34.593896+08:00","Action":"output","Package":"touchgocore/localtimer","Test":"TestWheel_MigrationOrphanProbe","Output":"\tC:/Program Files/Go/src/testing/testing.go:2036 +0x1cb\n"}
+{"Time":"2026-10-26T09:34:34.593896+08:00","Action":"output","Package":"touchgocore/localtimer","Test":"TestWheel_MigrationOrphanProbe","Output":"created by testing.(*T).Run in goroutine 1\n"}
+{"Time":"2026-10-26T09:34:34.593896+08:00","Action":"output","Package":"touchgocore/localtimer","Test":"TestWheel_MigrationOrphanProbe","Output":"\tC:/Program Files/Go/src/testing/testing.go:2101 +0xb2b\n"}
+{"Time":"2026-10-26T09:34:34.593896+08:00","Action":"output","Package":"touchgocore/localtimer","Test":"TestWheel_MigrationOrphanProbe","Output":"\n"}
+{"Time":"2026-10-26T09:34:34.593896+08:00","Action":"output","Package":"touchgocore/localtimer","Test":"TestWheel_MigrationOrphanProbe","Output":"goroutine 293 [chan receive, 9 minutes]:\n"}
+{"Time":"2026-10-26T09:34:34.593896+08:00","Action":"output","Package":"touchgocore/localtimer","Test":"TestWheel_MigrationOrphanProbe","Output":"touchgocore/localtimer.TestWheel_MigrationOrphanProbe.func1()\n"}
+{"Time":"2026-10-26T09:34:34.593896+08:00","Action":"output","Package":"touchgocore/localtimer","Test":"TestWheel_MigrationOrphanProbe","Output":"\tD:/TouchGoCore/localtimer/p1_migration_release_test.go:501 +0xf0\n"}
+{"Time":"2026-10-26T09:34:34.593896+08:00","Action":"output","Package":"touchgocore/localtimer","Test":"TestWheel_MigrationOrphanProbe","Output":"created by touchgocore/localtimer.TestWheel_MigrationOrphanProbe in goroutine 306\n"}
+{"Time":"2026-10-26T09:34:34.593896+08:00","Action":"output","Package":"touchgocore/localtimer","Test":"TestWheel_MigrationOrphanProbe","Output":"\tD:/TouchGoCore/localtimer/p1_migration_release_test.go:499 +0x49b\n"}
+{"Time":"2026-10-26T09:34:34.6177745+08:00","Action":"output","Package":"touchgocore/localtimer","Output":"FAIL\ttouchgocore/localtimer\t603.235s\n"}
+{"Time":"2026-10-26T09:34:34.6177745+08:00","Action":"fail","Package":"touchgocore/localtimer","Elapsed":603.235}

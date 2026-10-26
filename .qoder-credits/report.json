@@ -1,6 +1,6 @@
 {
   "schemaVersion": 3.2,
-  "generatedAt": "2026-10-26T01:23:16.533Z",
+  "generatedAt": "2026-10-26T01:36:47.615Z",
   "source": "desktop-rich",
   "usageSource": "transcript-ratio",
   "availability": {
@@ -31,21 +31,21 @@
     "model": "dfmodel",
     "modelSource": "runtime-config",
     "cwd": "D:\\TouchGoCore",
-    "turns": 9,
-    "roundTrips": 327,
+    "turns": 10,
+    "roundTrips": 332,
     "compactions": 0,
     "startedAt": "2026-10-25T14:03:49.422Z",
-    "endedAt": "2026-10-26T01:23:12.473Z"
+    "endedAt": "2026-10-26T01:36:46.786Z"
   },
   "context": {
     "contextWindow": 200000,
     "contextWindowSource": "fallback",
     "systemPromptTokens": 0,
-    "netContextTokens": 110274,
-    "peakContextTokens": 110274,
-    "peakContextRatio": 0.551369,
-    "peakSessionTokens": 110274,
-    "peakSessionRatio": 0.551369,
+    "netContextTokens": 111483,
+    "peakContextTokens": 111483,
+    "peakContextRatio": 0.557416,
+    "peakSessionTokens": 111483,
+    "peakSessionRatio": 0.557416,
     "peakSessionNotable": false,
     "peakAdvice": {
       "level": "mid",
@@ -54,46 +54,46 @@
     },
     "userContextLimit": 200000,
     "userContextLimitSource": "default",
-    "peakUserRatio": 0.551369,
+    "peakUserRatio": 0.557416,
     "peakUserAdvice": {
       "level": "mid",
       "tone": "info",
       "text": "已过盈亏线（39%）但还没进性价比区间，压缩有净收益但不大；不急着压"
     },
-    "currentContextTokens": 110274,
-    "netUserRatio": 0.55137,
+    "currentContextTokens": 111483,
+    "netUserRatio": 0.557415,
     "netUserAdvice": {
       "level": "mid",
       "tone": "info",
       "text": "已过盈亏线（39%）但还没进性价比区间，压缩有净收益但不大；不急着压"
     },
-    "netWindowRatio": 0.55137,
+    "netWindowRatio": 0.557415,
     "observedAutoCompactions": 0,
     "observedAutoTriggerTokens": null,
     "autoTriggerRatio": null,
     "thresholdNotEnforced": false
   },
   "totals": {
-    "billedInputTokens": 19298881,
-    "netContextTokens": 110274,
-    "peakContextTokens": 110274,
-    "amplification": 175.01,
-    "attributedTokens": 19298881,
+    "billedInputTokens": 19853789,
+    "netContextTokens": 111483,
+    "peakContextTokens": 111483,
+    "amplification": 178.09,
+    "attributedTokens": 19853789,
     "coverage": 1,
-    "credits": 653.764,
-    "originalCredits": 1502.77,
+    "credits": 657.151,
+    "originalCredits": 1506.157,
     "outputTokens": 0,
     "cachedTokens": 0,
     "cachedTrips": 0,
     "cachedShare": 0,
-    "toolCalls": 358,
-    "fileReads": 184
+    "toolCalls": 362,
+    "fileReads": 185
   },
   "creditsCoverage": {
-    "trips": 327,
-    "roundTrips": 327,
-    "tokens": 19298881,
-    "tokenShare": 1,
+    "trips": 332,
+    "roundTrips": 332,
+    "tokens": 19853789,
+    "tokenShare": 1.0000000201472876,
     "full": true
   },
   "compactionCost": {
@@ -108,11 +108,11 @@
   },
   "proxy": {
     "matched": 0,
-    "requests": 327,
+    "requests": 332,
     "breakdown": {
       "proxy": 0,
       "transcriptTokens": 0,
-      "transcriptRatio": 327
+      "transcriptRatio": 332
     },
     "logPath": "C:\\Users\\TouchGo\\.qoder-credits-proxy\\usage.jsonl",
     "logExists": false,
@@ -129,437 +129,437 @@
     {
       "key": "tool_result",
       "label": "工具返回",
-      "tokens": 6487414,
-      "share": 0.33615491467034825
+      "tokens": 6644977,
+      "share": 0.3346956442920015
     },
     {
       "key": "assistant_thinking",
       "label": "模型思考",
-      "tokens": 5864891,
-      "share": 0.30389797578028954
+      "tokens": 6083376,
+      "share": 0.3064088042822216
     },
     {
       "key": "assistant_tool_use",
       "label": "工具调用",
-      "tokens": 2119485,
-      "share": 0.1098242272837581
+      "tokens": 2175460,
+      "share": 0.10957407168781375
     },
     {
       "key": "assistant_text",
       "label": "模型回复",
-      "tokens": 594115,
-      "share": 0.030784968999359077
+      "tokens": 612646,
+      "share": 0.030857910078092632
     },
     {
       "key": "user_input",
       "label": "用户输入",
-      "tokens": 10054,
-      "share": 0.0005209595189471589
+      "tokens": 10525,
+      "share": 0.0005301176229342103
     },
     {
       "key": "attachment",
       "label": "附件/技能",
-      "tokens": 4222922,
-      "share": 0.21881695374730378
+      "tokens": 4326805,
+      "share": 0.21793347218423284
     }
   ],
   "byCategoryDetail": [
     {
       "key": "tool_result",
       "label": "工具返回",
-      "tokens": 6487414,
-      "share": 0.33615491467034825,
+      "tokens": 6644977,
+      "share": 0.3346956442920015,
       "children": [
         {
           "tool": "Bash",
           "label": "（无路径）",
           "kind": "shell",
-          "tokens": 2691605,
-          "share": 0.13946947551015043,
-          "catShare": 0.41489643442197405,
-          "trips": 21499
+          "tokens": 2765517,
+          "share": 0.1392941825633025,
+          "catShare": 0.4161816412578612,
+          "trips": 22223
         },
         {
           "tool": "Read",
           "label": "bsc/onchain.go",
           "kind": "read",
-          "tokens": 853071,
-          "share": 0.044203150820014726,
-          "catShare": 0.1314963693550717,
-          "trips": 1059
+          "tokens": 865674,
+          "share": 0.043602446893279204,
+          "catShare": 0.13027491584335868,
+          "trips": 1079
         },
         {
           "tool": "Read",
           "label": "ton/query.go",
           "kind": "read",
-          "tokens": 265682,
-          "share": 0.013766702655193997,
-          "catShare": 0.04095344751598939,
-          "trips": 310
+          "tokens": 269606,
+          "share": 0.013579550557105757,
+          "catShare": 0.040572833225336,
+          "trips": 315
         },
         {
           "tool": "Agent",
           "label": "（无路径）",
           "kind": "other",
-          "tokens": 209532,
-          "share": 0.010857204618301202,
-          "catShare": 0.03229821770997567,
-          "trips": 1078
+          "tokens": 212617,
+          "share": 0.01070913395226344,
+          "catShare": 0.03199663376234552,
+          "trips": 1098
         },
         {
           "tool": "Read",
           "label": "tron/query.go",
           "kind": "read",
-          "tokens": 200723,
-          "share": 0.010400764972535198,
-          "catShare": 0.030940392416201182,
-          "trips": 312
+          "tokens": 203661,
+          "share": 0.010258024077245626,
+          "catShare": 0.030648812591944363,
+          "trips": 317
         },
         {
           "tool": "Read",
           "label": "ledger/ledger.go",
           "kind": "read",
-          "tokens": 181511,
-          "share": 0.009405243291763767,
-          "catShare": 0.02797889568560096,
-          "trips": 312
-        },
-        {
-          "tool": "Read",
-          "label": "tron/route.go",
-          "kind": "read",
-          "tokens": 154202,
-          "share": 0.007990211239202271,
-          "catShare": 0.023769431564128418,
-          "trips": 248
+          "tokens": 184167,
+          "share": 0.00927616501228839,
+          "catShare": 0.027715224773572206,
+          "trips": 317
         },
         {
           "tool": "Read",
           "label": "localtimer/wheel_slots.go",
           "kind": "read",
-          "tokens": 153116,
-          "share": 0.007933921239847855,
-          "catShare": 0.023601979009077675,
-          "trips": 102
+          "tokens": 160560,
+          "share": 0.008087115202161028,
+          "catShare": 0.024162594703818475,
+          "trips": 107
+        },
+        {
+          "tool": "Read",
+          "label": "tron/route.go",
+          "kind": "read",
+          "tokens": 157172,
+          "share": 0.007916478735299264,
+          "catShare": 0.023652768926961654,
+          "trips": 253
         },
         {
           "tool": "Read",
           "label": "bsc/route.go",
           "kind": "read",
-          "tokens": 123394,
-          "share": 0.006393818846820992,
-          "catShare": 0.019020453272536913,
-          "trips": 240
+          "tokens": 125856,
+          "share": 0.006339154155457344,
+          "catShare": 0.018940055729935998,
+          "trips": 245
         },
         {
           "tool": "Read",
           "label": "sol/onchain.go",
           "kind": "read",
-          "tokens": 115229,
-          "share": 0.005970775586172232,
-          "catShare": 0.017761976177047712,
-          "trips": 1065
+          "tokens": 117026,
+          "share": 0.005894411635093944,
+          "catShare": 0.017611258872408362,
+          "trips": 1085
         },
         {
           "tool": "Read",
           "label": "bsc/route_test.go",
           "kind": "read",
-          "tokens": 114382,
-          "share": 0.005926897979119836,
-          "catShare": 0.017631448241451637,
-          "trips": 234
+          "tokens": 116728,
+          "share": 0.005879391041722198,
+          "catShare": 0.01756638050715948,
+          "trips": 239
         },
         {
           "tool": "Read",
           "label": "ton/route.go",
           "kind": "read",
-          "tokens": 112113,
-          "share": 0.00580931405004574,
-          "catShare": 0.01728165734462835,
-          "trips": 240
+          "tokens": 114351,
+          "share": 0.0057596466498287075,
+          "catShare": 0.017208609517498735,
+          "trips": 245
         },
         {
           "tool": "Read",
           "label": "pay/transfer.go",
           "kind": "read",
-          "tokens": 109246,
-          "share": 0.005660737910445303,
-          "catShare": 0.016839670233578262,
-          "trips": 237
+          "tokens": 111456,
+          "share": 0.005613836688846105,
+          "catShare": 0.016772960104459486,
+          "trips": 242
         },
         {
           "tool": "Read",
           "label": "util/string.go",
           "kind": "read",
-          "tokens": 77491,
-          "share": 0.0040153093578921,
-          "catShare": 0.01194481824497414,
-          "trips": 329
+          "tokens": 79759,
+          "share": 0.00401731893655876,
+          "catShare": 0.01200290175588271,
+          "trips": 339
         },
         {
           "tool": "Read",
           "label": "websocket/client.go",
           "kind": "read",
-          "tokens": 72416,
-          "share": 0.003752323992694223,
-          "catShare": 0.011162484405066503,
-          "trips": 549
+          "tokens": 79027,
+          "share": 0.00398045131755092,
+          "catShare": 0.011892749085429444,
+          "trips": 599
         },
         {
           "tool": null,
           "label": "其他 80 项",
           "kind": null,
-          "tokens": 1053701,
-          "share": 0.054599062600142884,
-          "catShare": 0.1624223244026811,
-          "trips": 33018
+          "tokens": 1081800,
+          "share": 0.054488336873991856,
+          "catShare": 0.1627996593420084,
+          "trips": 33929
         }
       ]
     },
     {
       "key": "assistant_thinking",
       "label": "模型思考",
-      "tokens": 5864891,
-      "share": 0.30389797578028954,
+      "tokens": 6083376,
+      "share": 0.3064088042822216,
       "children": []
     },
     {
       "key": "assistant_tool_use",
       "label": "工具调用",
-      "tokens": 2119485,
-      "share": 0.1098242272837581,
+      "tokens": 2175460,
+      "share": 0.10957407168781375,
       "children": [
         {
           "tool": "Bash",
           "label": "（无路径）",
           "kind": "shell",
-          "tokens": 356975,
-          "share": 0.018497163298288877,
-          "catShare": 0.16842516224126824,
-          "trips": 21499
+          "tokens": 369612,
+          "share": 0.01861672137825975,
+          "catShare": 0.1699007903192686,
+          "trips": 22223
         },
         {
           "tool": "Write",
           "label": "chainroute/chainroute.go",
           "kind": "write",
-          "tokens": 176163,
-          "share": 0.009128170906053848,
-          "catShare": 0.0831161860348806,
-          "trips": 230
+          "tokens": 179843,
+          "share": 0.009058384220796713,
+          "catShare": 0.08266904826357875,
+          "trips": 235
         },
         {
           "tool": "Agent",
           "label": "（无路径）",
           "kind": "other",
-          "tokens": 135595,
-          "share": 0.0070260511958460635,
-          "catShare": 0.0639754211763541,
-          "trips": 1078
+          "tokens": 138165,
+          "share": 0.006959113166721029,
+          "catShare": 0.06351058292830589,
+          "trips": 1098
         },
         {
           "tool": "Edit",
           "label": "bsc/onchain.go",
           "kind": "write",
-          "tokens": 132523,
-          "share": 0.006866893139321832,
-          "catShare": 0.0625262140163255,
-          "trips": 1173
+          "tokens": 134769,
+          "share": 0.0067880628296457185,
+          "catShare": 0.06194953536987758,
+          "trips": 1198
         },
         {
           "tool": "Write",
           "label": "chainroute/route_test.go",
           "kind": "write",
-          "tokens": 121004,
-          "share": 0.006270024234607266,
-          "catShare": 0.05709144866921854,
-          "trips": 228
+          "tokens": 123556,
+          "share": 0.006223276124856033,
+          "catShare": 0.056795152621385646,
+          "trips": 233
         },
         {
           "tool": "Edit",
           "label": "tron/usdt.go",
           "kind": "write",
-          "tokens": 95236,
-          "share": 0.004934793222122748,
-          "catShare": 0.04493355741418045,
-          "trips": 812
+          "tokens": 97520,
+          "share": 0.0049118957535934345,
+          "catShare": 0.044827171957138374,
+          "trips": 832
         },
         {
           "tool": "Edit",
           "label": "ton/native.go",
           "kind": "write",
-          "tokens": 84827,
-          "share": 0.0043954166431753455,
-          "catShare": 0.04002228608282121,
-          "trips": 910
+          "tokens": 87102,
+          "share": 0.0043871489476654075,
+          "catShare": 0.04003820319979332,
+          "trips": 935
         },
         {
           "tool": "Edit",
           "label": "sol/usdt.go",
           "kind": "write",
-          "tokens": 75991,
-          "share": 0.003937606964205045,
-          "catShare": 0.03585371881589717,
-          "trips": 862
+          "tokens": 77702,
+          "share": 0.0039137120015389935,
+          "catShare": 0.035717500876388954,
+          "trips": 882
         },
         {
           "tool": "Edit",
           "label": "bsc/usdt.go",
           "kind": "write",
-          "tokens": 73652,
-          "share": 0.003816370075036206,
-          "catShare": 0.034749801290890656,
-          "trips": 890
+          "tokens": 75254,
+          "share": 0.003790416748791377,
+          "catShare": 0.034592277994292396,
+          "trips": 910
         },
         {
           "tool": "Edit",
           "label": "sol/onchain.go",
           "kind": "write",
-          "tokens": 68422,
-          "share": 0.0035453773825519807,
-          "catShare": 0.03228228843706425,
-          "trips": 1194
+          "tokens": 69615,
+          "share": 0.0035063990366619876,
+          "catShare": 0.03200026231252983,
+          "trips": 1219
         },
         {
           "tool": "Edit",
           "label": "tron/query.go",
           "kind": "write",
-          "tokens": 54460,
-          "share": 0.0028219079347579,
-          "catShare": 0.025694767034115353,
-          "trips": 544
+          "tokens": 55396,
+          "share": 0.0027901768337037476,
+          "catShare": 0.025463841862637074,
+          "trips": 554
         },
         {
           "tool": "TaskCreate",
           "label": "（无路径）",
           "kind": "other",
-          "tokens": 48431,
-          "share": 0.0025095164663094705,
-          "catShare": 0.022850299322621344,
-          "trips": 2865
-        },
-        {
-          "tool": "Edit",
-          "label": "bsc/per_order_test.go",
-          "kind": "write",
-          "tokens": 45782,
-          "share": 0.0023722438980798783,
-          "catShare": 0.021600369579205855,
-          "trips": 573
+          "tokens": 49200,
+          "share": 0.002478098682892601,
+          "catShare": 0.022615739697552945,
+          "trips": 2915
         },
         {
           "tool": "Write",
           "label": "bsc/route_test.go",
           "kind": "write",
-          "tokens": 45612,
-          "share": 0.0023634570300843163,
-          "catShare": 0.021520361112832957,
-          "trips": 220
+          "tokens": 46611,
+          "share": 0.0023477086134725744,
+          "catShare": 0.02142576776886967,
+          "trips": 225
+        },
+        {
+          "tool": "Edit",
+          "label": "bsc/per_order_test.go",
+          "kind": "write",
+          "tokens": 46531,
+          "share": 0.002343672499838042,
+          "catShare": 0.02138893320050543,
+          "trips": 583
         },
         {
           "tool": "Edit",
           "label": "util/string.go",
           "kind": "write",
-          "tokens": 43424,
-          "share": 0.002250070947199349,
-          "catShare": 0.02048792878265133,
-          "trips": 653
+          "tokens": 44726,
+          "share": 0.0022527924826308806,
+          "catShare": 0.020559539751788054,
+          "trips": 673
         },
         {
           "tool": null,
           "label": "其他 80 项",
           "kind": null,
-          "tokens": 561388,
-          "share": 0.029089163946116346,
-          "catShare": 0.2648701899896576,
-          "trips": 27101
+          "tokens": 579860,
+          "share": 0.029206492366743293,
+          "catShare": 0.2665456518760677,
+          "trips": 27917
         }
       ]
     },
     {
       "key": "assistant_text",
       "label": "模型回复",
-      "tokens": 594115,
-      "share": 0.030784968999359077,
+      "tokens": 612646,
+      "share": 0.030857910078092632,
       "children": []
     },
     {
       "key": "user_input",
       "label": "用户输入",
-      "tokens": 10054,
-      "share": 0.0005209595189471589,
+      "tokens": 10525,
+      "share": 0.0005301176229342103,
       "children": []
     },
     {
       "key": "attachment",
       "label": "附件/技能",
-      "tokens": 4222922,
-      "share": 0.21881695374730378,
+      "tokens": 4326805,
+      "share": 0.21793347218423284,
       "children": []
     }
   ],
   "byTool": [
     {
       "tool": "Read",
-      "tokens": 3403836,
+      "tokens": 3480721,
       "calls": 68,
-      "perCall": 50056,
-      "share": 0.17637479522059335
+      "perCall": 51187,
+      "share": 0.17531771668593604
     },
     {
       "tool": "Bash",
-      "tokens": 3048579,
-      "calls": 143,
-      "perCall": 21319,
-      "share": 0.15796663880844067
+      "tokens": 3135130,
+      "calls": 146,
+      "perCall": 21473,
+      "share": 0.1579109039415636
     },
     {
       "tool": "Edit",
-      "tokens": 1065751,
-      "calls": 96,
-      "perCall": 11102,
-      "share": 0.05522344276426999
+      "tokens": 1094801,
+      "calls": 97,
+      "perCall": 11287,
+      "share": 0.05514318083666479
     },
     {
       "tool": "Write",
-      "tokens": 509608,
+      "tokens": 521262,
       "calls": 11,
-      "perCall": 46328,
-      "share": 0.026406081019178525
+      "perCall": 47387,
+      "share": 0.026255016167921287
     },
     {
       "tool": "Agent",
-      "tokens": 345127,
+      "tokens": 350782,
       "calls": 4,
-      "perCall": 86282,
-      "share": 0.017883255814147236
+      "perCall": 87695,
+      "share": 0.01766824711898446
     },
     {
       "tool": "Grep",
-      "tokens": 135717,
+      "tokens": 137764,
       "calls": 9,
-      "perCall": 15080,
-      "share": 0.007032366179560331
+      "perCall": 15307,
+      "share": 0.006938908451334171
     },
     {
       "tool": "TaskCreate",
-      "tokens": 62923,
+      "tokens": 63922,
       "calls": 10,
-      "perCall": 6292,
-      "share": 0.0032604440260515935
+      "perCall": 6392,
+      "share": 0.0032196250669878227
     },
     {
       "tool": "AskUserQuestion",
-      "tokens": 23663,
+      "tokens": 24129,
       "calls": 1,
-      "perCall": 23663,
-      "share": 0.0012261314001390208
+      "perCall": 24129,
+      "share": 0.0012153325554976897
     },
     {
       "tool": "TaskUpdate",
-      "tokens": 11695,
+      "tokens": 11928,
       "calls": 16,
-      "perCall": 731,
-      "share": 0.0006059867217201105
+      "perCall": 745,
+      "share": 0.0006007851549179993
     }
   ],
   "byFile": [
@@ -570,10 +570,10 @@
       "tool": "Read",
       "selfTokens": 15312,
       "reads": 9,
-      "trips": 4464,
-      "billed": 996921,
-      "perRead": 110769,
-      "share": 0.051656944132179146
+      "trips": 4554,
+      "billed": 1011975,
+      "perRead": 112442,
+      "share": 0.05097135530875884
     },
     {
       "attr": "file:D:\\TouchGoCore\\ton\\query.go",
@@ -582,10 +582,10 @@
       "tool": "Read",
       "selfTokens": 4733,
       "reads": 2,
-      "trips": 1174,
-      "billed": 308685,
-      "perRead": 154342,
-      "share": 0.01599495302727837
+      "trips": 1194,
+      "billed": 313338,
+      "perRead": 156669,
+      "share": 0.015782263765064003
     },
     {
       "attr": "file:D:\\TouchGoCore\\tron\\query.go",
@@ -594,10 +594,10 @@
       "tool": "Read",
       "selfTokens": 4024,
       "reads": 3,
-      "trips": 1712,
-      "billed": 260067,
-      "perRead": 86689,
-      "share": 0.0134757325366229
+      "trips": 1742,
+      "billed": 264023,
+      "perRead": 88008,
+      "share": 0.013298347044662992
     },
     {
       "attr": "file:D:\\TouchGoCore\\sol\\onchain.go",
@@ -606,22 +606,10 @@
       "tool": "Read",
       "selfTokens": 3206,
       "reads": 9,
-      "trips": 4518,
-      "billed": 192387,
-      "perRead": 21376,
-      "share": 0.009968840659216074
-    },
-    {
-      "attr": "file:D:\\TouchGoCore\\ledger\\ledger.go",
-      "label": "ledger/ledger.go",
-      "kind": "read",
-      "tool": "Read",
-      "selfTokens": 2715,
-      "reads": 1,
-      "trips": 624,
-      "billed": 182384,
-      "perRead": 182384,
-      "share": 0.009450494277253373
+      "trips": 4608,
+      "billed": 195539,
+      "perRead": 21727,
+      "share": 0.009848966699655516
     },
     {
       "attr": "file:D:\\TouchGoCore\\tron\\route.go",
@@ -630,10 +618,22 @@
       "tool": "Read",
       "selfTokens": 3672,
       "reads": 2,
-      "trips": 908,
-      "billed": 181577,
-      "perRead": 90789,
-      "share": 0.009408694500051905
+      "trips": 928,
+      "billed": 185187,
+      "perRead": 92594,
+      "share": 0.009327551529255244
+    },
+    {
+      "attr": "file:D:\\TouchGoCore\\ledger\\ledger.go",
+      "label": "ledger/ledger.go",
+      "kind": "read",
+      "tool": "Read",
+      "selfTokens": 2715,
+      "reads": 1,
+      "trips": 634,
+      "billed": 185053,
+      "perRead": 185053,
+      "share": 0.009320794969786442
     },
     {
       "attr": "file:D:\\TouchGoCore\\chainroute\\chainroute.go",
@@ -642,10 +642,10 @@
       "tool": "Write",
       "selfTokens": 3777,
       "reads": 1,
-      "trips": 460,
-      "billed": 177764,
-      "perRead": 177764,
-      "share": 0.009211087767075974
+      "trips": 470,
+      "billed": 181477,
+      "perRead": 181477,
+      "share": 0.009140667165896118
     },
     {
       "attr": "file:D:\\TouchGoCore\\bsc\\route_test.go",
@@ -654,10 +654,10 @@
       "tool": "Read",
       "selfTokens": 3450,
       "reads": 2,
-      "trips": 908,
-      "billed": 162189,
-      "perRead": 81095,
-      "share": 0.00840406571547735
+      "trips": 928,
+      "billed": 165581,
+      "perRead": 82790,
+      "share": 0.008340009007976972
     },
     {
       "attr": "file:D:\\TouchGoCore\\localtimer\\wheel_slots.go",
@@ -666,10 +666,10 @@
       "tool": "Read",
       "selfTokens": 7587,
       "reads": 1,
-      "trips": 204,
-      "billed": 153419,
-      "perRead": 153419,
-      "share": 0.007949638199514747
+      "trips": 214,
+      "billed": 160878,
+      "perRead": 160878,
+      "share": 0.008103135636396688
     },
     {
       "attr": "file:D:\\TouchGoCore\\bsc\\route.go",
@@ -678,10 +678,10 @@
       "tool": "Read",
       "selfTokens": 3031,
       "reads": 2,
-      "trips": 930,
-      "billed": 147617,
-      "perRead": 73809,
-      "share": 0.007648999167286719
+      "trips": 950,
+      "billed": 150597,
+      "perRead": 75298,
+      "share": 0.007585298620820612
     },
     {
       "attr": "file:D:\\TouchGoCore\\tron\\usdt.go",
@@ -690,10 +690,10 @@
       "tool": "Edit",
       "selfTokens": 3333,
       "reads": 6,
-      "trips": 2430,
-      "billed": 136630,
-      "perRead": 22772,
-      "share": 0.007079688118630252
+      "trips": 2490,
+      "billed": 139907,
+      "perRead": 23318,
+      "share": 0.007046853881922401
     },
     {
       "attr": "file:D:\\TouchGoCore\\ton\\route.go",
@@ -702,10 +702,10 @@
       "tool": "Read",
       "selfTokens": 2857,
       "reads": 2,
-      "trips": 850,
-      "billed": 133997,
-      "perRead": 66999,
-      "share": 0.0069432759680496834
+      "trips": 870,
+      "billed": 136806,
+      "perRead": 68403,
+      "share": 0.006890684184913659
     },
     {
       "attr": "file:D:\\TouchGoCore\\util\\string.go",
@@ -714,10 +714,10 @@
       "tool": "Read",
       "selfTokens": 3803,
       "reads": 6,
-      "trips": 1964,
-      "billed": 126545,
-      "perRead": 21091,
-      "share": 0.00655713925883646
+      "trips": 2024,
+      "billed": 130284,
+      "perRead": 21714,
+      "share": 0.006562183245756511
     },
     {
       "attr": "file:D:\\TouchGoCore\\chainroute\\route_test.go",
@@ -726,10 +726,10 @@
       "tool": "Write",
       "selfTokens": 2629,
       "reads": 1,
-      "trips": 456,
-      "billed": 122590,
-      "perRead": 122590,
-      "share": 0.006352174841149326
+      "trips": 466,
+      "billed": 125174,
+      "perRead": 125174,
+      "share": 0.006304814232079582
     },
     {
       "attr": "file:D:\\TouchGoCore\\bsc\\per_order_test.go",
@@ -738,10 +738,10 @@
       "tool": "Read",
       "selfTokens": 1978,
       "reads": 4,
-      "trips": 2304,
-      "billed": 120327,
-      "perRead": 30082,
-      "share": 0.006234935956295089
+      "trips": 2344,
+      "billed": 122272,
+      "perRead": 30568,
+      "share": 0.006158616387900415
     },
     {
       "attr": "file:D:\\TouchGoCore\\pay\\transfer.go",
@@ -750,10 +750,10 @@
       "tool": "Read",
       "selfTokens": 2260,
       "reads": 1,
-      "trips": 474,
-      "billed": 109829,
-      "perRead": 109829,
-      "share": 0.005690955372600706
+      "trips": 484,
+      "billed": 112051,
+      "perRead": 112051,
+      "share": 0.005643803788608627
     },
     {
       "attr": "file:D:\\TouchGoCore\\tron\\double_pay_test.go",
@@ -762,10 +762,10 @@
       "tool": "Read",
       "selfTokens": 1920,
       "reads": 3,
-      "trips": 1628,
-      "billed": 108351,
-      "perRead": 36117,
-      "share": 0.00561438136480716
+      "trips": 1658,
+      "billed": 110239,
+      "perRead": 36746,
+      "share": 0.005552534125698084
     },
     {
       "attr": "file:D:\\TouchGoCore\\websocket\\client.go",
@@ -774,10 +774,10 @@
       "tool": "Read",
       "selfTokens": 9894,
       "reads": 28,
-      "trips": 1972,
-      "billed": 90537,
-      "perRead": 3233,
-      "share": 0.0046913224356060585
+      "trips": 2252,
+      "billed": 100264,
+      "perRead": 3581,
+      "share": 0.005050125294033224
     },
     {
       "attr": "file:D:\\TouchGoCore\\ton\\native.go",
@@ -786,10 +786,10 @@
       "tool": "Edit",
       "selfTokens": 2409,
       "reads": 5,
-      "trips": 1820,
-      "billed": 88322,
-      "perRead": 17664,
-      "share": 0.004576513251628627
+      "trips": 1870,
+      "billed": 90690,
+      "perRead": 18138,
+      "share": 0.004567888097517695
     },
     {
       "attr": "file:D:\\TouchGoCore\\list\\list.go",
@@ -798,10 +798,10 @@
       "tool": "Read",
       "selfTokens": 4305,
       "reads": 8,
-      "trips": 1436,
-      "billed": 85689,
-      "perRead": 10711,
-      "share": 0.004440112361324471
+      "trips": 1516,
+      "billed": 89921,
+      "perRead": 11240,
+      "share": 0.004529184352346852
     },
     {
       "attr": "file:D:\\TouchGoCore\\tron\\onchain.go",
@@ -810,10 +810,10 @@
       "tool": "Read",
       "selfTokens": 2286,
       "reads": 7,
-      "trips": 2350,
-      "billed": 83178,
-      "perRead": 11883,
-      "share": 0.004309999512217756
+      "trips": 2420,
+      "billed": 85426,
+      "perRead": 12204,
+      "share": 0.00430273271822071
     },
     {
       "attr": "file:D:\\TouchGoCore\\sol\\usdt.go",
@@ -822,22 +822,10 @@
       "tool": "Edit",
       "selfTokens": 1812,
       "reads": 4,
-      "trips": 1724,
-      "billed": 79154,
-      "perRead": 19788,
-      "share": 0.004101473599318632
-    },
-    {
-      "attr": "file:D:\\TouchGoCore\\sol\\onchain_test.go",
-      "label": "sol/onchain_test.go",
-      "kind": "read",
-      "tool": "Read",
-      "selfTokens": 1203,
-      "reads": 2,
-      "trips": 1208,
-      "billed": 77329,
-      "perRead": 38664,
-      "share": 0.004006893627828471
+      "trips": 1764,
+      "billed": 80935,
+      "perRead": 20234,
+      "share": 0.004076563853502136
     },
     {
       "attr": "file:D:\\TouchGoCore\\bsc\\usdt.go",
@@ -846,10 +834,22 @@
       "tool": "Edit",
       "selfTokens": 1702,
       "reads": 4,
-      "trips": 1780,
-      "billed": 76923,
-      "perRead": 19231,
-      "share": 0.003985878397491035
+      "trips": 1820,
+      "billed": 78596,
+      "perRead": 19649,
+      "share": 0.003958752604469773
+    },
+    {
+      "attr": "file:D:\\TouchGoCore\\sol\\onchain_test.go",
+      "label": "sol/onchain_test.go",
+      "kind": "read",
+      "tool": "Read",
+      "selfTokens": 1203,
+      "reads": 2,
+      "trips": 1228,
+      "billed": 78511,
+      "perRead": 39256,
+      "share": 0.003954471338305289
     },
     {
       "attr": "file:D:\\TouchGoCore\\pay\\types.go",
@@ -858,10 +858,10 @@
       "tool": "Read",
       "selfTokens": 975,
       "reads": 1,
-      "trips": 646,
-      "billed": 69458,
-      "perRead": 69458,
-      "share": 0.00359908057279101
+      "trips": 656,
+      "billed": 70417,
+      "perRead": 70417,
+      "share": 0.003546766605601311
     },
     {
       "attr": "file:D:\\TouchGoCore\\ton\\onchain.go",
@@ -870,10 +870,10 @@
       "tool": "Read",
       "selfTokens": 1526,
       "reads": 8,
-      "trips": 3030,
-      "billed": 66453,
-      "perRead": 8307,
-      "share": 0.003443378900446697
+      "trips": 3110,
+      "billed": 67954,
+      "perRead": 8494,
+      "share": 0.003422700778119865
     },
     {
       "attr": "file:D:\\TouchGoCore\\ton\\route_test.go",
@@ -882,10 +882,10 @@
       "tool": "Read",
       "selfTokens": 1455,
       "reads": 2,
-      "trips": 818,
-      "billed": 66287,
-      "perRead": 33144,
-      "share": 0.00343477693794236
+      "trips": 838,
+      "billed": 67718,
+      "perRead": 33859,
+      "share": 0.003410823510704314
     },
     {
       "attr": "file:D:\\TouchGoCore\\bsc\\query.go",
@@ -894,10 +894,10 @@
       "tool": "Read",
       "selfTokens": 924,
       "reads": 2,
-      "trips": 1166,
-      "billed": 57040,
-      "perRead": 28520,
-      "share": 0.002955636393357949
+      "trips": 1186,
+      "billed": 57949,
+      "perRead": 28974,
+      "share": 0.0029187811342217544
     },
     {
       "attr": "file:D:\\TouchGoCore\\list\\node.go",
@@ -906,10 +906,10 @@
       "tool": "Read",
       "selfTokens": 2845,
       "reads": 6,
-      "trips": 1110,
-      "billed": 54945,
-      "perRead": 9157,
-      "share": 0.0028470476040498138
+      "trips": 1170,
+      "billed": 57742,
+      "perRead": 9624,
+      "share": 0.002908350081583248
     },
     {
       "attr": "file:D:\\TouchGoCore\\sol\\query.go",
@@ -918,10 +918,10 @@
       "tool": "Read",
       "selfTokens": 876,
       "reads": 2,
-      "trips": 1164,
-      "billed": 53778,
-      "perRead": 26889,
-      "share": 0.0027865950535418352
+      "trips": 1184,
+      "billed": 54639,
+      "perRead": 27320,
+      "share": 0.002752087624047768
     },
     {
       "attr": "file:D:\\TouchGoCore\\pay\\channel.go",
@@ -930,10 +930,10 @@
       "tool": "Read",
       "selfTokens": 1080,
       "reads": 1,
-      "trips": 472,
-      "billed": 52247,
-      "perRead": 52247,
-      "share": 0.0027072707351401184
+      "trips": 482,
+      "billed": 53309,
+      "perRead": 53309,
+      "share": 0.0026850819254385498
     },
     {
       "attr": "file:D:\\TouchGoCore\\tron\\usdt_test.go",
@@ -942,10 +942,10 @@
       "tool": "Edit",
       "selfTokens": 1218,
       "reads": 4,
-      "trips": 1558,
-      "billed": 48348,
-      "perRead": 12087,
-      "share": 0.0025052120534006426
+      "trips": 1598,
+      "billed": 49545,
+      "perRead": 12386,
+      "share": 0.0024955041145645067
     },
     {
       "attr": "file:D:\\TouchGoCore\\sol\\route_test.go",
@@ -954,10 +954,10 @@
       "tool": "Write",
       "selfTokens": 951,
       "reads": 1,
-      "trips": 426,
-      "billed": 41259,
-      "perRead": 41259,
-      "share": 0.0021378889198012843
+      "trips": 436,
+      "billed": 42194,
+      "perRead": 42194,
+      "share": 0.0021252264467944465
     },
     {
       "attr": "file:computeUnitLimit|signatureFeeLamports|PriorityFeeMicroLamports|MicroLamports|ComputeUnitPrice|microLamports|1e6|1_000_000",
@@ -966,10 +966,10 @@
       "tool": "Grep",
       "selfTokens": 523,
       "reads": 1,
-      "trips": 612,
-      "billed": 34232,
-      "perRead": 34232,
-      "share": 0.001773760804960831
+      "trips": 622,
+      "billed": 34746,
+      "perRead": 34746,
+      "share": 0.0017500822145682868
     },
     {
       "attr": "file:\\.nonces|adoptNonce|allocateNonce|nonceMu",
@@ -978,10 +978,10 @@
       "tool": "Grep",
       "selfTokens": 535,
       "reads": 1,
-      "trips": 588,
-      "billed": 33258,
-      "perRead": 33258,
-      "share": 0.0017233067724975412
+      "trips": 598,
+      "billed": 33784,
+      "perRead": 33784,
+      "share": 0.0017016325660346397
     },
     {
       "attr": "file:D:\\TouchGoCore\\bsc\\onchain_test.go",
@@ -990,10 +990,10 @@
       "tool": "Read",
       "selfTokens": 493,
       "reads": 1,
-      "trips": 578,
-      "billed": 29988,
-      "perRead": 29988,
-      "share": 0.0015538635431482989
+      "trips": 588,
+      "billed": 30472,
+      "perRead": 30472,
+      "share": 0.0015348455027564569
     },
     {
       "attr": "file:WithLock|func .*QueryOrder",
@@ -1002,10 +1002,10 @@
       "tool": "Grep",
       "selfTokens": 422,
       "reads": 1,
-      "trips": 618,
-      "billed": 27974,
-      "perRead": 27974,
-      "share": 0.0014495001697107618
+      "trips": 628,
+      "billed": 28389,
+      "perRead": 28389,
+      "share": 0.0014298833297849973
     },
     {
       "attr": "file:D:\\TouchGoCore\\websocket\\client_pool_stats_test.go",
@@ -1014,10 +1014,22 @@
       "tool": "Read",
       "selfTokens": 2324,
       "reads": 2,
-      "trips": 212,
-      "billed": 24696,
-      "perRead": 12348,
-      "share": 0.0012796778911911486
+      "trips": 232,
+      "billed": 26981,
+      "perRead": 13491,
+      "share": 0.0013589894188306406
+    },
+    {
+      "attr": "file:C:\\Users\\TouchGo\\.qoder-cn\\projects\\D--TouchGoCore\\memory\\pay-race-red-baseline-2026-10-25.md",
+      "label": "C:/Users/TouchGo/.qoder-cn/projects/D--TouchGoCore/memory/pay-race-red-baseline-2026-10-25.md",
+      "kind": "read",
+      "tool": "Read",
+      "selfTokens": 3724,
+      "reads": 5,
+      "trips": 460,
+      "billed": 23536,
+      "perRead": 4707,
+      "share": 0.001185481908141321
     },
     {
       "attr": "file:D:\\TouchGoCore\\sol\\route.go",
@@ -1026,10 +1038,10 @@
       "tool": "Write",
       "selfTokens": 513,
       "reads": 1,
-      "trips": 436,
-      "billed": 22808,
-      "perRead": 22808,
-      "share": 0.0011818537488304981
+      "trips": 446,
+      "billed": 23313,
+      "perRead": 23313,
+      "share": 0.0011742236267125235
     },
     {
       "attr": "file:D:\\TouchGoCore\\ton\\wallet_lock_test.go",
@@ -1038,10 +1050,10 @@
       "tool": "Read",
       "selfTokens": 344,
       "reads": 1,
-      "trips": 616,
-      "billed": 22706,
-      "perRead": 22706,
-      "share": 0.001176560783789731
+      "trips": 626,
+      "billed": 23044,
+      "perRead": 23044,
+      "share": 0.0011607101769931056
     },
     {
       "attr": "file:D:\\TouchGoCore\\list\\qa_gl_range_pool_test.go",
@@ -1050,10 +1062,10 @@
       "tool": "Read",
       "selfTokens": 1089,
       "reads": 1,
-      "trips": 202,
-      "billed": 21802,
-      "perRead": 21802,
-      "share": 0.0011297246876151123
+      "trips": 212,
+      "billed": 22873,
+      "perRead": 22873,
+      "share": 0.0011520735162538114
     },
     {
       "attr": "file:D:\\TouchGoCore\\bsc\\rpc_test.go",
@@ -1062,34 +1074,10 @@
       "tool": "Read",
       "selfTokens": 749,
       "reads": 4,
-      "trips": 1098,
-      "billed": 20692,
-      "perRead": 5173,
-      "share": 0.001072197361752369
-    },
-    {
-      "attr": "file:C:\\Users\\TouchGo\\.qoder-cn\\projects\\D--TouchGoCore\\memory\\pay-race-red-baseline-2026-10-25.md",
-      "label": "C:/Users/TouchGo/.qoder-cn/projects/D--TouchGoCore/memory/pay-race-red-baseline-2026-10-25.md",
-      "kind": "read",
-      "tool": "Read",
-      "selfTokens": 2951,
-      "reads": 4,
-      "trips": 418,
-      "billed": 20483,
-      "perRead": 5121,
-      "share": 0.0010613636163380395
-    },
-    {
-      "attr": "file:facebook|instagram|fb_cookie|ins\\b",
-      "label": "facebook|instagram|fb_cookie|ins/b",
-      "kind": "search",
-      "tool": "Grep",
-      "selfTokens": 232,
-      "reads": 1,
-      "trips": 652,
-      "billed": 16835,
-      "perRead": 16835,
-      "share": 0.0008723277786022677
+      "trips": 1138,
+      "billed": 21429,
+      "perRead": 5357,
+      "share": 0.0010793181856970264
     },
     {
       "attr": "file:D:\\TouchGoCore\\list\\pool.go",
@@ -1098,10 +1086,22 @@
       "tool": "Read",
       "selfTokens": 870,
       "reads": 2,
-      "trips": 394,
-      "billed": 16752,
-      "perRead": 8376,
-      "share": 0.000868034139423087
+      "trips": 414,
+      "billed": 17607,
+      "perRead": 8804,
+      "share": 0.0008868528616800948
+    },
+    {
+      "attr": "file:facebook|instagram|fb_cookie|ins\\b",
+      "label": "facebook|instagram|fb_cookie|ins/b",
+      "kind": "search",
+      "tool": "Grep",
+      "selfTokens": 232,
+      "reads": 1,
+      "trips": 662,
+      "billed": 17063,
+      "perRead": 17063,
+      "share": 0.0008594344652979829
     },
     {
       "attr": "file:D:\\TouchGoCore\\websocket\\p0_close_protocol_test.go",
@@ -1110,10 +1110,10 @@
       "tool": "Read",
       "selfTokens": 1512,
       "reads": 4,
-      "trips": 336,
-      "billed": 14534,
-      "perRead": 3634,
-      "share": 0.0007531033698294314
+      "trips": 376,
+      "billed": 16021,
+      "perRead": 4005,
+      "share": 0.0008069244744871534
     },
     {
       "attr": "file:C:\\Users\\TouchGo\\.qoder-cn\\memory\\feedback-stepwise-slice-delivery.md",
@@ -1122,10 +1122,10 @@
       "tool": "Read",
       "selfTokens": 471,
       "reads": 1,
-      "trips": 246,
-      "billed": 11530,
-      "perRead": 11530,
-      "share": 0.0005974560813576207
+      "trips": 256,
+      "billed": 11993,
+      "perRead": 11993,
+      "share": 0.0006040799889401775
     },
     {
       "attr": "file:C:\\Users\\TouchGo\\.qoder-cn\\memory\\user-stoneage-migration-profile.md",
@@ -1134,10 +1134,10 @@
       "tool": "Read",
       "selfTokens": 411,
       "reads": 1,
-      "trips": 246,
-      "billed": 10061,
-      "perRead": 10061,
-      "share": 0.0005213470264076051
+      "trips": 256,
+      "billed": 10465,
+      "perRead": 10465,
+      "share": 0.0005271271241070337
     },
     {
       "attr": "file:func newTestChannel|PendingNonce|func.*qaBSCPerOrderKey",
@@ -1146,10 +1146,10 @@
       "tool": "Grep",
       "selfTokens": 155,
       "reads": 1,
-      "trips": 580,
-      "billed": 9469,
-      "perRead": 9469,
-      "share": 0.0004906688934972276
+      "trips": 590,
+      "billed": 9622,
+      "perRead": 9622,
+      "share": 0.00048463001102751034
     },
     {
       "attr": "file:D:\\TouchGoCore\\tron\\usdt_assembly_test.go",
@@ -1158,10 +1158,10 @@
       "tool": "Edit",
       "selfTokens": 208,
       "reads": 2,
-      "trips": 794,
-      "billed": 8384,
-      "perRead": 4192,
-      "share": 0.00043441102027890616
+      "trips": 814,
+      "billed": 8588,
+      "perRead": 4294,
+      "share": 0.000432568946301871
     },
     {
       "attr": "file:C:\\Users\\TouchGo\\.qoder-cn\\memory\\feedback-long-verification-background.md",
@@ -1170,10 +1170,10 @@
       "tool": "Read",
       "selfTokens": 326,
       "reads": 1,
-      "trips": 246,
-      "billed": 7981,
-      "perRead": 7981,
-      "share": 0.0004135258652284172
+      "trips": 256,
+      "billed": 8301,
+      "perRead": 8301,
+      "share": 0.00041811056559341414
     },
     {
       "attr": "file:D:\\TouchGoCore\\tron\\account.go",
@@ -1182,10 +1182,10 @@
       "tool": "Read",
       "selfTokens": 257,
       "reads": 3,
-      "trips": 924,
-      "billed": 7950,
-      "perRead": 2650,
-      "share": 0.0004119592324186977
+      "trips": 954,
+      "billed": 8203,
+      "perRead": 2734,
+      "share": 0.00041317102689722814
     },
     {
       "attr": "file:D:\\TouchGoCore\\util\\string_test.go",
@@ -1194,10 +1194,10 @@
       "tool": "Write",
       "selfTokens": 284,
       "reads": 1,
-      "trips": 278,
-      "billed": 7894,
-      "perRead": 7894,
-      "share": 0.000409040069499989
+      "trips": 288,
+      "billed": 8173,
+      "perRead": 8173,
+      "share": 0.0004116704205540361
     },
     {
       "attr": "file:D:\\TouchGoCore\\list\\p1_list_concurrency_test.go",
@@ -1206,10 +1206,10 @@
       "tool": "Read",
       "selfTokens": 383,
       "reads": 1,
-      "trips": 178,
-      "billed": 6749,
-      "perRead": 6749,
-      "share": 0.0003496879960437064
+      "trips": 188,
+      "billed": 7125,
+      "perRead": 7125,
+      "share": 0.0003588794328765632
     },
     {
       "attr": "file:func buildableTx|type txReceipt|func newTestChannel",
@@ -1218,10 +1218,10 @@
       "tool": "Grep",
       "selfTokens": 86,
       "reads": 1,
-      "trips": 542,
-      "billed": 4850,
-      "perRead": 4850,
-      "share": 0.00025130304574689426
+      "trips": 552,
+      "billed": 4934,
+      "perRead": 4934,
+      "share": 0.0002485376807391337
     },
     {
       "attr": "file:D:\\TouchGoCore\\ton\\assembly_test.go",
@@ -1230,10 +1230,10 @@
       "tool": "Edit",
       "selfTokens": 119,
       "reads": 1,
-      "trips": 358,
-      "billed": 4303,
-      "perRead": 4303,
-      "share": 0.0002229555502207179
+      "trips": 368,
+      "billed": 4420,
+      "perRead": 4420,
+      "share": 0.00022261656049121832
     },
     {
       "attr": "file:D:\\TouchGoCore\\ton\\nilcfg_test.go",
@@ -1242,10 +1242,10 @@
       "tool": "Edit",
       "selfTokens": 120,
       "reads": 2,
-      "trips": 710,
-      "billed": 4301,
-      "perRead": 2150,
-      "share": 0.00022284586269434695
+      "trips": 730,
+      "billed": 4419,
+      "perRead": 2209,
+      "share": 0.00022255945598900206
     },
     {
       "attr": "file:pay\\types.go",
@@ -1254,10 +1254,10 @@
       "tool": "Grep",
       "selfTokens": 54,
       "reads": 1,
-      "trips": 648,
-      "billed": 3871,
-      "perRead": 3871,
-      "share": 0.00020055633319006737
+      "trips": 658,
+      "billed": 3924,
+      "perRead": 3924,
+      "share": 0.00019762477178474153
     },
     {
       "attr": "file:facebook|instagram|fbapi|messenger|graph\\.facebook",
@@ -1266,10 +1266,10 @@
       "tool": "Grep",
       "selfTokens": 48,
       "reads": 1,
-      "trips": 650,
-      "billed": 3462,
-      "perRead": 3462,
-      "share": 0.00017937155585963282
+      "trips": 660,
+      "billed": 3509,
+      "perRead": 3509,
+      "share": 0.00017673499949011565
     },
     {
       "attr": "file:D:\\TouchGoCore\\tron\\gateway.go",
@@ -1278,10 +1278,10 @@
       "tool": "Edit",
       "selfTokens": 160,
       "reads": 1,
-      "trips": 152,
-      "billed": 2405,
-      "perRead": 2405,
-      "share": 0.00012460131541333042
+      "trips": 162,
+      "billed": 2562,
+      "perRead": 2562,
+      "share": 0.00012904150857611372
     },
     {
       "attr": "file:PriorityFeeMicroLamports",
@@ -1290,10 +1290,10 @@
       "tool": "Grep",
       "selfTokens": 27,
       "reads": 1,
-      "trips": 612,
-      "billed": 1767,
-      "perRead": 1767,
-      "share": 0.00009157082549510987
+      "trips": 622,
+      "billed": 1794,
+      "perRead": 1794,
+      "share": 0.00009034841260677581
     },
     {
       "attr": "file:D:\\TouchGoCore\\websocket\\websocket.go",
@@ -1302,122 +1302,122 @@
       "tool": "Read",
       "selfTokens": 123,
       "reads": 1,
-      "trips": 78,
-      "billed": 946,
-      "perRead": 946,
-      "share": 0.00004902862434844782
+      "trips": 88,
+      "billed": 1067,
+      "perRead": 1067,
+      "share": 0.00005374891401919735
     }
   ],
   "byAttr": [
     {
       "attr": "assistant_thinking",
-      "tokens": 5864891,
-      "share": 0.30389797578028954
+      "tokens": 6083376,
+      "share": 0.3064088042822216
     },
     {
       "attr": "attachment",
-      "tokens": 4222922,
-      "share": 0.21881695374730378
+      "tokens": 4326805,
+      "share": 0.21793347218423284
     },
     {
       "attr": "tool_result|Read",
-      "tokens": 3361852,
-      "share": 0.17419934684558175
+      "tokens": 3437578,
+      "share": 0.17314469061890136
     },
     {
       "attr": "tool_result|Bash",
-      "tokens": 2691605,
-      "share": 0.13946947551015043
+      "tokens": 2765517,
+      "share": 0.1392941825633025
     },
     {
       "attr": "tool_use|Edit",
-      "tokens": 998073,
-      "share": 0.05171664872559483
+      "tokens": 1024868,
+      "share": 0.05162075846111869
     },
     {
       "attr": "assistant_text",
-      "tokens": 594115,
-      "share": 0.030784968999359077
+      "tokens": 612646,
+      "share": 0.030857910078092632
     },
     {
       "attr": "tool_use|Write",
-      "tokens": 494709,
-      "share": 0.02563406472072382
+      "tokens": 505977,
+      "share": 0.025485166738174685
     },
     {
       "attr": "tool_use|Bash",
-      "tokens": 356975,
-      "share": 0.018497163298288877
+      "tokens": 369612,
+      "share": 0.01861672137825975
     },
     {
       "attr": "tool_result|Agent",
-      "tokens": 209532,
-      "share": 0.010857204618301202
+      "tokens": 212617,
+      "share": 0.01070913395226344
     },
     {
       "attr": "tool_use|Agent",
-      "tokens": 135595,
-      "share": 0.0070260511958460635
+      "tokens": 138165,
+      "share": 0.006959113166721029
     },
     {
       "attr": "tool_result|Grep",
-      "tokens": 118011,
-      "share": 0.006114905024941689
+      "tokens": 119793,
+      "share": 0.006033769935955235
     },
     {
       "attr": "tool_result|Edit",
-      "tokens": 67677,
-      "share": 0.0035067940386754107
+      "tokens": 69933,
+      "share": 0.0035224223755470825
     },
     {
       "attr": "tool_use|TaskCreate",
-      "tokens": 48431,
-      "share": 0.0025095164663094705
+      "tokens": 49200,
+      "share": 0.002478098682892601
     },
     {
       "attr": "tool_use|Read",
-      "tokens": 41984,
-      "share": 0.002175448375011368
+      "tokens": 43143,
+      "share": 0.0021730260670339905
     },
     {
       "attr": "tool_use|AskUserQuestion",
-      "tokens": 18821,
-      "share": 0.0009752142148785044
+      "tokens": 19191,
+      "share": 0.0009666252603852937
     },
     {
       "attr": "tool_use|Grep",
-      "tokens": 17706,
-      "share": 0.0009174611546186321
+      "tokens": 17970,
+      "share": 0.0009051385153789379
     },
     {
       "attr": "tool_result|Write",
-      "tokens": 14899,
-      "share": 0.0007720162984547344
+      "tokens": 15284,
+      "share": 0.0007698494297466032
     },
     {
       "attr": "tool_result|TaskCreate",
-      "tokens": 14492,
-      "share": 0.0007509275597421262
+      "tokens": 14722,
+      "share": 0.0007415263840952211
     },
     {
       "attr": "user_input",
-      "tokens": 10054,
-      "share": 0.0005209595189471589
+      "tokens": 10525,
+      "share": 0.0005301176229342103
     },
     {
       "attr": "tool_use|TaskUpdate",
-      "tokens": 7192,
-      "share": 0.00037265913248514266
+      "tokens": 7334,
+      "share": 0.0003694234178468678
     },
     {
       "attr": "tool_result|AskUserQuestion",
-      "tokens": 4842,
-      "share": 0.000250917185260517
+      "tokens": 4938,
+      "share": 0.0002487072951123965
     },
     {
       "attr": "tool_result|TaskUpdate",
-      "tokens": 4503,
-      "share": 0.0002333275892349722
+      "tokens": 4593,
+      "share": 0.00023136173707113847
     },
     {
       "attr": "system",
@@ -5022,11 +5022,66 @@
       "credits": 0.757,
       "originalCredits": 0.757,
       "afterCompact": false
+    },
+    {
+      "index": 328,
+      "time": "09:34",
+      "ratio": 0.552741,
+      "inputTokens": 110548,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.598,
+      "originalCredits": 0.598,
+      "afterCompact": false
+    },
+    {
+      "index": 329,
+      "time": "09:34",
+      "ratio": 0.553523,
+      "inputTokens": 110705,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.679,
+      "originalCredits": 0.679,
+      "afterCompact": false
+    },
+    {
+      "index": 330,
+      "time": "09:35",
+      "ratio": 0.554695,
+      "inputTokens": 110939,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.744,
+      "originalCredits": 0.744,
+      "afterCompact": false
+    },
+    {
+      "index": 331,
+      "time": "09:36",
+      "ratio": 0.556167,
+      "inputTokens": 111233,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.712,
+      "originalCredits": 0.712,
+      "afterCompact": false
+    },
+    {
+      "index": 332,
+      "time": "09:36",
+      "ratio": 0.557416,
+      "inputTokens": 111483,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.654,
+      "originalCredits": 0.654,
+      "afterCompact": false
     }
   ],
   "identity": {
-    "sumAttributed": 19298881,
-    "billedInputTokens": 19298881,
+    "sumAttributed": 19853789,
+    "billedInputTokens": 19853789,
     "absDiff": 0,
     "ok": true
   },
@@ -5034,13 +5089,13 @@
   "selfCmd": "\"C:\\Users\\TouchGo\\.qoder-cn\\plugins\\cache\\qoder-marketplace\\qoder-credits-inspector\\2.7.4\\bin\\credits-inspector.cmd\" cli",
   "linkHealth": {
     "matched": 0,
-    "requests": 327,
+    "requests": 332,
     "coverage": 0,
     "usageSource": "transcript-ratio",
     "breakdown": {
       "proxy": 0,
       "transcriptTokens": 0,
-      "transcriptRatio": 327
+      "transcriptRatio": 332
     },
     "logRecords": 0,
     "lastRecordAt": null,
@@ -5121,10 +5176,10 @@
       "originalCredits": 354.484
     },
     "combined": {
-      "roundTrips": 416,
-      "billedInputTokens": 20714574,
-      "credits": 795.558,
-      "originalCredits": 1857.254
+      "roundTrips": 421,
+      "billedInputTokens": 21269482,
+      "credits": 798.945,
+      "originalCredits": 1860.641
     }
   },
   "manual": null,

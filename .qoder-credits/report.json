@@ -1,6 +1,6 @@
 {
   "schemaVersion": 3.2,
-  "generatedAt": "2026-10-25T15:15:50.806Z",
+  "generatedAt": "2026-10-26T01:23:16.533Z",
   "source": "desktop-rich",
   "usageSource": "transcript-ratio",
   "availability": {
@@ -28,72 +28,72 @@
     "id": "4aeb79eb-5a0f-43ff-a744-4df540cc955d",
     "title": "1、审查pay集成的tron/ton/bsc/s",
     "titleSource": "first-user",
-    "model": "qmodel_38max",
+    "model": "dfmodel",
     "modelSource": "runtime-config",
     "cwd": "D:\\TouchGoCore",
-    "turns": 4,
-    "roundTrips": 202,
+    "turns": 9,
+    "roundTrips": 327,
     "compactions": 0,
     "startedAt": "2026-10-25T14:03:49.422Z",
-    "endedAt": "2026-10-25T15:15:50.504Z"
+    "endedAt": "2026-10-26T01:23:12.473Z"
   },
   "context": {
     "contextWindow": 200000,
     "contextWindowSource": "fallback",
     "systemPromptTokens": 0,
-    "netContextTokens": 62934,
-    "peakContextTokens": 62934,
-    "peakContextRatio": 0.314671,
-    "peakSessionTokens": 62934,
-    "peakSessionRatio": 0.314671,
+    "netContextTokens": 110274,
+    "peakContextTokens": 110274,
+    "peakContextRatio": 0.551369,
+    "peakSessionTokens": 110274,
+    "peakSessionRatio": 0.551369,
     "peakSessionNotable": false,
     "peakAdvice": {
-      "level": "low",
+      "level": "mid",
       "tone": "info",
-      "text": "低于盈亏线（39%）。此时压缩在 token 上是亏的：省下的还不够付摘要输出加压缩后重读，别压"
+      "text": "已过盈亏线（39%）但还没进性价比区间，压缩有净收益但不大；不急着压"
     },
     "userContextLimit": 200000,
     "userContextLimitSource": "default",
-    "peakUserRatio": 0.314671,
+    "peakUserRatio": 0.551369,
     "peakUserAdvice": {
-      "level": "low",
+      "level": "mid",
       "tone": "info",
-      "text": "低于盈亏线（39%）。此时压缩在 token 上是亏的：省下的还不够付摘要输出加压缩后重读，别压"
+      "text": "已过盈亏线（39%）但还没进性价比区间，压缩有净收益但不大；不急着压"
     },
-    "currentContextTokens": 62934,
-    "netUserRatio": 0.31467,
+    "currentContextTokens": 110274,
+    "netUserRatio": 0.55137,
     "netUserAdvice": {
-      "level": "low",
+      "level": "mid",
       "tone": "info",
-      "text": "低于盈亏线（39%）。此时压缩在 token 上是亏的：省下的还不够付摘要输出加压缩后重读，别压"
+      "text": "已过盈亏线（39%）但还没进性价比区间，压缩有净收益但不大；不急着压"
     },
-    "netWindowRatio": 0.31467,
+    "netWindowRatio": 0.55137,
     "observedAutoCompactions": 0,
     "observedAutoTriggerTokens": null,
     "autoTriggerRatio": null,
     "thresholdNotEnforced": false
   },
   "totals": {
-    "billedInputTokens": 8193637,
-    "netContextTokens": 62934,
-    "peakContextTokens": 62934,
-    "amplification": 130.19,
-    "attributedTokens": 8193637,
+    "billedInputTokens": 19298881,
+    "netContextTokens": 110274,
+    "peakContextTokens": 110274,
+    "amplification": 175.01,
+    "attributedTokens": 19298881,
     "coverage": 1,
-    "credits": 524.772,
-    "originalCredits": 1311.931,
+    "credits": 653.764,
+    "originalCredits": 1502.77,
     "outputTokens": 0,
     "cachedTokens": 0,
     "cachedTrips": 0,
     "cachedShare": 0,
-    "toolCalls": 226,
-    "fileReads": 121
+    "toolCalls": 358,
+    "fileReads": 184
   },
   "creditsCoverage": {
-    "trips": 202,
-    "roundTrips": 202,
-    "tokens": 8193637,
-    "tokenShare": 0.9999999999999999,
+    "trips": 327,
+    "roundTrips": 327,
+    "tokens": 19298881,
+    "tokenShare": 1,
     "full": true
   },
   "compactionCost": {
@@ -108,11 +108,11 @@
   },
   "proxy": {
     "matched": 0,
-    "requests": 202,
+    "requests": 327,
     "breakdown": {
       "proxy": 0,
       "transcriptTokens": 0,
-      "transcriptRatio": 202
+      "transcriptRatio": 327
     },
     "logPath": "C:\\Users\\TouchGo\\.qoder-credits-proxy\\usage.jsonl",
     "logExists": false,
@@ -129,437 +129,437 @@
     {
       "key": "tool_result",
       "label": "工具返回",
-      "tokens": 3049014,
-      "share": 0.372119741961126
+      "tokens": 6487414,
+      "share": 0.33615491467034825
     },
     {
       "key": "assistant_thinking",
       "label": "模型思考",
-      "tokens": 1947734,
-      "share": 0.23771300915924298
+      "tokens": 5864891,
+      "share": 0.30389797578028954
     },
     {
       "key": "assistant_tool_use",
       "label": "工具调用",
-      "tokens": 914656,
-      "share": 0.11162998679528993
+      "tokens": 2119485,
+      "share": 0.1098242272837581
     },
     {
       "key": "assistant_text",
       "label": "模型回复",
-      "tokens": 229498,
-      "share": 0.028009250718065922
+      "tokens": 594115,
+      "share": 0.030784968999359077
     },
     {
       "key": "user_input",
       "label": "用户输入",
-      "tokens": 4181,
-      "share": 0.0005102649834701437
+      "tokens": 10054,
+      "share": 0.0005209595189471589
     },
     {
       "key": "attachment",
       "label": "附件/技能",
-      "tokens": 2048555,
-      "share": 0.2500177463828043
+      "tokens": 4222922,
+      "share": 0.21881695374730378
     }
   ],
   "byCategoryDetail": [
     {
       "key": "tool_result",
       "label": "工具返回",
-      "tokens": 3049014,
-      "share": 0.372119741961126,
+      "tokens": 6487414,
+      "share": 0.33615491467034825,
       "children": [
         {
           "tool": "Bash",
           "label": "（无路径）",
           "kind": "shell",
-          "tokens": 1139238,
-          "share": 0.1390394042615824,
-          "catShare": 0.37364156905200513,
-          "trips": 7840
+          "tokens": 2691605,
+          "share": 0.13946947551015043,
+          "catShare": 0.41489643442197405,
+          "trips": 21499
         },
         {
           "tool": "Read",
           "label": "bsc/onchain.go",
           "kind": "read",
-          "tokens": 533964,
-          "share": 0.06516811652420365,
-          "catShare": 0.17512673791709638,
-          "trips": 559
+          "tokens": 853071,
+          "share": 0.044203150820014726,
+          "catShare": 0.1314963693550717,
+          "trips": 1059
         },
         {
           "tool": "Read",
           "label": "ton/query.go",
           "kind": "read",
-          "tokens": 166333,
-          "share": 0.02030023053629766,
-          "catShare": 0.05455295230861025,
-          "trips": 185
+          "tokens": 265682,
+          "share": 0.013766702655193997,
+          "catShare": 0.04095344751598939,
+          "trips": 310
         },
         {
           "tool": "Agent",
           "label": "（无路径）",
           "kind": "other",
-          "tokens": 131452,
-          "share": 0.016043207866872158,
-          "catShare": 0.04311302534587948,
-          "trips": 579
+          "tokens": 209532,
+          "share": 0.010857204618301202,
+          "catShare": 0.03229821770997567,
+          "trips": 1078
         },
         {
           "tool": "Read",
           "label": "tron/query.go",
           "kind": "read",
-          "tokens": 126342,
-          "share": 0.015419512511133994,
-          "catShare": 0.041436964429435764,
-          "trips": 187
+          "tokens": 200723,
+          "share": 0.010400764972535198,
+          "catShare": 0.030940392416201182,
+          "trips": 312
         },
         {
           "tool": "Read",
           "label": "ledger/ledger.go",
           "kind": "read",
-          "tokens": 114249,
-          "share": 0.013943615396614472,
-          "catShare": 0.03747077573237463,
-          "trips": 187
+          "tokens": 181511,
+          "share": 0.009405243291763767,
+          "catShare": 0.02797889568560096,
+          "trips": 312
         },
         {
           "tool": "Read",
           "label": "tron/route.go",
           "kind": "read",
-          "tokens": 78999,
-          "share": 0.009641557108435672,
-          "catShare": 0.02590982423459514,
-          "trips": 123
+          "tokens": 154202,
+          "share": 0.007990211239202271,
+          "catShare": 0.023769431564128418,
+          "trips": 248
         },
         {
           "tool": "Read",
-          "label": "sol/onchain.go",
+          "label": "localtimer/wheel_slots.go",
           "kind": "read",
-          "tokens": 69724,
-          "share": 0.008509566669443764,
-          "catShare": 0.022867818365661256,
-          "trips": 565
+          "tokens": 153116,
+          "share": 0.007933921239847855,
+          "catShare": 0.023601979009077675,
+          "trips": 102
         },
         {
           "tool": "Read",
           "label": "bsc/route.go",
           "kind": "read",
-          "tokens": 61036,
-          "share": 0.007449168772572827,
-          "catShare": 0.02001820363873899,
-          "trips": 115
+          "tokens": 123394,
+          "share": 0.006393818846820992,
+          "catShare": 0.019020453272536913,
+          "trips": 240
         },
         {
           "tool": "Read",
-          "label": "ton/route.go",
+          "label": "sol/onchain.go",
           "kind": "read",
-          "tokens": 55456,
-          "share": 0.0067681868767967114,
-          "catShare": 0.01818819620030737,
-          "trips": 115
+          "tokens": 115229,
+          "share": 0.005970775586172232,
+          "catShare": 0.017761976177047712,
+          "trips": 1065
         },
         {
           "tool": "Read",
           "label": "bsc/route_test.go",
           "kind": "read",
-          "tokens": 54987,
-          "share": 0.00671094406273386,
-          "catShare": 0.018034367183439915,
-          "trips": 109
+          "tokens": 114382,
+          "share": 0.005926897979119836,
+          "catShare": 0.017631448241451637,
+          "trips": 234
+        },
+        {
+          "tool": "Read",
+          "label": "ton/route.go",
+          "kind": "read",
+          "tokens": 112113,
+          "share": 0.00580931405004574,
+          "catShare": 0.01728165734462835,
+          "trips": 240
         },
         {
           "tool": "Read",
           "label": "pay/transfer.go",
           "kind": "read",
-          "tokens": 53286,
-          "share": 0.00650330568855646,
-          "catShare": 0.01747637912001948,
-          "trips": 112
+          "tokens": 109246,
+          "share": 0.005660737910445303,
+          "catShare": 0.016839670233578262,
+          "trips": 237
         },
         {
           "tool": "Read",
-          "label": "pay/types.go",
+          "label": "util/string.go",
           "kind": "read",
-          "tokens": 44399,
-          "share": 0.005418761108512752,
-          "catShare": 0.014561874841563311,
-          "trips": 198
-        },
-        {
-          "tool": "Read",
-          "label": "bsc/per_order_test.go",
-          "kind": "read",
-          "tokens": 41568,
-          "share": 0.005073169291406917,
-          "catShare": 0.013633163520619909,
+          "tokens": 77491,
+          "share": 0.0040153093578921,
+          "catShare": 0.01194481824497414,
           "trips": 329
         },
         {
           "tool": "Read",
-          "label": "tron/double_pay_test.go",
+          "label": "websocket/client.go",
           "kind": "read",
-          "tokens": 35050,
-          "share": 0.00427769103237743,
-          "catShare": 0.011495469199869284,
-          "trips": 295
+          "tokens": 72416,
+          "share": 0.003752323992694223,
+          "catShare": 0.011162484405066503,
+          "trips": 549
         },
         {
           "tool": null,
-          "label": "其他 58 项",
+          "label": "其他 80 项",
           "kind": null,
-          "tokens": 342931,
-          "share": 0.04185330425358579,
-          "catShare": 0.11247267890978505,
-          "trips": 12886
+          "tokens": 1053701,
+          "share": 0.054599062600142884,
+          "catShare": 0.1624223244026811,
+          "trips": 33018
         }
       ]
     },
     {
       "key": "assistant_thinking",
       "label": "模型思考",
-      "tokens": 1947734,
-      "share": 0.23771300915924298,
+      "tokens": 5864891,
+      "share": 0.30389797578028954,
       "children": []
     },
     {
       "key": "assistant_tool_use",
       "label": "工具调用",
-      "tokens": 914656,
-      "share": 0.11162998679528993,
+      "tokens": 2119485,
+      "share": 0.1098242272837581,
       "children": [
         {
           "tool": "Bash",
           "label": "（无路径）",
           "kind": "shell",
-          "tokens": 120315,
-          "share": 0.014683905586349601,
-          "catShare": 0.13154087004665996,
-          "trips": 7840
+          "tokens": 356975,
+          "share": 0.018497163298288877,
+          "catShare": 0.16842516224126824,
+          "trips": 21499
         },
         {
           "tool": "Write",
           "label": "chainroute/chainroute.go",
           "kind": "write",
-          "tokens": 82988,
-          "share": 0.010128321636702436,
-          "catShare": 0.09073119085175585,
-          "trips": 105
-        },
-        {
-          "tool": "Edit",
-          "label": "bsc/onchain.go",
-          "kind": "write",
-          "tokens": 75667,
-          "share": 0.009234850513437757,
-          "catShare": 0.08272732783148021,
-          "trips": 548
+          "tokens": 176163,
+          "share": 0.009128170906053848,
+          "catShare": 0.0831161860348806,
+          "trips": 230
         },
         {
           "tool": "Agent",
           "label": "（无路径）",
           "kind": "other",
-          "tokens": 70734,
-          "share": 0.008632825271587305,
-          "catShare": 0.07733428552149176,
-          "trips": 579
+          "tokens": 135595,
+          "share": 0.0070260511958460635,
+          "catShare": 0.0639754211763541,
+          "trips": 1078
+        },
+        {
+          "tool": "Edit",
+          "label": "bsc/onchain.go",
+          "kind": "write",
+          "tokens": 132523,
+          "share": 0.006866893139321832,
+          "catShare": 0.0625262140163255,
+          "trips": 1173
         },
         {
           "tool": "Write",
           "label": "chainroute/route_test.go",
           "kind": "write",
-          "tokens": 56406,
-          "share": 0.006884157630044914,
-          "catShare": 0.06166942976235648,
-          "trips": 103
-        },
-        {
-          "tool": "Edit",
-          "label": "sol/onchain.go",
-          "kind": "write",
-          "tokens": 38201,
-          "share": 0.0046623162456164565,
-          "catShare": 0.0417658048653749,
-          "trips": 569
+          "tokens": 121004,
+          "share": 0.006270024234607266,
+          "catShare": 0.05709144866921854,
+          "trips": 228
         },
         {
           "tool": "Edit",
           "label": "tron/usdt.go",
           "kind": "write",
-          "tokens": 37409,
-          "share": 0.0045655924263935934,
-          "catShare": 0.04089933679528333,
-          "trips": 312
-        },
-        {
-          "tool": "Edit",
-          "label": "bsc/usdt.go",
-          "kind": "write",
-          "tokens": 33076,
-          "share": 0.00403673751970807,
-          "catShare": 0.0361617665252505,
-          "trips": 390
-        },
-        {
-          "tool": "Edit",
-          "label": "sol/usdt.go",
-          "kind": "write",
-          "tokens": 32677,
-          "share": 0.003988098704353744,
-          "catShare": 0.03572605192247516,
-          "trips": 362
-        },
-        {
-          "tool": "Edit",
-          "label": "tron/query.go",
-          "kind": "write",
-          "tokens": 30761,
-          "share": 0.0037542822196302687,
-          "catShare": 0.03363148493885404,
-          "trips": 294
-        },
-        {
-          "tool": "TaskCreate",
-          "label": "（无路径）",
-          "kind": "other",
-          "tokens": 28964,
-          "share": 0.0035349728288413965,
-          "catShare": 0.03166687491707694,
-          "trips": 1615
+          "tokens": 95236,
+          "share": 0.004934793222122748,
+          "catShare": 0.04493355741418045,
+          "trips": 812
         },
         {
           "tool": "Edit",
           "label": "ton/native.go",
           "kind": "write",
-          "tokens": 27223,
-          "share": 0.003322515079915416,
-          "catShare": 0.029763643043408523,
-          "trips": 285
+          "tokens": 84827,
+          "share": 0.0043954166431753455,
+          "catShare": 0.04002228608282121,
+          "trips": 910
+        },
+        {
+          "tool": "Edit",
+          "label": "sol/usdt.go",
+          "kind": "write",
+          "tokens": 75991,
+          "share": 0.003937606964205045,
+          "catShare": 0.03585371881589717,
+          "trips": 862
+        },
+        {
+          "tool": "Edit",
+          "label": "bsc/usdt.go",
+          "kind": "write",
+          "tokens": 73652,
+          "share": 0.003816370075036206,
+          "catShare": 0.034749801290890656,
+          "trips": 890
+        },
+        {
+          "tool": "Edit",
+          "label": "sol/onchain.go",
+          "kind": "write",
+          "tokens": 68422,
+          "share": 0.0035453773825519807,
+          "catShare": 0.03228228843706425,
+          "trips": 1194
+        },
+        {
+          "tool": "Edit",
+          "label": "tron/query.go",
+          "kind": "write",
+          "tokens": 54460,
+          "share": 0.0028219079347579,
+          "catShare": 0.025694767034115353,
+          "trips": 544
+        },
+        {
+          "tool": "TaskCreate",
+          "label": "（无路径）",
+          "kind": "other",
+          "tokens": 48431,
+          "share": 0.0025095164663094705,
+          "catShare": 0.022850299322621344,
+          "trips": 2865
         },
         {
           "tool": "Edit",
           "label": "bsc/per_order_test.go",
           "kind": "write",
-          "tokens": 26813,
-          "share": 0.0032724104797771875,
-          "catShare": 0.029314797696592242,
-          "trips": 323
+          "tokens": 45782,
+          "share": 0.0023722438980798783,
+          "catShare": 0.021600369579205855,
+          "trips": 573
+        },
+        {
+          "tool": "Write",
+          "label": "bsc/route_test.go",
+          "kind": "write",
+          "tokens": 45612,
+          "share": 0.0023634570300843163,
+          "catShare": 0.021520361112832957,
+          "trips": 220
         },
         {
           "tool": "Edit",
-          "label": "sol/onchain_test.go",
+          "label": "util/string.go",
           "kind": "write",
-          "tokens": 24454,
-          "share": 0.0029844933449550935,
-          "catShare": 0.026735588085557493,
-          "trips": 174
-        },
-        {
-          "tool": "Edit",
-          "label": "tron/double_pay_test.go",
-          "kind": "write",
-          "tokens": 23676,
-          "share": 0.002889519281392688,
-          "catShare": 0.025884794617879566,
-          "trips": 144
+          "tokens": 43424,
+          "share": 0.002250070947199349,
+          "catShare": 0.02048792878265133,
+          "trips": 653
         },
         {
           "tool": null,
-          "label": "其他 58 项",
+          "label": "其他 80 项",
           "kind": null,
-          "tokens": 205291,
-          "share": 0.025054988026584117,
-          "catShare": 0.22444675257850408,
-          "trips": 10741
+          "tokens": 561388,
+          "share": 0.029089163946116346,
+          "catShare": 0.2648701899896576,
+          "trips": 27101
         }
       ]
     },
     {
       "key": "assistant_text",
       "label": "模型回复",
-      "tokens": 229498,
-      "share": 0.028009250718065922,
+      "tokens": 594115,
+      "share": 0.030784968999359077,
       "children": []
     },
     {
       "key": "user_input",
       "label": "用户输入",
-      "tokens": 4181,
-      "share": 0.0005102649834701437,
+      "tokens": 10054,
+      "share": 0.0005209595189471589,
       "children": []
     },
     {
       "key": "attachment",
       "label": "附件/技能",
-      "tokens": 2048555,
-      "share": 0.2500177463828043,
+      "tokens": 4222922,
+      "share": 0.21881695374730378,
       "children": []
     }
   ],
   "byTool": [
     {
       "tool": "Read",
-      "tokens": 1680009,
-      "calls": 42,
-      "perCall": 40000,
-      "share": 0.20503820079417462
+      "tokens": 3403836,
+      "calls": 68,
+      "perCall": 50056,
+      "share": 0.17637479522059335
     },
     {
       "tool": "Bash",
-      "tokens": 1259553,
-      "calls": 75,
-      "perCall": 16794,
-      "share": 0.15372330984793198
+      "tokens": 3048579,
+      "calls": 143,
+      "perCall": 21319,
+      "share": 0.15796663880844067
     },
     {
       "tool": "Edit",
-      "tokens": 460822,
-      "calls": 60,
-      "perCall": 7680,
-      "share": 0.05624146400901497
+      "tokens": 1065751,
+      "calls": 96,
+      "perCall": 11102,
+      "share": 0.05522344276426999
     },
     {
       "tool": "Write",
-      "tokens": 221921,
-      "calls": 10,
-      "perCall": 22192,
-      "share": 0.027084503891830477
+      "tokens": 509608,
+      "calls": 11,
+      "perCall": 46328,
+      "share": 0.026406081019178525
     },
     {
       "tool": "Agent",
-      "tokens": 202186,
-      "calls": 3,
-      "perCall": 67395,
-      "share": 0.024676033138459483
+      "tokens": 345127,
+      "calls": 4,
+      "perCall": 86282,
+      "share": 0.017883255814147236
     },
     {
       "tool": "Grep",
-      "tokens": 83889,
+      "tokens": 135717,
       "calls": 9,
-      "perCall": 9321,
-      "share": 0.01023829928199094
+      "perCall": 15080,
+      "share": 0.007032366179560331
     },
     {
       "tool": "TaskCreate",
-      "tokens": 37631,
+      "tokens": 62923,
       "calls": 10,
-      "perCall": 3763,
-      "share": 0.004592747899981147
+      "perCall": 6292,
+      "share": 0.0032604440260515935
     },
     {
       "tool": "AskUserQuestion",
-      "tokens": 11864,
+      "tokens": 23663,
       "calls": 1,
-      "perCall": 11864,
-      "share": 0.0014478955753589335
+      "perCall": 23663,
+      "share": 0.0012261314001390208
     },
     {
       "tool": "TaskUpdate",
-      "tokens": 5795,
+      "tokens": 11695,
       "calls": 16,
-      "perCall": 362,
-      "share": 0.0007072743176726002
+      "perCall": 731,
+      "share": 0.0006059867217201105
     }
   ],
   "byFile": [
@@ -570,10 +570,10 @@
       "tool": "Read",
       "selfTokens": 15312,
       "reads": 9,
-      "trips": 2214,
-      "billed": 615755,
-      "perRead": 68417,
-      "share": 0.07515035344443072
+      "trips": 4464,
+      "billed": 996921,
+      "perRead": 110769,
+      "share": 0.051656944132179146
     },
     {
       "attr": "file:D:\\TouchGoCore\\ton\\query.go",
@@ -582,10 +582,10 @@
       "tool": "Read",
       "selfTokens": 4733,
       "reads": 2,
-      "trips": 674,
-      "billed": 190865,
-      "perRead": 95432,
-      "share": 0.02329424846070174
+      "trips": 1174,
+      "billed": 308685,
+      "perRead": 154342,
+      "share": 0.01599495302727837
     },
     {
       "attr": "file:D:\\TouchGoCore\\tron\\query.go",
@@ -594,22 +594,10 @@
       "tool": "Read",
       "selfTokens": 4024,
       "reads": 3,
-      "trips": 962,
-      "billed": 159896,
-      "perRead": 53299,
-      "share": 0.019514635907067587
-    },
-    {
-      "attr": "file:D:\\TouchGoCore\\ledger\\ledger.go",
-      "label": "ledger/ledger.go",
-      "kind": "read",
-      "tool": "Read",
-      "selfTokens": 2715,
-      "reads": 1,
-      "trips": 374,
-      "billed": 114799,
-      "perRead": 114799,
-      "share": 0.014010701629092634
+      "trips": 1712,
+      "billed": 260067,
+      "perRead": 86689,
+      "share": 0.0134757325366229
     },
     {
       "attr": "file:D:\\TouchGoCore\\sol\\onchain.go",
@@ -618,10 +606,22 @@
       "tool": "Read",
       "selfTokens": 3206,
       "reads": 9,
-      "trips": 2268,
-      "billed": 112579,
-      "perRead": 12509,
-      "share": 0.013739867748535133
+      "trips": 4518,
+      "billed": 192387,
+      "perRead": 21376,
+      "share": 0.009968840659216074
+    },
+    {
+      "attr": "file:D:\\TouchGoCore\\ledger\\ledger.go",
+      "label": "ledger/ledger.go",
+      "kind": "read",
+      "tool": "Read",
+      "selfTokens": 2715,
+      "reads": 1,
+      "trips": 624,
+      "billed": 182384,
+      "perRead": 182384,
+      "share": 0.009450494277253373
     },
     {
       "attr": "file:D:\\TouchGoCore\\tron\\route.go",
@@ -630,10 +630,10 @@
       "tool": "Read",
       "selfTokens": 3672,
       "reads": 2,
-      "trips": 408,
-      "billed": 90169,
-      "perRead": 45085,
-      "share": 0.011004759915557702
+      "trips": 908,
+      "billed": 181577,
+      "perRead": 90789,
+      "share": 0.009408694500051905
     },
     {
       "attr": "file:D:\\TouchGoCore\\chainroute\\chainroute.go",
@@ -642,10 +642,10 @@
       "tool": "Write",
       "selfTokens": 3777,
       "reads": 1,
-      "trips": 210,
-      "billed": 83742,
-      "perRead": 83742,
-      "share": 0.010220323489667407
+      "trips": 460,
+      "billed": 177764,
+      "perRead": 177764,
+      "share": 0.009211087767075974
     },
     {
       "attr": "file:D:\\TouchGoCore\\bsc\\route_test.go",
@@ -654,10 +654,22 @@
       "tool": "Read",
       "selfTokens": 3450,
       "reads": 2,
-      "trips": 408,
-      "billed": 76307,
-      "perRead": 38154,
-      "share": 0.009312972186054874
+      "trips": 908,
+      "billed": 162189,
+      "perRead": 81095,
+      "share": 0.00840406571547735
+    },
+    {
+      "attr": "file:D:\\TouchGoCore\\localtimer\\wheel_slots.go",
+      "label": "localtimer/wheel_slots.go",
+      "kind": "read",
+      "tool": "Read",
+      "selfTokens": 7587,
+      "reads": 1,
+      "trips": 204,
+      "billed": 153419,
+      "perRead": 153419,
+      "share": 0.007949638199514747
     },
     {
       "attr": "file:D:\\TouchGoCore\\bsc\\route.go",
@@ -666,58 +678,10 @@
       "tool": "Read",
       "selfTokens": 3031,
       "reads": 2,
-      "trips": 430,
-      "billed": 72165,
-      "perRead": 36083,
-      "share": 0.008807502053027971
-    },
-    {
-      "attr": "file:D:\\TouchGoCore\\bsc\\per_order_test.go",
-      "label": "bsc/per_order_test.go",
-      "kind": "read",
-      "tool": "Read",
-      "selfTokens": 1978,
-      "reads": 4,
-      "trips": 1304,
-      "billed": 71088,
-      "perRead": 17772,
-      "share": 0.008676037516572909
-    },
-    {
-      "attr": "file:D:\\TouchGoCore\\ton\\route.go",
-      "label": "ton/route.go",
-      "kind": "read",
-      "tool": "Read",
-      "selfTokens": 2857,
-      "reads": 2,
-      "trips": 350,
-      "billed": 62877,
-      "perRead": 31439,
-      "share": 0.007673911374226492
-    },
-    {
-      "attr": "file:D:\\TouchGoCore\\tron\\double_pay_test.go",
-      "label": "tron/double_pay_test.go",
-      "kind": "read",
-      "tool": "Read",
-      "selfTokens": 1920,
-      "reads": 3,
-      "trips": 878,
-      "billed": 60556,
-      "perRead": 20185,
-      "share": 0.00739062583540879
-    },
-    {
-      "attr": "file:D:\\TouchGoCore\\chainroute\\route_test.go",
-      "label": "chainroute/route_test.go",
-      "kind": "write",
-      "tool": "Write",
-      "selfTokens": 2629,
-      "reads": 1,
-      "trips": 206,
-      "billed": 57145,
-      "perRead": 57145,
-      "share": 0.006974354685698686
+      "trips": 930,
+      "billed": 147617,
+      "perRead": 73809,
+      "share": 0.007648999167286719
     },
     {
       "attr": "file:D:\\TouchGoCore\\tron\\usdt.go",
@@ -726,94 +690,22 @@
       "tool": "Edit",
       "selfTokens": 3333,
       "reads": 6,
-      "trips": 930,
-      "billed": 53661,
-      "perRead": 8943,
-      "share": 0.006549060712632135
+      "trips": 2430,
+      "billed": 136630,
+      "perRead": 22772,
+      "share": 0.007079688118630252
     },
     {
-      "attr": "file:D:\\TouchGoCore\\pay\\transfer.go",
-      "label": "pay/transfer.go",
+      "attr": "file:D:\\TouchGoCore\\ton\\route.go",
+      "label": "ton/route.go",
       "kind": "read",
       "tool": "Read",
-      "selfTokens": 2260,
-      "reads": 1,
-      "trips": 224,
-      "billed": 53570,
-      "perRead": 53570,
-      "share": 0.006538020843477578
-    },
-    {
-      "attr": "file:D:\\TouchGoCore\\sol\\onchain_test.go",
-      "label": "sol/onchain_test.go",
-      "kind": "read",
-      "tool": "Read",
-      "selfTokens": 1203,
+      "selfTokens": 2857,
       "reads": 2,
-      "trips": 708,
-      "billed": 47382,
-      "perRead": 23691,
-      "share": 0.005782767835863634
-    },
-    {
-      "attr": "file:D:\\TouchGoCore\\pay\\types.go",
-      "label": "pay/types.go",
-      "kind": "read",
-      "tool": "Read",
-      "selfTokens": 975,
-      "reads": 1,
-      "trips": 396,
-      "billed": 45187,
-      "perRead": 45187,
-      "share": 0.005514918664718095
-    },
-    {
-      "attr": "file:D:\\TouchGoCore\\bsc\\usdt.go",
-      "label": "bsc/usdt.go",
-      "kind": "write",
-      "tool": "Edit",
-      "selfTokens": 1702,
-      "reads": 4,
-      "trips": 780,
-      "billed": 34555,
-      "perRead": 8639,
-      "share": 0.004217243682349317
-    },
-    {
-      "attr": "file:D:\\TouchGoCore\\sol\\usdt.go",
-      "label": "sol/usdt.go",
-      "kind": "write",
-      "tool": "Edit",
-      "selfTokens": 1812,
-      "reads": 4,
-      "trips": 724,
-      "billed": 34047,
-      "perRead": 8512,
-      "share": 0.004155316720029496
-    },
-    {
-      "attr": "file:D:\\TouchGoCore\\bsc\\query.go",
-      "label": "bsc/query.go",
-      "kind": "read",
-      "tool": "Read",
-      "selfTokens": 924,
-      "reads": 2,
-      "trips": 666,
-      "billed": 34039,
-      "perRead": 17020,
-      "share": 0.004154327101024788
-    },
-    {
-      "attr": "file:D:\\TouchGoCore\\sol\\query.go",
-      "label": "sol/query.go",
-      "kind": "read",
-      "tool": "Read",
-      "selfTokens": 876,
-      "reads": 2,
-      "trips": 664,
-      "billed": 31972,
-      "perRead": 15986,
-      "share": 0.0039020057707724255
+      "trips": 850,
+      "billed": 133997,
+      "perRead": 66999,
+      "share": 0.0069432759680496834
     },
     {
       "attr": "file:D:\\TouchGoCore\\util\\string.go",
@@ -822,46 +714,70 @@
       "tool": "Read",
       "selfTokens": 3803,
       "reads": 6,
-      "trips": 464,
-      "billed": 31876,
-      "perRead": 5313,
-      "share": 0.003890355157461785
+      "trips": 1964,
+      "billed": 126545,
+      "perRead": 21091,
+      "share": 0.00655713925883646
     },
     {
-      "attr": "file:D:\\TouchGoCore\\ton\\route_test.go",
-      "label": "ton/route_test.go",
-      "kind": "read",
-      "tool": "Read",
-      "selfTokens": 1455,
-      "reads": 2,
-      "trips": 318,
-      "billed": 30068,
-      "perRead": 15034,
-      "share": 0.0036696246354269613
+      "attr": "file:D:\\TouchGoCore\\chainroute\\route_test.go",
+      "label": "chainroute/route_test.go",
+      "kind": "write",
+      "tool": "Write",
+      "selfTokens": 2629,
+      "reads": 1,
+      "trips": 456,
+      "billed": 122590,
+      "perRead": 122590,
+      "share": 0.006352174841149326
     },
     {
-      "attr": "file:D:\\TouchGoCore\\tron\\onchain.go",
-      "label": "tron/onchain.go",
+      "attr": "file:D:\\TouchGoCore\\bsc\\per_order_test.go",
+      "label": "bsc/per_order_test.go",
       "kind": "read",
       "tool": "Read",
-      "selfTokens": 2067,
-      "reads": 6,
-      "trips": 700,
-      "billed": 28476,
-      "perRead": 4746,
-      "share": 0.0034753681931805813
+      "selfTokens": 1978,
+      "reads": 4,
+      "trips": 2304,
+      "billed": 120327,
+      "perRead": 30082,
+      "share": 0.006234935956295089
     },
     {
-      "attr": "file:D:\\TouchGoCore\\ton\\onchain.go",
-      "label": "ton/onchain.go",
+      "attr": "file:D:\\TouchGoCore\\pay\\transfer.go",
+      "label": "pay/transfer.go",
       "kind": "read",
       "tool": "Read",
-      "selfTokens": 1526,
-      "reads": 8,
-      "trips": 1030,
-      "billed": 28466,
-      "perRead": 3558,
-      "share": 0.0034741781687545976
+      "selfTokens": 2260,
+      "reads": 1,
+      "trips": 474,
+      "billed": 109829,
+      "perRead": 109829,
+      "share": 0.005690955372600706
+    },
+    {
+      "attr": "file:D:\\TouchGoCore\\tron\\double_pay_test.go",
+      "label": "tron/double_pay_test.go",
+      "kind": "read",
+      "tool": "Read",
+      "selfTokens": 1920,
+      "reads": 3,
+      "trips": 1628,
+      "billed": 108351,
+      "perRead": 36117,
+      "share": 0.00561438136480716
+    },
+    {
+      "attr": "file:D:\\TouchGoCore\\websocket\\client.go",
+      "label": "websocket/client.go",
+      "kind": "read",
+      "tool": "Read",
+      "selfTokens": 9894,
+      "reads": 28,
+      "trips": 1972,
+      "billed": 90537,
+      "perRead": 3233,
+      "share": 0.0046913224356060585
     },
     {
       "attr": "file:D:\\TouchGoCore\\ton\\native.go",
@@ -870,10 +786,142 @@
       "tool": "Edit",
       "selfTokens": 2409,
       "reads": 5,
-      "trips": 570,
-      "billed": 28354,
-      "perRead": 5671,
-      "share": 0.0034604387623517322
+      "trips": 1820,
+      "billed": 88322,
+      "perRead": 17664,
+      "share": 0.004576513251628627
+    },
+    {
+      "attr": "file:D:\\TouchGoCore\\list\\list.go",
+      "label": "list/list.go",
+      "kind": "read",
+      "tool": "Read",
+      "selfTokens": 4305,
+      "reads": 8,
+      "trips": 1436,
+      "billed": 85689,
+      "perRead": 10711,
+      "share": 0.004440112361324471
+    },
+    {
+      "attr": "file:D:\\TouchGoCore\\tron\\onchain.go",
+      "label": "tron/onchain.go",
+      "kind": "read",
+      "tool": "Read",
+      "selfTokens": 2286,
+      "reads": 7,
+      "trips": 2350,
+      "billed": 83178,
+      "perRead": 11883,
+      "share": 0.004309999512217756
+    },
+    {
+      "attr": "file:D:\\TouchGoCore\\sol\\usdt.go",
+      "label": "sol/usdt.go",
+      "kind": "write",
+      "tool": "Edit",
+      "selfTokens": 1812,
+      "reads": 4,
+      "trips": 1724,
+      "billed": 79154,
+      "perRead": 19788,
+      "share": 0.004101473599318632
+    },
+    {
+      "attr": "file:D:\\TouchGoCore\\sol\\onchain_test.go",
+      "label": "sol/onchain_test.go",
+      "kind": "read",
+      "tool": "Read",
+      "selfTokens": 1203,
+      "reads": 2,
+      "trips": 1208,
+      "billed": 77329,
+      "perRead": 38664,
+      "share": 0.004006893627828471
+    },
+    {
+      "attr": "file:D:\\TouchGoCore\\bsc\\usdt.go",
+      "label": "bsc/usdt.go",
+      "kind": "write",
+      "tool": "Edit",
+      "selfTokens": 1702,
+      "reads": 4,
+      "trips": 1780,
+      "billed": 76923,
+      "perRead": 19231,
+      "share": 0.003985878397491035
+    },
+    {
+      "attr": "file:D:\\TouchGoCore\\pay\\types.go",
+      "label": "pay/types.go",
+      "kind": "read",
+      "tool": "Read",
+      "selfTokens": 975,
+      "reads": 1,
+      "trips": 646,
+      "billed": 69458,
+      "perRead": 69458,
+      "share": 0.00359908057279101
+    },
+    {
+      "attr": "file:D:\\TouchGoCore\\ton\\onchain.go",
+      "label": "ton/onchain.go",
+      "kind": "read",
+      "tool": "Read",
+      "selfTokens": 1526,
+      "reads": 8,
+      "trips": 3030,
+      "billed": 66453,
+      "perRead": 8307,
+      "share": 0.003443378900446697
+    },
+    {
+      "attr": "file:D:\\TouchGoCore\\ton\\route_test.go",
+      "label": "ton/route_test.go",
+      "kind": "read",
+      "tool": "Read",
+      "selfTokens": 1455,
+      "reads": 2,
+      "trips": 818,
+      "billed": 66287,
+      "perRead": 33144,
+      "share": 0.00343477693794236
+    },
+    {
+      "attr": "file:D:\\TouchGoCore\\bsc\\query.go",
+      "label": "bsc/query.go",
+      "kind": "read",
+      "tool": "Read",
+      "selfTokens": 924,
+      "reads": 2,
+      "trips": 1166,
+      "billed": 57040,
+      "perRead": 28520,
+      "share": 0.002955636393357949
+    },
+    {
+      "attr": "file:D:\\TouchGoCore\\list\\node.go",
+      "label": "list/node.go",
+      "kind": "read",
+      "tool": "Read",
+      "selfTokens": 2845,
+      "reads": 6,
+      "trips": 1110,
+      "billed": 54945,
+      "perRead": 9157,
+      "share": 0.0028470476040498138
+    },
+    {
+      "attr": "file:D:\\TouchGoCore\\sol\\query.go",
+      "label": "sol/query.go",
+      "kind": "read",
+      "tool": "Read",
+      "selfTokens": 876,
+      "reads": 2,
+      "trips": 1164,
+      "billed": 53778,
+      "perRead": 26889,
+      "share": 0.0027865950535418352
     },
     {
       "attr": "file:D:\\TouchGoCore\\pay\\channel.go",
@@ -882,34 +930,10 @@
       "tool": "Read",
       "selfTokens": 1080,
       "reads": 1,
-      "trips": 222,
-      "billed": 25363,
-      "perRead": 25363,
-      "share": 0.003095391117882076
-    },
-    {
-      "attr": "file:computeUnitLimit|signatureFeeLamports|PriorityFeeMicroLamports|MicroLamports|ComputeUnitPrice|microLamports|1e6|1_000_000",
-      "label": "computeUnitLimit|signatureFeeLamports|PriorityFeeMicroLamports|MicroLamports|ComputeUnitPrice|microLamports|1e6|1_000_000",
-      "kind": "search",
-      "tool": "Grep",
-      "selfTokens": 523,
-      "reads": 1,
-      "trips": 362,
-      "billed": 21212,
-      "perRead": 21212,
-      "share": 0.002588886088237872
-    },
-    {
-      "attr": "file:\\.nonces|adoptNonce|allocateNonce|nonceMu",
-      "label": "/.nonces|adoptNonce|allocateNonce|nonceMu",
-      "kind": "search",
-      "tool": "Grep",
-      "selfTokens": 535,
-      "reads": 1,
-      "trips": 338,
-      "billed": 19940,
-      "perRead": 19940,
-      "share": 0.002433591657093816
+      "trips": 472,
+      "billed": 52247,
+      "perRead": 52247,
+      "share": 0.0027072707351401184
     },
     {
       "attr": "file:D:\\TouchGoCore\\tron\\usdt_test.go",
@@ -918,22 +942,10 @@
       "tool": "Edit",
       "selfTokens": 1218,
       "reads": 4,
-      "trips": 558,
-      "billed": 18028,
-      "perRead": 4507,
-      "share": 0.0022002105673000864
-    },
-    {
-      "attr": "file:D:\\TouchGoCore\\bsc\\onchain_test.go",
-      "label": "bsc/onchain_test.go",
-      "kind": "read",
-      "tool": "Read",
-      "selfTokens": 493,
-      "reads": 1,
-      "trips": 328,
-      "billed": 17715,
-      "perRead": 17715,
-      "share": 0.0021620949676580594
+      "trips": 1558,
+      "billed": 48348,
+      "perRead": 12087,
+      "share": 0.0025052120534006426
     },
     {
       "attr": "file:D:\\TouchGoCore\\sol\\route_test.go",
@@ -942,10 +954,46 @@
       "tool": "Write",
       "selfTokens": 951,
       "reads": 1,
-      "trips": 176,
-      "billed": 17585,
-      "perRead": 17585,
-      "share": 0.002146216320158701
+      "trips": 426,
+      "billed": 41259,
+      "perRead": 41259,
+      "share": 0.0021378889198012843
+    },
+    {
+      "attr": "file:computeUnitLimit|signatureFeeLamports|PriorityFeeMicroLamports|MicroLamports|ComputeUnitPrice|microLamports|1e6|1_000_000",
+      "label": "computeUnitLimit|signatureFeeLamports|PriorityFeeMicroLamports|MicroLamports|ComputeUnitPrice|microLamports|1e6|1_000_000",
+      "kind": "search",
+      "tool": "Grep",
+      "selfTokens": 523,
+      "reads": 1,
+      "trips": 612,
+      "billed": 34232,
+      "perRead": 34232,
+      "share": 0.001773760804960831
+    },
+    {
+      "attr": "file:\\.nonces|adoptNonce|allocateNonce|nonceMu",
+      "label": "/.nonces|adoptNonce|allocateNonce|nonceMu",
+      "kind": "search",
+      "tool": "Grep",
+      "selfTokens": 535,
+      "reads": 1,
+      "trips": 588,
+      "billed": 33258,
+      "perRead": 33258,
+      "share": 0.0017233067724975412
+    },
+    {
+      "attr": "file:D:\\TouchGoCore\\bsc\\onchain_test.go",
+      "label": "bsc/onchain_test.go",
+      "kind": "read",
+      "tool": "Read",
+      "selfTokens": 493,
+      "reads": 1,
+      "trips": 578,
+      "billed": 29988,
+      "perRead": 29988,
+      "share": 0.0015538635431482989
     },
     {
       "attr": "file:WithLock|func .*QueryOrder",
@@ -954,34 +1002,22 @@
       "tool": "Grep",
       "selfTokens": 422,
       "reads": 1,
-      "trips": 368,
-      "billed": 17469,
-      "perRead": 17469,
-      "share": 0.002131989817387686
+      "trips": 618,
+      "billed": 27974,
+      "perRead": 27974,
+      "share": 0.0014495001697107618
     },
     {
-      "attr": "file:D:\\TouchGoCore\\ton\\wallet_lock_test.go",
-      "label": "ton/wallet_lock_test.go",
+      "attr": "file:D:\\TouchGoCore\\websocket\\client_pool_stats_test.go",
+      "label": "websocket/client_pool_stats_test.go",
       "kind": "read",
       "tool": "Read",
-      "selfTokens": 344,
-      "reads": 1,
-      "trips": 366,
-      "billed": 14143,
-      "perRead": 14143,
-      "share": 0.0017260960922611571
-    },
-    {
-      "attr": "file:facebook|instagram|fb_cookie|ins\\b",
-      "label": "facebook|instagram|fb_cookie|ins/b",
-      "kind": "search",
-      "tool": "Grep",
-      "selfTokens": 232,
-      "reads": 1,
-      "trips": 402,
-      "billed": 11060,
-      "perRead": 11060,
-      "share": 0.0013497913046180737
+      "selfTokens": 2324,
+      "reads": 2,
+      "trips": 212,
+      "billed": 24696,
+      "perRead": 12348,
+      "share": 0.0012796778911911486
     },
     {
       "attr": "file:D:\\TouchGoCore\\sol\\route.go",
@@ -990,70 +1026,34 @@
       "tool": "Write",
       "selfTokens": 513,
       "reads": 1,
-      "trips": 186,
-      "billed": 10038,
-      "perRead": 10038,
-      "share": 0.0012251192226864992
+      "trips": 436,
+      "billed": 22808,
+      "perRead": 22808,
+      "share": 0.0011818537488304981
     },
     {
-      "attr": "file:func newTestChannel|PendingNonce|func.*qaBSCPerOrderKey",
-      "label": "func newTestChannel|PendingNonce|func.*qaBSCPerOrderKey",
-      "kind": "search",
-      "tool": "Grep",
-      "selfTokens": 155,
+      "attr": "file:D:\\TouchGoCore\\ton\\wallet_lock_test.go",
+      "label": "ton/wallet_lock_test.go",
+      "kind": "read",
+      "tool": "Read",
+      "selfTokens": 344,
       "reads": 1,
-      "trips": 330,
-      "billed": 5611,
-      "perRead": 5611,
-      "share": 0.0006847870042771161
+      "trips": 616,
+      "billed": 22706,
+      "perRead": 22706,
+      "share": 0.001176560783789731
     },
     {
-      "attr": "file:D:\\TouchGoCore\\tron\\usdt_assembly_test.go",
-      "label": "tron/usdt_assembly_test.go",
-      "kind": "write",
-      "tool": "Edit",
-      "selfTokens": 208,
-      "reads": 2,
-      "trips": 294,
-      "billed": 3206,
-      "perRead": 1603,
-      "share": 0.00039125924493383984
-    },
-    {
-      "attr": "file:func buildableTx|type txReceipt|func newTestChannel",
-      "label": "func buildableTx|type txReceipt|func newTestChannel",
-      "kind": "search",
-      "tool": "Grep",
-      "selfTokens": 86,
+      "attr": "file:D:\\TouchGoCore\\list\\qa_gl_range_pool_test.go",
+      "label": "list/qa_gl_range_pool_test.go",
+      "kind": "read",
+      "tool": "Read",
+      "selfTokens": 1089,
       "reads": 1,
-      "trips": 292,
-      "billed": 2709,
-      "perRead": 2709,
-      "share": 0.0003306275513154029
-    },
-    {
-      "attr": "file:pay\\types.go",
-      "label": "pay/types.go",
-      "kind": "search",
-      "tool": "Grep",
-      "selfTokens": 54,
-      "reads": 1,
-      "trips": 398,
-      "billed": 2526,
-      "perRead": 2526,
-      "share": 0.000308321393792082
-    },
-    {
-      "attr": "file:facebook|instagram|fbapi|messenger|graph\\.facebook",
-      "label": "facebook|instagram|fbapi|messenger|graph/.facebook",
-      "kind": "search",
-      "tool": "Grep",
-      "selfTokens": 48,
-      "reads": 1,
-      "trips": 400,
-      "billed": 2267,
-      "perRead": 2267,
-      "share": 0.00027665260220499914
+      "trips": 202,
+      "billed": 21802,
+      "perRead": 21802,
+      "share": 0.0011297246876151123
     },
     {
       "attr": "file:D:\\TouchGoCore\\bsc\\rpc_test.go",
@@ -1062,10 +1062,118 @@
       "tool": "Read",
       "selfTokens": 749,
       "reads": 4,
-      "trips": 98,
-      "billed": 2047,
-      "perRead": 512,
-      "share": 0.0002498418388215667
+      "trips": 1098,
+      "billed": 20692,
+      "perRead": 5173,
+      "share": 0.001072197361752369
+    },
+    {
+      "attr": "file:C:\\Users\\TouchGo\\.qoder-cn\\projects\\D--TouchGoCore\\memory\\pay-race-red-baseline-2026-10-25.md",
+      "label": "C:/Users/TouchGo/.qoder-cn/projects/D--TouchGoCore/memory/pay-race-red-baseline-2026-10-25.md",
+      "kind": "read",
+      "tool": "Read",
+      "selfTokens": 2951,
+      "reads": 4,
+      "trips": 418,
+      "billed": 20483,
+      "perRead": 5121,
+      "share": 0.0010613636163380395
+    },
+    {
+      "attr": "file:facebook|instagram|fb_cookie|ins\\b",
+      "label": "facebook|instagram|fb_cookie|ins/b",
+      "kind": "search",
+      "tool": "Grep",
+      "selfTokens": 232,
+      "reads": 1,
+      "trips": 652,
+      "billed": 16835,
+      "perRead": 16835,
+      "share": 0.0008723277786022677
+    },
+    {
+      "attr": "file:D:\\TouchGoCore\\list\\pool.go",
+      "label": "list/pool.go",
+      "kind": "read",
+      "tool": "Read",
+      "selfTokens": 870,
+      "reads": 2,
+      "trips": 394,
+      "billed": 16752,
+      "perRead": 8376,
+      "share": 0.000868034139423087
+    },
+    {
+      "attr": "file:D:\\TouchGoCore\\websocket\\p0_close_protocol_test.go",
+      "label": "websocket/p0_close_protocol_test.go",
+      "kind": "read",
+      "tool": "Read",
+      "selfTokens": 1512,
+      "reads": 4,
+      "trips": 336,
+      "billed": 14534,
+      "perRead": 3634,
+      "share": 0.0007531033698294314
+    },
+    {
+      "attr": "file:C:\\Users\\TouchGo\\.qoder-cn\\memory\\feedback-stepwise-slice-delivery.md",
+      "label": "C:/Users/TouchGo/.qoder-cn/memory/feedback-stepwise-slice-delivery.md",
+      "kind": "read",
+      "tool": "Read",
+      "selfTokens": 471,
+      "reads": 1,
+      "trips": 246,
+      "billed": 11530,
+      "perRead": 11530,
+      "share": 0.0005974560813576207
+    },
+    {
+      "attr": "file:C:\\Users\\TouchGo\\.qoder-cn\\memory\\user-stoneage-migration-profile.md",
+      "label": "C:/Users/TouchGo/.qoder-cn/memory/user-stoneage-migration-profile.md",
+      "kind": "read",
+      "tool": "Read",
+      "selfTokens": 411,
+      "reads": 1,
+      "trips": 246,
+      "billed": 10061,
+      "perRead": 10061,
+      "share": 0.0005213470264076051
+    },
+    {
+      "attr": "file:func newTestChannel|PendingNonce|func.*qaBSCPerOrderKey",
+      "label": "func newTestChannel|PendingNonce|func.*qaBSCPerOrderKey",
+      "kind": "search",
+      "tool": "Grep",
+      "selfTokens": 155,
+      "reads": 1,
+      "trips": 580,
+      "billed": 9469,
+      "perRead": 9469,
+      "share": 0.0004906688934972276
+    },
+    {
+      "attr": "file:D:\\TouchGoCore\\tron\\usdt_assembly_test.go",
+      "label": "tron/usdt_assembly_test.go",
+      "kind": "write",
+      "tool": "Edit",
+      "selfTokens": 208,
+      "reads": 2,
+      "trips": 794,
+      "billed": 8384,
+      "perRead": 4192,
+      "share": 0.00043441102027890616
+    },
+    {
+      "attr": "file:C:\\Users\\TouchGo\\.qoder-cn\\memory\\feedback-long-verification-background.md",
+      "label": "C:/Users/TouchGo/.qoder-cn/memory/feedback-long-verification-background.md",
+      "kind": "read",
+      "tool": "Read",
+      "selfTokens": 326,
+      "reads": 1,
+      "trips": 246,
+      "billed": 7981,
+      "perRead": 7981,
+      "share": 0.0004135258652284172
     },
     {
       "attr": "file:D:\\TouchGoCore\\tron\\account.go",
@@ -1074,46 +1182,10 @@
       "tool": "Read",
       "selfTokens": 257,
       "reads": 3,
-      "trips": 174,
-      "billed": 1553,
-      "perRead": 518,
-      "share": 0.00018950915337687482
-    },
-    {
-      "attr": "file:D:\\TouchGoCore\\ton\\assembly_test.go",
-      "label": "ton/assembly_test.go",
-      "kind": "write",
-      "tool": "Edit",
-      "selfTokens": 119,
-      "reads": 1,
-      "trips": 108,
-      "billed": 1340,
-      "perRead": 1340,
-      "share": 0.00016360105612058329
-    },
-    {
-      "attr": "file:D:\\TouchGoCore\\ton\\nilcfg_test.go",
-      "label": "ton/nilcfg_test.go",
-      "kind": "write",
-      "tool": "Edit",
-      "selfTokens": 120,
-      "reads": 2,
-      "trips": 210,
-      "billed": 1313,
-      "perRead": 657,
-      "share": 0.0001603045755033675
-    },
-    {
-      "attr": "file:PriorityFeeMicroLamports",
-      "label": "PriorityFeeMicroLamports",
-      "kind": "search",
-      "tool": "Grep",
-      "selfTokens": 27,
-      "reads": 1,
-      "trips": 362,
-      "billed": 1095,
-      "perRead": 1095,
-      "share": 0.00013365186306390532
+      "trips": 924,
+      "billed": 7950,
+      "perRead": 2650,
+      "share": 0.0004119592324186977
     },
     {
       "attr": "file:D:\\TouchGoCore\\util\\string_test.go",
@@ -1122,122 +1194,230 @@
       "tool": "Write",
       "selfTokens": 284,
       "reads": 1,
-      "trips": 28,
-      "billed": 824,
-      "perRead": 824,
-      "share": 0.00010060404423299623
+      "trips": 278,
+      "billed": 7894,
+      "perRead": 7894,
+      "share": 0.000409040069499989
+    },
+    {
+      "attr": "file:D:\\TouchGoCore\\list\\p1_list_concurrency_test.go",
+      "label": "list/p1_list_concurrency_test.go",
+      "kind": "read",
+      "tool": "Read",
+      "selfTokens": 383,
+      "reads": 1,
+      "trips": 178,
+      "billed": 6749,
+      "perRead": 6749,
+      "share": 0.0003496879960437064
+    },
+    {
+      "attr": "file:func buildableTx|type txReceipt|func newTestChannel",
+      "label": "func buildableTx|type txReceipt|func newTestChannel",
+      "kind": "search",
+      "tool": "Grep",
+      "selfTokens": 86,
+      "reads": 1,
+      "trips": 542,
+      "billed": 4850,
+      "perRead": 4850,
+      "share": 0.00025130304574689426
+    },
+    {
+      "attr": "file:D:\\TouchGoCore\\ton\\assembly_test.go",
+      "label": "ton/assembly_test.go",
+      "kind": "write",
+      "tool": "Edit",
+      "selfTokens": 119,
+      "reads": 1,
+      "trips": 358,
+      "billed": 4303,
+      "perRead": 4303,
+      "share": 0.0002229555502207179
+    },
+    {
+      "attr": "file:D:\\TouchGoCore\\ton\\nilcfg_test.go",
+      "label": "ton/nilcfg_test.go",
+      "kind": "write",
+      "tool": "Edit",
+      "selfTokens": 120,
+      "reads": 2,
+      "trips": 710,
+      "billed": 4301,
+      "perRead": 2150,
+      "share": 0.00022284586269434695
+    },
+    {
+      "attr": "file:pay\\types.go",
+      "label": "pay/types.go",
+      "kind": "search",
+      "tool": "Grep",
+      "selfTokens": 54,
+      "reads": 1,
+      "trips": 648,
+      "billed": 3871,
+      "perRead": 3871,
+      "share": 0.00020055633319006737
+    },
+    {
+      "attr": "file:facebook|instagram|fbapi|messenger|graph\\.facebook",
+      "label": "facebook|instagram|fbapi|messenger|graph/.facebook",
+      "kind": "search",
+      "tool": "Grep",
+      "selfTokens": 48,
+      "reads": 1,
+      "trips": 650,
+      "billed": 3462,
+      "perRead": 3462,
+      "share": 0.00017937155585963282
+    },
+    {
+      "attr": "file:D:\\TouchGoCore\\tron\\gateway.go",
+      "label": "tron/gateway.go",
+      "kind": "write",
+      "tool": "Edit",
+      "selfTokens": 160,
+      "reads": 1,
+      "trips": 152,
+      "billed": 2405,
+      "perRead": 2405,
+      "share": 0.00012460131541333042
+    },
+    {
+      "attr": "file:PriorityFeeMicroLamports",
+      "label": "PriorityFeeMicroLamports",
+      "kind": "search",
+      "tool": "Grep",
+      "selfTokens": 27,
+      "reads": 1,
+      "trips": 612,
+      "billed": 1767,
+      "perRead": 1767,
+      "share": 0.00009157082549510987
+    },
+    {
+      "attr": "file:D:\\TouchGoCore\\websocket\\websocket.go",
+      "label": "websocket/websocket.go",
+      "kind": "read",
+      "tool": "Read",
+      "selfTokens": 123,
+      "reads": 1,
+      "trips": 78,
+      "billed": 946,
+      "perRead": 946,
+      "share": 0.00004902862434844782
     }
   ],
   "byAttr": [
     {
-      "attr": "attachment",
-      "tokens": 2048555,
-      "share": 0.2500177463828043
+      "attr": "assistant_thinking",
+      "tokens": 5864891,
+      "share": 0.30389797578028954
     },
     {
-      "attr": "assistant_thinking",
-      "tokens": 1947734,
-      "share": 0.23771300915924298
+      "attr": "attachment",
+      "tokens": 4222922,
+      "share": 0.21881695374730378
     },
     {
       "attr": "tool_result|Read",
-      "tokens": 1662086,
-      "share": 0.2028508176912903
+      "tokens": 3361852,
+      "share": 0.17419934684558175
     },
     {
       "attr": "tool_result|Bash",
-      "tokens": 1139238,
-      "share": 0.1390394042615824
+      "tokens": 2691605,
+      "share": 0.13946947551015043
     },
     {
       "attr": "tool_use|Edit",
-      "tokens": 436465,
-      "share": 0.05326880520961664
+      "tokens": 998073,
+      "share": 0.05171664872559483
     },
     {
       "attr": "assistant_text",
-      "tokens": 229498,
-      "share": 0.028009250718065922
+      "tokens": 594115,
+      "share": 0.030784968999359077
     },
     {
       "attr": "tool_use|Write",
-      "tokens": 216227,
-      "share": 0.026389599053134368
-    },
-    {
-      "attr": "tool_result|Agent",
-      "tokens": 131452,
-      "share": 0.016043207866872158
+      "tokens": 494709,
+      "share": 0.02563406472072382
     },
     {
       "attr": "tool_use|Bash",
-      "tokens": 120315,
-      "share": 0.014683905586349601
+      "tokens": 356975,
+      "share": 0.018497163298288877
     },
     {
-      "attr": "tool_result|Grep",
-      "tokens": 72879,
-      "share": 0.008894613831400609
+      "attr": "tool_result|Agent",
+      "tokens": 209532,
+      "share": 0.010857204618301202
     },
     {
       "attr": "tool_use|Agent",
-      "tokens": 70734,
-      "share": 0.008632825271587305
+      "tokens": 135595,
+      "share": 0.0070260511958460635
     },
     {
-      "attr": "tool_use|TaskCreate",
-      "tokens": 28964,
-      "share": 0.0035349728288413965
+      "attr": "tool_result|Grep",
+      "tokens": 118011,
+      "share": 0.006114905024941689
     },
     {
       "attr": "tool_result|Edit",
-      "tokens": 24357,
-      "share": 0.0029726587993980608
+      "tokens": 67677,
+      "share": 0.0035067940386754107
+    },
+    {
+      "attr": "tool_use|TaskCreate",
+      "tokens": 48431,
+      "share": 0.0025095164663094705
     },
     {
       "attr": "tool_use|Read",
-      "tokens": 17923,
-      "share": 0.002187383102885554
-    },
-    {
-      "attr": "tool_use|Grep",
-      "tokens": 11010,
-      "share": 0.0013436854505903286
+      "tokens": 41984,
+      "share": 0.002175448375011368
     },
     {
       "attr": "tool_use|AskUserQuestion",
-      "tokens": 9436,
-      "share": 0.0011515962698529926
+      "tokens": 18821,
+      "share": 0.0009752142148785044
     },
     {
-      "attr": "tool_result|TaskCreate",
-      "tokens": 8667,
-      "share": 0.0010577750711397522
+      "attr": "tool_use|Grep",
+      "tokens": 17706,
+      "share": 0.0009174611546186321
     },
     {
       "attr": "tool_result|Write",
-      "tokens": 5694,
-      "share": 0.0006949048386960975
+      "tokens": 14899,
+      "share": 0.0007720162984547344
+    },
+    {
+      "attr": "tool_result|TaskCreate",
+      "tokens": 14492,
+      "share": 0.0007509275597421262
     },
     {
       "attr": "user_input",
-      "tokens": 4181,
-      "share": 0.0005102649834701437
+      "tokens": 10054,
+      "share": 0.0005209595189471589
     },
     {
       "attr": "tool_use|TaskUpdate",
-      "tokens": 3582,
-      "share": 0.00043721402243196254
+      "tokens": 7192,
+      "share": 0.00037265913248514266
     },
     {
       "attr": "tool_result|AskUserQuestion",
-      "tokens": 2428,
-      "share": 0.0002962993055059423
+      "tokens": 4842,
+      "share": 0.000250917185260517
     },
     {
       "attr": "tool_result|TaskUpdate",
-      "tokens": 2213,
-      "share": 0.00027006029524064484
+      "tokens": 4503,
+      "share": 0.0002333275892349722
     },
     {
       "attr": "system",
@@ -3467,11 +3647,1386 @@
       "credits": 3.755,
       "originalCredits": 9.388,
       "afterCompact": false
+    },
+    {
+      "index": 203,
+      "time": "23:17",
+      "ratio": 0.315827,
+      "inputTokens": 63165,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 5.025,
+      "originalCredits": 12.562,
+      "afterCompact": false
+    },
+    {
+      "index": 204,
+      "time": "23:17",
+      "ratio": 0.321368,
+      "inputTokens": 64274,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 4.228,
+      "originalCredits": 10.569,
+      "afterCompact": false
+    },
+    {
+      "index": 205,
+      "time": "23:18",
+      "ratio": 0.322761,
+      "inputTokens": 64552,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 4.018,
+      "originalCredits": 10.046,
+      "afterCompact": false
+    },
+    {
+      "index": 206,
+      "time": "23:18",
+      "ratio": 0.324044,
+      "inputTokens": 64809,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 3.657,
+      "originalCredits": 9.142,
+      "afterCompact": false
+    },
+    {
+      "index": 207,
+      "time": "23:18",
+      "ratio": 0.324579,
+      "inputTokens": 64916,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 3.607,
+      "originalCredits": 9.018,
+      "afterCompact": false
+    },
+    {
+      "index": 208,
+      "time": "23:19",
+      "ratio": 0.324959,
+      "inputTokens": 64992,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 3.709,
+      "originalCredits": 9.273,
+      "afterCompact": false
+    },
+    {
+      "index": 209,
+      "time": "23:19",
+      "ratio": 0.326052,
+      "inputTokens": 65210,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 4.116,
+      "originalCredits": 10.291,
+      "afterCompact": false
+    },
+    {
+      "index": 210,
+      "time": "23:20",
+      "ratio": 0.327902,
+      "inputTokens": 65580,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 4.116,
+      "originalCredits": 10.29,
+      "afterCompact": false
+    },
+    {
+      "index": 211,
+      "time": "23:21",
+      "ratio": 0.329667,
+      "inputTokens": 65933,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 4.382,
+      "originalCredits": 10.954,
+      "afterCompact": false
+    },
+    {
+      "index": 212,
+      "time": "23:22",
+      "ratio": 0.333518,
+      "inputTokens": 66704,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 4.373,
+      "originalCredits": 10.932,
+      "afterCompact": false
+    },
+    {
+      "index": 213,
+      "time": "23:23",
+      "ratio": 0.330373,
+      "inputTokens": 66075,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 7.393,
+      "originalCredits": 7.393,
+      "afterCompact": false
+    },
+    {
+      "index": 214,
+      "time": "23:23",
+      "ratio": 0.332666,
+      "inputTokens": 66533,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.238,
+      "originalCredits": 0.238,
+      "afterCompact": false
+    },
+    {
+      "index": 215,
+      "time": "23:23",
+      "ratio": 0.333932,
+      "inputTokens": 66786,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.229,
+      "originalCredits": 0.229,
+      "afterCompact": false
+    },
+    {
+      "index": 216,
+      "time": "23:23",
+      "ratio": 0.336999,
+      "inputTokens": 67400,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.249,
+      "originalCredits": 0.249,
+      "afterCompact": false
+    },
+    {
+      "index": 217,
+      "time": "23:23",
+      "ratio": 0.33831,
+      "inputTokens": 67662,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.292,
+      "originalCredits": 0.292,
+      "afterCompact": false
+    },
+    {
+      "index": 218,
+      "time": "23:24",
+      "ratio": 0.340026,
+      "inputTokens": 68005,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.326,
+      "originalCredits": 0.326,
+      "afterCompact": false
+    },
+    {
+      "index": 219,
+      "time": "23:24",
+      "ratio": 0.342215,
+      "inputTokens": 68443,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.213,
+      "originalCredits": 0.213,
+      "afterCompact": false
+    },
+    {
+      "index": 220,
+      "time": "23:24",
+      "ratio": 0.343575,
+      "inputTokens": 68715,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.417,
+      "originalCredits": 0.417,
+      "afterCompact": false
+    },
+    {
+      "index": 221,
+      "time": "23:24",
+      "ratio": 0.350509,
+      "inputTokens": 70102,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.525,
+      "originalCredits": 0.525,
+      "afterCompact": false
+    },
+    {
+      "index": 222,
+      "time": "23:26",
+      "ratio": 0.354326,
+      "inputTokens": 70865,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.235,
+      "originalCredits": 0.235,
+      "afterCompact": false
+    },
+    {
+      "index": 223,
+      "time": "23:26",
+      "ratio": 0.355098,
+      "inputTokens": 71020,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.174,
+      "originalCredits": 0.174,
+      "afterCompact": false
+    },
+    {
+      "index": 224,
+      "time": "23:26",
+      "ratio": 0.358442,
+      "inputTokens": 71688,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.364,
+      "originalCredits": 0.364,
+      "afterCompact": false
+    },
+    {
+      "index": 225,
+      "time": "23:26",
+      "ratio": 0.362132,
+      "inputTokens": 72426,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.731,
+      "originalCredits": 0.731,
+      "afterCompact": false
+    },
+    {
+      "index": 226,
+      "time": "23:27",
+      "ratio": 0.374734,
+      "inputTokens": 74947,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 1.014,
+      "originalCredits": 1.014,
+      "afterCompact": false
+    },
+    {
+      "index": 227,
+      "time": "23:28",
+      "ratio": 0.384155,
+      "inputTokens": 76831,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.885,
+      "originalCredits": 0.885,
+      "afterCompact": false
+    },
+    {
+      "index": 228,
+      "time": "23:28",
+      "ratio": 0.392188,
+      "inputTokens": 78438,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.308,
+      "originalCredits": 0.308,
+      "afterCompact": false
+    },
+    {
+      "index": 229,
+      "time": "23:28",
+      "ratio": 0.393646,
+      "inputTokens": 78729,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.192,
+      "originalCredits": 0.192,
+      "afterCompact": false
+    },
+    {
+      "index": 230,
+      "time": "23:28",
+      "ratio": 0.393846,
+      "inputTokens": 78769,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.203,
+      "originalCredits": 0.203,
+      "afterCompact": false
+    },
+    {
+      "index": 231,
+      "time": "23:28",
+      "ratio": 0.394142,
+      "inputTokens": 78828,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.196,
+      "originalCredits": 0.196,
+      "afterCompact": false
+    },
+    {
+      "index": 232,
+      "time": "23:28",
+      "ratio": 0.394388,
+      "inputTokens": 78878,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.342,
+      "originalCredits": 0.342,
+      "afterCompact": false
+    },
+    {
+      "index": 233,
+      "time": "23:28",
+      "ratio": 0.396277,
+      "inputTokens": 79255,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.257,
+      "originalCredits": 0.257,
+      "afterCompact": false
+    },
+    {
+      "index": 234,
+      "time": "23:29",
+      "ratio": 0.397463,
+      "inputTokens": 79493,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.201,
+      "originalCredits": 0.201,
+      "afterCompact": false
+    },
+    {
+      "index": 235,
+      "time": "23:29",
+      "ratio": 0.397805,
+      "inputTokens": 79561,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.203,
+      "originalCredits": 0.203,
+      "afterCompact": false
+    },
+    {
+      "index": 236,
+      "time": "23:29",
+      "ratio": 0.398055,
+      "inputTokens": 79611,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.2,
+      "originalCredits": 0.2,
+      "afterCompact": false
+    },
+    {
+      "index": 237,
+      "time": "23:29",
+      "ratio": 0.39838,
+      "inputTokens": 79676,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.254,
+      "originalCredits": 0.254,
+      "afterCompact": false
+    },
+    {
+      "index": 238,
+      "time": "23:30",
+      "ratio": 0.400149,
+      "inputTokens": 80030,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.637,
+      "originalCredits": 0.637,
+      "afterCompact": false
+    },
+    {
+      "index": 239,
+      "time": "23:30",
+      "ratio": 0.405788,
+      "inputTokens": 81158,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.329,
+      "originalCredits": 0.329,
+      "afterCompact": false
+    },
+    {
+      "index": 240,
+      "time": "23:30",
+      "ratio": 0.407365,
+      "inputTokens": 81473,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.227,
+      "originalCredits": 0.227,
+      "afterCompact": false
+    },
+    {
+      "index": 241,
+      "time": "23:30",
+      "ratio": 0.407867,
+      "inputTokens": 81573,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.211,
+      "originalCredits": 0.211,
+      "afterCompact": false
+    },
+    {
+      "index": 242,
+      "time": "23:30",
+      "ratio": 0.408199,
+      "inputTokens": 81640,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.204,
+      "originalCredits": 0.204,
+      "afterCompact": false
+    },
+    {
+      "index": 243,
+      "time": "23:30",
+      "ratio": 0.408887,
+      "inputTokens": 81777,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.207,
+      "originalCredits": 0.207,
+      "afterCompact": false
+    },
+    {
+      "index": 244,
+      "time": "23:30",
+      "ratio": 0.409062,
+      "inputTokens": 81812,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.209,
+      "originalCredits": 0.209,
+      "afterCompact": false
+    },
+    {
+      "index": 245,
+      "time": "23:30",
+      "ratio": 0.409356,
+      "inputTokens": 81871,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.194,
+      "originalCredits": 0.194,
+      "afterCompact": false
+    },
+    {
+      "index": 246,
+      "time": "23:30",
+      "ratio": 0.409508,
+      "inputTokens": 81902,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.221,
+      "originalCredits": 0.221,
+      "afterCompact": false
+    },
+    {
+      "index": 247,
+      "time": "23:30",
+      "ratio": 0.410242,
+      "inputTokens": 82048,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.21,
+      "originalCredits": 0.21,
+      "afterCompact": false
+    },
+    {
+      "index": 248,
+      "time": "23:30",
+      "ratio": 0.410509,
+      "inputTokens": 82102,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.203,
+      "originalCredits": 0.203,
+      "afterCompact": false
+    },
+    {
+      "index": 249,
+      "time": "23:31",
+      "ratio": 0.410743,
+      "inputTokens": 82149,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.219,
+      "originalCredits": 0.219,
+      "afterCompact": false
+    },
+    {
+      "index": 250,
+      "time": "23:32",
+      "ratio": 0.411152,
+      "inputTokens": 82230,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.234,
+      "originalCredits": 0.234,
+      "afterCompact": false
+    },
+    {
+      "index": 251,
+      "time": "23:32",
+      "ratio": 0.412056,
+      "inputTokens": 82411,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.217,
+      "originalCredits": 0.217,
+      "afterCompact": false
+    },
+    {
+      "index": 252,
+      "time": "23:32",
+      "ratio": 0.412372,
+      "inputTokens": 82474,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.204,
+      "originalCredits": 0.204,
+      "afterCompact": false
+    },
+    {
+      "index": 253,
+      "time": "23:32",
+      "ratio": 0.412584,
+      "inputTokens": 82517,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.241,
+      "originalCredits": 0.241,
+      "afterCompact": false
+    },
+    {
+      "index": 254,
+      "time": "23:33",
+      "ratio": 0.417463,
+      "inputTokens": 83493,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.369,
+      "originalCredits": 0.369,
+      "afterCompact": false
+    },
+    {
+      "index": 255,
+      "time": "23:34",
+      "ratio": 0.418626,
+      "inputTokens": 83725,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.216,
+      "originalCredits": 0.216,
+      "afterCompact": false
+    },
+    {
+      "index": 256,
+      "time": "23:34",
+      "ratio": 0.419359,
+      "inputTokens": 83872,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.386,
+      "originalCredits": 0.386,
+      "afterCompact": false
+    },
+    {
+      "index": 257,
+      "time": "23:34",
+      "ratio": 0.421495,
+      "inputTokens": 84299,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.273,
+      "originalCredits": 0.273,
+      "afterCompact": false
+    },
+    {
+      "index": 258,
+      "time": "23:34",
+      "ratio": 0.422469,
+      "inputTokens": 84494,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.253,
+      "originalCredits": 0.253,
+      "afterCompact": false
+    },
+    {
+      "index": 259,
+      "time": "23:34",
+      "ratio": 0.423286,
+      "inputTokens": 84657,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.258,
+      "originalCredits": 0.258,
+      "afterCompact": false
+    },
+    {
+      "index": 260,
+      "time": "23:34",
+      "ratio": 0.424197,
+      "inputTokens": 84839,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.332,
+      "originalCredits": 0.332,
+      "afterCompact": false
+    },
+    {
+      "index": 261,
+      "time": "23:35",
+      "ratio": 0.425947,
+      "inputTokens": 85189,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.252,
+      "originalCredits": 0.252,
+      "afterCompact": false
+    },
+    {
+      "index": 262,
+      "time": "23:35",
+      "ratio": 0.426813,
+      "inputTokens": 85363,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.276,
+      "originalCredits": 0.276,
+      "afterCompact": false
+    },
+    {
+      "index": 263,
+      "time": "23:35",
+      "ratio": 0.427782,
+      "inputTokens": 85556,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.245,
+      "originalCredits": 0.245,
+      "afterCompact": false
+    },
+    {
+      "index": 264,
+      "time": "09:05",
+      "ratio": 0.430151,
+      "inputTokens": 86030,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 18.95,
+      "originalCredits": 18.95,
+      "afterCompact": false
+    },
+    {
+      "index": 265,
+      "time": "09:05",
+      "ratio": 0.431833,
+      "inputTokens": 86367,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.529,
+      "originalCredits": 0.529,
+      "afterCompact": false
+    },
+    {
+      "index": 266,
+      "time": "09:05",
+      "ratio": 0.433097,
+      "inputTokens": 86619,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.525,
+      "originalCredits": 0.525,
+      "afterCompact": false
+    },
+    {
+      "index": 267,
+      "time": "09:05",
+      "ratio": 0.434779,
+      "inputTokens": 86956,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.71,
+      "originalCredits": 0.71,
+      "afterCompact": false
+    },
+    {
+      "index": 268,
+      "time": "09:05",
+      "ratio": 0.436652,
+      "inputTokens": 87330,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.429,
+      "originalCredits": 0.429,
+      "afterCompact": false
+    },
+    {
+      "index": 269,
+      "time": "09:05",
+      "ratio": 0.437994,
+      "inputTokens": 87599,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.463,
+      "originalCredits": 0.463,
+      "afterCompact": false
+    },
+    {
+      "index": 270,
+      "time": "09:06",
+      "ratio": 0.439398,
+      "inputTokens": 87880,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 1.079,
+      "originalCredits": 1.079,
+      "afterCompact": false
+    },
+    {
+      "index": 271,
+      "time": "09:06",
+      "ratio": 0.443891,
+      "inputTokens": 88778,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.979,
+      "originalCredits": 0.979,
+      "afterCompact": false
+    },
+    {
+      "index": 272,
+      "time": "09:07",
+      "ratio": 0.447861,
+      "inputTokens": 89572,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.626,
+      "originalCredits": 0.626,
+      "afterCompact": false
+    },
+    {
+      "index": 273,
+      "time": "09:07",
+      "ratio": 0.450598,
+      "inputTokens": 90120,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 1.124,
+      "originalCredits": 1.124,
+      "afterCompact": false
+    },
+    {
+      "index": 274,
+      "time": "09:07",
+      "ratio": 0.455123,
+      "inputTokens": 91025,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.996,
+      "originalCredits": 0.996,
+      "afterCompact": false
+    },
+    {
+      "index": 275,
+      "time": "09:07",
+      "ratio": 0.459267,
+      "inputTokens": 91853,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.743,
+      "originalCredits": 0.743,
+      "afterCompact": false
+    },
+    {
+      "index": 276,
+      "time": "09:08",
+      "ratio": 0.461053,
+      "inputTokens": 92211,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.887,
+      "originalCredits": 0.887,
+      "afterCompact": false
+    },
+    {
+      "index": 277,
+      "time": "09:08",
+      "ratio": 0.464549,
+      "inputTokens": 92910,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 1.186,
+      "originalCredits": 1.186,
+      "afterCompact": false
+    },
+    {
+      "index": 278,
+      "time": "09:09",
+      "ratio": 0.469508,
+      "inputTokens": 93902,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 1.143,
+      "originalCredits": 1.143,
+      "afterCompact": false
+    },
+    {
+      "index": 279,
+      "time": "09:10",
+      "ratio": 0.473541,
+      "inputTokens": 94708,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 2.469,
+      "originalCredits": 2.469,
+      "afterCompact": false
+    },
+    {
+      "index": 280,
+      "time": "09:10",
+      "ratio": 0.486149,
+      "inputTokens": 97230,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.74,
+      "originalCredits": 0.74,
+      "afterCompact": false
+    },
+    {
+      "index": 281,
+      "time": "09:10",
+      "ratio": 0.487966,
+      "inputTokens": 97593,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.764,
+      "originalCredits": 0.764,
+      "afterCompact": false
+    },
+    {
+      "index": 282,
+      "time": "09:11",
+      "ratio": 0.4904,
+      "inputTokens": 98080,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 2.242,
+      "originalCredits": 2.242,
+      "afterCompact": false
+    },
+    {
+      "index": 283,
+      "time": "09:11",
+      "ratio": 0.500399,
+      "inputTokens": 100080,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.484,
+      "originalCredits": 0.484,
+      "afterCompact": false
+    },
+    {
+      "index": 284,
+      "time": "09:11",
+      "ratio": 0.500611,
+      "inputTokens": 100122,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.5,
+      "originalCredits": 0.5,
+      "afterCompact": false
+    },
+    {
+      "index": 285,
+      "time": "09:11",
+      "ratio": 0.500887,
+      "inputTokens": 100177,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.516,
+      "originalCredits": 0.516,
+      "afterCompact": false
+    },
+    {
+      "index": 286,
+      "time": "09:11",
+      "ratio": 0.501278,
+      "inputTokens": 100256,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.501,
+      "originalCredits": 0.501,
+      "afterCompact": false
+    },
+    {
+      "index": 287,
+      "time": "09:12",
+      "ratio": 0.50217,
+      "inputTokens": 100434,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.705,
+      "originalCredits": 0.705,
+      "afterCompact": false
+    },
+    {
+      "index": 288,
+      "time": "09:12",
+      "ratio": 0.503824,
+      "inputTokens": 100765,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.72,
+      "originalCredits": 0.72,
+      "afterCompact": false
+    },
+    {
+      "index": 289,
+      "time": "09:12",
+      "ratio": 0.506134,
+      "inputTokens": 101227,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.673,
+      "originalCredits": 0.673,
+      "afterCompact": false
+    },
+    {
+      "index": 290,
+      "time": "09:13",
+      "ratio": 0.50723,
+      "inputTokens": 101446,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.808,
+      "originalCredits": 0.808,
+      "afterCompact": false
+    },
+    {
+      "index": 291,
+      "time": "09:13",
+      "ratio": 0.509261,
+      "inputTokens": 101852,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.669,
+      "originalCredits": 0.669,
+      "afterCompact": false
+    },
+    {
+      "index": 292,
+      "time": "09:14",
+      "ratio": 0.510918,
+      "inputTokens": 102184,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.945,
+      "originalCredits": 0.945,
+      "afterCompact": false
+    },
+    {
+      "index": 293,
+      "time": "09:14",
+      "ratio": 0.513574,
+      "inputTokens": 102715,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.486,
+      "originalCredits": 0.486,
+      "afterCompact": false
+    },
+    {
+      "index": 294,
+      "time": "09:14",
+      "ratio": 0.514113,
+      "inputTokens": 102823,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.761,
+      "originalCredits": 0.761,
+      "afterCompact": false
+    },
+    {
+      "index": 295,
+      "time": "09:14",
+      "ratio": 0.516107,
+      "inputTokens": 103221,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.683,
+      "originalCredits": 0.683,
+      "afterCompact": false
+    },
+    {
+      "index": 296,
+      "time": "09:14",
+      "ratio": 0.517306,
+      "inputTokens": 103461,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.487,
+      "originalCredits": 0.487,
+      "afterCompact": false
+    },
+    {
+      "index": 297,
+      "time": "09:15",
+      "ratio": 0.517824,
+      "inputTokens": 103565,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.856,
+      "originalCredits": 0.856,
+      "afterCompact": false
+    },
+    {
+      "index": 298,
+      "time": "09:15",
+      "ratio": 0.520261,
+      "inputTokens": 104052,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.7,
+      "originalCredits": 0.7,
+      "afterCompact": false
+    },
+    {
+      "index": 299,
+      "time": "09:15",
+      "ratio": 0.521552,
+      "inputTokens": 104310,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.509,
+      "originalCredits": 0.509,
+      "afterCompact": false
+    },
+    {
+      "index": 300,
+      "time": "09:16",
+      "ratio": 0.522471,
+      "inputTokens": 104494,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.879,
+      "originalCredits": 0.879,
+      "afterCompact": false
+    },
+    {
+      "index": 301,
+      "time": "09:16",
+      "ratio": 0.524663,
+      "inputTokens": 104933,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.652,
+      "originalCredits": 0.652,
+      "afterCompact": false
+    },
+    {
+      "index": 302,
+      "time": "09:16",
+      "ratio": 0.525705,
+      "inputTokens": 105141,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.717,
+      "originalCredits": 0.717,
+      "afterCompact": false
+    },
+    {
+      "index": 303,
+      "time": "09:16",
+      "ratio": 0.527142,
+      "inputTokens": 105428,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.514,
+      "originalCredits": 0.514,
+      "afterCompact": false
+    },
+    {
+      "index": 304,
+      "time": "09:16",
+      "ratio": 0.527675,
+      "inputTokens": 105535,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.553,
+      "originalCredits": 0.553,
+      "afterCompact": false
+    },
+    {
+      "index": 305,
+      "time": "09:17",
+      "ratio": 0.528074,
+      "inputTokens": 105615,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.503,
+      "originalCredits": 0.503,
+      "afterCompact": false
+    },
+    {
+      "index": 306,
+      "time": "09:17",
+      "ratio": 0.528939,
+      "inputTokens": 105788,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.825,
+      "originalCredits": 0.825,
+      "afterCompact": false
+    },
+    {
+      "index": 307,
+      "time": "09:17",
+      "ratio": 0.531283,
+      "inputTokens": 106257,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.658,
+      "originalCredits": 0.658,
+      "afterCompact": false
+    },
+    {
+      "index": 308,
+      "time": "09:17",
+      "ratio": 0.532214,
+      "inputTokens": 106443,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.553,
+      "originalCredits": 0.553,
+      "afterCompact": false
+    },
+    {
+      "index": 309,
+      "time": "09:17",
+      "ratio": 0.532634,
+      "inputTokens": 106527,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.505,
+      "originalCredits": 0.505,
+      "afterCompact": false
+    },
+    {
+      "index": 310,
+      "time": "09:17",
+      "ratio": 0.533091,
+      "inputTokens": 106618,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.573,
+      "originalCredits": 0.573,
+      "afterCompact": false
+    },
+    {
+      "index": 311,
+      "time": "09:17",
+      "ratio": 0.53365,
+      "inputTokens": 106730,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.531,
+      "originalCredits": 0.531,
+      "afterCompact": false
+    },
+    {
+      "index": 312,
+      "time": "09:17",
+      "ratio": 0.533995,
+      "inputTokens": 106799,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.51,
+      "originalCredits": 0.51,
+      "afterCompact": false
+    },
+    {
+      "index": 313,
+      "time": "09:17",
+      "ratio": 0.534167,
+      "inputTokens": 106833,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.515,
+      "originalCredits": 0.515,
+      "afterCompact": false
+    },
+    {
+      "index": 314,
+      "time": "09:17",
+      "ratio": 0.535007,
+      "inputTokens": 107001,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.772,
+      "originalCredits": 0.772,
+      "afterCompact": false
+    },
+    {
+      "index": 315,
+      "time": "09:18",
+      "ratio": 0.537597,
+      "inputTokens": 107519,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.775,
+      "originalCredits": 0.775,
+      "afterCompact": false
+    },
+    {
+      "index": 316,
+      "time": "09:18",
+      "ratio": 0.539018,
+      "inputTokens": 107804,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.535,
+      "originalCredits": 0.535,
+      "afterCompact": false
+    },
+    {
+      "index": 317,
+      "time": "09:18",
+      "ratio": 0.53933,
+      "inputTokens": 107866,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.548,
+      "originalCredits": 0.548,
+      "afterCompact": false
+    },
+    {
+      "index": 318,
+      "time": "09:18",
+      "ratio": 0.539708,
+      "inputTokens": 107942,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.54,
+      "originalCredits": 0.54,
+      "afterCompact": false
+    },
+    {
+      "index": 319,
+      "time": "09:18",
+      "ratio": 0.540042,
+      "inputTokens": 108008,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.519,
+      "originalCredits": 0.519,
+      "afterCompact": false
+    },
+    {
+      "index": 320,
+      "time": "09:19",
+      "ratio": 0.540265,
+      "inputTokens": 108053,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.839,
+      "originalCredits": 0.839,
+      "afterCompact": false
+    },
+    {
+      "index": 321,
+      "time": "09:20",
+      "ratio": 0.542565,
+      "inputTokens": 108513,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.753,
+      "originalCredits": 0.753,
+      "afterCompact": false
+    },
+    {
+      "index": 322,
+      "time": "09:22",
+      "ratio": 0.544058,
+      "inputTokens": 108812,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.528,
+      "originalCredits": 0.528,
+      "afterCompact": false
+    },
+    {
+      "index": 323,
+      "time": "09:22",
+      "ratio": 0.544372,
+      "inputTokens": 108874,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.591,
+      "originalCredits": 0.591,
+      "afterCompact": false
+    },
+    {
+      "index": 324,
+      "time": "09:22",
+      "ratio": 0.545052,
+      "inputTokens": 109010,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.524,
+      "originalCredits": 0.524,
+      "afterCompact": false
+    },
+    {
+      "index": 325,
+      "time": "09:22",
+      "ratio": 0.547486,
+      "inputTokens": 109497,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.981,
+      "originalCredits": 0.981,
+      "afterCompact": false
+    },
+    {
+      "index": 326,
+      "time": "09:22",
+      "ratio": 0.549754,
+      "inputTokens": 109951,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.552,
+      "originalCredits": 0.552,
+      "afterCompact": false
+    },
+    {
+      "index": 327,
+      "time": "09:23",
+      "ratio": 0.551369,
+      "inputTokens": 110274,
+      "outputTokens": null,
+      "usageSource": "transcript-ratio",
+      "credits": 0.757,
+      "originalCredits": 0.757,
+      "afterCompact": false
     }
   ],
   "identity": {
-    "sumAttributed": 8193637,
-    "billedInputTokens": 8193637,
+    "sumAttributed": 19298881,
+    "billedInputTokens": 19298881,
     "absDiff": 0,
     "ok": true
   },
@@ -3479,13 +5034,13 @@
   "selfCmd": "\"C:\\Users\\TouchGo\\.qoder-cn\\plugins\\cache\\qoder-marketplace\\qoder-credits-inspector\\2.7.4\\bin\\credits-inspector.cmd\" cli",
   "linkHealth": {
     "matched": 0,
-    "requests": 202,
+    "requests": 327,
     "coverage": 0,
     "usageSource": "transcript-ratio",
     "breakdown": {
       "proxy": 0,
       "transcriptTokens": 0,
-      "transcriptRatio": 202
+      "transcriptRatio": 327
     },
     "logRecords": 0,
     "lastRecordAt": null,
@@ -3508,7 +5063,7 @@
       "C:\\Users\\TouchGo\\.qoder-cn\\projects\\4aeb79eb-5a0f-43ff-a744-4df540cc955d\\subagents"
     ],
     "reason": "ok",
-    "count": 3,
+    "count": 4,
     "items": [
       {
         "agentId": "ageneral-purpose-50eb348f34c58ea1",
@@ -3520,6 +5075,18 @@
         "peakContextRatio": 0.1813,
         "credits": 58.966,
         "originalCredits": 147.415,
+        "error": null
+      },
+      {
+        "agentId": "ageneral-purpose-7a1684e9cbd4ddd1",
+        "agentType": "general-purpose",
+        "description": "独立审计 pay 残留漏洞",
+        "toolUseId": "call_c982e2616f7c4f3ba32cdc3a",
+        "roundTrips": 23,
+        "billedInputTokens": 458580,
+        "peakContextRatio": 0.1384,
+        "credits": 44.346,
+        "originalCredits": 110.864,
         "error": null
       },
       {
@@ -3548,16 +5115,16 @@
       }
     ],
     "totals": {
-      "roundTrips": 66,
-      "billedInputTokens": 957113,
-      "credits": 97.448,
-      "originalCredits": 243.62
+      "roundTrips": 89,
+      "billedInputTokens": 1415693,
+      "credits": 141.794,
+      "originalCredits": 354.484
     },
     "combined": {
-      "roundTrips": 268,
-      "billedInputTokens": 9150750,
-      "credits": 622.22,
-      "originalCredits": 1555.551
+      "roundTrips": 416,
+      "billedInputTokens": 20714574,
+      "credits": 795.558,
+      "originalCredits": 1857.254
     }
   },
   "manual": null,

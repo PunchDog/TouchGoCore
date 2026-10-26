@@ -249,7 +249,7 @@ func isReadFallbackWorthwhile(err error) bool {
 
 // Driver 返回驱动标记。
 //
-// 它不在 chainChannel 接口里：驱动名只用于日志与错误定位，登记表消失之后
+// 它不在 chainroute.Channel 接口里：驱动名只用于日志与错误定位，登记表消失之后
 // 没有人再靠它找实现，留着接口方法只会让「窄接口」变成一个可以往上堆无关方法的开口。
 func (c *onchainChannel) Driver() string { return c.opt.Driver }
 

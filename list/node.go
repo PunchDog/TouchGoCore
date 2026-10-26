@@ -24,7 +24,10 @@ type INode interface {
 // 在旧链表锁内写 nil、在新链表锁内写新值 —— 同一字段被两把不同的锁保护，
 // 任何一把都拦不住另一把，裸指针就是实打实的数据竞争。
 type Node struct {
-	id       int64                //节点id
+	// id 用原子量：GetId 会在 Range 回调里被无锁调用（Range 的锁外快照遍历），
+	// 而 Clear/摘链会在别的 goroutine 里把它归零。裸 int64 会让「回调读 id」
+	// 与「并发 Clear 写 id」成为数据竞争（-race 实测：list.go 写 vs node.go GetId）。
+	id       atomic.Int64         //节点id
 	pre      INode                //上一个节点
 	next     INode                //下一个节点
 	data     interface{}          //数据
@@ -37,7 +40,11 @@ type Node struct {
 	fromPool bool
 	// 遍历（Range）期间被请求删除、尚未真正摘除。
 	// 若之后又被 Add 回链表，该标记会被清除，避免延迟删除把「回加的节点」误删。
-	delPending bool
+	//
+	// 用原子量而不是裸 bool：这个标记会被「当前归属链」的锁写入（Remove/Add/摘链），
+	// 而旧链的 Range 收尾又会读它来判定是否归还对象池——跨链迁移（时间轮跨档）
+	// 时两把不同的链锁互相拦不住，裸 bool 就是实打实的数据竞争。
+	delPending atomic.Bool
 }
 
 // 获取节点
@@ -47,7 +54,7 @@ func (n *Node) GetNode() *Node {
 
 // 获取id
 func (n *Node) GetId() int64 {
-	return n.id
+	return n.id.Load()
 }
 
 // 获取数据
@@ -184,7 +191,7 @@ func (n *Node) remove(release bool) {
 	if release && l.rangeCount.Load() > 0 {
 		// 标记待删除；若遍历期间该节点又被 Add 回本链表，Add 会清掉此标记，
 		// 遍历结束后就不会把它误删。
-		n.delPending = true
+		n.delPending.Store(true)
 		l.rangeDelList = append(l.rangeDelList, n)
 		return
 	}

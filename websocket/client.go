@@ -92,11 +92,43 @@ type ICall interface {
 
 // ============ 原有代码 ============
 
+// onceFlag 是 sync.Once 的可复位替代。
+//
+// Do 的语义与 sync.Once.Do 一致：只执行一次，且并发调用者阻塞到它完成。
+// 区别只在复位：sync.Once 没有复位接口，池化实例复用时只能整体赋值
+// `sync.Once{}`，而整字零写会覆盖相邻的原子字段（-race 实测：NewClient 的
+// recycleOnce 重置与旧连接 readLoop 的 liveLoops.Add 争同一 8 字节槽）。
+// reset 走「加锁 + 窄写 bool」，不会产生覆盖相邻字段的宽写。
+type onceFlag struct {
+	mu   sync.Mutex
+	done bool
+}
+
+func (o *onceFlag) Do(f func()) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.done {
+		return
+	}
+	o.done = true
+	f()
+}
+
+func (o *onceFlag) reset() {
+	o.mu.Lock()
+	o.done = false
+	o.mu.Unlock()
+}
+
 // 客户端
 // 修改Client结构体定义
 type Client struct {
 	ICall
-	wsConnect  *websocket.Conn
+	wsConnect *websocket.Conn
+	// remoteAddr 的并发访问统一走 addr()/setRemoteAddr()：recycle 收尾时会清空它，
+	// 而 SendMsg/Close 的错误日志可能在同一时刻从别的协程读取它（连接池复用期的
+	// 真实竞争，-race 实测）。测试在构造期直接写字段（尚未起协程）不受影响。
+	addrMu     sync.RWMutex
 	remoteAddr string
 	closeCh    chan bool
 	msgChan    chan []byte
@@ -104,9 +136,10 @@ type Client struct {
 	iCallName  string
 	// 原子关闭标志，防止竞态条件
 	closed atomic.Bool
-	// closeOnce/recycleOnce：关闭动作与回收动作各只执行一次
-	closeOnce   sync.Once
-	recycleOnce sync.Once
+	// closeOnce/recycleOnce：关闭动作与回收动作各只执行一次。
+	// 用可复位的 onceFlag 而不是 sync.Once：池化实例复用时需要重置它们，见 onceFlag 注释。
+	closeOnce   onceFlag
+	recycleOnce onceFlag
 	// liveLoops：readLoop/handleLoop 常驻协程计数，归零后才允许回池
 	liveLoops atomic.Int32
 	// counted：是否已计入服务器连接统计，决定回池时是否做 -1
@@ -128,6 +161,20 @@ type Client struct {
 		errors           atomic.Int64
 		lastActivity     atomic.Value // time.Time
 	}
+}
+
+// addr 读取对端地址；未设置时返回空串。
+func (c *Client) addr() string {
+	c.addrMu.RLock()
+	defer c.addrMu.RUnlock()
+	return c.remoteAddr
+}
+
+// setRemoteAddr 设置对端地址（写锁，与 addr 的并发读不竞争）。
+func (c *Client) setRemoteAddr(s string) {
+	c.addrMu.Lock()
+	c.remoteAddr = s
+	c.addrMu.Unlock()
 }
 
 // initChannels 建立连接期资源。msgChan 在实例生命周期内永不 close，
@@ -191,7 +238,7 @@ func (c *Client) connectionDial(url string) error {
 		if err == nil {
 			c.wsConnect = wsConn
 			wsConn.SetReadLimit(limit)
-			c.remoteAddr = url
+			c.setRemoteAddr(url)
 
 			// ============ 改进：初始化统计 ============
 			c.stats.connectTime = util.CurrentTime()
@@ -218,7 +265,7 @@ func (c *Client) connectionDial(url string) error {
 func (c *Client) handleLoop() {
 	defer func() {
 		if err := recover(); err != nil {
-			vars.Error("客户端handleLoop发生panic错误: %v, 客户端地址: %s", err, c.remoteAddr)
+			vars.Error("客户端handleLoop发生panic错误: %v, 客户端地址: %s", err, c.addr())
 		}
 		c.Close("")
 		c.finishLoop()
@@ -242,7 +289,7 @@ func (c *Client) handleLoop() {
 
 		case <-pinger.C:
 			if err := c.writePing(conn); err != nil {
-				vars.Error("发送心跳失败: %v, 客户端地址: %s", err, c.remoteAddr)
+				vars.Error("发送心跳失败: %v, 客户端地址: %s", err, c.addr())
 				c.Close("发送心跳失败")
 				return
 			}
@@ -257,13 +304,13 @@ func (c *Client) handleLoop() {
 			// 设置写超时：对端不收时 WriteMessage 会永久阻塞，把本协程
 			// 连同这条连接的发送队列钉死，背压也变成死锁。
 			if err := conn.SetWriteDeadline(util.CurrentTime().Add(currentWriteTimeout())); err != nil {
-				vars.Error("设置写超时失败: %v, 客户端地址: %s", err, c.remoteAddr)
+				vars.Error("设置写超时失败: %v, 客户端地址: %s", err, c.addr())
 				c.Close("设置写超时失败")
 				return
 			}
 			// 执行写操作
 			if err := conn.WriteMessage(websocket.BinaryMessage, msg); err != nil {
-				vars.Error("写消息失败: %v, 客户端地址: %s", err, c.remoteAddr)
+				vars.Error("写消息失败: %v, 客户端地址: %s", err, c.addr())
 				c.Close("写消息失败")
 				return
 			}
@@ -287,7 +334,7 @@ func (c *Client) writePing(conn *websocket.Conn) error {
 func (c *Client) readLoop() {
 	defer func() {
 		if err := recover(); err != nil {
-			vars.Error("客户端readLoop发生panic错误: %v, 客户端地址: %s", err, c.remoteAddr)
+			vars.Error("客户端readLoop发生panic错误: %v, 客户端地址: %s", err, c.addr())
 		}
 		c.Close("")
 		c.finishLoop()
@@ -302,7 +349,7 @@ func (c *Client) readLoop() {
 	// 本连接的消息也绝不会混进新一代。
 	queue := c.dispatchQueue()
 	if queue == nil {
-		vars.Error("客户端 readLoop 启动时代际队列为空，客户端地址: %s", c.remoteAddr)
+		vars.Error("客户端 readLoop 启动时代际队列为空，客户端地址: %s", c.addr())
 		return
 	}
 
@@ -314,7 +361,7 @@ func (c *Client) readLoop() {
 
 	for c.Connected() {
 		if err := conn.SetReadDeadline(util.CurrentTime().Add(currentReadTimeout())); err != nil {
-			vars.Error("设置读超时失败: %v, 客户端地址: %s", err, c.remoteAddr)
+			vars.Error("设置读超时失败: %v, 客户端地址: %s", err, c.addr())
 			return
 		}
 		if _, data, err := conn.ReadMessage(); err == nil {
@@ -399,7 +446,7 @@ func (c *Client) Close(reason string) {
 			c.wsConnect.Close()
 		}
 
-		vars.Info("%s 连接关闭，原因：%s", c.remoteAddr, reason)
+		vars.Info("%s 连接关闭，原因：%s", c.addr(), reason)
 	})
 
 	// 无常驻协程在跑（连接建立失败等场景）时立即回收
@@ -417,12 +464,18 @@ func (c *Client) finishLoop() {
 
 // recycle 清空在用字段并归还对象池，仅在全部协程退出后执行一次
 func (c *Client) recycle() {
+	// 先等关闭动作彻底结束再清字段：并发 Close 在 closed 的 CAS 上失败后直接返回，
+	// 其调用方（readLoop/handleLoop 的 defer）随即推进到这里；若不等待，本函数
+	// 清空 UID/ICall/wsConnect/remoteAddr 时，另一个协程上仍在执行的关闭闭包
+	// 正读着这些字段（-race 实测的数据竞争）。从未 Close 过的裸实例（测试直接
+	// finishLoop）在这里只是把 once 标记为完成，不执行任何东西。
+	c.closeOnce.Do(func() {})
 	c.recycleOnce.Do(func() {
 		// 清理客户端资源，切断对连接的引用。
 		// closeCh/msgChan 保持原样：可能仍有业务协程刚通过 Connected() 检查，
 		// 置 nil 会与之形成数据竞争；下一次 NewClient 会整体重建这两条通道。
 		c.wsConnect = nil
-		c.remoteAddr = ""
+		c.setRemoteAddr("")
 		c.UID = 0
 
 		// 归还 ICall 到对象池
@@ -475,10 +528,10 @@ func (c *Client) SendMsg(msg ...any) {
 		chanLen := len(c.msgChan)
 		chanCap := cap(c.msgChan)
 		if float64(chanLen) >= float64(chanCap)*BACKPRESSURE_THRESHOLD {
-			vars.Warning("WebSocket 发送通道背压过高: len=%d, cap=%d, client=%s", chanLen, chanCap, c.remoteAddr)
+			vars.Warning("WebSocket 发送通道背压过高: len=%d, cap=%d, client=%s", chanLen, chanCap, c.addr())
 			if params.dropOnFull {
 				metrics.WS.IncErrors("write")
-				vars.Error("WebSocket 发送通道已满，丢弃消息: client=%s", c.remoteAddr)
+				vars.Error("WebSocket 发送通道已满，丢弃消息: client=%s", c.addr())
 				return
 			}
 		}
@@ -490,7 +543,7 @@ func (c *Client) SendMsg(msg ...any) {
 			case c.msgChan <- v:
 			default:
 				// 通道满时记录错误
-				vars.Error("WebSocket 发送通道已满，丢弃消息: client=%s", c.remoteAddr)
+				vars.Error("WebSocket 发送通道已满，丢弃消息: client=%s", c.addr())
 				c.stats.errors.Add(1)
 			}
 			return
@@ -518,7 +571,7 @@ func (c *Client) SendMsg(msg ...any) {
 		select {
 		case c.msgChan <- data:
 		default:
-			vars.Error("WebSocket 发送通道已满，丢弃消息: client=%s", c.remoteAddr)
+			vars.Error("WebSocket 发送通道已满，丢弃消息: client=%s", c.addr())
 			c.stats.errors.Add(1)
 		}
 		return
@@ -531,7 +584,7 @@ func (c *Client) SendMsg(msg ...any) {
 func (client *Client) runConnectGate() (ok bool) {
 	defer func() {
 		if r := recover(); r != nil {
-			vars.Error("WebSocket OnConnect 回调 panic, 客户端: %s: %v", client.remoteAddr, r)
+			vars.Error("WebSocket OnConnect 回调 panic, 客户端: %s: %v", client.addr(), r)
 			ok = false
 		}
 	}()
@@ -570,7 +623,7 @@ func (c *Client) runCloseGate() {
 		if r := recover(); r != nil {
 			UpdateErrorStats()
 			metrics.WS.IncErrors("panic")
-			vars.Error("WebSocket OnClose 回调 panic, 客户端: %s: %v", c.remoteAddr, r)
+			vars.Error("WebSocket OnClose 回调 panic, 客户端: %s: %v", c.addr(), r)
 		}
 	}()
 	c.OnClose(c)
@@ -593,13 +646,13 @@ func NewClient(connType interface{}, remoteAddr string, className string) (*Clie
 	// 复用的实例必须重置一次性标志与协程计数，否则上一次的关闭/回收状态会污染本次连接
 	client.closed.Store(false)
 	client.counted.Store(false)
-	client.closeOnce = sync.Once{}
-	client.recycleOnce = sync.Once{}
+	client.closeOnce.reset()
+	client.recycleOnce.reset()
 	client.liveLoops.Store(0)
 	client.iCallName = className
 
 	client.UID = uid
-	client.remoteAddr = remoteAddr
+	client.setRemoteAddr(remoteAddr)
 	// M4 修复：快照当前代际。连接生命周期内不变，readLoop 只会向本代 msgQueue 投递。
 	client.runState = loadRunState()
 	client.initChannels()
@@ -622,7 +675,7 @@ func NewClient(connType interface{}, remoteAddr string, className string) (*Clie
 		return nil, errors.New("无效的连接类型参数")
 	}
 
-	client.remoteAddr = remoteAddr
+	client.setRemoteAddr(remoteAddr)
 	//使用反射创建ICall接口
 	if className != "" {
 		call, _, err := acquireICall(className)

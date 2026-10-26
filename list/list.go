@@ -70,7 +70,7 @@ func (l *List) assignIDLocked(obj *Node, node INode) int64 {
 	}
 	// 重新入链的节点可能仍挂在旧 ID 上（遍历期间删除请求被挂起，旧键尚未摘除）：
 	// 不先摘掉就会在 nodeMap 里永久残留一个指向同一节点的幽灵条目。
-	if old := obj.id; old != 0 {
+	if old := obj.id.Load(); old != 0 {
 		if prev, ok := l.nodeMap[old]; ok && prev == node {
 			delete(l.nodeMap, old)
 		}
@@ -82,7 +82,7 @@ func (l *List) assignIDLocked(obj *Node, node INode) int64 {
 		vars.Error("list 节点 ID 冲突: id=%d, 既有节点将被跳过", id)
 		id = l.generateNextID()
 	}
-	obj.id = id
+	obj.id.Store(id)
 	l.nodeMap[id] = node
 	return id
 }
@@ -128,7 +128,7 @@ func (l *List) Add(node INode) (bret bool) {
 	obj.pre = nil
 	obj.next = nil
 	// 节点重新入链：撤销遍历期间挂起的删除请求
-	obj.delPending = false
+	obj.delPending.Store(false)
 
 	//添加新的链接
 	if l.head == nil {
@@ -204,7 +204,7 @@ func (l *List) Range(f func(INode) bool) {
 				}
 				// 只清理「仍然处于待删除状态」的节点：
 				// 遍历期间被重新 Add 回链表的节点其 delPending 已被撤销，必须保留
-				if n.delPending {
+				if n.delPending.Load() {
 					l.removeNodeLocked(n, true)
 				}
 			}
@@ -284,22 +284,32 @@ func (l *List) removeNodeLocked(node *Node, release bool) {
 	}
 	l.len--
 	if l.indexed {
-		if cur, ok := l.nodeMap[node.id]; ok && cur.GetNode() == node {
-			delete(l.nodeMap, node.id)
+		id := node.id.Load()
+		if cur, ok := l.nodeMap[id]; ok && cur.GetNode() == node {
+			delete(l.nodeMap, id)
 		}
 	}
 
-	node.list.Store(nil)
+	// 复位字段必须排在「断开归属」之前：node.list 是并发 Add 的 detach() 判断
+	// 「还要不要拿本链锁」的唯一依据。先置 nil 会让 detach 直接跳过本链锁，
+	// 在本函数还没写完字段时就并发把同一节点挂进另一条链表（时间轮跨档迁移），
+	// 而两条链各持自己的锁，谁也没拦住谁——字段被并发改写、payload 被清空。
+	// 反之，把 Store(nil) 留作最后一次写：detach 要么读到旧值而阻塞在本链锁上
+	// （与本函数串行），要么读到 nil 时本函数的所有写都已完成（原子量的顺序
+	// 一致性给出 happens-before）。两条路都不再有竞争。
 	node.pre = nil
 	node.next = nil
-	node.id = 0
-	node.delPending = false
-
-	if !release {
-		return
+	node.id.Store(0)
+	node.delPending.Store(false)
+	if release {
+		node.data = nil
+		node.nodeType = nil
 	}
-
-	node.data = nil
-	node.nodeType = nil
-	releaseNode(node)
+	node.list.Store(nil)
+	if release {
+		// releaseNode 只负责归还池（字段已在上面复位，list 已断开）。
+		// 内嵌宿主节点（fromPool=false）在里面直接返回、不碰任何字段：它可能正被
+		// 并发的 Add 重挂到新链（跨档迁移），生命周期归宿主自己。
+		releaseNode(node)
+	}
 }

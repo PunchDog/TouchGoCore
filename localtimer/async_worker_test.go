@@ -634,3 +634,117 @@ func TestAsyncTickDrainsAfterTimeStopBudgetExpires(t *testing.T) {
 		}
 	}
 }
+
+// waitPoolExit 等待 pool 全部 worker 退出，超时即判定为泄漏。
+func waitPoolExit(t *testing.T, pool *asyncTickPool, budget time.Duration) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+	if !pool.wait(ctx) {
+		t.Fatalf("workers did not exit within %s: pending=%d workers=%d",
+			budget, pool.pendingForShard(0), pool.stats().Workers)
+	}
+}
+
+func TestAsyncCompletionOrphanedWhenShardGone(t *testing.T) {
+	pool := newAsyncTickPool(1, 1)
+	started := make(chan int, 1)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+
+	// mgr 非 nil 才会真正执行 Tick：完成事件在 Tick 返回后才产生，
+	// 于是这里精确落在「投递」这一步上。
+	job := newAsyncPoolTestTimer(t, &TimerManager{}, 1, started, release)
+	if !pool.submit(job) {
+		t.Fatal("submit rejected")
+	}
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("async timer did not start")
+	}
+
+	// 消费者已永久退出：没有它，会合投递会让 worker 永久阻塞。
+	pool.markShardGone(0)
+	releaseOnce.Do(func() { close(release) })
+
+	waitPoolExit(t, pool, 2*time.Second)
+	if got := pool.pendingForShard(0); got != 0 {
+		t.Fatalf("pending = %d, want 0", got)
+	}
+	if got := pool.orphaned.Load(); got != 1 {
+		t.Fatalf("orphaned = %d, want 1", got)
+	}
+	pool.mu.Lock()
+	busy, deferred := len(pool.busy), len(pool.deferred)
+	pool.mu.Unlock()
+	if busy != 0 || deferred != 0 {
+		t.Fatalf("busy=%d deferred=%d after orphan finalize, want 0/0", busy, deferred)
+	}
+	if got := pool.stats().Orphaned; got != 1 {
+		t.Fatalf("stats.Orphaned = %d, want 1", got)
+	}
+	parent := job.task.timer.GetParent()
+	if parent == nil {
+		t.Fatal("timer lost its parent")
+	}
+	if parent.IsActive() {
+		t.Fatal("orphan finalize rescheduled the timer instead of retiring it")
+	}
+}
+
+func TestDrainTimeoutMarksShardGoneAndReleasesWorker(t *testing.T) {
+	pool := newAsyncTickPool(1, 1)
+	started := make(chan int, 1)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+
+	job := newAsyncPoolTestTimer(t, &TimerManager{}, 1, started, release)
+	if !pool.submit(job) {
+		t.Fatal("submit rejected")
+	}
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("async timer did not start")
+	}
+
+	// 业务 Tick 卡住不返回，排空必然超时：此时必须声明该片不再接收，
+	// 否则 worker 释放后仍会卡在会合投递上永不退出。
+	drained := make(chan struct{})
+	go func() {
+		drainAsyncCompletionsWithin(pool, 0, 30*time.Millisecond)
+		close(drained)
+	}()
+	select {
+	case <-drained:
+	case <-time.After(2 * time.Second):
+		t.Fatal("drain did not honor its budget")
+	}
+	select {
+	case <-pool.goneForShard(0):
+	default:
+		t.Fatal("drain timeout did not mark the shard gone")
+	}
+	if got := pool.pendingForShard(0); got != 1 {
+		t.Fatalf("pending before release = %d, want 1", got)
+	}
+
+	releaseOnce.Do(func() { close(release) })
+	waitPoolExit(t, pool, 2*time.Second)
+	if got := pool.pendingForShard(0); got != 0 {
+		t.Fatalf("pending after orphan finalize = %d, want 0", got)
+	}
+	if got := pool.orphaned.Load(); got != 1 {
+		t.Fatalf("orphaned = %d, want 1", got)
+	}
+	parent := job.task.timer.GetParent()
+	if parent == nil {
+		t.Fatal("timer lost its parent")
+	}
+	if parent.IsActive() {
+		t.Fatal("orphan finalize rescheduled the timer instead of retiring it")
+	}
+}

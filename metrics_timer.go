@@ -62,6 +62,9 @@ var (
 	asyncTimerInFlightDesc = prometheus.NewDesc(
 		"touchgocore_async_timer_in_flight",
 		"已由异步 worker 开始且尚未由分片 consumer 完成收尾的 Tick 数", nil, nil)
+	asyncTimerOrphanedDesc = prometheus.NewDesc(
+		"touchgocore_async_timer_orphaned_total",
+		"因原分片消费者已退出而由 worker 本地作废收尾的异步 Tick 累计（大于 0 说明该片已降级）", nil, nil)
 )
 
 func (timerBacklogCollector) Describe(ch chan<- *prometheus.Desc) {
@@ -77,6 +80,7 @@ func (timerBacklogCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- asyncTimerWorkerCountDesc
 	ch <- asyncTimerQueueDepthDesc
 	ch <- asyncTimerInFlightDesc
+	ch <- asyncTimerOrphanedDesc
 }
 
 func (timerBacklogCollector) Collect(ch chan<- prometheus.Metric) {
@@ -130,6 +134,7 @@ func (timerBacklogCollector) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(asyncTimerWorkerCountDesc, prometheus.GaugeValue, float64(asyncWorkers.Workers))
 	ch <- prometheus.MustNewConstMetric(asyncTimerQueueDepthDesc, prometheus.GaugeValue, float64(asyncWorkers.Queued))
 	ch <- prometheus.MustNewConstMetric(asyncTimerInFlightDesc, prometheus.GaugeValue, float64(asyncWorkers.InFlight))
+	ch <- prometheus.MustNewConstMetric(asyncTimerOrphanedDesc, prometheus.CounterValue, float64(asyncWorkers.Orphaned))
 
 	// 每轮在链数按档读：只报总数的话，「毫秒轮爆满而其它轮空转」与「均匀分布」
 	// 长得一模一样，而前者才是要处置的那种。

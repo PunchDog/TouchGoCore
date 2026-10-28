@@ -90,11 +90,16 @@ func Run(ctx context.Context) {
 		// 检查（closech 已关闭）自行退出，不会去消费新一轮的调度项。
 		oldDone := make(chan struct{})
 		go func() {
+			defer close(oldDone)
 			old.tickWG.Wait()
 			if old.asyncPool != nil {
-				old.asyncPool.wait(context.Background())
+				// 预算与外层 select 一致：worker 卡在业务 Tick 里时，无预算的 Wait
+				// 会让这个等待协程永久存活。消费者已消失的分片由 markShardGone
+				// 触发孤儿收尾，这里等的只剩真正跑着业务回调的那部分 worker。
+				waitCtx, cancelWait := context.WithTimeout(context.Background(), DefaultCloseBudget)
+				defer cancelWait()
+				old.asyncPool.wait(waitCtx)
 			}
-			close(oldDone)
 		}()
 		select {
 		case <-oldDone:
@@ -352,19 +357,29 @@ func shouldRunAsyncTick(timer TimerInterface) (async bool) {
 // drainAsyncCompletions 在分片消费者 panic 退出后接管该片的异步完成事件。
 //
 // 不能调用 pool.stopAccepting：那会连带拒绝其它健康分片的异步提交。这里只排空本片，
-// 并带预算退出——业务 Tick 永不返回时，残留 worker 只能留在原地，不能拖死进程。
+// 并带预算退出——业务 Tick 永不返回时，超时后声明该片不再接收，残留 worker
+// 转为本地孤儿收尾，不会永久卡在会合投递上。
 func drainAsyncCompletions(pool *asyncTickPool, shard int) {
+	drainAsyncCompletionsWithin(pool, shard, DefaultCloseBudget)
+}
+
+// drainAsyncCompletionsWithin 是带显式预算的实现，供测试用短预算驱动超时路径。
+func drainAsyncCompletionsWithin(pool *asyncTickPool, shard int, budget time.Duration) {
 	if pool == nil {
 		return
 	}
-	deadline := time.After(DefaultCloseBudget)
+	deadline := time.After(budget)
 	for pool.pendingForShard(shard) > 0 {
 		select {
 		case completion := <-pool.resultsForShard(shard):
 			consumeAsyncTickCompletion(completion)
 		case <-pool.progressForShard(shard):
 		case <-deadline:
-			vars.Error("分片 %d 异步完成事件排空超时，剩余未收尾任务=%d", shard, pool.pendingForShard(shard))
+			remaining := pool.pendingForShard(shard)
+			vars.Error("分片 %d 异步完成事件排空超时，剩余未收尾任务=%d，转为孤儿收尾", shard, remaining)
+			// 声明本片不再接收：残留 worker 的会合投递据此改为本地收尾，
+			// 否则它们连同单飞令牌与 busy 标记一起永久滞留。
+			pool.markShardGone(shard)
 			return
 		}
 	}
@@ -389,6 +404,19 @@ func consumeAsyncTickCompletion(completion asyncTickCompletion) {
 		return
 	}
 	manager := completion.job.task.mgr
+	if completion.orphan {
+		// 原分片消费者已永久退出，续期只会把调度项塞进无人消费的通道。
+		// 按「管理器已关闭」同一语义作废并归还实例：该定时器此后不再触发，
+		// 而不是留下一个永远等不到 Tick 的活跃实例。
+		if manager != nil {
+			manager.stats.timersDropped.Add(1)
+		}
+		if manager != nil && parent.IsActive() && parent.gen.Load() == completion.job.task.gen {
+			manager.retireAfterExhaustion(parent)
+		}
+		parent.endTick()
+		return
+	}
 	if completion.ran {
 		if manager != nil {
 			manager.finishTimerTick(completion.job.task, parent)

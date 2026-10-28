@@ -129,13 +129,17 @@ func TestApp_ShutdownHonorsPerServiceBudget(t *testing.T) {
 		t.Fatal("服务全部超时时 Shutdown 应返回错误")
 	}
 
+	// 服务侧是用 ctx.Deadline() 反算预算的，从建 ctx 到 Stop 真正被调度进来
+	// 有一段调度开销，必然略小于标称值；容差取 50ms，与「预算被压成 1s/0」
+	// 这类真实回归差一个数量级，不会掩盖问题。
+	const budgetSlack = 50 * time.Millisecond
 	for _, svc := range services {
 		observed := svc.observed()
 		if len(observed) != 1 {
 			t.Fatalf("服务[%s] 被停止 %d 次，期望 1 次", svc.name, len(observed))
 		}
-		if b := observed[0]; b < minServiceStopBudget-time.Millisecond {
-			t.Fatalf("服务[%s] 拿到的预算 %v 低于下限 %v", svc.name, b, minServiceStopBudget)
+		if b := observed[0]; b < minServiceStopBudget-budgetSlack {
+			t.Fatalf("服务[%s] 拿到的预算 %v 低于下限 %v（容差 %v）", svc.name, b, minServiceStopBudget, budgetSlack)
 		}
 	}
 }

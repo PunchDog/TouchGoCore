@@ -99,7 +99,10 @@ type asyncTickCompletion struct {
 	flightKey     asyncTimerKey
 	releaseFlight func()
 	ran           bool
-	ack           chan struct{}
+	// orphan 标记本次完成事件的原分片消费者已永久退出，无处投递。
+	// 收尾改为「作废归还」而不是续期：续期只会把调度项塞进无人消费的通道。
+	orphan bool
+	ack    chan struct{}
 }
 
 type asyncTickWorker struct {
@@ -121,15 +124,21 @@ type asyncTickPool struct {
 	pending  []int
 	results  []chan asyncTickCompletion
 	progress []chan struct{}
+	// gone 是「该分片消费者已永久退出」的信号，close 表示不再有人接收完成事件。
+	// 没有它，worker 会永久阻塞在会合投递上，连带它的单飞令牌与 busy 标记一起滞留。
+	gone     []chan struct{}
+	goneOnce []sync.Once
+	orphaned atomic.Int64
 	workerWG sync.WaitGroup
 }
 
 // AsyncWorkerStats is a snapshot of the asynchronous Tick worker pool.
 type AsyncWorkerStats struct {
-	Limit    int // configured maximum worker count
-	Workers  int // currently registered workers
-	Queued   int // tasks waiting in worker queues
-	InFlight int // async tasks accepted but not finalized by their shard
+	Limit    int   // configured maximum worker count
+	Workers  int   // currently registered workers
+	Queued   int   // tasks waiting in worker queues
+	InFlight int   // async tasks accepted but not finalized by their shard
+	Orphaned int64 // completions finalized locally because their shard consumer was gone
 }
 
 // DefaultAsyncWorkerLimit is the default maximum number of asynchronous Tick workers.
@@ -232,7 +241,7 @@ func GetAsyncWorkerStats() AsyncWorkerStats {
 func (p *asyncTickPool) stats() AsyncWorkerStats {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	stats := AsyncWorkerStats{Limit: p.limit, Workers: len(p.workers)}
+	stats := AsyncWorkerStats{Limit: p.limit, Workers: len(p.workers), Orphaned: p.orphaned.Load()}
 	for _, pending := range p.pending {
 		stats.InFlight += pending
 	}
@@ -260,11 +269,14 @@ func newAsyncTickPool(limit, shards int) *asyncTickPool {
 		pending:  make([]int, shards),
 		results:  make([]chan asyncTickCompletion, shards),
 		progress: make([]chan struct{}, shards),
+		gone:     make([]chan struct{}, shards),
+		goneOnce: make([]sync.Once, shards),
 	}
 	for i := range pool.results {
 		// Rendezvous delivery prevents a second unbounded completion queue.
 		pool.results[i] = make(chan asyncTickCompletion)
 		pool.progress[i] = make(chan struct{}, 1)
+		pool.gone[i] = make(chan struct{})
 	}
 	return pool
 }
@@ -404,8 +416,7 @@ func (p *asyncTickPool) runWorker(worker *asyncTickWorker) {
 			ran:           ran,
 			ack:           make(chan struct{}, 1),
 		}
-		p.results[job.shard] <- completion
-		<-completion.ack
+		p.deliverCompletion(completion, job.shard)
 		p.finishWithoutCompletion(job.shard)
 	}
 }
@@ -519,6 +530,51 @@ func (p *asyncTickPool) progressForShard(shard int) <-chan struct{} {
 		return nil
 	}
 	return p.progress[shard]
+}
+
+// markShardGone 声明第 shard 号分片的消费者已永久退出，此后不再接收完成事件。
+//
+// 幂等：同一分片可能被排空路径与分片降级路径各声明一次。
+func (p *asyncTickPool) markShardGone(shard int) {
+	if p == nil || shard < 0 || shard >= len(p.gone) {
+		return
+	}
+	p.goneOnce[shard].Do(func() { close(p.gone[shard]) })
+}
+
+func (p *asyncTickPool) goneForShard(shard int) <-chan struct{} {
+	if p == nil || shard < 0 || shard >= len(p.gone) {
+		return nil
+	}
+	return p.gone[shard]
+}
+
+// deliverCompletion 把完成事件交回原分片消费者，并等它收尾完毕。
+//
+// 会合投递要求「必须有接收方在场」。消费者 panic 退出且排空超时后，这个前提
+// 永久不成立：继续阻塞投递会让 worker、它的单飞令牌与 busy 标记一起滞留，
+// 该 Timer 之后所有调度都堆进 deferred 永不再执行，pending 也永不归零。
+// 因此消费者消失时改为本地孤儿收尾——不续期，直接作废并归还实例。
+func (p *asyncTickPool) deliverCompletion(completion asyncTickCompletion, shard int) {
+	if p == nil {
+		completion.orphan = true
+		consumeAsyncTickCompletion(completion)
+		return
+	}
+	if shard < 0 || shard >= len(p.results) {
+		completion.orphan = true
+		p.orphaned.Add(1)
+		consumeAsyncTickCompletion(completion)
+		return
+	}
+	select {
+	case p.results[shard] <- completion:
+		<-completion.ack
+	case <-p.goneForShard(shard):
+		completion.orphan = true
+		p.orphaned.Add(1)
+		consumeAsyncTickCompletion(completion)
+	}
 }
 
 func (p *asyncTickPool) stopAccepting() {

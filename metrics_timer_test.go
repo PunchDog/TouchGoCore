@@ -188,10 +188,11 @@ func TestTimerBacklogMetricsExposed(t *testing.T) {
 	}
 	asyncWorkers := localtimer.GetAsyncWorkerStats()
 	asyncMetrics := map[string]float64{
-		"touchgocore_async_timer_worker_limit": float64(asyncWorkers.Limit),
-		"touchgocore_async_timer_worker_count": float64(asyncWorkers.Workers),
-		"touchgocore_async_timer_queue_depth":  float64(asyncWorkers.Queued),
-		"touchgocore_async_timer_in_flight":    float64(asyncWorkers.InFlight),
+		"touchgocore_async_timer_worker_limit":   float64(asyncWorkers.Limit),
+		"touchgocore_async_timer_worker_count":   float64(asyncWorkers.Workers),
+		"touchgocore_async_timer_queue_depth":    float64(asyncWorkers.Queued),
+		"touchgocore_async_timer_in_flight":      float64(asyncWorkers.InFlight),
+		"touchgocore_async_timer_orphaned_total": float64(asyncWorkers.Orphaned),
 	}
 	for name, want := range asyncMetrics {
 		if got, ok := seriesValue(fams[name], "", ""); !ok || got != want {

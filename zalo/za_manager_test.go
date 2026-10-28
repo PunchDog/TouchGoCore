@@ -236,6 +236,16 @@ type fakeZAConn struct {
 
 	sendErr   error
 	sendMsgID string
+
+	deleteErr   error
+	deleteCalls []fakeZADeleteCall
+}
+
+// fakeZADeleteCall 是一次到达 conn.DeleteChat 的调用记录。
+type fakeZADeleteCall struct {
+	threadID string
+	group    bool
+	boundary ChatBoundary
 }
 
 // UID 返回固定 UID。
@@ -256,6 +266,21 @@ func (c *fakeZAConn) SendText(context.Context, string, bool, string) (string, er
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.sendMsgID, c.sendErr
+}
+
+// DeleteChat 记录边界参数并返回注入错误。
+func (c *fakeZAConn) DeleteChat(_ context.Context, threadID string, group bool, boundary ChatBoundary) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.deleteCalls = append(c.deleteCalls, fakeZADeleteCall{threadID: threadID, group: group, boundary: boundary})
+	return c.deleteErr
+}
+
+// recordedDeletes 返回删除调用记录副本。
+func (c *fakeZAConn) recordedDeletes() []fakeZADeleteCall {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]fakeZADeleteCall(nil), c.deleteCalls...)
 }
 
 // GetAllFriends 返回好友副本。
@@ -1171,7 +1196,7 @@ func TestZALimitsFromConfig(t *testing.T) {
 			cfg:  nil,
 			want: zaLimits{
 				qrTTL: 5 * time.Minute, requestTimeout: 30 * time.Second, listener: false,
-				friendsTTL: 5 * time.Minute, groupsTTL: 5 * time.Minute,
+				friendsTTL: 1 * time.Minute, groupsTTL: 1 * time.Minute,
 				infoMin: 1500 * time.Millisecond, infoTTL: 10 * time.Minute,
 				sendMin: 3 * time.Second, sendMax: 5 * time.Second, sendMaxPerHour: 30,
 			},
@@ -1187,9 +1212,9 @@ func TestZALimitsFromConfig(t *testing.T) {
 			},
 			want: zaLimits{
 				qrTTL: 2 * time.Minute, requestTimeout: 5 * time.Second, listener: false,
-				friendsTTL: 5 * time.Minute, groupsTTL: 5 * time.Minute,
+				friendsTTL: 1 * time.Minute, groupsTTL: 1 * time.Minute,
 				infoMin: 1500 * time.Millisecond, infoTTL: 10 * time.Minute,
-				sendMin: 3 * time.Second, sendMax: 3 * time.Second, sendMaxPerHour: 30,
+				sendMin: 1 * time.Second, sendMax: 1 * time.Second, sendMaxPerHour: 30,
 				userAgent: "ua-x", language: "vi",
 			},
 		},

@@ -47,6 +47,23 @@ type GroupInfo struct {
 	LockSendMsg bool     `json:"lock_send_msg"`
 }
 
+// ChatBoundary 是「清空本端会话」的边界消息（上游 deleteconver 的 conver 参数）。
+//
+// 三个字段必须描述同一条消息：OwnerID 是发送者 UID，CliMsgID 是客户端生成的消息
+// id，GlobalMsgID 是服务端下发的 msgId。删除以该消息为界，只影响本账号自己这一端
+// （onlyMe=1），对端/群成员的消息不动。
+//
+// **OwnerID 不能为空**：空 ⇒ 上游回 114（参数非法）。
+// **CliMsgID 也不能为空**：空 ⇒ 上游回 112（"Lỗi không xác định"），整次删除被拒、
+// 会话一条都没清掉（2026-10-27 对真实接口核实）。zcago v0.3.0 的发送响应只回
+// GlobalMsgID，拿不到本端刚发消息的真实 client id，所以本包用 GlobalMsgID 顶替
+// （上游只要非空即通过，真正定位边界的是 GlobalMsgID）。
+type ChatBoundary struct {
+	OwnerID     string `json:"owner_id"`
+	CliMsgID    string `json:"cli_msg_id"`
+	GlobalMsgID string `json:"global_msg_id"`
+}
+
 // InboundMessage 是 listener 收到的一条文本消息（非文本不广播）。
 // TimestampMS 是 zcago 报文里的 ts 按毫秒整数解析的结果，解析失败为 0。
 type InboundMessage struct {

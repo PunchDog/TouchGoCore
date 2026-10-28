@@ -38,10 +38,10 @@ func TestZaloEffectiveDefaults(t *testing.T) {
 		if got := c.EffectiveRequestTimeout(); got != 30*time.Second {
 			t.Errorf("RequestTimeout 缺省=%v", got)
 		}
-		if got := c.EffectiveFriendsCacheTTL(); got != 5*time.Minute {
+		if got := c.EffectiveFriendsCacheTTL(); got != 1*time.Minute {
 			t.Errorf("FriendsCacheTTL 缺省=%v", got)
 		}
-		if got := c.EffectiveGroupsCacheTTL(); got != 5*time.Minute {
+		if got := c.EffectiveGroupsCacheTTL(); got != 1*time.Minute {
 			t.Errorf("GroupsCacheTTL 缺省=%v", got)
 		}
 		if got := c.EffectiveInfoMinInterval(); got != 1500*time.Millisecond {
@@ -81,10 +81,10 @@ func TestZaloEffectiveClamps(t *testing.T) {
 	if got := c.EffectiveRequestTimeout(); got != 5*time.Second {
 		t.Errorf("RequestTimeout 下限钳制=%v", got)
 	}
-	if got := c.EffectiveFriendsCacheTTL(); got != 5*time.Minute {
+	if got := c.EffectiveFriendsCacheTTL(); got != 30*time.Second {
 		t.Errorf("FriendsCacheTTL 下限钳制=%v", got)
 	}
-	if got := c.EffectiveGroupsCacheTTL(); got != 5*time.Minute {
+	if got := c.EffectiveGroupsCacheTTL(); got != 30*time.Second {
 		t.Errorf("GroupsCacheTTL 下限钳制=%v", got)
 	}
 	if got := c.EffectiveInfoMinInterval(); got != 1500*time.Millisecond {
@@ -93,10 +93,10 @@ func TestZaloEffectiveClamps(t *testing.T) {
 	if got := c.EffectiveInfoCacheTTL(); got != 10*time.Minute {
 		t.Errorf("InfoCacheTTL 下限钳制=%v", got)
 	}
-	if got := c.EffectiveSendMinDelay(); got != 3*time.Second {
+	if got := c.EffectiveSendMinDelay(); got != 1*time.Second {
 		t.Errorf("SendMinDelay 下限钳制=%v", got)
 	}
-	if got := c.EffectiveSendMaxDelay(); got != 3*time.Second {
+	if got := c.EffectiveSendMaxDelay(); got != 1*time.Second {
 		t.Errorf("SendMaxDelay 低于 min 时按 min 取=%v", got)
 	}
 	if got := c.EffectiveSendMaxPerHour(); got != 30 {

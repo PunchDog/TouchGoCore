@@ -15,9 +15,11 @@ package zalo
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/cookiejar"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/amrakk/zcago"
@@ -56,6 +58,7 @@ type zaConn interface {
 	UID() string
 	SnapshotCredentials() (zcago.Credentials, error)
 	SendText(ctx context.Context, threadID string, group bool, text string) (string, error)
+	DeleteChat(ctx context.Context, threadID string, group bool, boundary ChatBoundary) error
 	GetAllFriends(ctx context.Context) ([]UserInfo, error)
 	GetAllGroups(ctx context.Context) (map[string]string, error) // groupID -> version
 	GetGroupInfo(ctx context.Context, ids ...string) ([]GroupInfo, error)
@@ -83,16 +86,26 @@ func newZASDK() zaSDK {
 
 // newZAHTTPClient 返回一个带独立 cookie jar 的私有 HTTP client。
 // 不设 Timeout：listener 是长连接，请求超时由 manager 在 context 上控制。
+//
+// Transport 包了 zaFallbackTransport：传输层失败不返回 (nil, err)，而是折成 599
+// 合成响应。原因是上游 zcago v0.3.0 的登录链会对 nil response 取 .Status 而 panic，
+// 且该 panic 在上游自己的 goroutine 里、调用方 recover 接不住（见 za_http.go 头注）。
 func newZAHTTPClient() *http.Client {
 	jar, _ := cookiejar.New(nil)
-	return &http.Client{Jar: jar}
+	return &http.Client{
+		Jar:       jar,
+		Transport: zaFallbackTransport{base: http.DefaultTransport},
+	}
 }
 
-// newZalo 构造一次登录用的 zcago 句柄。
+// zaNewZaloHandle 构造一次登录用的 zcago 句柄。
 //
 // 关掉 zcago 的日志与版本检查：前者会往 stdout 打请求噪音（含会话参数），
 // 后者每次登录多发一次无关请求。
-func (s *zaRealSDK) newZalo() zcago.Zalo {
+//
+// 用包级 var 而不是方法：单测要把它换成「一登录就 panic」的假句柄，验证
+// zaRecoverLoginPanic 是活闸（见 za_login_panic_test.go）。
+var zaNewZaloHandle = func() zcago.Zalo {
 	return zcago.NewZalo(
 		zcago.WithLogging(false),
 		zcago.WithCheckUpdate(false),
@@ -100,9 +113,26 @@ func (s *zaRealSDK) newZalo() zcago.Zalo {
 	)
 }
 
+// errZALoginUpstreamPanic 表示上游登录链在 HTTP 请求阶段 panic（拿不到 response）。
+//
+// 触发面：zcago v0.3.0 的 auth.login 在 httpx.Request 失败（网络不可达、超时、
+// ctx 取消）时会对 nil response 取 .Status（session/auth/login.go:62/74/167/176），
+// 必然 panic。登录失败是可恢复错误，不能让它带走整个进程。
+var errZALoginUpstreamPanic = errors.New(
+	"zalo 登录失败：上游 SDK 请求无响应（getServerInfo/getLoginInfo 连接失败或超时；检查到 wpa.chat.zalo.me 的网络/代理，必要时调大 zalo.sessions.request_timeout_sec）")
+
+// zaRecoverLoginPanic 把上游登录链的 panic 折算成可配置可判的错误。
+// 只用于登录入口：登录是懒登录/重登，任何一次网络抖动都不该升级成进程崩溃。
+func zaRecoverLoginPanic(errp *error) {
+	if r := recover(); r != nil {
+		*errp = fmt.Errorf("%w: %v", errZALoginUpstreamPanic, r)
+	}
+}
+
 // Login 用已保存的凭证恢复会话。
-func (s *zaRealSDK) Login(ctx context.Context, cred zcago.Credentials) (zaConn, error) {
-	api, err := s.newZalo().Login(ctx, cred)
+func (s *zaRealSDK) Login(ctx context.Context, cred zcago.Credentials) (conn zaConn, err error) {
+	defer zaRecoverLoginPanic(&err)
+	api, err := zaNewZaloHandle().Login(ctx, cred)
 	if err != nil {
 		return nil, err
 	}
@@ -110,8 +140,9 @@ func (s *zaRealSDK) Login(ctx context.Context, cred zcago.Credentials) (zaConn, 
 }
 
 // LoginQR 走扫码登录，cb 负责把二维码/扫描/过期事件交给 pairing 层。
-func (s *zaRealSDK) LoginQR(ctx context.Context, opt *zcago.LoginQROption, cb zcago.LoginQRCallback) (zaConn, error) {
-	api, err := s.newZalo().LoginQR(ctx, opt, cb)
+func (s *zaRealSDK) LoginQR(ctx context.Context, opt *zcago.LoginQROption, cb zcago.LoginQRCallback) (conn zaConn, err error) {
+	defer zaRecoverLoginPanic(&err)
+	api, err := zaNewZaloHandle().LoginQR(ctx, opt, cb)
 	if err != nil {
 		return nil, err
 	}
@@ -175,6 +206,47 @@ func (c *zaRealConn) SendText(ctx context.Context, threadID string, group bool, 
 		return "", nil
 	}
 	return resp.Message.MsgID, nil
+}
+
+// DeleteChat 清空本端（onlyMe）threadID 会话的消息。
+//
+// 上游 deleteconver 只回 status，非 0 状态在 Resolve 里已折算成错误；空响应同样
+// 不能装成成功。boundary 经 zaNormalizeBoundary 归一（OwnerID 留空 ⇒ 取当前登录
+// UID；CliMsgID 留空 ⇒ 用 GlobalMsgID 顶替，理由见 ChatBoundary 注释）。
+func (c *zaRealConn) DeleteChat(ctx context.Context, threadID string, group bool, boundary ChatBoundary) error {
+	tt := model.ThreadTypeUser
+	if group {
+		tt = model.ThreadTypeGroup
+	}
+	boundary = zaNormalizeBoundary(boundary, c.UID())
+	resp, err := c.api.DeleteChat(ctx, threadID, tt, zcagoapi.DeleteChatLastMessage{
+		OwnerID:     boundary.OwnerID,
+		CliMsgID:    boundary.CliMsgID,
+		GlobalMsgID: boundary.GlobalMsgID,
+	})
+	if err != nil {
+		return err
+	}
+	if resp == nil {
+		return errZANilResponse
+	}
+	return nil
+}
+
+// zaNormalizeBoundary 归一删除会话的边界参数。
+//
+// OwnerID 留空 ⇒ 取当前登录账号的 UID（发送后清理的边界就是本端刚发出去的那条，
+// owner 恒为自己）；空 owner 会被上游拒成 114。
+// CliMsgID 留空 ⇒ 用 GlobalMsgID 顶替：空值会被上游拒成 112，整次删除不生效
+// （2026-10-27 对真实接口核实）。
+func zaNormalizeBoundary(boundary ChatBoundary, selfUID string) ChatBoundary {
+	if strings.TrimSpace(boundary.OwnerID) == "" {
+		boundary.OwnerID = strings.TrimSpace(selfUID)
+	}
+	if strings.TrimSpace(boundary.CliMsgID) == "" {
+		boundary.CliMsgID = boundary.GlobalMsgID
+	}
+	return boundary
 }
 
 // GetAllFriends 拉取全量好友（单页 20000），返回按 UserID 升序的切片。

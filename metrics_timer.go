@@ -50,6 +50,18 @@ var (
 	timerPoolInUseDesc = prometheus.NewDesc(
 		"touchgocore_timer_pool_in_use",
 		"当前外借中的定时器对象数（Gets 减 Puts）", nil, nil)
+	asyncTimerWorkerLimitDesc = prometheus.NewDesc(
+		"touchgocore_async_timer_worker_limit",
+		"异步 Tick worker goroutine 数量上限", nil, nil)
+	asyncTimerWorkerCountDesc = prometheus.NewDesc(
+		"touchgocore_async_timer_worker_count",
+		"当前存活的异步 Tick worker goroutine 数量", nil, nil)
+	asyncTimerQueueDepthDesc = prometheus.NewDesc(
+		"touchgocore_async_timer_queue_depth",
+		"动态 worker pool 中等待执行的异步 Tick 任务数（无界队列）", nil, nil)
+	asyncTimerInFlightDesc = prometheus.NewDesc(
+		"touchgocore_async_timer_in_flight",
+		"已由异步 worker 开始且尚未由分片 consumer 完成收尾的 Tick 数", nil, nil)
 )
 
 func (timerBacklogCollector) Describe(ch chan<- *prometheus.Desc) {
@@ -61,6 +73,10 @@ func (timerBacklogCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- timerDroppedDesc
 	ch <- timerRescheduleFailedDesc
 	ch <- timerPoolInUseDesc
+	ch <- asyncTimerWorkerLimitDesc
+	ch <- asyncTimerWorkerCountDesc
+	ch <- asyncTimerQueueDepthDesc
+	ch <- asyncTimerInFlightDesc
 }
 
 func (timerBacklogCollector) Collect(ch chan<- prometheus.Metric) {
@@ -108,6 +124,12 @@ func (timerBacklogCollector) Collect(ch chan<- prometheus.Metric) {
 	pool := localtimer.GetTimerPoolStats()
 	ch <- prometheus.MustNewConstMetric(
 		timerPoolInUseDesc, prometheus.GaugeValue, float64(pool.Gets-pool.Puts))
+
+	asyncWorkers := localtimer.GetAsyncWorkerStats()
+	ch <- prometheus.MustNewConstMetric(asyncTimerWorkerLimitDesc, prometheus.GaugeValue, float64(asyncWorkers.Limit))
+	ch <- prometheus.MustNewConstMetric(asyncTimerWorkerCountDesc, prometheus.GaugeValue, float64(asyncWorkers.Workers))
+	ch <- prometheus.MustNewConstMetric(asyncTimerQueueDepthDesc, prometheus.GaugeValue, float64(asyncWorkers.Queued))
+	ch <- prometheus.MustNewConstMetric(asyncTimerInFlightDesc, prometheus.GaugeValue, float64(asyncWorkers.InFlight))
 
 	// 每轮在链数按档读：只报总数的话，「毫秒轮爆满而其它轮空转」与「均匀分布」
 	// 长得一模一样，而前者才是要处置的那种。

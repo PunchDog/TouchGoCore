@@ -1,11 +1,45 @@
 package config
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+)
 
 func TestValidateNil(t *testing.T) {
 	var c *Cfg
 	if err := c.Validate(); err == nil {
 		t.Fatal("expected error for nil cfg")
+	}
+}
+
+func TestTimerGoroutineLimit(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  *Cfg
+		want int
+	}{
+		{name: "nil config", want: DefaultMaxTimerGoroutines},
+		{name: "nil server", cfg: &Cfg{}, want: DefaultMaxTimerGoroutines},
+		{name: "unset value", cfg: &Cfg{Server: &ServerConfig{}}, want: DefaultMaxTimerGoroutines},
+		{name: "non-positive value", cfg: &Cfg{Server: &ServerConfig{MaxTimerGoroutines: -1}}, want: DefaultMaxTimerGoroutines},
+		{name: "configured value", cfg: &Cfg{Server: &ServerConfig{MaxTimerGoroutines: 24}}, want: 24},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.cfg.TimerGoroutineLimit(); got != tt.want {
+				t.Fatalf("TimerGoroutineLimit() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestServerMaxTimerGoroutinesJSON(t *testing.T) {
+	var cfg Cfg
+	if err := json.Unmarshal([]byte(`{"server":{"max_timer_goroutines":73}}`), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.TimerGoroutineLimit(); got != 73 {
+		t.Fatalf("TimerGoroutineLimit() = %d, want 73", got)
 	}
 }
 

@@ -29,6 +29,12 @@ type timerService struct{}
 
 func (s *timerService) Name() string { return "timer" }
 func (s *timerService) Start(ctx context.Context) error {
+	cfg := corectx.CfgFrom(ctx)
+	workerLimit := 0
+	if cfg != nil {
+		workerLimit = cfg.TimerGoroutineLimit()
+	}
+	localtimer.SetAsyncWorkerLimit(workerLimit)
 	localtimer.Run(ctx)
 	return nil
 }

@@ -86,21 +86,35 @@ return tx.Commit()
 脏账本、分布式锁、Seq CAS、写缓冲全部由 `db/cache` 框架提供，Postgres 侧零额外配置。
 
 ```go
-repo := db.NewPostgresRepository[Player](app.Postgres)
-keyToID := func(k string) any { return k }   // 业务键 → 主键
-idOf := func(p *Player) string { return p.Name }
+// WithLoader/WithSaver 是泛型函数，门面无法别名转发，须直接引入子包：
+import cachepkg "touchgocore/db/cache"
 
-c, _ := db.OpenCache[string, Player](
+repo := db.NewPostgresRepository[Player](app.Postgres)
+// 业务键 = 玩家名；name 必须有唯一索引（回源按它 IN 查，落库按它冲突）
+keyToID := func(k string) any { return k }        // 业务键 → 主键列取值
+idOf := func(p *Player) string { return p.Name }  // 实体 → 业务键（回填映射用）
+
+c, err := db.OpenCache[string, Player](
     app.Cache, "player",
-    cachepkg.WithLoader[string, Player](db.NewPostgresCacheBatchSource(repo, keyToID, "name", nil, idOf)),
-    cachepkg.WithSaver[string, Player](db.NewPostgresCacheBatchSink(repo, keyToID, "id")),
+    cachepkg.WithLoader[string, Player](
+        db.NewPostgresCacheBatchSource(repo, keyToID, "name", nil, idOf)),
+    cachepkg.WithSaver[string, Player](
+        db.NewPostgresCacheBatchSink(repo, keyToID, "name")), // 冲突列与回源列必须一致
 )
+if err != nil {
+    return err
+}
 
 // 读线：Redis 命中直接返回，未命中回源 Postgres 并回填
 p, _ := c.GetOrLoad(ctx, "alice")
 // 写线：同步写 Redis + 入写缓冲，定时器批量 UpsertBatch 落 Postgres
 _ = c.Write(ctx, "alice", &Player{Name: "alice"})
 ```
+
+> `idCol`（回源 `IN` 的列）与 sink 的 `idCols`（`UpsertBatch` 冲突目标）必须指向
+> 同一个唯一列。回源按 `name` 查、落库按 `id` 冲突，会让更新落在错误的行上。
+> 第 4 参 `keyFn` 传 `nil` 即用框架默认的键序列化，与该 Cache 的 `WithKeyFunc`
+> 不一致时必须显式传同一个函数。
 
 资金类只读表沿用框架口径：只挂 `Loader` 不挂 `Saver`，事务 COMMIT 成功后再
 `InvalidateOnCommit` 失效缓存，不要走 `Write`。
@@ -114,6 +128,30 @@ IsPostgresCanceled / IsPostgresDeadlock / IsPostgresTableNotExist`，底层按 S
 
 ## 可观测性
 
-`db.NewPostgres()` 默认注入 `PostgresMetricsAdapter`，把连接池水位上报到
-`metrics.DB`（label `"postgres"`）。慢查询阈值默认 200ms，可用
-`db.WithPostgresSlowQueryThreshold(d)` 覆盖。
+**`db.NewPostgres()` 单独调用时不上报任何指标**——子包默认值是
+`NoopMetrics{}`（见 `db/postgres/client.go: defaultOptions`），三个 hook 全是空实现。
+
+要接指标必须显式注入 Option：
+
+```go
+// 应用级：把连接池水位上报到 metrics.DB（label "postgres"）
+client, _ := db.NewPostgres(cfg, db.WithPostgresMetricsHook(db.NewPostgresMetricsAdapter()))
+
+// 或者带自己的 hook
+client, _ = db.NewPostgres(cfg, db.WithPostgresMetricsHook(myHook))
+```
+
+App 启动时走的是前一种：`app.go: initDatabase` 显式追加
+`db.WithPostgresMetricsHook(db.NewPostgresMetricsAdapter())`，所以 `app.Postgres`
+是有指标的，但**你自己 `db.NewPostgres(...)` 出来的实例没有**。
+
+注意 `PostgresMetricsAdapter` 只实现了 `OnConnection`（
+`metrics.DB.SetConnections("postgres", state, n)`），`OnQuery` / `OnSlowQuery`
+目前是空实现——查询耗时与慢查询不进 `metrics.DB`，要上报得自己写 hook。
+
+慢查询阈值默认 200ms（`defaultSlowThreshold`），可用
+`db.WithPostgresSlowQueryThreshold(d)` 覆盖；该阈值只影响慢查询 hook 的触发，
+不影响查询本身。
+
+`WithLoggerLevel(logger.LogLevel)` 与 `WithPostgresAutoMigrate(bool)` 一样**仅子包可用**，
+未通过 `db` 门面暴露（要开自动建表走子包 `pgdb.NewClient`）。

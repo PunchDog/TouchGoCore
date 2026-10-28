@@ -65,3 +65,6 @@ tasks/
 # 两者都是本机一次性文件，入库只会把大块噪声带进 clone。
 .dev/
 .qoder-credits/
+whatsapp/outputs/
+whatsapp/.workbuddy-ai/
+outputs/

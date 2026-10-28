@@ -695,6 +695,10 @@ func (a *zaAccount) loginFromStore(ctx context.Context, f *zaConnFlight) error {
 
 	conn, err := a.mgr.sdk.Login(ctx, cred)
 	if err != nil {
+		// 请求无响应是网络/代理问题，套「cookie 可能已过期」会把人带错方向。
+		if errors.Is(err, errZALoginUpstreamPanic) {
+			return zaSafeWrap("zalo 登录失败", err)
+		}
 		return zaSafeWrap("zalo 登录失败（cookie 可能已过期，请重新扫码或导入）", err)
 	}
 	if conn == nil {
@@ -937,7 +941,7 @@ func (a *zaAccount) listFriends(ctx context.Context, refresh bool) ([]UserInfo, 
 		defer cancel()
 		users, err := conn.GetAllFriends(rctx)
 		if err != nil {
-			return nil, zaSafeWrap("zalo 拉取好友列表失败", err)
+			return nil, zaFetchError("zalo 拉取好友列表失败", err)
 		}
 		return users, nil
 	}
@@ -1010,7 +1014,7 @@ func (a *zaAccount) fetchGroups(ctx context.Context) ([]GroupInfo, error) {
 	vers, err := conn.GetAllGroups(rctx)
 	cancel()
 	if err != nil {
-		return nil, zaSafeWrap("zalo 拉取群列表失败", err)
+		return nil, zaFetchError("zalo 拉取群列表失败", err)
 	}
 
 	ttl := a.mgr.limits.infoTTL

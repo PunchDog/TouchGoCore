@@ -39,30 +39,57 @@ func (m *TimerManager) executeTimer(task timerTask) {
 	if !task.isValid() {
 		return // 已被移除或被复用的过期调度项，直接丢弃
 	}
-	parent := task.timer.GetParent()
-
-	// 在飞标记：Tick 执行期间禁止把实例归还对象池，否则新主人会和这个回调同时
-	// 写同一块内存。beginTick 内部会复核代次与作废状态，校验通过后到真正打上
-	// 在飞标记之间不存在可被池认领的窗口；失败说明实例已易主，直接放弃本次回调。
-	// endTick 必须是本函数最后一个动作——它返回后实例随时已易主，
-	// 再读一次 task.timer 就是踩别人的对象。
-	if !parent.beginTick(task.gen) {
+	parent := safeAsyncTimerParent(task.timer)
+	if parent == nil {
 		return
 	}
-	defer parent.endTick()
+	// 只有声明异步执行的 Timer 才可能被 worker 并发执行，需要跨路径单飞令牌；
+	// 纯同步 Timer 保持原有零全局锁的热路径。此处必须非阻塞取令牌：消费者一旦
+	// 卡在令牌上，就没人再处理异步完成事件，而完成事件正是令牌的释放方。
+	if shouldRunAsyncTick(task.timer) {
+		flightKey := asyncTimerKey{parent: parent, epoch: parent.poolEpoch.Load()}
+		releaseFlight, ok := tryAcquireTimerFlight(flightKey)
+		if !ok {
+			return // 该 Timer 的异步 Tick 仍在飞：本次派发让位，由在飞者收尾并续期
+		}
+		defer releaseFlight()
+		if parent.poolEpoch.Load() != flightKey.epoch {
+			return
+		}
+	}
+	if !task.isValid() || !parent.beginTick(task.gen) {
+		return
+	}
 
+	m.runTimerTick(task.timer)
+	m.finishTimerTick(task, parent)
+}
+
+// runTimerTick executes the user callback with panic isolation and updates its statistic.
+func (m *TimerManager) runTimerTick(timer TimerInterface) {
 	func() {
 		defer func() {
 			if err := recover(); err != nil {
 				vars.Error("定时器执行发生panic: %v", err)
 			}
 		}()
-		task.timer.Tick()
+		timer.Tick()
 	}()
 	m.stats.timersExecuted.Add(1)
+}
 
-	// Tick 内部可能已经移除/复用该定时器，或系统已关闭，重新校验后再续期
-	if m.isClosed.Load() || !task.isValid() {
+// finishTimerTick performs the existing reschedule/release path. endTick is
+// deliberately the final operation touching parent because it may return it to the pool.
+func (m *TimerManager) finishTimerTick(task timerTask, parent *Timer) {
+	defer parent.endTick()
+
+	if m.isClosed.Load() {
+		if parent.IsActive() && parent.gen.Load() == task.gen {
+			m.retireAfterExhaustion(parent)
+		}
+		return
+	}
+	if !task.isValid() {
 		return
 	}
 	if !task.timer.HasNext() {
@@ -86,6 +113,20 @@ func (m *TimerManager) executeTimer(task timerTask) {
 		m.stats.timersRescheduleFailed.Add(1)
 		m.notifyTimerLost(task.timer, parent, err)
 	}
+}
+
+// discardDispatchedTask retires a task already detached from its wheel when the
+// runtime is stopping or its manager has closed.
+func (m *TimerManager) discardDispatchedTask(task timerTask) {
+	if task.timer == nil || !safeTimerTaskValid(task) {
+		return
+	}
+	parent := safeAsyncTimerParent(task.timer)
+	if parent == nil || !parent.beginTick(task.gen) {
+		return
+	}
+	m.retireAfterExhaustion(parent)
+	parent.endTick()
 }
 
 // defaultWheelConfigs 每档轮的精度（毫秒）：毫秒/秒/分钟/10分钟/小时。

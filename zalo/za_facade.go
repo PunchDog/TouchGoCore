@@ -106,6 +106,26 @@ func ZaloSendGroupMessage(ctx context.Context, accountID, groupID, text string) 
 	return a.sendText(ctx, conn, true, groupID, text)
 }
 
+// ZaloDeleteChat 清空 accountID 账号本端（onlyMe）threadID 会话的消息。
+//
+// 语义与 Zalo App 的「删除会话」一致：只影响本账号这一端，对端/群成员的消息不动。
+// 不做批量、不重试：调用方（发送后清理）拿到的是一次请求的结果，失败只代表这次
+// 没清掉，不代表消息没发出去。
+//
+// boundary.OwnerID 留空时取当前登录账号的 UID —— 发送后清理的边界就是本端刚发出
+// 去的那条消息，owner 恒为自己。
+func ZaloDeleteChat(ctx context.Context, accountID, threadID string, group bool, boundary ChatBoundary) error {
+	_, a, err := zaFacadeAccount(accountID)
+	if err != nil {
+		return err
+	}
+	conn, err := a.ensureConn(ctx)
+	if err != nil {
+		return err
+	}
+	return a.clearChat(ctx, conn, group, threadID, boundary)
+}
+
 // ZaloListFriends 返回好友列表：缓存新鲜直接返回，过期自动刷新（5 分钟闸）。
 func ZaloListFriends(ctx context.Context, accountID string) ([]UserInfo, error) {
 	_, a, err := zaFacadeAccount(accountID)
@@ -245,6 +265,49 @@ func (a *zaAccount) sendText(ctx context.Context, conn zaConn, group bool, threa
 		return "", ErrZaloEmptyMessageID
 	}
 	return msgID, nil
+}
+
+// clearChat 清空本端会话。
+//
+// 与 sendText 共用 sendMu：同一账号的请求不并发打上游。但**不占发送配额、也不推进
+// lastSend** —— 清会话不是发消息，既不该吃掉滚动 1 小时的发送预算，也不该把下一条
+// 发送的 3–5 秒间隔重新起算。
+func (a *zaAccount) clearChat(ctx context.Context, conn zaConn, group bool, threadID string, boundary ChatBoundary) error {
+	threadID = strings.TrimSpace(threadID)
+	if threadID == "" {
+		return errZAFacadeEmptyThread
+	}
+	if conn == nil {
+		return ErrZaloNotLoggedIn
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("zalo 清空会话前请求已取消: %w", err)
+	}
+	boundary = zaNormalizeBoundary(boundary, conn.UID())
+
+	m := a.mgr
+
+	a.sendMu.Lock()
+	defer a.sendMu.Unlock()
+
+	if a.stoppedOrStopping() {
+		return ErrZaloNotStarted
+	}
+	if cur := a.currentConn(); cur == nil || cur != conn {
+		return ErrZaloNotLoggedIn
+	}
+
+	reqCtx, cancel := context.WithTimeout(ctx, m.limits.requestTimeout)
+	defer cancel()
+	if err := conn.DeleteChat(reqCtx, threadID, group, boundary); err != nil {
+		// 带原因（Zalo 错误码 + 短文案）：「清空会话失败」这种光秃秃的文案在日志里
+		// 没法排障 —— 上游拒收（112/114）与网络故障长得一模一样。
+		return zaFetchError("zalo 清空会话失败", err)
+	}
+	return nil
 }
 
 // ZaloLogout 登出账号：停 listener、清内存里的 conn，但保留会话库行——下次发送/查询

@@ -40,6 +40,17 @@ type Cfg struct {
 	Other interface{} `json:"other_data"` //其他配置,需要自行传入想要的数据模型
 }
 
+// DefaultMaxTimerGoroutines is the fallback async timer worker limit.
+const DefaultMaxTimerGoroutines = 512
+
+// TimerGoroutineLimit returns the configured localtimer worker limit or its default.
+func (c *Cfg) TimerGoroutineLimit() int {
+	if c == nil || c.Server == nil || c.Server.MaxTimerGoroutines <= 0 {
+		return DefaultMaxTimerGoroutines
+	}
+	return c.Server.MaxTimerGoroutines
+}
+
 func init() {
 	Cfg_ = &Cfg{
 		Ws:       nil,

@@ -14,22 +14,29 @@ import (
 //   - sendMessage 中风险，连续两条随机 3-5 秒。
 //
 // 配置写得更小一律抬到下限：这几条是封号风险的软闸，不能靠「记得别配小」。
+//
+// **2026-10-27 现场调整（运营裁决）**：好友/群组拉取的间隔下限从 5 分钟降到 30 秒、
+// 默认从 5 分钟降到 1 分钟。起因是实测里一次**传输层瞬时失败**就把账号堵死 5 分钟
+// ——失败之后连重试都发不出去，运营侧表现为「点了发送没反应」。现在失败只挡 1 分钟。
+// 封号风险仍在：想恢复保守口径，把 zalo.sessions.friends_cache_ttl_sec /
+// groups_cache_ttl_sec 配成 300 即可（配置值小于下限时抬到 30 秒）。
 const (
 	zaloDefaultQRTTL           = 5 * time.Minute
 	zaloMinQRTTL               = 2 * time.Minute
 	zaloDefaultRequestTimeout  = 30 * time.Second
 	zaloMinRequestTimeout      = 5 * time.Second
-	zaloDefaultFriendsCacheTTL = 5 * time.Minute
-	zaloMinFriendsCacheTTL     = 5 * time.Minute
-	zaloDefaultGroupsCacheTTL  = 5 * time.Minute
-	zaloMinGroupsCacheTTL      = 5 * time.Minute
+	zaloDefaultFriendsCacheTTL = 1 * time.Minute
+	zaloMinFriendsCacheTTL     = 30 * time.Second
+	zaloDefaultGroupsCacheTTL  = 1 * time.Minute
+	zaloMinGroupsCacheTTL      = 30 * time.Second
 	zaloDefaultInfoMinInterval = 1500 * time.Millisecond
 	zaloMinInfoMinInterval     = 1500 * time.Millisecond
 	zaloDefaultInfoCacheTTL    = 10 * time.Minute
 	zaloMinInfoCacheTTL        = 10 * time.Minute
 	zaloDefaultSendMinDelay    = 3 * time.Second
-	zaloMinSendMinDelay        = 3 * time.Second
+	zaloMinSendMinDelay        = 1 * time.Second
 	zaloDefaultSendMaxDelay    = 5 * time.Second
+	zaloMinSendMaxDelay        = 1 * time.Second
 	zaloDefaultSendMaxPerHour  = 30
 )
 
@@ -114,19 +121,19 @@ func (c *ZaloSessionsConfig) EffectiveInfoCacheTTL() time.Duration {
 	return ttl
 }
 
-// EffectiveSendMaxDelay 补单账号连续发送间隔上界（<=0 → 5 秒）。
+// EffectiveSendMaxDelay 补单账号连续发送间隔上界（<=0 → 5 秒，下限 1 秒）。
 func (c *ZaloSessionsConfig) EffectiveSendMaxDelay() time.Duration {
 	delay := zaloDefaultSendMaxDelay
 	if c != nil && c.SendMaxDelayMs > 0 {
 		delay = time.Duration(c.SendMaxDelayMs) * time.Millisecond
 	}
-	if delay < zaloMinSendMinDelay {
-		return zaloMinSendMinDelay
+	if delay < zaloMinSendMaxDelay {
+		return zaloMinSendMaxDelay
 	}
 	return delay
 }
 
-// EffectiveSendMinDelay 补连续发送间隔下界（<=0 → 3 秒，下限 3 秒）。
+// EffectiveSendMinDelay 补连续发送间隔下界（<=0 → 3 秒，下限 1 秒）。
 // 下界压过上界时按上界取，避免随机区间塌成空集。
 func (c *ZaloSessionsConfig) EffectiveSendMinDelay() time.Duration {
 	delay := zaloDefaultSendMinDelay

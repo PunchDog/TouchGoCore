@@ -17,7 +17,7 @@
 | `session.go` | `Session` ctx 绑定视图 |
 | `tx.go` | `Tx` 事务封装（`Commit`/`Rollback`） |
 | `query.go` | `Query` 类型安全链式查询构建器 |
-| `repository.go` | `Repository[T]` 泛型 CRUD 引擎（12 个 CRUD 方法） |
+| `repository.go` | `Repository[T]` 泛型 CRUD 引擎（14 个 CRUD 方法 + `AutoMigrate`） |
 | `factory.go` | 4 个泛型工厂（裸/ctx/事务/Session） |
 | `observability.go` | `MetricsHook` 接口 + gorm 插件 + `NoopMetrics` |
 | `helpers.go` | `toSnakeCase` 工具 |
@@ -57,7 +57,7 @@ cfg := &config.MySqlDBConfig{
     MaxOpenConns: 100,
 }
 
-client, err := db.NewClient(cfg,
+client, err := db.NewMySql(cfg,
     db.WithSlowQueryThreshold(300*time.Millisecond),
     db.WithMetricsHook(db.NewMetricsAdapter()),
     db.WithCharset("utf8mb4", "utf8mb4_unicode_ci"),
@@ -100,7 +100,7 @@ if err := client.Close(); err != nil {
 | `db.NewSessionRepository[T](*Session)` | 在 Session 内 |
 | `db.NewTxRepository[T](*Tx)` | 在事务内 |
 
-> ⚠️ **方法上不能声明类型参数**（Go 1.26.7 工具链限制），所以泛型工厂独立为包级函数。`Client.Repository()` 返回的 `RepositoryFactory` 提供了内部接入点。
+> ⚠️ **Go 语言不支持在方法上声明类型参数**（永久性语言限制，与工具链版本无关），所以泛型工厂独立为包级函数。`Client.Repository()` 返回的 `RepositoryFactory` 提供了内部接入点。
 
 ### 4.2 CRUD 方法
 
@@ -130,8 +130,9 @@ func (User) TableName() string { return "t_user" }
 | `Exists(ctx, *Query)` | 是否存在 | `(bool, error)` |
 | `Update(ctx, *T)` | 按主键全量更新 | `error` |
 | `UpdateFields(ctx, id, map[string]any)` | 局部字段更新 | `error` |
-| `Upsert(ctx, *T, []string)` | 冲突时更新 | `error` |
-| `Delete(ctx, id)` | 软删 | `error` |
+| `Upsert(ctx, *T, []string)` | 冲突时更新（`conflictColumns` 为空则退化为 Create） | `error` |
+| `UpsertBatch(ctx, []*T, []string)` | 批量冲突更新，单条 SQL（缓存写线定时落库用它） | `error` |
+| `Delete(ctx, id)` | 软删（模型带 `gorm.DeletedAt` 时才写 `deleted_at`，否则为物理删除） | `error` |
 | `DeleteHard(ctx, id)` | 硬删（`Unscoped`） | `error` |
 | `AutoMigrate(ctx)` | 自动建表 | `error` |
 
@@ -175,7 +176,8 @@ if err := repo.Delete(ctx, u.ID); err != nil { /* ... */ }
 | `IsNull("deleted_at")` | `deleted_at IS NULL` |
 | `IsNotNull("deleted_at")` | `deleted_at IS NOT NULL` |
 
-> 注：`Where` 会**覆盖**之前的 where 条件；其他方法本质都是 `Where` 的语法糖。
+> ⚠️ 注：`Where` 会**覆盖**之前的 where 条件——Query 只能持有一条 where 表达式。其他方法本质都是 `Where` 的语法糖，
+> 所以连续调多个条件（如 `.Gte(...).IsNotNull(...)`）只保留**最后一个**。多条件请写进同一条复合表达式，见 §5.3。
 
 ### 5.2 排序、分页、投影
 
@@ -193,9 +195,10 @@ q := db.NewQuery().
 ### 5.3 使用示例
 
 ```go
+// Query 只能持有一条 where 表达式：连续调 Gte/IsNotNull/… 会覆盖前一个条件，
+// 多条件写进同一条复合表达式。
 q := db.NewQuery().
-    Gte("age", 18).
-    IsNotNull("email").
+    Where("age >= ? AND email IS NOT NULL", 18).
     OrderDesc("id").
     Limit(10)
 
@@ -369,7 +372,7 @@ func (h *promHook) OnConnection(state string, n float64) {
     // 已在 client.go 中通过 NewMetricsAdapter 上报
 }
 
-client, _ := db.NewClient(cfg, db.WithMetricsHook(&promHook{ /* ... */ }))
+client, _ := db.NewMySql(cfg, db.WithMetricsHook(&promHook{ /* ... */ }))
 ```
 
 ### 9.4 慢查询
@@ -387,6 +390,7 @@ client, _ := db.NewClient(cfg, db.WithMetricsHook(&promHook{ /* ... */ }))
 | `WithConnMaxLifetime(time.Duration)` | 24h | 连接最大存活时间 |
 | `WithDSNParam(k, v)` | – | 添加自定义 DSN 参数（如 `time_zone`） |
 | `WithCharset(charset, collation)` | `utf8mb4` / `utf8mb4_unicode_ci` | 字符集 |
+| `WithLoggerLevel(logger.LogLevel)` | `Silent` | gorm 日志级别；**仅子包可用**，未通过 `db` 门面暴露 |
 
 DSN 由 `parseTime=true&loc=Local` + 上述选项自动拼装。
 
@@ -522,7 +526,7 @@ func Transfer(ctx context.Context, c *db.Client, fromUID, toUID uint64, amount i
 ```go
 import "touchgocore/db"
 
-client, _ := db.NewClient(cfg)
+client, _ := db.NewMySql(cfg)
 repo := db.NewRepository[User](client)
 ```
 
@@ -540,7 +544,7 @@ gormDB.Engine().Use(myCustomGormPlugin) // 仍可访问原生 gorm.DB
 ## 14. 常见问题
 
 **Q: 为什么 Repository[T] 不能在 `Client` 方法上声明？**
-A: Go 1.26.7 工具链不支持在方法上声明类型参数。`Client.Repository()` 返回 `*RepositoryFactory`，泛型构造走包级函数（`NewRepository[T]` / `NewTxRepository[T]` 等）。
+A: Go 语言不支持在方法上声明类型参数（永久性语言限制，不是某个版本的工具链问题）。`Client.Repository()` 返回 `*RepositoryFactory`，泛型构造走包级函数（`NewRepository[T]` / `NewTxRepository[T]` 等）。
 
 **Q: 如何获取原生 `*gorm.DB`？**
 A: `client.Engine()` 返回 `*gorm.DB`，可用于自定义 gorm 调用或注册 plugin。
@@ -577,11 +581,11 @@ A: 暂未内建。可在 `Client.Raw` 回调中实现主从切换，或自行封
 
 ```go
 // 第一次：完整初始化
-client1, _ := db.NewClient(cfg)
+client1, _ := db.NewMySql(cfg)
 defer client1.Close()
 
 // 第二次：复用 client1 的 socket 与 gorm.DB
-client2, _ := db.NewClient(cfg) // 同步返回，无网络开销
+client2, _ := db.NewMySql(cfg) // 同步返回，无网络开销
 defer client2.Close()           // 第二次 Close 是 no-op
 ```
 
@@ -598,7 +602,7 @@ defer client2.Close()           // 第二次 Close 是 no-op
 ### 16.1 用法
 
 ```go
-client, _ := db.NewClient(cfg,
+client, _ := db.NewMySql(cfg,
     db.WithAutoMigrate(true), // 开启自动建表
 )
 

@@ -261,6 +261,9 @@ func TestZAFacadeNotStarted(t *testing.T) {
 			_, err := ZaloSendGroupMessage(ctx, "acct", "group-1", "hello")
 			return err
 		}},
+		{name: "delete_chat", call: func() error {
+			return ZaloDeleteChat(ctx, "acct", "peer-1", false, ChatBoundary{GlobalMsgID: "m1"})
+		}},
 		{name: "list_friends", call: func() error {
 			_, err := ZaloListFriends(ctx, "acct")
 			return err
@@ -322,6 +325,9 @@ func TestZAFacadeBadAccountID(t *testing.T) {
 		{name: "send_group_message", call: func() error {
 			_, err := ZaloSendGroupMessage(ctx, "..", "group-1", "hello")
 			return err
+		}},
+		{name: "delete_chat", call: func() error {
+			return ZaloDeleteChat(ctx, "..", "peer-1", false, ChatBoundary{GlobalMsgID: "m1"})
 		}},
 		{name: "list_friends", call: func() error {
 			_, err := ZaloListFriends(ctx, "..")

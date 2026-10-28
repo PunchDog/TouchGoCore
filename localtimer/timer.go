@@ -88,6 +88,8 @@ type TimerInterface interface {
 	RemoveFromManager(cleanPool bool)
 	// IsActive 检查定时器是否活跃
 	IsActive() bool
+	// IsAsyncTick reports whether Tick should run in an asynchronous worker.
+	IsAsyncTick() bool
 }
 
 // TimerPool 为定时器提供类型安全的对象池管理。
@@ -192,6 +194,7 @@ func (p *TimerPool) Get(cls TimerInterface) TimerInterface {
 			parent.released.Store(false)
 			parent.pendingRelease.Store(false)
 			parent.putClaimed.Store(false)
+			parent.poolEpoch.Add(1)
 			parent.mu.Unlock()
 			p.gets.Add(1)
 			return obj
@@ -202,6 +205,7 @@ func (p *TimerPool) Get(cls TimerInterface) TimerInterface {
 	if parent := obj.GetParent(); parent != nil {
 		parent.inPool.Store(false)
 		parent.released.Store(false)
+		parent.poolEpoch.Add(1)
 	}
 	p.gets.Add(1)
 	return obj
@@ -293,6 +297,8 @@ type Timer struct {
 	// Put 里的 inPool CAS 是最后一道闸，但只有在这里抢占才能保证「收尾只做一次」，
 	// 也让统计口径（Puts）不被无意义的重复调用污染。实例被下一个主人认领时重置。
 	putClaimed atomic.Bool
+	// poolEpoch distinguishes successive owners when sync.Pool reuses this address.
+	poolEpoch atomic.Uint64
 }
 
 // Init 初始化定时器
@@ -420,11 +426,8 @@ func (t *Timer) releaseToPool() {
 
 // beginTick 登记一次业务回调执行，返回 false 表示本次调度项已作废、调用方必须放弃回调。
 //
-// isValid 校验与真正的「在飞」标记之间总有窗口：期间实例可能被 Remove 归还对象池、
-// 又被下一个 NewTimer 认领并推进代次。若只增计数不复核，就会与全新主人同时写同一块
-// 内存（use-after-free 到池对象）。这里先增在飞计数、再校验代次与作废标记，两次原子
-// 操作构成 Dekker 配对：池的认领方也是「先改所有权标记、后读在飞计数」，
-// 因此双方不可能同时认为自己是唯一持有者。
+// 先增在飞计数，再由 timerFlightRegistry 按实例地址和 poolEpoch 取得单飞令牌，
+// 最后复核代次及作废标记。同步执行与异步 worker 共用该令牌，避免同一 Timer 重入。
 func (t *Timer) beginTick(expectGen uint64) bool {
 	t.inTick.Add(1)
 
@@ -652,6 +655,12 @@ func (t *Timer) GetType() TimerType {
 // IsActive 检查定时器是否活跃
 func (t *Timer) IsActive() bool {
 	return t.isActive.Load()
+}
+
+// IsAsyncTick reports whether Tick should run in an asynchronous worker.
+// The base Timer keeps existing synchronous behavior.
+func (t *Timer) IsAsyncTick() bool {
+	return false
 }
 
 // calculateType 根据间隔计算定时器类型

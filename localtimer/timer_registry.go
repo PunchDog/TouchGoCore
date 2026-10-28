@@ -64,6 +64,7 @@ type timerRuntime struct {
 	closeOnce sync.Once
 	tickWG    sync.WaitGroup
 	ctx       context.Context
+	asyncPool *asyncTickPool
 
 	// degraded：本轮生命周期里有分片消费协程 panic 退出（S68）。置位后其余分片
 	// 照常消费，但健康检查报告「未运行」——半死不活的状态不该对外报正常。
@@ -72,7 +73,482 @@ type timerRuntime struct {
 
 // shutdown 关闭本轮生命周期，幂等且并发安全
 func (rt *timerRuntime) shutdown() {
-	rt.closeOnce.Do(func() { close(rt.closech) })
+	rt.closeOnce.Do(func() {
+		if rt.asyncPool != nil {
+			rt.asyncPool.stopAccepting()
+		}
+		close(rt.closech)
+	})
+}
+
+type asyncTimerKey struct {
+	parent *Timer
+	epoch  uint64
+}
+
+type asyncTickJob struct {
+	task      timerTask
+	shard     int
+	flightKey asyncTimerKey
+}
+
+type asyncTickCompletion struct {
+	pool          *asyncTickPool
+	job           asyncTickJob
+	parent        *Timer
+	flightKey     asyncTimerKey
+	releaseFlight func()
+	ran           bool
+	ack           chan struct{}
+}
+
+type asyncTickWorker struct {
+	id    uint64
+	queue []asyncTickJob
+}
+
+// asyncTickPool owns a bounded number of worker goroutines and an unbounded FIFO
+// queue per worker. All worker registration and queue mutations use mu.
+type asyncTickPool struct {
+	mu       sync.Mutex
+	limit    int
+	stopped  bool
+	nextID   uint64
+	round    int
+	workers  []*asyncTickWorker
+	busy     map[asyncTimerKey]bool
+	deferred map[asyncTimerKey][]asyncTickJob
+	pending  []int
+	results  []chan asyncTickCompletion
+	progress []chan struct{}
+	workerWG sync.WaitGroup
+}
+
+// AsyncWorkerStats is a snapshot of the asynchronous Tick worker pool.
+type AsyncWorkerStats struct {
+	Limit    int // configured maximum worker count
+	Workers  int // currently registered workers
+	Queued   int // tasks waiting in worker queues
+	InFlight int // async tasks accepted but not finalized by their shard
+}
+
+// DefaultAsyncWorkerLimit is the default maximum number of asynchronous Tick workers.
+const DefaultAsyncWorkerLimit = 512
+
+var configuredAsyncWorkerLimit atomic.Int64
+
+var timerFlightRegistry = struct {
+	mu      sync.Mutex
+	flights map[asyncTimerKey]*timerFlightGate
+}{flights: make(map[asyncTimerKey]*timerFlightGate)}
+
+type timerFlightGate struct {
+	token chan struct{}
+	refs  int
+}
+
+// acquireTimerFlight 阻塞取得单飞令牌。仅异步 worker 使用：它阻塞时消费者仍能
+// 处理完成事件，令牌必然会被归还。
+func acquireTimerFlight(key asyncTimerKey) func() {
+	gate := lookupOrCreateFlight(key)
+	<-gate.token
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			gate.token <- struct{}{}
+			dropFlight(key, gate)
+		})
+	}
+}
+
+// tryAcquireTimerFlight 尝试取得单飞令牌但不阻塞。消费者协程必须走这条路径：
+// 它在等待令牌时无法处理异步完成事件，而完成事件正是令牌的释放方，阻塞即死锁。
+func tryAcquireTimerFlight(key asyncTimerKey) (func(), bool) {
+	gate := lookupOrCreateFlight(key)
+	select {
+	case <-gate.token:
+		var once sync.Once
+		return func() {
+			once.Do(func() {
+				gate.token <- struct{}{}
+				dropFlight(key, gate)
+			})
+		}, true
+	default:
+		dropFlight(key, gate) // 未取到令牌：只回退登记引用，不能归还令牌
+		return nil, false
+	}
+}
+
+func lookupOrCreateFlight(key asyncTimerKey) *timerFlightGate {
+	timerFlightRegistry.mu.Lock()
+	defer timerFlightRegistry.mu.Unlock()
+	gate := timerFlightRegistry.flights[key]
+	if gate == nil {
+		gate = &timerFlightGate{token: make(chan struct{}, 1)}
+		gate.token <- struct{}{}
+		timerFlightRegistry.flights[key] = gate
+	}
+	gate.refs++
+	return gate
+}
+
+func dropFlight(key asyncTimerKey, gate *timerFlightGate) {
+	timerFlightRegistry.mu.Lock()
+	gate.refs--
+	if gate.refs == 0 && timerFlightRegistry.flights[key] == gate {
+		delete(timerFlightRegistry.flights, key)
+	}
+	timerFlightRegistry.mu.Unlock()
+}
+
+// SetAsyncWorkerLimit sets the maximum number of asynchronous Tick workers for
+// the next timer runtime. Values <= 0 restore DefaultAsyncWorkerLimit.
+func SetAsyncWorkerLimit(limit int) int {
+	if limit <= 0 {
+		limit = DefaultAsyncWorkerLimit
+	}
+	configuredAsyncWorkerLimit.Store(int64(limit))
+	return limit
+}
+
+func asyncWorkerLimit() int {
+	limit := configuredAsyncWorkerLimit.Load()
+	if limit <= 0 {
+		return DefaultAsyncWorkerLimit
+	}
+	return int(limit)
+}
+
+// GetAsyncWorkerStats returns a snapshot of the current runtime's async worker pool.
+func GetAsyncWorkerStats() AsyncWorkerStats {
+	rt := timerRT.Load()
+	if rt == nil || rt.asyncPool == nil {
+		return AsyncWorkerStats{Limit: asyncWorkerLimit()}
+	}
+	return rt.asyncPool.stats()
+}
+
+func (p *asyncTickPool) stats() AsyncWorkerStats {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	stats := AsyncWorkerStats{Limit: p.limit, Workers: len(p.workers)}
+	for _, pending := range p.pending {
+		stats.InFlight += pending
+	}
+	for _, worker := range p.workers {
+		stats.Queued += len(worker.queue)
+	}
+	for _, jobs := range p.deferred {
+		stats.Queued += len(jobs)
+	}
+	stats.InFlight -= stats.Queued
+	return stats
+}
+
+func newAsyncTickPool(limit, shards int) *asyncTickPool {
+	if limit <= 0 {
+		limit = DefaultAsyncWorkerLimit
+	}
+	if shards <= 0 {
+		shards = 1
+	}
+	pool := &asyncTickPool{
+		limit:    limit,
+		busy:     make(map[asyncTimerKey]bool),
+		deferred: make(map[asyncTimerKey][]asyncTickJob),
+		pending:  make([]int, shards),
+		results:  make([]chan asyncTickCompletion, shards),
+		progress: make([]chan struct{}, shards),
+	}
+	for i := range pool.results {
+		// Rendezvous delivery prevents a second unbounded completion queue.
+		pool.results[i] = make(chan asyncTickCompletion)
+		pool.progress[i] = make(chan struct{}, 1)
+	}
+	return pool
+}
+
+func (p *asyncTickPool) submit(job asyncTickJob) bool {
+	if p == nil || job.shard < 0 || job.shard >= len(p.results) || job.task.timer == nil {
+		return false
+	}
+	parent := safeAsyncTimerParent(job.task.timer)
+	if parent == nil {
+		return false
+	}
+	epoch := parent.poolEpoch.Load()
+	job.flightKey = asyncTimerKey{parent: parent, epoch: epoch}
+
+	p.mu.Lock()
+	if p.stopped {
+		p.mu.Unlock()
+		return false
+	}
+	p.pending[job.shard]++
+	if p.busy[job.flightKey] {
+		p.deferred[job.flightKey] = append(p.deferred[job.flightKey], job)
+		p.mu.Unlock()
+		return true
+	}
+	// Reserve this Timer incarnation before exposing the job to a worker. This
+	// closes the submit-to-beginTick window without confusing later pool reuse.
+	p.busy[job.flightKey] = true
+
+	var start *asyncTickWorker
+	if len(p.workers) < p.limit {
+		p.nextID++
+		start = &asyncTickWorker{id: p.nextID, queue: []asyncTickJob{job}}
+		p.workers = append(p.workers, start)
+		p.workerWG.Add(1)
+	} else {
+		idx := p.leastQueuedWorkerLocked()
+		if idx < 0 {
+			delete(p.busy, job.flightKey)
+			p.pending[job.shard]--
+			p.mu.Unlock()
+			return false
+		}
+		p.workers[idx].queue = append(p.workers[idx].queue, job)
+	}
+	p.mu.Unlock()
+
+	if start != nil {
+		go p.runWorker(start)
+	}
+	return true
+}
+
+func (p *asyncTickPool) leastQueuedWorkerLocked() int {
+	if len(p.workers) == 0 {
+		return -1
+	}
+	start := p.round % len(p.workers)
+	best := start
+	for i := 1; i < len(p.workers); i++ {
+		idx := (start + i) % len(p.workers)
+		if len(p.workers[idx].queue) < len(p.workers[best].queue) {
+			best = idx
+		}
+	}
+	p.round = (best + 1) % len(p.workers)
+	return best
+}
+
+func (p *asyncTickPool) nextJob(worker *asyncTickWorker) (asyncTickJob, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(worker.queue) == 0 {
+		for i, candidate := range p.workers {
+			if candidate == worker {
+				p.workers = append(p.workers[:i], p.workers[i+1:]...)
+				if p.round >= len(p.workers) {
+					p.round = 0
+				}
+				break
+			}
+		}
+		return asyncTickJob{}, false
+	}
+	job := worker.queue[0]
+	worker.queue[0] = asyncTickJob{}
+	worker.queue = worker.queue[1:]
+	switch {
+	case len(worker.queue) == 0:
+		worker.queue = nil
+	case len(worker.queue)*4 < cap(worker.queue):
+		compacted := make([]asyncTickJob, len(worker.queue))
+		copy(compacted, worker.queue)
+		worker.queue = compacted
+	}
+	return job, true
+}
+
+func (p *asyncTickPool) runWorker(worker *asyncTickWorker) {
+	defer p.workerWG.Done()
+	for {
+		job, ok := p.nextJob(worker)
+		if !ok {
+			return
+		}
+		if job.task.timer == nil {
+			p.releaseTimer(job.flightKey)
+			p.finishWithoutCompletion(job.shard)
+			continue
+		}
+		parent := safeAsyncTimerParent(job.task.timer)
+		if parent == nil || !safeTimerTaskValid(job.task) || parent.poolEpoch.Load() != job.flightKey.epoch {
+			p.releaseTimer(job.flightKey)
+			p.finishWithoutCompletion(job.shard)
+			continue
+		}
+		releaseFlight := acquireTimerFlight(job.flightKey)
+		if !safeTimerTaskValid(job.task) || !parent.beginTick(job.task.gen) {
+			releaseFlight()
+			p.releaseTimer(job.flightKey)
+			p.finishWithoutCompletion(job.shard)
+			continue
+		}
+
+		ran := false
+		if job.task.mgr != nil && !job.task.mgr.isClosed.Load() {
+			job.task.mgr.runTimerTick(job.task.timer)
+			ran = true
+		}
+		completion := asyncTickCompletion{
+			pool:          p,
+			job:           job,
+			parent:        parent,
+			flightKey:     job.flightKey,
+			releaseFlight: releaseFlight,
+			ran:           ran,
+			ack:           make(chan struct{}, 1),
+		}
+		p.results[job.shard] <- completion
+		<-completion.ack
+		p.finishWithoutCompletion(job.shard)
+	}
+}
+
+func safeAsyncTimerParent(timer TimerInterface) (parent *Timer) {
+	defer func() {
+		if recover() != nil {
+			parent = nil
+		}
+	}()
+	return timer.GetParent()
+}
+
+func safeTimerTaskValid(task timerTask) (valid bool) {
+	defer func() {
+		if recover() != nil {
+			valid = false
+		}
+	}()
+	return task.isValid()
+}
+
+// releaseTimer unblocks same-Timer jobs only after the current callback and its
+// consumer-side finalization have completed.
+func (p *asyncTickPool) releaseTimer(key asyncTimerKey) {
+	if key.parent == nil {
+		return
+	}
+	p.mu.Lock()
+	delete(p.busy, key)
+	jobs := p.deferred[key]
+	if len(jobs) == 0 {
+		delete(p.deferred, key)
+		p.mu.Unlock()
+		return
+	}
+	job := jobs[0]
+	if !safeTimerTaskValid(job.task) || key.parent.poolEpoch.Load() != key.epoch {
+		if len(jobs) == 1 {
+			delete(p.deferred, key)
+		} else {
+			p.deferred[key] = jobs[1:]
+		}
+		p.mu.Unlock()
+		p.finishWithoutCompletion(job.shard)
+		p.releaseTimer(key)
+		return
+	}
+	if len(jobs) == 1 {
+		delete(p.deferred, key)
+	} else {
+		p.deferred[key] = jobs[1:]
+	}
+	p.busy[key] = true
+
+	var start *asyncTickWorker
+	if len(p.workers) < p.limit {
+		p.nextID++
+		start = &asyncTickWorker{id: p.nextID, queue: []asyncTickJob{job}}
+		p.workers = append(p.workers, start)
+		p.workerWG.Add(1)
+	} else {
+		idx := p.leastQueuedWorkerLocked()
+		if idx < 0 {
+			delete(p.busy, key)
+			p.deferred[key] = append([]asyncTickJob{job}, p.deferred[key]...)
+			p.mu.Unlock()
+			return
+		}
+		p.workers[idx].queue = append(p.workers[idx].queue, job)
+	}
+	p.mu.Unlock()
+
+	if start != nil {
+		go p.runWorker(start)
+	}
+}
+
+func (p *asyncTickPool) finishWithoutCompletion(shard int) {
+	p.mu.Lock()
+	if shard >= 0 && shard < len(p.pending) && p.pending[shard] > 0 {
+		p.pending[shard]--
+	}
+	p.mu.Unlock()
+	if shard >= 0 && shard < len(p.progress) {
+		select {
+		case p.progress[shard] <- struct{}{}:
+		default:
+		}
+	}
+}
+
+func (p *asyncTickPool) pendingForShard(shard int) int {
+	if p == nil || shard < 0 || shard >= len(p.pending) {
+		return 0
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.pending[shard]
+}
+
+func (p *asyncTickPool) resultsForShard(shard int) <-chan asyncTickCompletion {
+	if p == nil || shard < 0 || shard >= len(p.results) {
+		return nil
+	}
+	return p.results[shard]
+}
+
+func (p *asyncTickPool) progressForShard(shard int) <-chan struct{} {
+	if p == nil || shard < 0 || shard >= len(p.progress) {
+		return nil
+	}
+	return p.progress[shard]
+}
+
+func (p *asyncTickPool) stopAccepting() {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	p.stopped = true
+	p.mu.Unlock()
+}
+
+// wait must only be called after stopAccepting, which prevents further WaitGroup.Add.
+func (p *asyncTickPool) wait(ctx context.Context) bool {
+	if p == nil {
+		return true
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	done := make(chan struct{})
+	go func() {
+		p.workerWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
 
 // TimerLostInfo 描述一个彻底失联（续期重试仍失败、已被强制回收）的定时器。

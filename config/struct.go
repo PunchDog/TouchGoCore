@@ -642,14 +642,15 @@ type LuaConfig struct {
 
 // 服务器全局配置
 type ServerConfig struct {
-	Debug        bool   `json:"debug"`        // 调试模式
-	FPS          int    `json:"fps"`          // 帧率
-	Version      string `json:"version"`      // 版本号
-	MaxMsgSize   int    `json:"max_msg_size"` // 最大消息大小
-	WriteBuffer  int    `json:"write_buffer"` // 写队列容量（消息条数，不是字节）
-	ReadBuffer   int    `json:"read_buffer"`  // 读队列容量（消息条数，不是字节；旧配置的字节值需换算）
-	Backpressure bool   `json:"backpressure"` // 是否启用背压
-	MaxProcs     int    `json:"max_procs"`    // GOMAXPROCS，<=0 时保留运行时默认值
+	Debug              bool   `json:"debug"`                // 调试模式
+	FPS                int    `json:"fps"`                  // 帧率
+	Version            string `json:"version"`              // 版本号
+	MaxMsgSize         int    `json:"max_msg_size"`         // 最大消息大小
+	WriteBuffer        int    `json:"write_buffer"`         // 写队列容量（消息条数，不是字节）
+	ReadBuffer         int    `json:"read_buffer"`          // 读队列容量（消息条数，不是字节；旧配置的字节值需换算）
+	Backpressure       bool   `json:"backpressure"`         // 是否启用背压
+	MaxProcs           int    `json:"max_procs"`            // GOMAXPROCS，<=0 时保留运行时默认值
+	MaxTimerGoroutines int    `json:"max_timer_goroutines"` // localtimer 异步 worker 最大数，<=0 时默认 512
 }
 
 // Metrics 监控配置

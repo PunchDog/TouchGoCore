@@ -103,12 +103,17 @@ Go 游戏服务框架：WebSocket、gRPC、定时器、Lua、Telegram、Gin、Re
   同一单号二次提交时 from/to/contract 必须一致。
   其余通道的同名门面仍在（`TronWithdraw` / `BscWithdraw` / `SolWithdraw` 等），但它们一律
   返回 `ErrPayoutNotWired`：接口保留是为了不破坏调用面，不代表这条链路可用。
-- NFT 资产通道：代码在 `nft` 包，四件事——查询持有 `NftHoldings`、单币详情 `NftToken`、
-  铸造 `NftMint`、转账 `NftTransfer`，外加查单 `NftQuery` 与对账 `NftReconcile`。它与数字货币资金链路刻意不耦合：
+- NFT 资产通道：代码在 `nft` 包，六个门面——查询持有 `NftHoldings`、单币详情 `NftToken`、
+  铸造 `NftMint`、转账 `NftTransfer`、查单 `NftQuery`，外加 UNKNOWN 单的唯一出路
+  `NftReconcile`（读回供应商事实，不改写 UNKNOWN，也不自动重下）。它与数字货币资金链路刻意不耦合：
   凭证登记在独立的顶层 `nft_sdks` 表（不复用 `pay_sdks`——两张表的端点逻辑名与驱动命名空间不同域，
   混用会让「换资金供应商」与「换 NFT 供应商」互相牵连），驱动走 `nft.Register`（内置 `nft_generic_md5`），
   密钥注入钩子是 `util.CallNftSDKMsg+"<段名>"`，与 `CallPaySDKMsg` 各注各的；同一供应商两边都供时凭证仍只各自注入、不落版本库。
-  通道段 `nft` 用 `{sdk, account}` 引用 `nft_sdks` 一段，`chain`（eth/bsc/tron/sol/ton）与 `network` 参与签名。
+  通道段 `nft` 的 `provider` 字段（即 `nft.provider`，形态 `{sdk, account}`）引用 `nft_sdks` 一段，
+  `chain`（eth/bsc/tron/sol/ton）与 `network` 参与签名。`nft_sdks.<段>.endpoints` 的键只有
+  `holdings/token/mint/transfer/query` 五个合法逻辑名（写错键名启动即报错），`NftReconcile` 复用 `query`、
+  不占独立端点；`<段>.accounts.<别名>` 必须带 `merchant_id`。开不开有两处真相、都得开：
+  `nft.provider` 留空即本通道不启用，`nft_sdks.<段>.enable` 不为 `"on"` 即凭证不可用。
   `token_id`、总量这类链上大整数一律十进制字符串，禁 float64。落库、额度与市场撮合（上架交易）归下游业务工程，
   本包不碰 SQL——与资金侧同一分层口径。接一家新 NFT 供应商 = 在它自己的包里 `nft.Register` + 配置改 `driver`。
 

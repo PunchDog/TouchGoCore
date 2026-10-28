@@ -1,277 +1,220 @@
-# TouchGoCore DB - MySQL 数据库模块
+# TouchGoCore DB
 
-基于 GORM 的 MySQL 数据库操作封装，提供简洁、高效的数据库访问接口。
+`db` 是 TouchGoCore 的数据库门面包：**实现全部下沉到子包，调用方只需 import `touchgocore/db`**。
+根包只放门面（类型别名 + 工厂函数）与 Redis / MongoDB 的兼容实现。
+
+| 后端 | 门面入口 | 实现位置 | 详细文档 |
+|---|---|---|---|
+| MySQL | `db.NewMySql` → `*db.Client` + 泛型 `db.Repository[T]` | `db/mysql/` | [mysql/README.md](mysql/README.md) |
+| PostgreSQL | `db.NewPostgres` → `*db.PostgresClient` + `db.PostgresRepository[T]` | `db/postgres/` | [README_POSTGRES.md](README_POSTGRES.md) |
+| MongoDB | `db.NewMongoDB` → `*db.DbOperate` | `db/`（mongo.go、mongo_crud.go、mongo_gridfs.go） | – |
+| Redis | `db.NewRedis` → `*db.Redis` | `db/`（redis.go） | – |
+| 两级缓存 | `db.NewCacheLayer` / `db.OpenCache` → `db.Cache[K, V]` | `db/cache/` | 本文件「两级缓存」一节 |
+
+MySQL 与 PostgreSQL 风格对齐（泛型 Repository、链式 Query、Tx、错误分类、可观测性插件）；
+MySQL 相关符号不加前缀，Postgres 相关符号带 `Postgres` 前缀。
 
 ## 特性
 
-- ✅ 基于 GORM ORM 框架
-- ✅ 连接池管理
-- ✅ 事务支持
-- ✅ 软删除支持
-- ✅ 关联关系支持（一对一、一对多、多对多）
-- ✅ 丰富的查询 API
-- ✅ 原生 SQL 支持
-- ✅ 批量操作优化
-- ✅ 连接池统计
+- ✅ 泛型 `Repository[T]`：类型安全的 CRUD / 分页 / 统计 / Upsert
+- ✅ 链式 `Query` 查询构建器
+- ✅ 事务封装（`Tx`：显式 `Commit` / `Rollback`）
+- ✅ 结构化错误 `*db.Error` + 14 类 `Kind` 分类与 `IsNotFound` 等断言
+- ✅ 软删除（`DeletedAt`）与硬删并存
+- ✅ 连接池复用（connectOnly：同配置多次 `NewMySql` 共享同一 socket 池）
+- ✅ 可观测性插拔（`MetricsHook`：慢查询 / 连接池水位）
+- ✅ 表不存在自动建表（默认关闭，`WithAutoMigrate(true)` 开启）
+- ✅ DSN 密码不进错误对象与日志（`redactDSN`）
 
 ## 快速开始
 
-### 1. 初始化
+### 1. 连接
 
 ```go
-import "touchgocore/db"
+import (
+    "context"
+    "time"
 
-mysqlDB, err := db.NewDbMysql(&config.MySqlDBConfig{
-    Host:          "localhost:3306",
-    Username:      "root",
-    Password:      "password",
-    DBName:        "mydb",
-    MaxIdleConns:  10,
-    MaxOpenConns:  100,
-})
+    "touchgocore/config"
+    "touchgocore/db"
+)
+
+client, err := db.NewMySql(&config.MySqlDBConfig{
+    Host:         "127.0.0.1:3306",
+    Username:     "app",
+    Password:     "secret",
+    DBName:       "mydb",
+    MaxIdleConns: 10,
+    MaxOpenConns: 100,
+},
+    db.WithSlowQueryThreshold(300*time.Millisecond),
+    db.WithMetricsHook(db.NewMetricsAdapter()),
+)
 if err != nil {
-    log.Fatal(err)
+    log.Fatalf("connect mysql: %v", err)
 }
-defer mysqlDB.Close()
+defer client.Close()
+
+ctx := context.Background()
+if err := client.Ping(ctx); err != nil {
+    log.Fatalf("mysql unhealthy: %v", err)
+}
 ```
+
+App 已接入时直接用 `app.MySQL`（`initDatabase` 在 `Cfg.MySql != nil` 时装配，并已注入 metrics hook）。
 
 ### 2. 定义模型
 
 ```go
 type User struct {
-    ID        uint           `gorm:"primaryKey"`
-    Name      string         `gorm:"size:100;not null"`
-    Email     string         `gorm:"size:100;uniqueIndex;not null"`
-    Age       int            `gorm:"default:0"`
-    Status    string         `gorm:"size:20;default:'active';index"`
-    CreatedAt time.Time      `gorm:"autoCreateTime"`
-    UpdatedAt time.Time      `gorm:"autoUpdateTime"`
-    DeletedAt gorm.DeletedAt `gorm:"index"`
+    ID        uint64           `gorm:"primaryKey;autoIncrement"`
+    Name      string           `gorm:"size:100;not null"`
+    Email     string           `gorm:"size:100;uniqueIndex;not null"`
+    Age       int              `gorm:"default:0"`
+    Status    string           `gorm:"size:20;default:'active';index"`
+    CreatedAt time.Time        `gorm:"autoCreateTime"`
+    UpdatedAt time.Time        `gorm:"autoUpdateTime"`
+    DeletedAt gorm.DeletedAt   `gorm:"index"` // 启用软删除
 }
+
+func (User) TableName() string { return "t_user" }
 ```
 
-### 3. 自动迁移
+更多模型示例见 `mysql/models_example.go`（User / Order / Product / Category / Profile / Tag /
+Comment / Permission·Role 等）。
+
+### 3. 建表
 
 ```go
-err := mysqlDB.AutoMigrate(&User{}, &Order{}, &Product{})
+repo := db.NewRepository[User](client)
+
+// 显式建表（推荐，生产环境走这一条）
+if err := repo.AutoMigrate(ctx); err != nil {
+    log.Fatal(err)
+}
+
+// 或建表期开关（默认关闭，生产慎用，见 mysql/README.md §16）：
+// client, _ = db.NewMySql(cfg, db.WithAutoMigrate(true))
+// 效果：表不存在时自动 AutoMigrate 并重试一次，之后该 Repository 实例内不再检测。
 ```
 
 ### 4. 基本操作
 
 ```go
 // 创建
-user := User{Name: "John", Email: "john@example.com"}
-mysqlDB.Create(&user)
+user := &User{Name: "John", Email: "john@example.com", Age: 20}
+if err := repo.Create(ctx, user); err != nil {
+    log.Fatal(err)
+}
 
-// 查询
-var user User
-mysqlDB.First(&user, 1)
+// 按主键查询
+got, err := repo.FindByID(ctx, user.ID)
 
-// 更新
-mysqlDB.Update(&User{ID: 1, Name: "NewName"})
-
-// 删除
-mysqlDB.Delete(&User{}, 1)
-```
-
-## 文件说明
-
-- **mysql.go** - 核心数据库操作封装
-- **models_example.go** - 模型定义示例（包含15+常用模型）
-- **map.go** - 连接池管理
-- **GORM_GUIDE.md** - 详细使用指南
-- **README.md** - 本文件
-
-## 核心 API
-
-### 基础 CRUD
-
-```go
-// 创建
-Create(value interface{}) error
-BatchCreate(values interface{}) error
-
-// 查询
-Find(dest interface{}, conds ...interface{}) error
-First(dest interface{}, conds ...interface{}) error
-Take(dest interface{}, conds ...interface{}) error
-Last(dest interface{}, conds ...interface{}) error
-
-// 更新
-Updates(values interface{}) error
-Update(column string, value interface{}) error
-UpdateWithConditions(model, whereClause, args, updates) error
-
-// 删除
-Delete(value interface{}, conds ...interface{}) error
-DeleteWithConditions(model, whereClause, args) error
-```
-
-### 聚合查询
-
-```go
-Count(model, whereClause, args...) (int64, error)
-Exists(model, whereClause, args...) (bool, error)
-Sum(model, column, whereClause, args...) (float64, error)
-Avg(model, column, whereClause, args...) (float64, error)
-Max(model, column, whereClause, args...) (interface{}, error)
-Min(model, column, whereClause, args...) (interface{}, error)
-```
-
-### 高级功能
-
-```go
-// 分页
-Paginate(model, page, pageSize, whereClause, args, order, dest) (int64, error)
-
-// 事务
-Transaction(fn func(tx *gorm.DB) error) error
-Begin() *gorm.DB
-Commit(tx *gorm.DB) error
-Rollback(tx *gorm.DB) error
-
-// 批量操作
-BatchUpdate(model, whereClause, args, updates) (int64, error)
-BatchDelete(model, whereClause, args) (int64, error)
-
-// Upsert
-Upsert(model, conflictColumns...) error
-
-// 原生 SQL
-RawQuery(sql, args, dest) error
-Exec(sql, args...) error
-
-// 其他
-AutoMigrate(models...)
-GetDB() *gorm.DB
-SetLoggerLevel(level)
-GetStats() (maxOpen, open, inUse, waitCount, waitDuration, idle int)
-```
-
-### 链式查询
-
-```go
-Where(query, args...) *gorm.DB
-Order(value) *gorm.DB
-Limit(limit int) *gorm.DB
-Offset(offset int) *gorm.DB
-Group(name string) *gorm.DB
-Having(query, args...) *gorm.DB
-Select(query, args...) *gorm.DB
-Distinct(args...) *gorm.DB
-Joins(query, args...) *gorm.DB
-Preload(query, args...) *gorm.DB
-Scopes(funcs...) *gorm.DB
-Model(value) *gorm.DB
-Table(name, args...) *gorm.DB
-```
-
-## 使用示例
-
-### 查询示例
-
-```go
-// 基础查询
-var users []User
-mysqlDB.Find(&users)
+// 局部字段更新
+if err := repo.UpdateFields(ctx, user.ID, map[string]any{"age": 21}); err != nil {
+    log.Fatal(err)
+}
 
 // 条件查询
-mysqlDB.Where("age > ?", 18).Where("status = ?", "active").Find(&users)
+rows, err := repo.FindAll(ctx, db.NewQuery().Eq("status", "active").OrderDesc("id").Limit(20))
 
-// 排序分页
-total, err := mysqlDB.Paginate(&User{}, 1, 20,
-    "age > ?", []interface{}{18},
-    "created_at DESC", &users)
+// 分页（items, total, err）
+items, total, err := repo.Page(ctx, db.NewQuery().Gte("age", 18), 1, 20)
 
-// 原生 SQL
-var results []map[string]interface{}
-mysqlDB.RawQuery("SELECT * FROM users WHERE age > ?", 18, &results)
+// 统计 / 存在性
+n, _ := repo.Count(ctx, db.NewQuery().Eq("status", "active"))
+exists, _ := repo.Exists(ctx, db.NewQuery().Eq("email", "john@example.com"))
+
+// 删除（模型带 DeletedAt 即软删；DeleteHard 恒为物理删除）
+_ = repo.Delete(ctx, user.ID)
+_ = repo.DeleteHard(ctx, user.ID)
 ```
 
-### 关联查询
+### 5. 事务
 
 ```go
-// 预加载关联
-var user User
-mysqlDB.Preload("Orders").Preload("Profile").First(&user, 1)
+import "database/sql"
 
-// 嵌套预加载
-mysqlDB.Preload("Orders.Items").First(&user)
-
-// 带条件的预加载
-mysqlDB.Preload("Orders", "status = ?", "paid").First(&user)
-```
-
-### 事务示例
-
-```go
-// 自动事务
-err := mysqlDB.Transaction(func(tx *gorm.DB) error {
-    if err := tx.Create(&order).Error; err != nil {
-        return err
+tx, err := client.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead})
+if err != nil {
+    return err
+}
+committed := false
+defer func() {
+    if !committed {
+        _ = tx.Rollback()
     }
-    return tx.Model(&product).Update("stock", gorm.Expr("stock - ?", order.Quantity)).Error
+}()
+
+userRepo := db.NewTxRepository[User](tx)
+if err := userRepo.UpdateFields(ctx, 1, map[string]any{"balance": 100}); err != nil {
+    return err
+}
+if err := tx.Commit(); err != nil {
+    return err
+}
+committed = true
+return nil
+```
+
+### 6. 原生 SQL 与逃生舱
+
+```go
+// Raw：拿到绑定 ctx 的 *gorm.DB，可自由组装（含 Unscoped / Debug / 自定义 clause）
+var users []User
+err := client.Raw(ctx, func(gtx *gorm.DB) error {
+    return gtx.Select("id", "name", "email").Limit(100).Find(&users).Error
 })
 
-// 手动事务
-tx := mysqlDB.Begin()
-tx.Create(&order)
-tx.Create(&payment)
-if err := tx.Commit().Error; err != nil {
-    tx.Rollback()
-}
+// Engine：直接拿底层 *gorm.DB（客户端已关闭时为 nil，调用方判空）
+_ = client.Engine()
 ```
 
-### 批量操作
+## API 索引
+
+| 类型 / 函数 | 说明 |
+|---|---|
+| `db.NewMySql(cfg, opts...) (*Client, error)` | 连接（同配置复用连接池） |
+| `db.NewRepository[T](c *Client)` | 泛型 CRUD 引擎（方法上不能声明类型参数，故走包级函数） |
+| `db.NewRepositoryWithContext[T](c, ctx)` / `db.NewSessionRepository[T](s)` / `db.NewTxRepository[T](t)` | 绑定 ctx / 会话 / 事务的构造入口 |
+| `db.NewQuery()` | 链式查询构建器 |
+| `db.NewMetricsAdapter()` | 连接池水位上报到 `metrics.DB` |
+| `Client` | `Close` / `Ping(ctx)` / `Stats()` / `Config()` / `Engine()` / `WithContext(ctx)` / `BeginTx(ctx, opts...)` / `Raw(ctx, fn)` / `Repository()` |
+| `Repository[T]` | `Create` / `CreateBatch` / `FindByID` / `FindOne` / `FindAll` / `Page` / `Count` / `Exists` / `Update` / `UpdateFields` / `Upsert` / `UpsertBatch` / `Delete` / `DeleteHard` / `AutoMigrate`（全部带 ctx） |
+| `Tx` / `Session` | `Commit` / `Rollback` / `WithContext` / `Repository` |
+| 断言 | `db.IsNotFound` / `IsDuplicate` / `IsTimeout` / `IsCanceled` / `IsDeadlock` / `IsTableNotExist` |
+| Option | `WithSlowQueryThreshold` / `WithMetricsHook` / `WithConnMaxLifetime` / `WithDSNParam` / `WithCharset` / `WithAutoMigrate` |
+
+完整方法表、Query 语义（**`Where` 会覆盖前一个条件**）、错误分类对照、可观测性、
+connectOnly 复用规则与 FAQ 见 [mysql/README.md](mysql/README.md)。
+
+## 错误处理
 
 ```go
-// 批量插入
-users := []User{{Name: "John"}, {Name: "Jane"}}
-mysqlDB.BatchCreate(users)
+if db.IsNotFound(err) { /* 资源不存在 */ }
+if db.IsDuplicate(err) { /* 唯一键冲突（MySQL 1062） */ }
+if db.IsTimeout(err)   { /* ctx 超时 */ }
+if db.IsCanceled(err)  { /* ctx 取消 */ }
+if db.IsDeadlock(err)  { /* 死锁（MySQL 1213），可重试 */ }
 
-// 批量更新
-count, _ := mysqlDB.BatchUpdate(&User{},
-    "status = ?", []interface{}{"active"},
-    map[string]interface{}{"updated_at": time.Now()})
-
-// 批量删除
-count, _ := mysqlDB.BatchDelete(&User{},
-    "age < ?", []interface{}{18})
+if e, ok := err.(*db.Error); ok {
+    log.Printf("op=%s kind=%s dur=%s sql=%s err=%v",
+        e.Op, e.Kind, e.Duration, e.SQL, e.Err) // SQL 已脱敏
+}
 ```
-
-## 模型示例
-
-详见 `models_example.go`，包含以下模型：
-
-- **User** - 用户模型（基础）
-- **Order** - 订单模型
-- **Product** - 商品模型
-- **Category** - 分类模型（树形结构）
-- **Profile** - 用户资料（一对一）
-- **OrderItem** - 订单项（一对多）
-- **Tag** - 标签（多对多）
-- **Log** - 日志模型
-- **Setting** - 配置模型
-- **Article** - 文章模型
-- **Session** - 会话模型
-- **Payment** - 支付模型
-- **Notification** - 通知模型
-- **Comment** - 评论模型（树形结构）
-- **Attachment** - 附件模型
-- **Permission/Role** - 权限角色模型（RBAC）
 
 ## GORM 标签说明
 
 ### 常用标签
 
 ```go
-ID        uint  `gorm:"primaryKey"`        // 主键
-Name      string `gorm:"size:100;not null"` // 长度+非空
-Email     string `gorm:"uniqueIndex"`     // 唯一索引
-Status    string `gorm:"index"`            // 普通索引
-CreatedAt time.Time `gorm:"autoCreateTime"` // 自动创建时间
-UpdatedAt time.Time `gorm:"autoUpdateTime"` // 自动更新时间
-DeletedAt gorm.DeletedAt `gorm:"index"`   // 软删除
+ID        uint64           `gorm:"primaryKey;autoIncrement"` // 主键
+Name      string           `gorm:"size:100;not null"`        // 长度 + 非空
+Email     string           `gorm:"uniqueIndex"`              // 唯一索引
+Status    string           `gorm:"index"`                    // 普通索引
+CreatedAt time.Time        `gorm:"autoCreateTime"`           // 自动创建时间
+UpdatedAt time.Time        `gorm:"autoUpdateTime"`           // 自动更新时间
+DeletedAt gorm.DeletedAt   `gorm:"index"`                    // 软删除
 ```
 
 ### 关系标签
@@ -284,107 +227,77 @@ Profile Profile `gorm:"foreignKey:UserID"`
 Orders []Order `gorm:"foreignKey:UserID"`
 
 // 多对多
-Tags []Tag `gorm:"many2many:product_tags;"`
+Tags []Tag `gorm:"many2many:product_tags"`
 
 // 自关联（树形）
 Children []Category `gorm:"foreignKey:ParentID"`
 ```
 
+关联预加载（`Preload`）不在 `Repository[T]` 的链式 API 内，走 `client.Raw`：
+
+```go
+var user User
+err := client.Raw(ctx, func(gtx *gorm.DB) error {
+    return gtx.Preload("Orders").Preload("Orders.Items").Preload("Profile").First(&user, 1).Error
+})
+```
+
 ## 最佳实践
 
-1. **使用预加载避免 N+1 查询**
+1. **先判类型错误再重试**：死锁 / 锁等待可重试，唯一键冲突不可重试。
    ```go
-   mysqlDB.Preload("Orders").First(&user)  // ✅
-   // 而不是循环查询  // ❌
+   if db.IsDeadlock(err) { /* 重试 */ }
+   if db.IsDuplicate(err) { /* 幂等处理，不要重试 */ }
    ```
-
-2. **使用事务保证数据一致性**
+2. **事务包住跨表写**，用 `NewTxRepository[T]` 拿到同一事务里的 Repository。
+3. **局部更新用 `UpdateFields`**，避免全行 `Save` 覆盖并发写入的字段。
    ```go
-   mysqlDB.Transaction(func(tx *gorm.DB) error {
-       tx.Create(&order)
-       tx.Model(&product).Update("stock", gorm.Expr("stock - ?", qty))
-   })  // ✅
+   repo.UpdateFields(ctx, id, map[string]any{"status": "active"}) // ✅
    ```
-
-3. **添加索引优化查询**
-   ```go
-   Email string `gorm:"uniqueIndex"`  // ✅
-   Status string `gorm:"index"`       // ✅
-   ```
-
-4. **使用模型而非 map[string]interface{}**
-   ```go
-   user := User{ID: 1, Name: "NewName"}  // ✅ 类型安全
-   updates := map[string]interface{}{"name": "NewName"}  // ❌ 不推荐
-   ```
-
-5. **合理配置连接池**
-   ```go
-   MaxIdleConns: 10   // 根据实际负载调整
-   MaxOpenConns: 100  // 根据实际负载调整
-   ```
-
-更多最佳实践请参考 [GORM_GUIDE.md](./GORM_GUIDE.md)
+4. **加索引**：唯一列 `uniqueIndex`，过滤列 `index`。
+5. **只取需要的列**（`Select`）并限制结果集（`Limit` / `Page`）。
+6. **合理配置连接池**：`MaxIdleConns` / `MaxOpenConns` 按实际并发调整。
+7. **凭证不进版本库**：DSN 密码在错误对象与日志里会被脱敏，但仍不要打日志。
 
 ## 性能优化
 
-### 1. 使用索引
-
 ```go
+// 1. 索引
 type User struct {
-    Email  string `gorm:"uniqueIndex"`  // 唯一索引
-    Status string `gorm:"index"`        // 普通索引
-    Age    int    `gorm:"index"`        // 普通索引
+    Email  string `gorm:"uniqueIndex"`
+    Status string `gorm:"index"`
+    Age    int    `gorm:"index"`
 }
-```
 
-### 2. 批量操作
+// 2. 批量写入（比循环单条快很多）
+_ = repo.CreateBatch(ctx, users)
+_ = repo.UpsertBatch(ctx, users, []string{"email"})
 
-```go
-// 批量插入（比循环插入快很多）
-mysqlDB.BatchCreate(users)
-
-// 批量更新
-mysqlDB.BatchUpdate(&User{}, "status = ?", []interface{}{"active"}, updates)
-```
-
-### 3. 预加载关联
-
-```go
-// 一次性加载，避免 N+1
-mysqlDB.Preload("Orders").Preload("Profile").First(&user)
-```
-
-### 4. 只查询需要的字段
-
-```go
-mysqlDB.Select("id, name, email").Find(&users)
-```
-
-### 5. 使用 LIMIT 限制结果集
-
-```go
-mysqlDB.Limit(100).Find(&users)
+// 3. 只查需要的列 + 限制条数
+q := db.NewQuery().Select("id", "name", "email").OrderDesc("id").Limit(100)
 ```
 
 ## 常见问题
 
-### Q: 如何查看生成的 SQL？
+### Q: 如何看到生成的 SQL？
 
 ```go
-// 开启日志
-mysqlDB.SetLoggerLevel(logger.Info)
+// 单次语句开 Debug
+err := client.Raw(ctx, func(gtx *gorm.DB) error {
+    return gtx.Debug().Find(&users).Error
+})
 
-// 或直接使用 GORM
-db := mysqlDB.GetDB()
-db = db.Debug()
+// 全局日志级别走子包 Option（未通过 db 门面暴露）：
+// import mysqldb "touchgocore/db/mysql"
+// c, _ := mysqldb.NewClient(cfg, mysqldb.WithLoggerLevel(logger.Info))
 ```
 
-### Q: 如何获取连接池统计信息？
+### Q: 如何获取连接池统计？
 
 ```go
-maxOpen, open, inUse, waitCount, waitDuration, idle := mysqlDB.GetStats()
-fmt.Printf("Open: %d/%d, In Use: %d, Idle: %d\n", open, maxOpen, inUse, idle)
+st, err := client.Stats() // sql.DBStats
+fmt.Printf("open=%d/%d idle=%d in_use=%d waiting=%d\n",
+    st.OpenConnections, st.MaxOpenConnections, st.Idle, st.InUse, st.WaitCount)
 ```
 
 ### Q: 如何处理事务超时？
@@ -393,46 +306,71 @@ fmt.Printf("Open: %d/%d, In Use: %d, Idle: %d\n", open, maxOpen, inUse, idle)
 ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 defer cancel()
 
-db := mysqlDB.GetDB().WithContext(ctx)
-err := db.Transaction(func(tx *gorm.DB) error {
-    // ...
-})
+tx, err := client.BeginTx(ctx) // 超时后 ctx 取消，操作直接报错
 ```
 
-### Q: 如何实现软删除？
+### Q: 如何实现 / 绕过软删除？
 
 ```go
 type User struct {
-    ID        uint           `gorm:"primaryKey"`
-    DeletedAt gorm.DeletedAt `gorm:"index"`
+    ID        uint64           `gorm:"primaryKey"`
+    DeletedAt gorm.DeletedAt   `gorm:"index"`
 }
 
-// 软删除
-mysqlDB.Delete(&User{}, 1)
+_ = repo.Delete(ctx, 1) // 软删（写 deleted_at）
 
-// 查询已删除的记录
-mysqlDB.GetDB().Unscoped().Find(&users)
+var deleted []User
+_ = client.Raw(ctx, func(gtx *gorm.DB) error {
+    return gtx.Unscoped().Find(&deleted).Error // 查已删除记录
+})
 
-// 永久删除
-mysqlDB.GetDB().Unscoped().Delete(&User{}, 1)
+_ = repo.DeleteHard(ctx, 1) // 物理删除
 ```
+
+### Q: 同配置多次 `NewMySql` 会重复拨号吗？
+
+不会。按 `host-dbname-user-sha256(password)[:8]` 复用同一 socket 池，详见 mysql/README.md §15。
+
+## 文件说明
+
+| 文件 / 目录 | 职责 |
+|---|---|
+| `mysql_api.go` | MySQL 门面：类型别名 + 工厂 + Option + 错误断言 |
+| `postgres_api.go` | PostgreSQL 门面（`Postgres` 前缀） |
+| `cache_api.go` | 两级缓存门面：类型别名 + 回源/落库适配器 + post-commit 事务边界 |
+| `cache_mongo_adapter.go` | MongoDB 缓存适配器（依赖 `DbOperate`） |
+| `redis.go` | Redis 客户端封装 |
+| `mongo.go` / `mongo_crud.go` / `mongo_gridfs.go` | MongoDB 客户端、CRUD、GridFS |
+| `mysql/` | MySQL 实现（client / repository / query / tx / errors / observability） |
+| `mysql/models_example.go` | 模型定义示例（User / Order / Product / Category / Profile / Tag / Comment / RBAC 等） |
+| `postgres/` | PostgreSQL 实现（与 mysql 同构，另带 JSONB 等类型） |
+| `cache/` | 两级缓存框架（读线 / 写线 / 脏账本 / 分布式锁） |
+| `dbmap/` | 连接注册表（mysql / postgres / redis / mongo 共享） |
+| `README.md` | 本文件 |
+| `README_POSTGRES.md` | PostgreSQL 与缓存集成指南 |
+| `mysql/README.md` | MySQL 完整使用文档 |
 
 ## 依赖
 
 ```go
 require (
-    gorm.io/gorm v1.31.1
+    gorm.io/gorm v1.31.2
     gorm.io/driver/mysql v1.6.0
+    gorm.io/driver/postgres v1.6.3
+    github.com/go-sql-driver/mysql v1.9.3
+    github.com/jackc/pgx/v5 v5.10.0
+    github.com/redis/go-redis/v9 v9.7.3
 )
 ```
 
 ## 相关文档
 
+- [MySQL 完整文档](mysql/README.md)
+- [PostgreSQL 与缓存集成](README_POSTGRES.md)
+- [模型示例](mysql/models_example.go)
 - [GORM 官方文档](https://gorm.io/docs/)
 - [GORM 中文文档](https://gorm.io/zh_CN/docs/)
 - [MySQL 官方文档](https://dev.mysql.com/doc/)
-- [GORM_GUIDE.md](./GORM_GUIDE.md) - 详细使用指南
-- [models_example.go](./models_example.go) - 模型示例
 
 ## 两级缓存（Redis + MySQL/Mongo）
 
@@ -493,10 +431,14 @@ Remove/WriteDelete：同步 DEL → 缓冲 tombstone，等落库删除
 ### 用法示例
 
 ```go
-// 从配置构造（App 内），或独立 NewCache[K,V](name, app.Redis, opts...)
+// WithLoader / WithSaver 等构造选项是泛型函数，门面无法别名转发，
+// 需直接引入子包：import cachepkg "touchgocore/db/cache"
+
+// App 已接入时 app.Cache 由 initDatabase 装配（cache 段未配置/未启用时为 nil，此时无法注册类型）；
+// 也可不依赖 Layer 独立构造：db.NewCache[K, V](name, app.Redis, opts...)
 c, err := db.OpenCache[string, User](app.Cache, "user",
-    db.WithLoader[string, User](db.NewMysqlCacheSource[User, string](userRepo, func(k string) any { return k })),
-    db.WithSaver[string, User](db.NewMysqlCacheBatchSink[User, string](userRepo, func(k string) any { return k }, "id")),
+    cachepkg.WithLoader[string, User](db.NewMysqlCacheSource[User, string](userRepo, func(k string) any { return k })),
+    cachepkg.WithSaver[string, User](db.NewMysqlCacheBatchSink[User, string](userRepo, func(k string) any { return k }, "id")),
 )
 u, err := c.GetOrLoad(ctx, "u:1001") // 拿到的是 Redis 读回的值
 err = c.Write(ctx, "u:1001", &u)     // 同步写 Redis 成功即返回，稍后批量落库

@@ -34,7 +34,8 @@ func gatherTimerFamilies(t *testing.T) map[string]*dto.MetricFamily {
 	}
 	out := make(map[string]*dto.MetricFamily)
 	for _, mf := range mfs {
-		if strings.HasPrefix(mf.GetName(), "touchgocore_timer_") {
+		if strings.HasPrefix(mf.GetName(), "touchgocore_timer_") ||
+			strings.HasPrefix(mf.GetName(), "touchgocore_async_timer_") {
 			out[mf.GetName()] = mf
 		}
 	}
@@ -183,6 +184,18 @@ func TestTimerBacklogMetricsExposed(t *testing.T) {
 			t.Fatalf("✘ 缺少指标 %s", name)
 		} else if v < 0 {
 			t.Fatalf("✘ %s 出现负值: %v", name, v)
+		}
+	}
+	asyncWorkers := localtimer.GetAsyncWorkerStats()
+	asyncMetrics := map[string]float64{
+		"touchgocore_async_timer_worker_limit": float64(asyncWorkers.Limit),
+		"touchgocore_async_timer_worker_count": float64(asyncWorkers.Workers),
+		"touchgocore_async_timer_queue_depth":  float64(asyncWorkers.Queued),
+		"touchgocore_async_timer_in_flight":    float64(asyncWorkers.InFlight),
+	}
+	for name, want := range asyncMetrics {
+		if got, ok := seriesValue(fams[name], "", ""); !ok || got != want {
+			t.Fatalf("✘ async worker metric %s = %v (present=%t), want %v", name, got, ok, want)
 		}
 	}
 

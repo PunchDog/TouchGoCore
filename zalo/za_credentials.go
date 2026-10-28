@@ -24,6 +24,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -32,6 +33,7 @@ import (
 
 	"github.com/amrakk/zcago"
 	zcagoconfig "github.com/amrakk/zcago/config"
+	zcagoerrs "github.com/amrakk/zcago/errs"
 	"github.com/amrakk/zcago/session"
 )
 
@@ -66,6 +68,49 @@ func zaSafeWrap(msg string, err error) error {
 		return nil
 	}
 	return &zaSafeError{msg: msg, err: err}
+}
+
+// zaSafeReason 从上游错误里取一段**可安全回显**的原因，供「失败要回前端」的场景用。
+//
+// 只认两类：
+//   - Zalo API 错误（zcago errs.ZaloAPIError）：自带错误码与服务端消息，消息本身是
+//     Zalo 的短状态说明（如「Đăng nhập thất bại」），不含凭据；
+//   - 本包传输层兜底造的 599（zaFallbackTransport）：文案已去掉 URL 与参数。
+//
+// 其余错误（JSON 解析、加密失败等）可能带响应体，一律不给 —— 宁可少给信息，
+// 也不能把会话材料顺进前端文案。
+func zaSafeReason(err error) string {
+	if err == nil {
+		return ""
+	}
+	var apiErr zcagoerrs.ZaloAPIError
+	if !errors.As(err, &apiErr) {
+		return ""
+	}
+	msg := strings.TrimSpace(apiErr.Message)
+	msg = strings.ReplaceAll(msg, "\r", " ")
+	msg = strings.ReplaceAll(msg, "\n", " ")
+	if len(msg) > 120 {
+		msg = msg[:120]
+	}
+	if apiErr.Code != nil {
+		if msg == "" {
+			return fmt.Sprintf("code=%d", *apiErr.Code)
+		}
+		return fmt.Sprintf("code=%d %s", *apiErr.Code, msg)
+	}
+	return msg
+}
+
+// zaFetchError 组装「拉取类」失败的安全文案：有可回显原因就带上原因。
+func zaFetchError(msg string, err error) error {
+	if err == nil {
+		return nil
+	}
+	if reason := zaSafeReason(err); reason != "" {
+		return zaSafeWrap(msg+"："+reason, err)
+	}
+	return zaSafeWrap(msg, err)
 }
 
 // parseZACredentials 解析导入的凭证字节，支持四种输入：

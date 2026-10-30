@@ -262,6 +262,17 @@ func (c *RpcClient) SendMsg(protocol1, protocol2 int32, pb proto.Message, callfu
 		}
 	case <-waitCtx.Done():
 		vars.Error("RPC客户端等待响应超时[%s] 协议:%d:%d request_id=%d", c.fullAddr, protocol1, protocol2, reqID)
+		// 超时后作废流（与 SendMsgCtx 同因同治）。
+		//
+		// 不作废的后果（2026-10-28 实测）：服务端 handler 超时后仍会把回包写进
+		// 同一条流，而该 request_id 已从 pending 删除 —— 回包被丢弃、流进入半死
+		// 状态，**此后所有调用都等满超时且拿不到响应**，直到进程重启。
+		//
+		// 这里只作废流、不改回调语义：调用方本来也收不到响应（SendMsg 无返回），
+		// 行为与修复前一致，只是下次调用会重建流而不是继续等死。
+		if c.invalidateStream(stream) {
+			vars.Warning("RPC客户端流已作废[%s] 协议:%d:%d（超时后重建）", c.fullAddr, protocol1, protocol2)
+		}
 		return
 	}
 	if isErrorPacket(recv) {
@@ -272,6 +283,105 @@ func (c *RpcClient) SendMsg(protocol1, protocol2 int32, pb proto.Message, callfu
 		return
 	}
 	c.dispatchRecv(protocol1, protocol2, recv, callfunc)
+}
+
+// ---- SendMsgCtx：SendMsg 的同步版 ------------------------------------------
+
+// 客户端侧失败分类。调用方按需 errors.Is 判定，不必解析文案。
+var (
+	ErrClientClosed = errors.New("rpc: 客户端已关闭")
+	ErrNotConnected = errors.New("rpc: 连接未就绪")
+	ErrStreamBroken = errors.New("rpc: 连接断开")
+	ErrWaitTimeout  = errors.New("rpc: 等待响应超时")
+	ErrServerFail   = errors.New("rpc: 服务端处理失败")
+)
+
+// SendMsgCtx 与 SendMsg 的唯一区别是**错误传播**。
+//
+// 背景（2026-10-28 实测）：SendMsg 在服务端返回错误帧时只打一条日志就 return，
+// 不回调 callfunc —— 调用方唯一能感知失败的方式是自己超时。实测服务端 12s 判定
+// 失败，客户端挂到 25s 才把失败传到 HTTP 层。
+//
+// 为什么不直接改 SendMsg：它是资金链路的发送入口。在错误分支回调 callfunc(nil)
+// 会让所有没判空的调用方 panic；保持静默则语义永远如此。所以新增本方法，
+// **SendMsg 的行为一字不动**，需要明确错误的新代码（如 moduleclient）用这个。
+//
+// ctx 语义：ctx 取消 → 返回 ctx.Err()；c.timeout 先到 → ErrWaitTimeout。
+// 两者取较早者。
+func (c *RpcClient) SendMsgCtx(ctx context.Context, protocol1, protocol2 int32, pb proto.Message, callfunc func(pb1 proto.Message)) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if c.closed.Load() {
+		return fmt.Errorf("%w[%s] 协议:%d:%d", ErrClientClosed, c.fullAddr, protocol1, protocol2)
+	}
+	conn := c.conn.Load()
+	if conn == nil {
+		c.markDisconnected()
+		return fmt.Errorf("%w[%s] 协议:%d:%d", ErrNotConnected, c.fullAddr, protocol1, protocol2)
+	}
+
+	waitCtx, cancelWait := context.WithTimeout(ctx, c.timeout)
+	defer cancelWait()
+
+	stream, err := c.ensureStream(conn)
+	if err != nil {
+		c.markDisconnected()
+		return fmt.Errorf("%w[%s] 协议:%d:%d: %v", ErrNotConnected, c.fullAddr, protocol1, protocol2, err)
+	}
+
+	reqID := c.nextReqID.Add(1)
+	waitCh := make(chan *message.FSMessage, 1)
+	c.pending.Store(reqID, waitCh)
+	defer c.pending.Delete(reqID)
+
+	req := util.NewFSMessageWithID(protocol1, protocol2, reqID, pb)
+	c.sendMu.Lock()
+	err = stream.Send(req)
+	c.sendMu.Unlock()
+	if err != nil {
+		if c.invalidateStream(stream) {
+			c.failAllPending()
+		}
+		c.triggerOnError(err)
+		c.markDisconnected()
+		return fmt.Errorf("%w[%s] 协议:%d:%d: %v", ErrStreamBroken, c.fullAddr, protocol1, protocol2, err)
+	}
+	c.triggerOnMessageSent(protocol1, protocol2, pb)
+
+	var recv *message.FSMessage
+	select {
+	case recv = <-waitCh:
+		if recv == nil {
+			return fmt.Errorf("%w[%s] 协议:%d:%d request_id=%d", ErrStreamBroken, c.fullAddr, protocol1, protocol2, reqID)
+		}
+	case <-waitCtx.Done():
+		// 超时后**必须作废这条流**。
+		//
+		// 2026-10-28 实测：服务端 handler 超时（12s）时，客户端在 15s 放弃，
+		// 但服务端稍后仍会把这条请求的回包写进同一条流 —— 该 request_id 已在
+		// pending 里被删，回包被丢弃；此后这条流进入半死状态，**所有后续调用
+		// 都等满超时并返回空响应**，直到进程重启。
+		//
+		// 作废流的代价是一次重连（毫秒级），收益是通道不会整体假死。
+		// 不用 failAllPending：其他并发调用应各自按自己的超时收场，不该被这条连累。
+		if c.invalidateStream(stream) {
+			vars.Warning("RPC客户端流已作废[%s] 协议:%d:%d（超时后重建）", c.fullAddr, protocol1, protocol2)
+		}
+		// 区分"调用方取消"与"自身超时"：前者返回 ctx.Err()，后者返回 ErrWaitTimeout。
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		return fmt.Errorf("%w[%s] 协议:%d:%d request_id=%d", ErrWaitTimeout, c.fullAddr, protocol1, protocol2, reqID)
+	}
+	if isErrorPacket(recv) {
+		err := fmt.Errorf("%w[%s] 协议:%d:%d request_id=%d", ErrServerFail, c.fullAddr, protocol1, protocol2, reqID)
+		vars.Error("%v", err)
+		c.triggerOnError(err)
+		return err
+	}
+	c.dispatchRecv(protocol1, protocol2, recv, callfunc)
+	return nil
 }
 
 // isErrorPacket 判断响应帧是否为服务端错误包（Cmd=ErrorCmd，Body 为空）。
@@ -382,8 +492,19 @@ func (c *RpcClient) recvLoop(stream message.Grpc_MsgClient) {
 			return
 		}
 		rid := uint64(0)
+		var evP1, evP2 int32
 		if recv.GetHead() != nil {
 			rid = recv.GetHead().GetRequestId()
+			evP1 = recv.GetHead().GetProtocol1()
+			evP2 = recv.GetHead().GetProtocol2()
+		}
+		// 事件通道：经 RegisterEventProtocol 显式声明的协议号，requestID=0 的帧
+		// 是服务端主动推（RpcServer.Send），**不能**进 pending 匹配——否则没有
+		// 在途请求时被丢弃、有在途请求时被错投成那个业务请求的响应。
+		// 未声明的协议号不受影响，继续走下面的原兼容路径。
+		if rid == 0 && IsEventProtocol(evP1, evP2) {
+			c.dispatchEvent(evP1, evP2, recv)
+			continue
 		}
 		// 反向代理请求（服务端发起，子码=3）：不当作自身 pending 响应，
 		// 起协程异步处理避免拖慢客户端自身 RPC 回包。注册回执（子码=2）仍走下方 rid 匹配。
@@ -476,6 +597,41 @@ func (c *RpcClient) resetForReuse() {
 	// 连接状态兜底：NewRpcClient 随后会按拨号结果重写，这里先归零，
 	// 避免拨号前的窗口内脏实例对外谎报「已连接」。
 	c.connStatus.Store(false)
+}
+
+// dispatchEvent 处理服务端主动推的事件帧（requestID=0 且协议号已声明为事件）。
+//
+// 与 dispatchRecv 的分工：那个处理"某请求的响应"（有 callfunc、要匹配 pending），
+// 这个处理"不属于任何请求的推送"。事件在独立协程里回调并隔离 panic：
+//   - 不能阻塞 recvLoop（否则后续所有响应都卡住）；
+//   - 不能因为一个业务 handler panic 把整条流带走。
+//
+// 不纳入 bgWG：事件是"可丢的变更通知"，纳入会让 Close 的 Wait 与事件协程的
+// Add 之间产生竞态（Add-after-Wait）。代价是极端情况下进程退出时可能少收
+// 最后几条事件——业务侧靠轮询兜底，可以接受。
+func (c *RpcClient) dispatchEvent(protocol1, protocol2 int32, recv *message.FSMessage) {
+	evt := util.ParseFSMessage(recv)
+	if evt == nil {
+		vars.Error("RPC客户端事件解析失败[%s] 协议:%d:%d", c.fullAddr, protocol1, protocol2)
+		return
+	}
+	cb := c.callbacks.Load()
+	if cb == nil || cb.OnEvent == nil {
+		vars.Warning("RPC客户端收到事件但未注册 OnEvent[%s] 协议:%d:%d，已丢弃",
+			c.fullAddr, protocol1, protocol2)
+		return
+	}
+	serverName := c.serverName
+	fullAddr := c.fullAddr
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				vars.Error("RPC客户端事件回调panic[%s] 协议:%d:%d: %v",
+					fullAddr, protocol1, protocol2, r)
+			}
+		}()
+		cb.OnEvent(serverName, protocol1, protocol2, evt)
+	}()
 }
 
 func (c *RpcClient) dispatchRecv(protocol1, protocol2 int32, recv *message.FSMessage, callfunc func(pb1 proto.Message)) {

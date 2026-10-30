@@ -46,13 +46,14 @@ type fakeSession struct {
 	// 常驻协程收到它就会从 waitUntilDown 醒来重连，正是 latch 必须在 Logout 之前的理由。
 	fireDisconnectedOnLogout bool
 
-	sendID   string // SendText 返回的消息 id；空串模拟「服务端没给 id」
-	sendErr  error
-	sendTS   time.Time // 非零时作为 SendText 返回的服务器时间戳（删框时间戳断言用确定值）
-	stateErr error
-	sent     []fakeText
-	patches  []appstate.PatchInfo
-	handler  func(any)
+	sendID     string // SendText 返回的消息 id；空串模拟「服务端没给 id」
+	sendErr    error
+	sendTS     time.Time // 非零时作为 SendText 返回的服务器时间戳（删框时间戳断言用确定值）
+	stateErr   error
+	sent       []fakeText
+	sentImages []fakeImage
+	patches    []appstate.PatchInfo
+	handler    func(any)
 	// onState：非 nil 时在 SendAppState 的锁外回调（删框用例钉「闸已释放」等时序）。
 	onState func()
 	// downAfterSends>0 时，发满该条数就把登录态按回 false（批量发信逐条自愈的用例用）。
@@ -124,6 +125,9 @@ type fakeSession struct {
 }
 
 type fakeText struct{ to, body string }
+
+// fakeImage 是 SendImage 的一条落点记录（图文混排用例断言用）。
+type fakeImage struct{ to, url, caption string }
 
 func (f *fakeSession) Login(ctx context.Context) error {
 	// kl 挂点（默认零值不进入）：一轮连接的来回耗时。睡在**锁外**——睡在锁内会把门面
@@ -245,6 +249,24 @@ func (f *fakeSession) SendText(ctx context.Context, to string, body string) (str
 	if f.downAfterSends > 0 && len(f.sent) >= f.downAfterSends {
 		f.loggedIn = false
 	}
+	return f.sendID, ts, f.sendErr
+}
+
+// SendImage 是图文分支的假件：只记录「发了哪张图、说明是什么」，不碰网络。
+//
+// 图片下载与上传都在 wa_media.go 的 waConn 里，假件这一层只对应
+// 「已经拿到可发形态之后的那一次投递」，所以这里不解码、不校验 URL。
+func (f *fakeSession) SendImage(ctx context.Context, to string, img OutboundImage) (string, time.Time, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if ctx != nil && ctx.Err() != nil {
+		return "", time.Time{}, ctx.Err()
+	}
+	ts := f.sendTS
+	if ts.IsZero() {
+		ts = time.Now()
+	}
+	f.sentImages = append(f.sentImages, fakeImage{to: to, url: img.URL, caption: img.Caption})
 	return f.sendID, ts, f.sendErr
 }
 

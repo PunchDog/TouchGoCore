@@ -16,6 +16,16 @@ type ClientCallbacks struct {
 	OnMessageSent func(clientName string, protocol1, protocol2 int32, req proto.Message)
 	// OnMessageReceived 收到响应消息时触发（protocol1, protocol2, 响应数据）
 	OnMessageReceived func(clientName string, protocol1, protocol2 int32, resp proto.Message)
+	// OnEvent 收到服务端主动推的事件时触发。
+	//
+	// 与 OnMessageReceived 的区别：那个是"某个请求的响应"（有 request_id 可匹配），
+	// 这个是"不属于任何请求的主动推送"（request_id=0）。只有经
+	// rpc.RegisterEventProtocol 声明过的协议号才会走到这里，未声明的仍按
+	// 原来的"投给任意等待者"兼容路径处理（见 events.go 头注）。
+	//
+	// 回调在独立协程中执行并隔离 panic：事件处理不能阻塞 recvLoop，
+	// 也不能因为一个 handler panic 把整条流带走。
+	OnEvent func(clientName string, protocol1, protocol2 int32, evt proto.Message)
 	// OnError 错误发生时触发
 	OnError func(clientName string, err error)
 }

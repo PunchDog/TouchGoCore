@@ -484,7 +484,8 @@ func TestDeleteChatBackfillsFromSendLedger(t *testing.T) {
 // 落点的会话 JID——单聊按库同款改写落 LID，群组原样；这样后台群发后清理不必猜 LID。
 func TestSendResultChatResolved(t *testing.T) {
 	dev := fakeDevice(t, "8613800000000@s.whatsapp.net", "android", "A")
-	cfg := &config.WhatsappSessionsConfig{AntibanEnabled: waBool(false)}
+	// SendRate 放宽：本用例要连发两条，缺省 1|1 会让第 2 条撞速率闸。
+	cfg := &config.WhatsappSessionsConfig{AntibanEnabled: waBool(false), SendRate: "1|1000"}
 	m, _, get := startFakeWA(t, cfg, nil, dev)
 	if err := m.StartClient(*dev.ID); err != nil {
 		t.Fatal(err)
@@ -884,11 +885,14 @@ func TestListSpeakableGroupsFilter(t *testing.T) {
 }
 
 // TestSendBatchAsync 异步批量发信：门面当场返回，批内逐条广播 SendResult；
-// 第一条不等待、其后每条前睡一次注入的间隔；小时闸超限的那条被拒且不触达会话，
+// 第一条不等待、其后每条前睡一次注入的间隔；速率闸超限的那条被拒且不触达会话，
 // 整批不中止；空正文/坏目标逐条带错误广播且不占闸额度。
+//
+// 本用例用 `send_rate: "1|2"`（1 分钟 2 条）压出超限：窗口与条数同源，
+// 第 3 条在同一个窗口内被拒，与「等满窗口」这条语义一起被钉住。
 func TestSendBatchAsync(t *testing.T) {
 	dev := fakeDevice(t, "8613800000000@s.whatsapp.net", "android", "A")
-	cfg := &config.WhatsappSessionsConfig{SendMaxPerHour: 2, AntibanEnabled: waBool(false)}
+	cfg := &config.WhatsappSessionsConfig{SendRate: "1|2", AntibanEnabled: waBool(false)}
 	m, _, get := startFakeWA(t, cfg, nil, dev)
 	if err := m.StartClient(*dev.ID); err != nil {
 		t.Fatal(err)
@@ -913,7 +917,7 @@ func TestSendBatchAsync(t *testing.T) {
 	if err := WhatsappSendBatchAsync(nil, "8613800000000", []OutboundMessage{
 		{To: "8613900000000", Body: "m1"},
 		{To: "12345@g.us", Body: "m2"},
-		{To: "8613910000000", Body: "m3"}, // 第 3 条撞小时闸（max=2）
+		{To: "8613910000000", Body: "m3"}, // 第 3 条撞速率闸（max=2）
 		{To: "8613920000000", Body: ""},   // 空正文：拒绝且不占闸额度
 		{To: "abc", Body: "m5"},           // 拼不出号码
 	}); err != nil {
@@ -933,7 +937,7 @@ func TestSendBatchAsync(t *testing.T) {
 	if gotSleeps != 4 {
 		t.Errorf("5 条消息之间应睡 4 次，实得 %d", gotSleeps)
 	}
-	wantErr := []string{"", "", "每小时", "消息内容为空", "没有任何数字"}
+	wantErr := []string{"", "", "发送速率上限", "消息内容为空", "没有任何数字"}
 	for i, sub := range wantErr {
 		r := gotResults[i]
 		if sub == "" && (r.Err != "" || r.MsgID != "MSG-1") {
@@ -952,7 +956,7 @@ func TestSendBatchAsync(t *testing.T) {
 	}
 
 	// 调用方 cancel / deadline 对批次的影响另立用例（TestSendBatchAsyncCtxContract），
-	// 这里不测：本用例的 cfg 把小时闸压到 2 条，额度已被上面五条吃掉。
+	// 这里不测：本用例的 cfg 把速率闸压到 2 条，额度已被上面五条吃掉。
 
 	// 空列表与未启动账号在接走之前就地拒绝（不产生广播）。
 	if err := WhatsappSendBatchAsync(nil, "8613800000000", nil); err == nil ||
@@ -972,7 +976,7 @@ func TestSendBatchAsync(t *testing.T) {
 // 退回「WithoutCancel 且不取 deadline」⇒ 第二段红（过期预算不再中止剩余条目）。
 func TestSendBatchAsyncCtxContract(t *testing.T) {
 	dev := fakeDevice(t, "8613800000000@s.whatsapp.net", "android", "A")
-	cfg := &config.WhatsappSessionsConfig{AntibanEnabled: waBool(false), SendMaxPerHour: 30}
+	cfg := &config.WhatsappSessionsConfig{AntibanEnabled: waBool(false), SendRate: "1|30"}
 	m, _, get := startFakeWA(t, cfg, nil, dev)
 	if err := m.StartClient(*dev.ID); err != nil {
 		t.Fatal(err)

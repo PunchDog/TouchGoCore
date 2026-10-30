@@ -156,7 +156,7 @@ func TestSendGroupMessageAutoClearsChat(t *testing.T) {
 // （1 个 patch）；坏目标/空正文不产生 patch，整批不中止。
 func TestSendBatchAutoClearsPerSuccess(t *testing.T) {
 	dev := fakeDevice(t, "8613800000000@s.whatsapp.net", "android", "A")
-	cfg := &config.WhatsappSessionsConfig{AntibanEnabled: waBool(false), SendMaxPerHour: 30}
+	cfg := &config.WhatsappSessionsConfig{AntibanEnabled: waBool(false), SendRate: "1|30"}
 	m, _, get := startFakeWA(t, cfg, nil, dev)
 	if err := m.StartClient(*dev.ID); err != nil {
 		t.Fatal(err)
@@ -299,7 +299,7 @@ func TestSendAutoCleanupSkipsSelfAndNonChatTargets(t *testing.T) {
 }
 
 // TestAutoCleanupRunsAfterGateUnlock 清空必须在防封闸的 gateMu 释放之后：
-// 在 SendAppState 回调里 TryLock 成功才绿。把清理挪进 waSendText 的持锁段会当场变红。
+// 在 SendAppState 回调里 TryLock 成功才绿。把清理挪进 waSendContent 的持锁段会当场变红。
 func TestAutoCleanupRunsAfterGateUnlock(t *testing.T) {
 	installFakeGate(t)
 	dev := fakeDevice(t, "8613800000000@s.whatsapp.net", "android", "A")

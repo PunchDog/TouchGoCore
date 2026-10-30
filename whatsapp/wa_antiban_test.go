@@ -90,7 +90,8 @@ func waAcct(t *testing.T) (*waManager, *fakeSession, *fakeGate) {
 	t.Helper()
 	fg := installFakeGate(t)
 	dev := fakeDevice(t, "8613800000000@s.whatsapp.net", "android", "A")
-	m, _, get := startFakeWA(t, &config.WhatsappSessionsConfig{AntibanEnabled: waBool(true)}, nil, dev)
+	// SendRate 放宽：缺省 1|1 会让「同批第 2 条」撞速率闸，这些用例要连发多条。
+	m, _, get := startFakeWA(t, &config.WhatsappSessionsConfig{AntibanEnabled: waBool(true), SendRate: "1|1000"}, nil, dev)
 	if err := m.StartClient(*dev.ID); err != nil {
 		t.Fatal(err)
 	}

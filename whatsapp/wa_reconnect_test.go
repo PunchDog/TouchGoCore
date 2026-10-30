@@ -189,6 +189,8 @@ func TestBatchHealsEveryItem(t *testing.T) {
 	// 读作 true），闸门会给首条 15 秒延迟，把这条用例的节奏整个吞掉。
 	cfg := &config.WhatsappSessionsConfig{
 		SendMinDelaySec: 1, SendMaxDelaySec: 1, AntibanEnabled: waBool(false),
+		// SendRate 放宽：本用例要连发两条，缺省 1|1 会让第 2 条撞速率闸。
+		SendRate: "1|1000",
 	}
 	_, _, get := startFakeWA(t, cfg, func(s *fakeSession) { s.downAfterSends = 1 }, dev)
 	if err := WhatsappStartClient(dev.ID.String()); err != nil {

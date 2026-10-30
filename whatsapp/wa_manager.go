@@ -695,14 +695,20 @@ func (w *waClientWrapper) markDown() {
 	}
 }
 
-// takeSendSlot 是单账号滚动一小时发送闸：窗口内已记账数 < max 才放行并记上 now。
+// takeSendSlot 是单账号滚动窗口发送闸：窗口内已记账数 < max 才放行并记上 now。
 //
-// max<=0 读作「不限」（调用方已用 Effective* 归一，正常不会走到）；
-// 拒绝时不记账，超限的那条就地失败，排队等下一小时不属于本包语义。
-func (w *waClientWrapper) takeSendSlot(now time.Time, max int) bool {
+// window 与 max 都来自配置的 `send_rate`（`分钟|条数`），默认 1 分钟 1 条。
+// 窗口做成参数而不是常量：上层分批的批间等待必须与它同源，写死会让两者漂移。
+//
+// max<=0 或 window<=0 读作「不限」（调用方已用 Effective* 归一，正常不会走到）；
+// 拒绝时不记账，超限的那条就地失败，排队等下一个窗口不属于本包语义。
+func (w *waClientWrapper) takeSendSlot(now time.Time, window time.Duration, max int) bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	cutoff := now.Add(-time.Hour)
+	if window <= 0 || max <= 0 {
+		return true
+	}
+	cutoff := now.Add(-window)
 	kept := w.sendWindow[:0]
 	for _, t := range w.sendWindow {
 		if t.After(cutoff) {

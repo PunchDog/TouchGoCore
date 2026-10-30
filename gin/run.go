@@ -285,8 +285,20 @@ func Run(ctx context.Context) error {
 		ctx = context.Background()
 	}
 	cfg := corectx.CfgFrom(ctx)
-	if cfg == nil || cfg.Web == nil || cfg.Web.HTTPPort == 0 {
-		vars.Error("web服务未开启")
+	// 三档分开：这三种"没启动"的原因完全不同，混成一条 Error 会让运维误判。
+	//   cfg==nil        → 配置根本没加载，是故障；
+	//   没有 web 段     → 纯 RPC 进程（如模块服）的正常形态，Info；
+	//   有 web 段但端口 0 → 大概率是漏配，Warning。
+	if cfg == nil {
+		vars.Error("web服务未开启：配置未加载（CfgFrom 返回 nil）")
+		return nil
+	}
+	if cfg.Web == nil {
+		vars.Info("未配置 web 段，跳过 HTTP 装配（纯 RPC 进程）")
+		return nil
+	}
+	if cfg.Web.HTTPPort == 0 {
+		vars.Warning("web 段已配置但 httpport=0，跳过 HTTP 装配")
 		return nil
 	}
 	ginServer := gin.New()

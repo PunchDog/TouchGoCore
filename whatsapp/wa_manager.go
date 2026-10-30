@@ -137,7 +137,9 @@ type waClientWrapper struct {
 
 	mu          sync.Mutex
 	lastEventAt time.Time
-	// sendWindow 是滚动一小时的发送时刻表（小时闸记账），与 lastEventAt 共用 mu。
+	// sendWindow 是滚动窗口的发送时刻表（速率闸记账），与 lastEventAt 共用 mu。
+	// 窗口长度与配额都来自 send_rate（`分钟|条数`），不是固定一小时：
+	// 只存时刻、不存窗口，判定时按当前配置现算，改配置即刻生效。
 	sendWindow []time.Time
 	// lastSends 是本账号自己的发送账：会话 JID 串 → 最近一条发往该会话的 id+时间。
 	// 删框时调用方留空 lastMsgID 就回退到这里（WhatsappDeleteChat）；只记本包
@@ -695,19 +697,76 @@ func (w *waClientWrapper) markDown() {
 	}
 }
 
-// takeSendSlot 是单账号滚动窗口发送闸：窗口内已记账数 < max 才放行并记上 now。
+// minWaSendSlotWait 是 waitSendSlot 单次等待的下限。
+//
+// 算出来的等待可能是 0（时钟抖动、并发追加把 idx 推到边界）：直接 sleep(0) 会变成
+// 忙等循环，把 CPU 烧在一个注定要等的判定上。1 秒的粒度对「每 N 分钟 M 条」的
+// 节奏完全够细，最多让一条消息晚 1 秒。
+const minWaSendSlotWait = time.Second
+
+// waSendRateOverride 是业务侧注入的生效速率，nil 表示回落到配置文件的 send_rate。
+//
+// 【为什么需要它】send_rate 有两个可能的来源：配置文件（本包自己的 cfg）和
+// 运营后台（业务侧的 sys_config）。业务侧的口径是「后台设了就用后台的」，
+// 但本包读不到 sys_config —— 于是出现一种最难查的分叉：业务侧按后台值分批、
+// 本包按文件值放行。表现为「后台明明调了、实际节奏没变」，且不报任何错。
+// 注入把它收敛成单一真源：业务侧解析出最终值后塞进来，本包只认这一个。
+//
+// 用 atomic.Pointer 而不是加锁改 cfg：waRunBatch 每个批次开头读一次，改配置
+// 与跑批次是并发关系，改 cfg 字段会踩 data race。
+var waSendRateOverride atomic.Pointer[config.WaSendRate]
+
+// SetSendRateOverride 注入当前生效的发送速率；传 nil 表示回落到配置文件。
+//
+// 调用方（业务侧）负责归一化：这里不再做「空串/非法值」判定，传进来的就是
+// 已经裁决完的结果。window 或 max 非正的语义与 takeSendSlot 一致（= 不限）。
+func SetSendRateOverride(r *config.WaSendRate) {
+	if r == nil {
+		waSendRateOverride.Store(nil)
+		return
+	}
+	v := *r
+	waSendRateOverride.Store(&v)
+}
+
+// sendRate 取本账号当前生效的速率：注入值优先，否则配置文件。
+//
+// 每个批次开头调一次即可 —— 批内不重读，一批的节奏必须自始至终一致，
+// 中途换速率会让「前几条按旧窗口记账、后几条按新窗口判定」，账本身就不自洽了。
+func (w *waClientWrapper) sendRate() config.WaSendRate {
+	if p := waSendRateOverride.Load(); p != nil {
+		return *p
+	}
+	return w.cfg.EffectiveSendRate()
+}
+
+// takeSendSlot 是单账号滚动窗口发送闸的**记账原语**：窗口内已记账数 < max 才放行并记上 now。
 //
 // window 与 max 都来自配置的 `send_rate`（`分钟|条数`），默认 1 分钟 1 条。
 // 窗口做成参数而不是常量：上层分批的批间等待必须与它同源，写死会让两者漂移。
 //
-// max<=0 或 window<=0 读作「不限」（调用方已用 Effective* 归一，正常不会走到）；
-// 拒绝时不记账，超限的那条就地失败，排队等下一个窗口不属于本包语义。
+// max<=0 或 window<=0 读作「不限」（调用方已用 Effective* 归一，正常不会走到）。
+//
+// 只负责「现在有没有空位」这一个判断，**不负责等**：需要等的调用方走 waitSendSlot。
+// 这个分工是 2026-10-30 改的 —— 在此之前它既判定又拒单，于是 1|1（窗口 60 秒、
+// 配额 1 条）下同一批的第 2 条起全部就地失败，运营看到的是「群发一直失败、
+// 单发却正常」（单条发送不走本闸）。
 func (w *waClientWrapper) takeSendSlot(now time.Time, window time.Duration, max int) bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if window <= 0 || max <= 0 {
 		return true
 	}
+	w.pruneSendWindowLocked(now, window)
+	if len(w.sendWindow) >= max {
+		return false
+	}
+	w.sendWindow = append(w.sendWindow, now)
+	return true
+}
+
+// pruneSendWindowLocked 丢掉窗口外的记账（调用方须持 w.mu）。
+func (w *waClientWrapper) pruneSendWindowLocked(now time.Time, window time.Duration) {
 	cutoff := now.Add(-window)
 	kept := w.sendWindow[:0]
 	for _, t := range w.sendWindow {
@@ -716,11 +775,65 @@ func (w *waClientWrapper) takeSendSlot(now time.Time, window time.Duration, max 
 		}
 	}
 	w.sendWindow = kept
-	if max > 0 && len(w.sendWindow) >= max {
-		return false
+}
+
+// waitSendSlot 是 takeSendSlot 的**阻塞版**：窗口满就等到有空位再记账，而不是拒单。
+//
+// 【为什么必须排队而不是拒】`send_rate` 的语义是「每 N 分钟最多 M 条」——它描述的是
+// 出网节奏，不是「超出就丢弃」。把超配额的那条判死，等于把「限速」实现成了「丢消息」：
+// 1|1 时一批 100 条只有第 1 条能出去，其余 99 条全是失败。正确语义是「等下一个槽位」，
+// 整批最终都会发完，只是慢。
+//
+// 【等多久】等到窗口内只剩 max-1 条为止，即第 (len-max) 条（0-based）过期的那一刻。
+// 例：len=1、max=1 ⇒ 等 sendWindow[0]+window；len=5、max=3 ⇒ 等 sendWindow[2]+window。
+// 不写「固定等一个 window」：配置调小时那样会白等，配置调大时又等不够。
+//
+// 【上限】不设硬上限，只认 ctx —— 用户口径是「直到发完或账号被封」。但 ctx 必须
+// 一路传导：停机（runCtx 收掉）和调用方截止时间都要能打断，否则一个 24 小时窗口的
+// 配置会把批次协程钉住一整天。
+func (w *waClientWrapper) waitSendSlot(ctx context.Context, window time.Duration, max int) error {
+	if window <= 0 || max <= 0 {
+		return nil
 	}
-	w.sendWindow = append(w.sendWindow, now)
-	return true
+	for {
+		now := time.Now()
+		if w.takeSendSlot(now, window, max) {
+			return nil
+		}
+		d := w.sendSlotWaitDuration(now, window, max)
+		if d < minWaSendSlotWait {
+			// 时钟抖动/并发追加都可能算出 0：给一个下限，避免空转烧 CPU。
+			d = minWaSendSlotWait
+		}
+		if err := waSleepCtx(ctx, d); err != nil {
+			return err
+		}
+	}
+}
+
+// sendSlotWaitDuration 算出「还要等多久才有空位」。
+//
+// 调用前通常刚跑过一次 takeSendSlot，窗口里的条目已剪过；但并发发送会在这两步之间
+// 追加新条目，那种情况下多等一点是安全的（少等才会超发）。
+func (w *waClientWrapper) sendSlotWaitDuration(now time.Time, window time.Duration, max int) time.Duration {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if len(w.sendWindow) == 0 {
+		return 0
+	}
+	// 要让窗口内剩 max-1 条：第 (len-max) 条过期即可。
+	idx := len(w.sendWindow) - max
+	if idx < 0 {
+		idx = 0
+	}
+	if idx >= len(w.sendWindow) {
+		idx = len(w.sendWindow) - 1
+	}
+	d := w.sendWindow[idx].Add(window).Sub(now)
+	if d < 0 {
+		return 0
+	}
+	return d
 }
 
 // waLastSend 是发送账的一条：最近一次经本包发往某会话的消息 id 与服务器时间戳。

@@ -52,8 +52,12 @@ type fakeSession struct {
 	stateErr   error
 	sent       []fakeText
 	sentImages []fakeImage
-	patches    []appstate.PatchInfo
-	handler    func(any)
+	// sentLinks 记录 SendInteractive 的落点（CTA 按钮消息用例断言用）；
+	// linkErr 非 nil 时 SendInteractive 直接失败，用来钉住「按钮被拒 ⇒ 降级」这一支。
+	sentLinks []fakeInteractive
+	linkErr   error
+	patches   []appstate.PatchInfo
+	handler   func(any)
 	// onState：非 nil 时在 SendAppState 的锁外回调（删框用例钉「闸已释放」等时序）。
 	onState func()
 	// downAfterSends>0 时，发满该条数就把登录态按回 false（批量发信逐条自愈的用例用）。
@@ -128,6 +132,9 @@ type fakeText struct{ to, body string }
 
 // fakeImage 是 SendImage 的一条落点记录（图文混排用例断言用）。
 type fakeImage struct{ to, url, caption string }
+
+// fakeInteractive 是 SendInteractive 的一条落点记录（CTA 按钮消息用例断言用）。
+type fakeInteractive struct{ to, body, url, buttonText, buttonURL string }
 
 func (f *fakeSession) Login(ctx context.Context) error {
 	// kl 挂点（默认零值不进入）：一轮连接的来回耗时。睡在**锁外**——睡在锁内会把门面
@@ -267,6 +274,27 @@ func (f *fakeSession) SendImage(ctx context.Context, to string, img OutboundImag
 		ts = time.Now()
 	}
 	f.sentImages = append(f.sentImages, fakeImage{to: to, url: img.URL, caption: img.Caption})
+	return f.sendID, ts, f.sendErr
+}
+
+// SendInteractive 是 CTA 按钮分支的假件：只记录落点；linkErr 非 nil 时模拟
+// 「服务端不接受交互消息」，用来钉住 waSendContent 的降级重发。
+func (f *fakeSession) SendInteractive(ctx context.Context, to string, m OutboundInteractive) (string, time.Time, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if ctx != nil && ctx.Err() != nil {
+		return "", time.Time{}, ctx.Err()
+	}
+	if f.linkErr != nil {
+		return "", time.Time{}, f.linkErr
+	}
+	ts := f.sendTS
+	if ts.IsZero() {
+		ts = time.Now()
+	}
+	f.sentLinks = append(f.sentLinks, fakeInteractive{
+		to: to, body: m.Body, url: m.ImageURL, buttonText: m.ButtonText, buttonURL: m.ButtonURL,
+	})
 	return f.sendID, ts, f.sendErr
 }
 

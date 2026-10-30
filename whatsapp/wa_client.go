@@ -154,6 +154,9 @@ type waSession interface {
 	// SendImage 发一条图文消息（图片 + 说明文字），返回消息 id 与服务器时间戳。
 	// 图片由本包按 img.URL 下载并上传，实现见 wa_media.go。
 	SendImage(ctx context.Context, to string, img OutboundImage) (string, time.Time, error)
+	// SendInteractive 发一条 CTA 按钮消息（正文 + 可选图片 header + 跳转按钮），
+	// 返回消息 id 与服务器时间戳。实现见 wa_interactive.go。
+	SendInteractive(ctx context.Context, to string, m OutboundInteractive) (string, time.Time, error)
 	// SendAppState 发一次会话级 app state 变异（当前唯一用途是删会话）。
 	SendAppState(ctx context.Context, patch appstate.PatchInfo) error
 	// GetLIDForPN 查 PN（s.whatsapp.net 号码）对应的 LID：whatsmeow 发送对单聊目标
@@ -540,7 +543,7 @@ func deliverOutbound(ctx context.Context, w *waClientWrapper, rawTo string, msg 
 	if requireGroup && jid.Server != types.GroupServer {
 		return "", "", fmt.Errorf("whatsapp 发送群组消息失败: 目标 %q 不是群组 JID（服务端应为 %s）", rawTo, types.GroupServer)
 	}
-	msgID, chat, ts, err := waSendContent(ctx, w, jid, msg.Body, strings.TrimSpace(msg.ImageURL), label)
+	msgID, chat, ts, err := waSendContent(ctx, w, jid, msg.Body, strings.TrimSpace(msg.ImageURL), strings.TrimSpace(msg.LinkText), strings.TrimSpace(msg.LinkURL), label)
 	if err != nil {
 		return "", "", err
 	}
@@ -559,9 +562,14 @@ func deliverOutbound(ctx context.Context, w *waClientWrapper, rawTo string, msg 
 // （body 必须非空）。防封闸两种形态都按 body 判定：闸关心的是「这条消息说了什么」，
 // 图文消息的说明文字就是它要看的文本。
 //
+// linkText/linkURL 成对非空时走 SendInteractive（CTA 按钮，图片存在时作 header）。
+// 按钮消息被服务端拒绝 ⇒ 记一条 Warning 并把按钮摊成「正文 + 字样 + 链接」按普通
+// 文本/图文重发一次：个人号对交互消息的支持不是官方契约，整批停在这一条上的代价
+// 远大于少一个按钮外观。降级后的正文参与防封闸记账（闸只看内容语义，不看形态）。
+//
 // 防封闸（wa_antiban.go）开启时，「问闸→睡到点→真发→记账」整段持 gateMu：
 // 同账号发送被串成单行道，这是防封的本意；闸拦下的发送以「防封闸拦截」错误返回。
-func waSendContent(ctx context.Context, w *waClientWrapper, jid types.JID, body, imageURL, label string) (string, types.JID, time.Time, error) {
+func waSendContent(ctx context.Context, w *waClientWrapper, jid types.JID, body, imageURL, linkText, linkURL, label string) (string, types.JID, time.Time, error) {
 	if body == "" && imageURL == "" {
 		return "", types.JID{}, time.Time{}, fmt.Errorf("whatsapp %s失败: %v", label, errWaImageEmpty)
 	}
@@ -589,19 +597,37 @@ func waSendContent(ctx context.Context, w *waClientWrapper, jid types.JID, body,
 			}
 		}
 	}
-	send := func() (string, time.Time, error) {
+	// withLink=false 时按普通文本/图文发（降级路径会把链接摊进正文）。
+	// 只有字样与链接同时非空才发按钮：缺一按普通消息走，不发一条点了没反应的消息。
+	withLink := strings.TrimSpace(linkText) != "" && strings.TrimSpace(linkURL) != ""
+	send := func(withLink bool) (string, time.Time, error) {
+		if withLink {
+			return w.sess.SendInteractive(ctx, target, OutboundInteractive{
+				Body: body, ImageURL: imageURL, ButtonText: linkText, ButtonURL: linkURL,
+			})
+		}
 		if imageURL == "" {
 			return w.sess.SendText(ctx, target, body)
 		}
 		return w.sess.SendImage(ctx, target, OutboundImage{URL: imageURL, Caption: body})
 	}
-	msgID, ts, err := send()
+	msgID, ts, err := send(withLink)
 	if waIsReachout463(err) {
 		// 门闸没拿到凭证仍发出去时被服务器点名：强制增量+（窗口外）全量重拉 regular_high、
 		// 向手机要历史并轮询；只有等到**新凭证**（对方 tctoken，或发送当时缺的盐落了库）
 		// 才重试——463 已证明当前凭证组合被拒，拿同一份料重发只会再吃一个 463。
 		if w.recoverReachout463(ctx, jid) {
-			msgID, ts, err = send()
+			msgID, ts, err = send(withLink)
+		}
+	}
+	if err != nil && withLink {
+		// 按钮形态被拒：摊成普通文本/图文重发一次（理由见函数头注释）。
+		vars.Warning("whatsapp %s：CTA 按钮消息被拒（%v），降级为「正文 + 链接」发送", label, err)
+		body = waLinkFallbackBody(body, linkText, linkURL)
+		withLink = false
+		msgID, ts, err = send(false)
+		if waIsReachout463(err) && w.recoverReachout463(ctx, jid) {
+			msgID, ts, err = send(false)
 		}
 	}
 	if err != nil {
@@ -700,10 +726,17 @@ func waIsGroupOrNewsletter(jid types.JID) bool {
 //
 // ImageURL 为空 ⇒ 纯文本，Body 是正文；非空 ⇒ 图文消息，Body 变成图片的说明文字
 // （可空），图片由本包按该直链下载后上传（见 wa_media.go）。
+//
+// LinkURL/LinkText 非空 ⇒ 发 CTA 按钮消息（正文 + 按钮，图片存在时作 header，见
+// wa_interactive.go）。本包对「按钮消息被服务端拒绝」做一次降级：把按钮摊成
+// 「正文 + 字样 + 链接」按普通文本/图文再发一次，不让整批停在这一条上。
 type OutboundMessage struct {
 	To       string
 	Body     string
 	ImageURL string
+	// LinkText 按钮字样；LinkURL 按钮点击后打开的网页。两者必须成对，缺一不发按钮。
+	LinkText string
+	LinkURL  string
 }
 
 // SendResult 是异步批量发信里一条消息的落点，经 CallWhatsappMsg+"SendResult" 广播。
@@ -733,9 +766,10 @@ var (
 	}
 )
 
-// errWaSendRateLimited 是速率闸拒绝的固定文案（下游按 Err 串分支时它是稳定值）。
-// 文案不写具体窗口与条数：那是可配的（`send_rate`），写进错误串会让下游匹配漂移。
-var errWaSendRateLimited = errors.New("超出单账号发送速率上限（send_rate），本条已拒")
+// errWaSendRateLimited 已随「排队代替拒单」一起下线（2026-10-30）：速率闸现在
+// 在窗口满时等下一个槽位，不再产生「超出上限」这个终态。保留这段说明而不是直接
+// 抹掉，是因为历史上排查「群发一直失败」的人都先搜这个串 —— 搜到空白比搜到
+// 「这里曾经有过、为什么没了」更容易误判。
 
 // WhatsappSendBatchAsync 把一批文本交给后台协程逐条发送：调用当场返回，
 // 每条结果（成功与失败都算）经 util.CallWhatsappMsg+"SendResult" 广播一条 SendResult。
@@ -744,8 +778,9 @@ var errWaSendRateLimited = errors.New("超出单账号发送速率上限（send_
 //   - 第一条立即发；此后每条之前随机睡 [send_min_delay_sec, send_max_delay_sec]
 //     （缺省 1~5 秒）。随机而不是固定间隔：固定节奏是风控最容易被识别的形态。
 //   - 单账号滚动窗口内最多发 N 条，窗口与条数同源于配置 `send_rate`（`分钟|条数`，
-//     缺省 "1|1"）；与同步门面无关，只记本包发送路径的账；超限的那条广播拒绝结果后
-//     继续走剩余条目（不整批中止）。
+//     缺省 "1|1"）；与同步门面无关，只记本包发送路径的账。**超配额的条目排队等下一个
+//     槽位，不判死**（2026-10-30 改：旧形态是「超限的那条广播拒绝结果」，1|1 时一批
+//     100 条只有第 1 条能出去）；排队期间只认 ctx，停机/截止时该条广播「等待发送槽位失败」。
 //   - 批次终止只认两件事：调用方显式设的 deadline、以及进程停机。二者任一发生，
 //     未发的条目逐条广播「发送已取消」而不是静默蒸发，业务方账面上每条都有落点。
 //     调用方中途 cancel 不在此列（理由见 waBatchCtx）。
@@ -812,15 +847,21 @@ func waBatchCtx(caller context.Context) (context.Context, context.CancelFunc) {
 	return base, func() {}
 }
 
-// waRunBatch 是后台协程本体：逐条「睡眠→判定→发送→广播」，任何单条错误都不中止整批。
+// waRunBatch 是后台协程本体：逐条「等槽位→发送→广播」，任何单条错误都不中止整批。
 //
 // 防封闸开启时批内不再自己睡间隔：BeforeSend 返回的随机延迟就是权威节奏，
-// 两层再叠只会把批次拖慢一倍（速率闸 takeSendSlot 仍保留，作独立硬上限）。
+// 两层再叠只会把批次拖慢一倍（速率闸仍保留，作独立硬上限）。
+//
+// 【速率闸为什么是排队而不是拒单（2026-10-30 改）】`send_rate` 描述的是出网节奏，
+// 不是「超出就丢」。旧实现把超配额的那条判死，于是 1|1（窗口 60 秒、配额 1 条）下
+// 一批 100 条只有第 1 条能出去、其余 99 条全是「超出单账号发送速率上限」——
+// 运营看到的是「群发一直失败、单发却正常」（单条发送走 WhatsappSendMessage，
+// 压根不过本闸）。现在窗口满就按算出的时长睡到下一个槽位，整批最终都会发完，只是慢。
 func waRunBatch(ctx context.Context, w *waClientWrapper, msgs []OutboundMessage) {
 	account := w.jid.String()
 	minD := w.cfg.EffectiveSendMinDelay()
 	maxD := w.cfg.EffectiveSendMaxDelay()
-	rate := w.cfg.EffectiveSendRate()
+	rate := w.sendRate()
 	for i, msg := range msgs {
 		if i > 0 && w.gate == nil {
 			waBatchSleep(waBatchDelay(minD, maxD))
@@ -833,11 +874,11 @@ func waRunBatch(ctx context.Context, w *waClientWrapper, msgs []OutboundMessage)
 			res.Err = fmt.Sprintf("whatsapp 批量发信失败: %v", perr)
 		case msg.Body == "" && strings.TrimSpace(msg.ImageURL) == "":
 			res.Err = "whatsapp 批量发信失败: " + errWaImageEmpty.Error()
-		case !w.takeSendSlot(time.Now(), rate.Window, rate.Max):
-			res.Err = "whatsapp 批量发信失败: " + errWaSendRateLimited.Error()
 		default:
-			msgID, chat, serr := deliverOutbound(ctx, w, msg.To, msg, "批量发信", false)
-			if serr != nil {
+			// 窗口满就等到下一个槽位；只有 ctx 被打断（停机/调用方截止）才算失败。
+			if werr := w.waitSendSlot(ctx, rate.Window, rate.Max); werr != nil {
+				res.Err = "whatsapp 批量发信失败: 等待发送槽位失败: " + werr.Error()
+			} else if msgID, chat, serr := deliverOutbound(ctx, w, msg.To, msg, "批量发信", false); serr != nil {
 				res.Err = serr.Error()
 			} else {
 				res.MsgID = msgID

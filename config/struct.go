@@ -114,6 +114,15 @@ type WebConfig struct {
 	Static       *string    `json:"static"`        //文件服
 	AllowOrigins []string   `json:"allow_origins"` // CORS 允许的来源，空则不允许跨域（生产默认）
 	TLS          *TLSConfig `json:"tls"`
+	// PublicOrigin 是**对外访问地址**（形如 https://admin.example.com，不带路径），
+	// 用于拼接上传回执里的媒体直链。留空时回落到请求头推导（X-Forwarded-* → Host）。
+	//
+	// 【为什么需要显式配置】请求头推导隐含一个假设：后台本身就是通过对外域名访问的。
+	// 实际部署里运维常用内网 IP / localhost 打开后台，于是上传回执被写成
+	// http://192.168.x.x:8091/static/xxx.png 并落库；等消息服在外网侧去下载这张图时，
+	// 那个地址要么不可达、要么被网关判成越权直接 403 —— 表现是「内网发图正常、
+	// 外网发图 403」，且错误只出现在发送侧日志里，后台完全无感。
+	PublicOrigin string `json:"public_origin"`
 }
 
 type WebsocketPort struct {

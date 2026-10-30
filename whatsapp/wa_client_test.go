@@ -885,14 +885,15 @@ func TestListSpeakableGroupsFilter(t *testing.T) {
 }
 
 // TestSendBatchAsync 异步批量发信：门面当场返回，批内逐条广播 SendResult；
-// 第一条不等待、其后每条前睡一次注入的间隔；速率闸超限的那条被拒且不触达会话，
-// 整批不中止；空正文/坏目标逐条带错误广播且不占闸额度。
+// 第一条不等待、其后每条前睡一次注入的间隔；空正文/坏目标逐条带错误广播。
 //
-// 本用例用 `send_rate: "1|2"`（1 分钟 2 条）压出超限：窗口与条数同源，
-// 第 3 条在同一个窗口内被拒，与「等满窗口」这条语义一起被钉住。
+// 速率闸的排队语义不在这里测（`send_rate: "1|1000"` 直接把闸让开）：
+// 2026-10-30 起窗口满不再拒单而是等到下一个槽位，用真配置压额度就意味着本用例
+// 要等满一分钟 —— 那种时长只能靠 TestWaitSendSlotQueuesInsteadOfRejecting 用
+// 毫秒级窗口参数去钉。
 func TestSendBatchAsync(t *testing.T) {
 	dev := fakeDevice(t, "8613800000000@s.whatsapp.net", "android", "A")
-	cfg := &config.WhatsappSessionsConfig{SendRate: "1|2", AntibanEnabled: waBool(false)}
+	cfg := &config.WhatsappSessionsConfig{SendRate: "1|1000", AntibanEnabled: waBool(false)}
 	m, _, get := startFakeWA(t, cfg, nil, dev)
 	if err := m.StartClient(*dev.ID); err != nil {
 		t.Fatal(err)
@@ -917,9 +918,9 @@ func TestSendBatchAsync(t *testing.T) {
 	if err := WhatsappSendBatchAsync(nil, "8613800000000", []OutboundMessage{
 		{To: "8613900000000", Body: "m1"},
 		{To: "12345@g.us", Body: "m2"},
-		{To: "8613910000000", Body: "m3"}, // 第 3 条撞速率闸（max=2）
-		{To: "8613920000000", Body: ""},   // 空正文：拒绝且不占闸额度
-		{To: "abc", Body: "m5"},           // 拼不出号码
+		{To: "8613910000000", Body: "m3"},
+		{To: "8613920000000", Body: ""}, // 空正文：拒绝且不占闸额度
+		{To: "abc", Body: "m5"},         // 拼不出号码
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -937,7 +938,7 @@ func TestSendBatchAsync(t *testing.T) {
 	if gotSleeps != 4 {
 		t.Errorf("5 条消息之间应睡 4 次，实得 %d", gotSleeps)
 	}
-	wantErr := []string{"", "", "发送速率上限", "消息内容为空", "没有任何数字"}
+	wantErr := []string{"", "", "", "消息内容为空", "没有任何数字"}
 	for i, sub := range wantErr {
 		r := gotResults[i]
 		if sub == "" && (r.Err != "" || r.MsgID != "MSG-1") {
@@ -951,12 +952,12 @@ func TestSendBatchAsync(t *testing.T) {
 		}
 	}
 	_, _, _, sent, _ := s.snapshot()
-	if len(sent) != 2 || sent[0].to != "8613900000000@s.whatsapp.net" || sent[1].to != "12345@g.us" {
-		t.Errorf("只有前两条该触达会话: %+v", sent)
+	if len(sent) != 3 || sent[0].to != "8613900000000@s.whatsapp.net" ||
+		sent[1].to != "12345@g.us" || sent[2].to != "8613910000000@s.whatsapp.net" {
+		t.Errorf("三条合法目标都该触达会话: %+v", sent)
 	}
 
-	// 调用方 cancel / deadline 对批次的影响另立用例（TestSendBatchAsyncCtxContract），
-	// 这里不测：本用例的 cfg 把速率闸压到 2 条，额度已被上面五条吃掉。
+	// 调用方 cancel / deadline 对批次的影响另立用例（TestSendBatchAsyncCtxContract）。
 
 	// 空列表与未启动账号在接走之前就地拒绝（不产生广播）。
 	if err := WhatsappSendBatchAsync(nil, "8613800000000", nil); err == nil ||

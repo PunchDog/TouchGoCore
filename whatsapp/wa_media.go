@@ -64,6 +64,19 @@ const (
 	// waImageFetchTimeout 单图下载预算。后台静态目录是同机房/同域名的直链，
 	// 正常是毫秒级；30s 只兜「反代卡住」这类异常。
 	waImageFetchTimeout = 30 * time.Second
+	// waImageUserAgent 是下载图片时显式声明的 UA。
+	//
+	// 【为什么必须设（2026-10-30 真机踩坑）】不设时 Go 发的是 "Go-http-client/1.1"，
+	// 挂在 Cloudflare 后面的源站会把它当爬虫直接回 403（实测：同一个 URL，
+	// 浏览器 UA 拿 404、Go UA 拿 403，且 403 的响应体是 Cloudflare 的
+	// "Attention Required!" 拦截页）。这个错误只出现在消息服日志里，后台完全无感，
+	// 表现就是「内网发图正常、外网发图 403」—— 内网直连源站不过 CDN，所以看不见。
+	//
+	// 用常见桌面浏览器 UA 是最小侵入：源站是自家静态目录，没有伪装意图，
+	// 只是别让 WAF 把「不是浏览器」当成「是爬虫」。真正的治理仍在 CDN 侧
+	// （WAF 放行 /static/ 或按源站 IP 白名单），这一条保证不配也能用。
+	waImageUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+		"(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 )
 
 // 两个注入点：测试整体替换（照 waSessionFactory / waBatchSleep 的换-还原范式）。
@@ -98,13 +111,20 @@ func waFetchImage(ctx context.Context, rawURL string) ([]byte, string, error) {
 	if err != nil {
 		return nil, "", fmt.Errorf("构造图片请求失败: %w", err)
 	}
+	// UA 与 Accept 都要给：CDN/WAF 常常只要缺一项就当非浏览器处理（见 waImageUserAgent）。
+	req.Header.Set("User-Agent", waImageUserAgent)
+	req.Header.Set("Accept", "image/avif,image/webp,image/png,image/jpeg,*/*;q=0.8")
 	resp, err := waImageHTTP.Do(req)
 	if err != nil {
-		return nil, "", fmt.Errorf("下载图片失败: %w", err)
+		// 错误串带 URL：403/404 的排查第一个问题永远是「它到底在下载哪个地址」。
+		return nil, "", fmt.Errorf("下载图片失败 %s: %w", rawURL, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, "", fmt.Errorf("下载图片失败: 源站返回 %d", resp.StatusCode)
+		// 带上 URL 与状态码，并把「可能是 CDN 拦的」写在文案里：这条错误串是
+		// 运维唯一能看到的线索，不该只给一个裸的 403。
+		return nil, "", fmt.Errorf("下载图片失败: 源站返回 %d（%s）%s",
+			resp.StatusCode, rawURL, waFetchImageHint(resp))
 	}
 	// 多读 1 字节用于判超限：Content-Length 可能缺失或撒谎，只有读出来的字节数算数。
 	data, err := io.ReadAll(io.LimitReader(resp.Body, waImageMaxBytes+1))
@@ -122,6 +142,29 @@ func waFetchImage(ctx context.Context, rawURL string) ([]byte, string, error) {
 		return nil, "", errors.New("图片格式不认识（只支持 jpeg / png / webp）")
 	}
 	return data, mime, nil
+}
+
+// waFetchImageHint 给非 200 响应补一句「这个状态码大概率意味着什么」。
+//
+// 存在理由：图片直链的失败面全在反代/CDN 侧，而这条错误串是运维唯一能看到的东西。
+// 一个裸的 "源站返回 403" 会让人先去翻代码，而实际要改的是 WAF 规则。
+// 下面两类都是 2026-10-30 真机实证过的：
+//   - 403 + Server: cloudflare → WAF 把非浏览器请求当爬虫拦了（本项目已靠 UA 绕过，
+//     但换成其它出口/其它 CDN 仍会复发）；
+//   - 404 → /static/ 被反代到了不服务静态目录的进程（本项目 8090 的 static 是 null）。
+func waFetchImageHint(resp *http.Response) string {
+	switch resp.StatusCode {
+	case http.StatusForbidden:
+		if server := strings.ToLower(resp.Header.Get("Server")); strings.Contains(server, "cloudflare") {
+			return "（源站是 Cloudflare，403 通常是 WAF 拦截非浏览器请求，需放行 /static/）"
+		}
+		return "（源站拒绝访问，检查反代 allow/deny 与防盗链）"
+	case http.StatusNotFound:
+		return "（源站没有这个文件：检查直链域名是否正确、/static/ 是否反代到服务静态目录的进程）"
+	case http.StatusUnauthorized, http.StatusProxyAuthRequired:
+		return "（源站要求认证，直链可能不是公开可读的）"
+	}
+	return ""
 }
 
 // waSniffImageMime 按文件头判类型。不信任 Content-Type：静态目录的 MIME 由

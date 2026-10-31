@@ -4,15 +4,15 @@ package whatsapp
 // 速率闸的排队语义（waitSendSlot）
 //
 // 2026-10-30 之前这里是「窗口满就拒单」：超配额的那条直接以「超出单账号发送
-// 速率上限（send_rate）」失败。1|1（窗口 60 秒、配额 1 条）下，一批 100 条
+// 速率上限（send_rate）」失败。60|1（窗口 60 秒、配额 1 条）下，一批 100 条
 // 只有第 1 条能出去、其余 99 条全失败 —— 运营看到的是「群发一直失败、单发却
 // 正常」（单条发送走 WhatsappSendMessage，不过这道闸）。
 //
 // 现在的语义是「窗口满就等到下一个槽位」：整批最终都会发完，只是慢。
 // 这几条用例分别钉住：等待时长怎么算、真会等、认 ctx、以及「不限」的两种写法。
 //
-// 窗口参数用毫秒级而不是走 send_rate 配置：配置的最小粒度是 1 分钟，
-// 真按 1|1 跑一条用例要等 60 秒。waitSendSlot 的 window 本来就是入参，
+// 窗口参数用毫秒级而不是走 send_rate 配置：配置的最小粒度是 1 秒，
+// 真按 60|1 跑一条用例要等 60 秒。waitSendSlot 的 window 本来就是入参，
 // 直接喂 200ms 既测到同一段代码，又不让测试拖慢。
 // ============================================================================
 
@@ -97,7 +97,7 @@ func TestWaitSendSlotQueuesInsteadOfRejecting(t *testing.T) {
 
 // TestWaitSendSlotHonorsCtx ctx 被打断时必须立刻返回错误，不能把协程钉死。
 //
-// 窗口上限是 1440 分钟（24 小时）。不认 ctx 的话，一个配错的大窗口会让批次
+// 窗口上限是 86400 秒（24 小时）。不认 ctx 的话，一个配错的大窗口会让批次
 // 协程睡一整天，而账号串行闸还被它占着 —— 那个号整天发不出任何东西。
 func TestWaitSendSlotHonorsCtx(t *testing.T) {
 	w := &waClientWrapper{}
@@ -157,7 +157,7 @@ func TestWaitSendSlotUnlimited(t *testing.T) {
 // 不生效的后果是最难查的那种 —— 业务侧按后台值分批、核心按文件值放行，
 // 表现是「后台明明调了、实际节奏没变」，且不报任何错。
 func TestSendRateOverrideWinsOverConfig(t *testing.T) {
-	w := &waClientWrapper{cfg: &config.WhatsappSessionsConfig{SendRate: "1|1"}}
+	w := &waClientWrapper{cfg: &config.WhatsappSessionsConfig{SendRate: "60|1"}}
 	t.Cleanup(func() { SetSendRateOverride(nil) })
 
 	// 未注入：按配置文件。
@@ -185,7 +185,7 @@ func TestSendRateOverrideWinsOverConfig(t *testing.T) {
 // 调用方后续改 r 会悄悄改掉全局速率 —— 那种 bug 只有跑起来才会以「节奏莫名变了」出现。
 func TestSendRateOverrideIsACopy(t *testing.T) {
 	t.Cleanup(func() { SetSendRateOverride(nil) })
-	w := &waClientWrapper{cfg: &config.WhatsappSessionsConfig{SendRate: "1|1"}}
+	w := &waClientWrapper{cfg: &config.WhatsappSessionsConfig{SendRate: "60|1"}}
 
 	src := config.WaSendRate{Window: 2 * time.Minute, Max: 7}
 	SetSendRateOverride(&src)

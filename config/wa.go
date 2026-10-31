@@ -17,12 +17,13 @@ const (
 	waDefaultSendMinDelay   = 1 * time.Second
 	waDefaultSendMaxDelay   = 5 * time.Second
 
-	// waDefaultSendRateWindow/Max 是单账号发送闸的缺省速率：每滚动 1 分钟 1 条。
+	// waDefaultSendRateWindow/Max 是单账号发送闸的缺省速率：每滚动 60 秒 1 条。
 	//
-	// 取 1/1 而不是「换算过来的旧缺省 30 条/小时」：后者 ≈ 每 2 分钟一条，
-	// 而 1 条/分钟 = 严格每 60 秒一条，正好是第三方实测的安全间隔下界
-	// （冷启动号建议 60-120 秒一条）。要更慢就配 `2|1`、`5|3` 这种。
-	waDefaultSendRateWindow = time.Minute
+	// 取 60/1 而不是「换算过来的旧缺省 30 条/小时」：后者 ≈ 每 2 分钟一条，
+	// 而 1 条/60 秒正好是第三方实测的安全间隔下界（冷启动号建议 60-120 秒一条）。
+	// 要更慢就配 `120|1`、`300|3` 这种。2026-10-31 起首段单位由分钟改为秒，
+	// 存量 `1|1` 必须换算成 `60|1` 才是同一节奏（迁移 023 负责换算）。
+	waDefaultSendRateWindow = 60 * time.Second
 	waDefaultSendRateMax    = 1
 
 	// waSendRateMaxWindow 是窗口上限（24h），waSendRateMaxCount 是窗口内条数上限。
@@ -41,7 +42,10 @@ type WaSendRate struct {
 	Max    int
 }
 
-// ParseWaSendRate 解析 `分钟|条数` 形态（如 "1|1"、"5|3"）。
+// ParseWaSendRate 解析 `秒|次数` 形态（如 "60|1" = 每 60 秒 1 条、"300|3" = 每 300 秒 3 条）。
+//
+// 2026-10-31 起首段单位由分钟改为秒：分钟粒度无法表达「30 秒一条 / 90 秒一条」这类
+// 实测安全间隔，运营只能四舍五入到整分钟。缺省 `60|1` 与此前的 `1|1` 同节奏。
 //
 // 容错口径：只容忍空白，不容忍缺项、0、负数、非数字、正号 —— 配错的速率会直接改变
 // 出网节奏，静默纠错比拒绝更危险。调用方按 ok 决定「用默认」还是「报配置错」。
@@ -59,15 +63,15 @@ func ParseWaSendRate(raw string) (WaSendRate, bool) {
 	if len(parts) != 2 {
 		return WaSendRate{}, false
 	}
-	mins, ok := waSendRateSegment(parts[0])
-	if !ok || mins <= 0 {
+	secs, ok := waSendRateSegment(parts[0])
+	if !ok || secs <= 0 {
 		return WaSendRate{}, false
 	}
 	count, ok := waSendRateSegment(parts[1])
 	if !ok || count <= 0 {
 		return WaSendRate{}, false
 	}
-	window := time.Duration(mins) * time.Minute
+	window := time.Duration(secs) * time.Second
 	if window > waSendRateMaxWindow || count > waSendRateMaxCount {
 		return WaSendRate{}, false
 	}
@@ -97,7 +101,7 @@ func waSendRateSegment(raw string) (int, bool) {
 	return n, true
 }
 
-// EffectiveSendRate 返回单账号发送速率：配置文件 `send_rate`，缺省 1 分钟 1 条。
+// EffectiveSendRate 返回单账号发送速率：配置文件 `send_rate`，缺省 60 秒 1 条（`60|1`）。
 //
 // 与 max_concurrent 的「<=0 即不限」刻意相反：这条闸防的是非官方客户端的风控封号，
 // 「没配」读作「用保守缺省」而不是「裸奔」；要调高就显式配。

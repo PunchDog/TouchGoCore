@@ -7,8 +7,8 @@ import (
 
 // TestTakeSendSlotRollingWindow 滚动窗口：窗口内第 N+1 条拒，最早一条滑出后放行。
 //
-// 这条闸的窗口来自配置 `send_rate`（`分钟|条数`），所以窗口长度必须真的被用上 ——
-// 写死 1 小时的话，「5|3」会变成 5 小时内 3 条，节奏慢 60 倍。
+// 这条闸的窗口来自配置 `send_rate`（`秒|次数`），所以窗口长度必须真的被用上 ——
+// 写死 1 小时的话，「300|3」会变成 1 小时内 3 条，节奏慢 12 倍。
 func TestTakeSendSlotRollingWindow(t *testing.T) {
 	w := &waClientWrapper{}
 	base := time.Now()
@@ -31,7 +31,7 @@ func TestTakeSendSlotRollingWindow(t *testing.T) {
 	}
 }
 
-// TestTakeSendSlotDefaultRate 缺省速率 1 分钟 1 条：同分钟内第二条拒，下一分钟放行。
+// TestTakeSendSlotDefaultRate 缺省速率 60 秒 1 条：窗口内第二条拒，满 60 秒后放行。
 func TestTakeSendSlotDefaultRate(t *testing.T) {
 	w := &waClientWrapper{}
 	base := time.Now()

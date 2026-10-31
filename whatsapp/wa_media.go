@@ -81,8 +81,10 @@ const (
 
 // 两个注入点：测试整体替换（照 waSessionFactory / waBatchSleep 的换-还原范式）。
 var (
-	// waImageHTTP 下载图片用的客户端。默认 Transport 会读 HTTP(S)_PROXY 环境变量，
-	// 与发信走同一条出口，不需要额外配置。
+	// waImageHTTP 下载图片直链用的客户端。nil Transport ⇒ 默认 Transport，只读
+	// HTTP(S)_PROXY 环境变量；显式代理（WhatsappSetProxy / sessions.proxy_url）只管
+	// WhatsApp 协议出口（WS + 媒体上传下载），不覆盖这条直链下载——直链通常是业务
+	// 自己的静态目录，绕代理反而可能不可达。
 	waImageHTTP = &http.Client{Timeout: waImageFetchTimeout}
 	// waImageThumb 生成缩略图与像素尺寸；返回 nil 缩略图表示「这张给不出来」。
 	waImageThumb = waMakeThumbnail
@@ -228,6 +230,15 @@ func waMakeThumbnail(data []byte) ([]byte, uint32, uint32) {
 	return buf.Bytes(), uint32(w), uint32(h)
 }
 
+// upload 是带读锁的媒体上传：whatsmeow 的 Upload 读 mediaHTTP.Transport，
+// 运行中切代理（waConn.SetProxy）写的正是同一字段，不互斥就是数据竞争。
+// defer 兜住 panic，避免锁泄漏把之后的切代理永久堵死。
+func (c *waConn) upload(ctx context.Context, data []byte, kind whatsmeow.MediaType) (whatsmeow.UploadResponse, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.cli.Upload(ctx, data, kind)
+}
+
 // SendImage 是 waSession 的图片分支真实现：下载 → 上传 → 组装 ImageMessage → 发送。
 //
 // 上传用 cli.Upload（whatsmeow/upload.go:69）：它负责生成 mediaKey、加密、算
@@ -251,7 +262,9 @@ func (c *waConn) SendImage(ctx context.Context, to string, img OutboundImage) (s
 	if thumb == nil {
 		vars.Warning("WA 图片缩略图生成失败（webp 或数据损坏），本条按无预览发送")
 	}
-	up, err := c.cli.Upload(ctx, data, whatsmeow.MediaImage)
+	// upload 读 mediaHTTP.Transport：与运行中切换代理（waConn.SetProxy）写同一字段，
+	// 必须互斥（实现见 upload 方法）。
+	up, err := c.upload(ctx, data, whatsmeow.MediaImage)
 	if err != nil {
 		return "", time.Time{}, fmt.Errorf("图片上传失败: %w", err)
 	}

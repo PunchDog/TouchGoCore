@@ -26,6 +26,11 @@
 // Connection/QR/SendResult）：Withdraw/Query 两个键不再有回执。下游收不到
 // 资金回调时该读成「这条通道没接入」，而不是「单还在路上」。
 //
+// **出网代理**：WhatsApp 协议出口（登录/发信的 websocket + 媒体上传下载）支持一个
+// 全局代理，见 wa_proxy.go。两个入口：配置 whatsapp.sessions.proxy_url 作启动兜底，
+// 运行时 WhatsappSetProxy(url, port) 优先并立即重连在跑账号；两者都空时沿用
+// HTTP(S)_PROXY 环境变量。图片直链下载是另一条出口，不受显式代理影响。
+//
 // **本包有常驻协程**：每个已启动账号一条连接守护（wa_manager.go 的 run），
 // 每次进行中的配对一条泵协程（wa_pairing.go 的 runPairing）。停机由 WhatsappStop
 // 负责收掉，单协程等待上限 1.5s，压在框架 2s 服务停机预算（app.go minServiceStopBudget）之内。
@@ -149,6 +154,12 @@ func startWA(all *config.Cfg) {
 	}
 	if scfg == nil || strings.TrimSpace(scfg.DSN) == "" {
 		vars.Info("不启动 WhatsApp 消息侧（未配置 whatsapp.sessions.dsn）")
+		return
+	}
+	// 代理配置非法就整体不启动：配了代理却静默直连是最难查的部署事故，
+	// 与「DSN 不可用不启动」同口径。运行时接口设过的值优先，配置不再覆盖。
+	if err := installWAProxyDefault(scfg); err != nil {
+		vars.Error("WhatsApp 代理配置不可用，消息侧不启动: %v", err)
 		return
 	}
 	st, err := NewWAStore(runCtx(), scfg.DSN, waLogger{module: "store"})

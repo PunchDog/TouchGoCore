@@ -138,7 +138,7 @@ type waClientWrapper struct {
 	mu          sync.Mutex
 	lastEventAt time.Time
 	// sendWindow 是滚动窗口的发送时刻表（速率闸记账），与 lastEventAt 共用 mu。
-	// 窗口长度与配额都来自 send_rate（`分钟|条数`），不是固定一小时：
+	// 窗口长度与配额都来自 send_rate（`秒|次数`），不是固定一小时：
 	// 只存时刻、不存窗口，判定时按当前配置现算，改配置即刻生效。
 	sendWindow []time.Time
 	// lastSends 是本账号自己的发送账：会话 JID 串 → 最近一条发往该会话的 id+时间。
@@ -192,25 +192,30 @@ func (m *waManager) StartClient(jid types.JID) error {
 		// 业务调用撞响，而不是调用方自己 StartClient 撞的，所以处置写清楚怎么腾额度。
 		return fmt.Errorf("whatsapp 在跑会话数已达上限 %d（max_concurrent），先停一个再启新的（先用 WhatsappStopClient 停一个不用的账号）", max)
 	}
+	// 读锁覆盖「构造会话 + 登记进 clients」：与 WhatsappSetProxy 的
+	// 「落状态 + 扫描重放」互斥，保证并发启动的账号不会拿着旧代理错过这一轮重放。
+	waProxyApplyMu.RLock()
 	w := &waClientWrapper{
-		jid:      jid,
-		dev:      dev,
-		sess:     waSessionFactory(dev, m.log.Sub(jid.User)),
-		cfg:      m.cfg,
-		stop:     make(chan struct{}),
-		done:     make(chan struct{}),
-		kick:     make(chan struct{}, 1),
-		downed:   make(chan struct{}, 1),
-		after:    m.afterFor,
+		jid:    jid,
+		dev:    dev,
+		sess:   waSessionFactory(dev, m.log.Sub(jid.User)),
+		cfg:    m.cfg,
+		stop:   make(chan struct{}),
+		done:   make(chan struct{}),
+		kick:   make(chan struct{}, 1),
+		downed: make(chan struct{}, 1),
+		after:  m.afterFor,
 	}
 	if m.cfg.EffectiveAntibanEnabled() {
 		w.gate = waGateFactory(m.cfg, key)
 	}
 	w.sess.OnEvent(w.onEvent)
 	if _, loaded := m.clients.LoadOrStore(key, w); loaded {
+		waProxyApplyMu.RUnlock()
 		// 并发窗口里另一个调用已经启动了这个账号：丢弃自己这份，幂等返回。
 		return nil
 	}
+	waProxyApplyMu.RUnlock()
 	m.wg.Add(1)
 	go func() {
 		defer m.wg.Done()
@@ -460,6 +465,35 @@ func (w *waClientWrapper) kickNow() {
 	}
 }
 
+// ReapplyProxy 把新代理套到全部在跑会话：先切 transport，再 Disconnect + kick。
+//
+// 顺序不能反：SetProxyAddress 只影响「下一次 Connect」（WM/client.go:352-353），
+// 先断后设会让 run() 可能用旧 transport 抢跑一轮；EnableAutoReconnect=false
+// 保证除 run() 外没有别的连接发起者。在途发送会因断开失败，这是运行时换出口的
+// 固有代价，调用方不要把本方法放在请求路径上。
+func (m *waManager) ReapplyProxy(addr string) {
+	if m == nil {
+		return
+	}
+	m.clients.Range(func(_, v any) bool {
+		w, ok := v.(*waClientWrapper)
+		if !ok {
+			return true
+		}
+		s, ok := w.sess.(waProxySetter)
+		if !ok {
+			return true
+		}
+		if err := s.SetProxy(addr); err != nil {
+			vars.Warning("WhatsApp[%s] 切换代理失败，保留旧连接: %v", w.jid.String(), err)
+			return true
+		}
+		w.sess.Disconnect()
+		w.kickNow()
+		return true
+	})
+}
+
 // waitConnected 等本账号进入登录态，上限 EffectiveConnectTimeout。
 //
 // 判据用 sess.LoggedIn() 而不是「Login 返回 nil」：ConnectContext 只代表 socket 与
@@ -700,7 +734,7 @@ func (w *waClientWrapper) markDown() {
 // minWaSendSlotWait 是 waitSendSlot 单次等待的下限。
 //
 // 算出来的等待可能是 0（时钟抖动、并发追加把 idx 推到边界）：直接 sleep(0) 会变成
-// 忙等循环，把 CPU 烧在一个注定要等的判定上。1 秒的粒度对「每 N 分钟 M 条」的
+// 忙等循环，把 CPU 烧在一个注定要等的判定上。1 秒的粒度对「每 N 秒 M 条」的
 // 节奏完全够细，最多让一条消息晚 1 秒。
 const minWaSendSlotWait = time.Second
 
@@ -742,13 +776,13 @@ func (w *waClientWrapper) sendRate() config.WaSendRate {
 
 // takeSendSlot 是单账号滚动窗口发送闸的**记账原语**：窗口内已记账数 < max 才放行并记上 now。
 //
-// window 与 max 都来自配置的 `send_rate`（`分钟|条数`），默认 1 分钟 1 条。
+// window 与 max 都来自配置的 `send_rate`（`秒|次数`），默认 60 秒 1 条。
 // 窗口做成参数而不是常量：上层分批的批间等待必须与它同源，写死会让两者漂移。
 //
 // max<=0 或 window<=0 读作「不限」（调用方已用 Effective* 归一，正常不会走到）。
 //
 // 只负责「现在有没有空位」这一个判断，**不负责等**：需要等的调用方走 waitSendSlot。
-// 这个分工是 2026-10-30 改的 —— 在此之前它既判定又拒单，于是 1|1（窗口 60 秒、
+// 这个分工是 2026-10-30 改的 —— 在此之前它既判定又拒单，于是 60|1（窗口 60 秒、
 // 配额 1 条）下同一批的第 2 条起全部就地失败，运营看到的是「群发一直失败、
 // 单发却正常」（单条发送不走本闸）。
 func (w *waClientWrapper) takeSendSlot(now time.Time, window time.Duration, max int) bool {
@@ -779,9 +813,9 @@ func (w *waClientWrapper) pruneSendWindowLocked(now time.Time, window time.Durat
 
 // waitSendSlot 是 takeSendSlot 的**阻塞版**：窗口满就等到有空位再记账，而不是拒单。
 //
-// 【为什么必须排队而不是拒】`send_rate` 的语义是「每 N 分钟最多 M 条」——它描述的是
+// 【为什么必须排队而不是拒】`send_rate` 的语义是「每 N 秒最多 M 条」——它描述的是
 // 出网节奏，不是「超出就丢弃」。把超配额的那条判死，等于把「限速」实现成了「丢消息」：
-// 1|1 时一批 100 条只有第 1 条能出去，其余 99 条全是失败。正确语义是「等下一个槽位」，
+// 60|1 时一批 100 条只有第 1 条能出去，其余 99 条全是失败。正确语义是「等下一个槽位」，
 // 整批最终都会发完，只是慢。
 //
 // 【等多久】等到窗口内只剩 max-1 条为止，即第 (len-max) 条（0-based）过期的那一刻。

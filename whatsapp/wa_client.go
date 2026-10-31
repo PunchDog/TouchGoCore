@@ -39,6 +39,7 @@ import (
 	"math/rand/v2"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -200,6 +201,14 @@ var waSessionFactory = newWaConn
 // waConn 是 waSession 的真实现，包住 *whatsmeow.Client。
 type waConn struct {
 	cli *whatsmeow.Client
+	// mu 串行化「换 transport」与「读 transport 的联网动作」。
+	// whatsmeow 的 SetProxyAddress 是原地替换 http.Client.Transport（WM/client.go:401-411），
+	// 而 ConnectContext 与 Upload 会并发读同一个 *http.Client——不锁就是数据竞争。
+	// 读侧用 RLock：并发上传与连接握手可以并行，只有切换代理时互斥。
+	mu sync.RWMutex
+	// proxyErr 是构造期装代理的失败：fail-closed，Login 直接返回而不是静默直连
+	// （代理通常正是不允许直连时才配的，回落直连属于部署事故）。
+	proxyErr error
 }
 
 // newWaConn 装配真客户端。
@@ -210,10 +219,35 @@ type waConn struct {
 func newWaConn(dev *store.Device, log waLog.Logger) waSession {
 	cli := whatsmeow.NewClient(dev, log)
 	cli.EnableAutoReconnect = false
-	return &waConn{cli: cli}
+	c := &waConn{cli: cli}
+	// 代理必须在任何 Connect 之前装（WM/client.go:348-359）：这里正是唯一的构造点。
+	if err := waApplyClientProxy(cli, waProxyAddr()); err != nil {
+		vars.Error("WhatsApp 全局代理应用失败，该会话拒绝连接: %v", err)
+		c.proxyErr = err
+	}
+	return c
 }
 
-func (c *waConn) Login(ctx context.Context) error  { return c.cli.ConnectContext(ctx) }
+// SetProxy 运行中切换代理（waProxySetter 的实现面，不进 waSession 接口）。
+// 调用方负责随后 Disconnect + kick：库要求换代理后重连才生效（WM/client.go:352-353）。
+func (c *waConn) SetProxy(addr string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err := applyWAProxy(c.cli, addr); err != nil {
+		return err
+	}
+	c.proxyErr = nil
+	return nil
+}
+
+func (c *waConn) Login(ctx context.Context) error {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.proxyErr != nil {
+		return c.proxyErr
+	}
+	return c.cli.ConnectContext(ctx)
+}
 func (c *waConn) LoggedIn() bool                   { return c.cli.IsLoggedIn() }
 func (c *waConn) Connected() bool                  { return c.cli.IsConnected() }
 func (c *waConn) Disconnect()                      { c.cli.Disconnect() }
@@ -777,9 +811,9 @@ var (
 // 节奏与闸（三段配置见 whatsapp.sessions 段）：
 //   - 第一条立即发；此后每条之前随机睡 [send_min_delay_sec, send_max_delay_sec]
 //     （缺省 1~5 秒）。随机而不是固定间隔：固定节奏是风控最容易被识别的形态。
-//   - 单账号滚动窗口内最多发 N 条，窗口与条数同源于配置 `send_rate`（`分钟|条数`，
-//     缺省 "1|1"）；与同步门面无关，只记本包发送路径的账。**超配额的条目排队等下一个
-//     槽位，不判死**（2026-10-30 改：旧形态是「超限的那条广播拒绝结果」，1|1 时一批
+//   - 单账号滚动窗口内最多发 N 条，窗口与条数同源于配置 `send_rate`（`秒|次数`，
+//     缺省 "60|1"）；与同步门面无关，只记本包发送路径的账。**超配额的条目排队等下一个
+//     槽位，不判死**（2026-10-30 改：旧形态是「超限的那条广播拒绝结果」，60|1 时一批
 //     100 条只有第 1 条能出去）；排队期间只认 ctx，停机/截止时该条广播「等待发送槽位失败」。
 //   - 批次终止只认两件事：调用方显式设的 deadline、以及进程停机。二者任一发生，
 //     未发的条目逐条广播「发送已取消」而不是静默蒸发，业务方账面上每条都有落点。
@@ -853,7 +887,7 @@ func waBatchCtx(caller context.Context) (context.Context, context.CancelFunc) {
 // 两层再叠只会把批次拖慢一倍（速率闸仍保留，作独立硬上限）。
 //
 // 【速率闸为什么是排队而不是拒单（2026-10-30 改）】`send_rate` 描述的是出网节奏，
-// 不是「超出就丢」。旧实现把超配额的那条判死，于是 1|1（窗口 60 秒、配额 1 条）下
+// 不是「超出就丢」。旧实现把超配额的那条判死，于是 60|1（窗口 60 秒、配额 1 条）下
 // 一批 100 条只有第 1 条能出去、其余 99 条全是「超出单账号发送速率上限」——
 // 运营看到的是「群发一直失败、单发却正常」（单条发送走 WhatsappSendMessage，
 // 压根不过本闸）。现在窗口满就按算出的时长睡到下一个槽位，整批最终都会发完，只是慢。

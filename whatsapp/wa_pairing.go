@@ -234,20 +234,36 @@ type waPairSession interface {
 var waPairSessionFactory = newWaPairConn
 
 // waPairConn 是 waPairSession 的真实现。
-type waPairConn struct{ cli *whatsmeow.Client }
+type waPairConn struct {
+	cli *whatsmeow.Client
+	// proxyErr 同 waConn：构造期装代理失败就拒绝配对，不静默直连。
+	proxyErr error
+}
 
 func newWaPairConn(dev *store.Device, log waLog.Logger) waPairSession {
 	cli := whatsmeow.NewClient(dev, log)
 	// 关掉库的自动重连：配对期断线（二维码耗尽即 timeout）是终局而不是可重试故障，
 	// 让库自己连回去只会烧出一串没人消费的二维码。
 	cli.EnableAutoReconnect = false
-	return &waPairConn{cli: cli}
+	c := &waPairConn{cli: cli}
+	if err := waApplyClientProxy(cli, waProxyAddr()); err != nil {
+		vars.Error("WhatsApp 全局代理应用失败，配对会话拒绝连接: %v", err)
+		c.proxyErr = err
+	}
+	return c
 }
 
 func (c *waPairConn) QRChannel(ctx context.Context) (<-chan whatsmeow.QRChannelItem, error) {
 	return c.cli.GetQRChannel(ctx)
 }
-func (c *waPairConn) Connect() error        { return c.cli.Connect() }
+
+// Connect 带构造期代理失败闸：配对也必须走同一条出口，直连等于把服务器 IP 暴露出去。
+func (c *waPairConn) Connect() error {
+	if c.proxyErr != nil {
+		return c.proxyErr
+	}
+	return c.cli.Connect()
+}
 func (c *waPairConn) Disconnect()           { c.cli.Disconnect() }
 func (c *waPairConn) Device() *store.Device { return c.cli.Store }
 

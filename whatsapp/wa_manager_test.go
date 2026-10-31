@@ -36,6 +36,11 @@ type fakeSession struct {
 	disconnects int
 	logouts     int
 
+	// 运行中切换代理的调用账（wa_proxy_test.go）：proxyAddrs 按调用顺序记地址，
+	// proxyErr 非 nil 时让 SetProxy 失败（钉「失败就保留旧连接、不disconnect」）。
+	proxyAddrs []string
+	proxyErr   error
+
 	// logoutErr：服务端 unlink 谈不成时的兜底路径注入点（照 loginErr 那一族写法）。
 	logoutErr error
 	// deleteOnLogout：仿真库侧 Logout 成功时顺带走的 Device.Delete——它把 dev.ID 置 nil

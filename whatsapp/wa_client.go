@@ -893,8 +893,12 @@ func waBatchCtx(caller context.Context) (context.Context, context.CancelFunc) {
 
 // waRunBatch 是后台协程本体：逐条「等槽位→发送→广播」，任何单条错误都不中止整批。
 //
-// 防封闸开启时批内不再自己睡间隔：BeforeSend 返回的随机延迟就是权威节奏，
-// 两层再叠只会把批次拖慢一倍（速率闸仍保留，作独立硬上限）。
+// 【批内间隔只有一个来源（2026-11-02 收敛）】谁在管节奏谁负责，不叠加：
+//   - 防封闸开启 ⇒ 节奏由 BeforeSend 返回的随机延迟决定，批内不再自己睡；
+//   - 速率闸有效（send_rate 的窗口与配额都为正）⇒ 节奏由 waitSendSlot 的排队决定，
+//     批内也不再睡 send_min/max_delay。旧写法在这里无条件睡 1~5 秒，90|1 会变成
+//     91~95 秒一条，慢多少还取决于这条在批内的位置；
+//   - 两者都不管（速率配成「不限」）⇒ 才用 send_min/max_delay 兜底，避免裸奔。
 //
 // 【速率闸为什么是排队而不是拒单（2026-10-30 改）】`send_rate` 描述的是出网节奏，
 // 不是「超出就丢」。旧实现把超配额的那条判死，于是 60|1（窗口 60 秒、配额 1 条）下
@@ -906,8 +910,11 @@ func waRunBatch(ctx context.Context, w *waClientWrapper, msgs []OutboundMessage)
 	minD := w.cfg.EffectiveSendMinDelay()
 	maxD := w.cfg.EffectiveSendMaxDelay()
 	rate := w.sendRate()
+	// 速率闸「不限」的两种写法：窗口非正或配额非正（与 takeSendSlot 的判据同源）。
+	// 只有这时才轮到 send_min/max_delay 当节奏。
+	rateUnlimited := rate.Window <= 0 || rate.Max <= 0
 	for i, msg := range msgs {
-		if i > 0 && w.gate == nil {
+		if i > 0 && w.gate == nil && rateUnlimited {
 			waBatchSleep(waBatchDelay(minD, maxD))
 		}
 		res := SendResult{Account: account, To: msg.To}

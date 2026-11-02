@@ -18,10 +18,12 @@ package whatsapp
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
 	"touchgocore/config"
+	"touchgocore/util"
 )
 
 // TestSendSlotWaitDuration 等待时长必须精确落在「第 (len-max) 条过期」那一刻。
@@ -277,5 +279,68 @@ func TestAwaitSendSlotRecordsSingleSend(t *testing.T) {
 	}
 	if d := time.Since(start); d < window {
 		t.Fatalf("✘ 第二条必须等满窗口 %s，实等 %s", window, d)
+	}
+}
+
+// TestBatchPacingComesOnlyFromSendRate 速率闸有效时，批内不再叠 send_min/max_delay。
+//
+// 2026-11-02 收敛：关掉防封闸后，出网节奏的唯一来源就是 send_rate。旧写法在批内
+// 无条件睡 1~5 秒（且睡在 waitSendSlot 之前），于是 90|1 实际是 91~95 秒一条，
+// 慢多少还取决于这条在批内的位置 —— 配置写着 90、日志里是 93，没人说得清为什么。
+//
+// 断言两侧：① 一次都不睡（节奏只由排队决定）；② 第二条确实等满了窗口
+// （证明「不睡」不是把闸也一起让开了）。
+func TestBatchPacingComesOnlyFromSendRate(t *testing.T) {
+	window := 150 * time.Millisecond
+	withSendRate(t, window, 1)
+
+	dev := fakeDevice(t, "8613800000000@s.whatsapp.net", "android", "A")
+	// 配置里留着 1~5 秒的批内间隔：它只有在速率闸「不限」时才该生效。
+	cfg := &config.WhatsappSessionsConfig{
+		AntibanEnabled:  waBool(false),
+		SendMinDelaySec: 1,
+		SendMaxDelaySec: 5,
+	}
+	m, _, _ := startFakeWA(t, cfg, nil, dev)
+	if err := m.StartClient(*dev.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	var mu sync.Mutex
+	var sleeps []time.Duration
+	oldSleep := waBatchSleep
+	waBatchSleep = func(d time.Duration) { mu.Lock(); sleeps = append(sleeps, d); mu.Unlock() }
+	t.Cleanup(func() { waBatchSleep = oldSleep })
+
+	var results []*SendResult
+	rid := util.DefaultCallFunc.Register(util.CallWhatsappMsg+"SendResult", func(r *SendResult) {
+		mu.Lock()
+		results = append(results, r)
+		mu.Unlock()
+	})
+	t.Cleanup(func() { util.DefaultCallFunc.Unregister(util.CallWhatsappMsg+"SendResult", rid) })
+
+	start := time.Now()
+	if err := WhatsappSendBatchAsync(context.Background(), "8613800000000", []OutboundMessage{
+		{To: "8613900000000", Body: "a"},
+		{To: "8613910000000", Body: "b"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	waitUntil(t, 5*time.Second, "两条 SendResult", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(results) == 2
+	})
+	elapsed := time.Since(start)
+
+	mu.Lock()
+	got := append([]time.Duration(nil), sleeps...)
+	mu.Unlock()
+	if len(got) != 0 {
+		t.Errorf("✘ 速率闸有效时批内不该自己睡（会叠在排队等待之上）：%v", got)
+	}
+	if elapsed < window {
+		t.Errorf("✘ 第二条必须等满窗口 %s，实等 %s", window, elapsed)
 	}
 }

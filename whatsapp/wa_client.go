@@ -521,6 +521,9 @@ func WhatsappStartPairing(ctx context.Context) (string, error) {
 //
 // 发送成功后自动清空该会话消息（clearChat，不归档、不删好友）；
 // 清空失败只记 Warning，不改变本函数的返回值。发给自己（备忘录会话）不清理。
+//
+// 【速率闸】与批量发送共用同一本 send_rate 账（见 awaitSendSlot）：窗口满时排队等
+// 下一个槽位，等到 ctx 结束才报错。在此之前单条发送不过闸，手动点一次就能绕开配置节奏。
 func WhatsappSendMessage(ctx context.Context, fromJID, to, body string) (string, error) {
 	m, err := currentWA()
 	if err != nil {
@@ -529,6 +532,9 @@ func WhatsappSendMessage(ctx context.Context, fromJID, to, body string) (string,
 	w, err := m.ensureLoggedIn(ctx, fromJID)
 	if err != nil {
 		return "", waLoginErr("发送消息", err)
+	}
+	if err := w.awaitSendSlot(ctx); err != nil {
+		return "", waSendErr("发送消息", err)
 	}
 	msgID, _, err := deliverOutbound(ctx, w, to, OutboundMessage{To: to, Body: body}, "发送消息", false)
 	return msgID, err
@@ -553,6 +559,10 @@ func WhatsappSendGroupMessage(ctx context.Context, fromJID, groupJID, body strin
 	w, err := m.ensureLoggedIn(ctx, fromJID)
 	if err != nil {
 		return "", waLoginErr("发送群组消息", err)
+	}
+	// 与单发同一道闸：群发一条也是这个账号的一次出网，必须记进同一本账。
+	if err := w.awaitSendSlot(ctx); err != nil {
+		return "", waSendErr("发送群组消息", err)
 	}
 	msgID, _, err := deliverOutbound(ctx, w, groupJID, OutboundMessage{To: groupJID, Body: body}, "发送群组消息", true)
 	return msgID, err

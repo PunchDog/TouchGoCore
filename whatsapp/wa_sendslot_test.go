@@ -158,7 +158,10 @@ func TestWaitSendSlotUnlimited(t *testing.T) {
 // 表现是「后台明明调了、实际节奏没变」，且不报任何错。
 func TestSendRateOverrideWinsOverConfig(t *testing.T) {
 	w := &waClientWrapper{cfg: &config.WhatsappSessionsConfig{SendRate: "60|1"}}
-	t.Cleanup(func() { SetSendRateOverride(nil) })
+	// 本用例必须从「没有注入」开始，而 TestMain 给整个包注入了「不限」——
+	// 先清掉再还原成不限，否则第一条断言读到的就是 TestMain 那份。
+	SetSendRateOverride(nil)
+	t.Cleanup(func() { SetSendRateOverride(&config.WaSendRate{}) })
 
 	// 未注入：按配置文件。
 	if got := w.sendRate(); got.Window != time.Minute || got.Max != 1 {
@@ -184,7 +187,9 @@ func TestSendRateOverrideWinsOverConfig(t *testing.T) {
 // 业务侧注入后立刻复用同一个结构体变量（waSendRate 里就是 &r），若这里存指针，
 // 调用方后续改 r 会悄悄改掉全局速率 —— 那种 bug 只有跑起来才会以「节奏莫名变了」出现。
 func TestSendRateOverrideIsACopy(t *testing.T) {
-	t.Cleanup(func() { SetSendRateOverride(nil) })
+	// 还原成 TestMain 的「不限」，不是 nil：nil 会回落到缺省 60|1，
+	// 把闸留给后面那些「连发两条」的用例，让它们莫名等满一分钟。
+	t.Cleanup(func() { SetSendRateOverride(&config.WaSendRate{}) })
 	w := &waClientWrapper{cfg: &config.WhatsappSessionsConfig{SendRate: "60|1"}}
 
 	src := config.WaSendRate{Window: 2 * time.Minute, Max: 7}
@@ -194,5 +199,83 @@ func TestSendRateOverrideIsACopy(t *testing.T) {
 
 	if got := w.sendRate(); got.Window != 2*time.Minute || got.Max != 7 {
 		t.Fatalf("✘ 注入后被调用方改动污染：window=%s max=%d", got.Window, got.Max)
+	}
+}
+
+// withSendRate 临时注入速率，用完还原成 TestMain 的口径（不限）。
+//
+// 还原成 nil 会让后续用例回落到缺省 60|1，等于把闸偷偷打开 —— 那时下一条用例
+// 若是「连发两条」，就会莫名等满 60 秒。
+func withSendRate(t *testing.T, window time.Duration, max int) {
+	t.Helper()
+	SetSendRateOverride(&config.WaSendRate{Window: window, Max: max})
+	t.Cleanup(func() { SetSendRateOverride(&config.WaSendRate{}) })
+}
+
+// TestSendSlotWaitProbe 探测「还要等多久」必须与真实占槽位同源、且不记账。
+//
+// 这条探针是业务侧「点发送按钮后要不要等」的唯一依据（t1job 的 AdmWaSend）。
+// 它必须满足三件事：没发过时报 0；刚发过时报「还要等一个窗口」；记账过期后
+// 自动回到 0（不剪窗口就会永远报「还要等」，按钮永久变灰）。
+func TestSendSlotWaitProbe(t *testing.T) {
+	window := 90 * time.Second
+	withSendRate(t, window, 1)
+
+	w := &waClientWrapper{}
+	if d, rate := w.sendSlotWait(); d != 0 || rate.Window != window {
+		t.Fatalf("✘ 空窗口应立刻可发并回带窗口 %s，实得 wait=%s window=%s", window, d, rate.Window)
+	}
+	if !w.takeSendSlot(time.Now(), window, 1) {
+		t.Fatal("✘ 首条应当放行")
+	}
+	d, _ := w.sendSlotWait()
+	if d <= 0 || d > window {
+		t.Fatalf("✘ 刚记账后应报「还要等 ~%s」，实得 %s", window, d)
+	}
+
+	// 记账已滑出窗口：探测必须回到 0，否则后台的发送按钮会永久拒绝。
+	stale := &waClientWrapper{sendWindow: []time.Time{time.Now().Add(-2 * window)}}
+	if d, _ := stale.sendSlotWait(); d != 0 {
+		t.Fatalf("✘ 窗口外的旧记账应被剪掉，实得等待 %s", d)
+	}
+	// 探测本身不得**追加**记账（否则每点一次按钮都会往后推一个窗口）。
+	// 剪掉窗口外的旧条目是允许的：那是记账本自身的清理，不改变「谁占着槽位」。
+	fresh := &waClientWrapper{sendWindow: []time.Time{time.Now()}}
+	if d, _ := fresh.sendSlotWait(); d <= 0 {
+		t.Fatalf("✘ 窗口内已有一条时应报「还要等」，实得 %s", d)
+	}
+	fresh.mu.Lock()
+	n := len(fresh.sendWindow)
+	fresh.mu.Unlock()
+	if n != 1 {
+		t.Fatalf("✘ 探测不该追加记账，实得 %d 条", n)
+	}
+}
+
+// TestAwaitSendSlotRecordsSingleSend 单条发送必须进同一本账，第二条要等窗口。
+//
+// 这是 2026-11-02 修的那条缝：WhatsappSendMessage 不过闸，于是自动发刚发完
+// 3 秒、手动点一次还能再发一条 —— 90|1 对「点按钮」完全无效。
+func TestAwaitSendSlotRecordsSingleSend(t *testing.T) {
+	window := 200 * time.Millisecond
+	withSendRate(t, window, 1)
+
+	w := &waClientWrapper{}
+	if err := w.awaitSendSlot(context.Background()); err != nil {
+		t.Fatalf("✘ 首条不该等：%v", err)
+	}
+	w.mu.Lock()
+	n := len(w.sendWindow)
+	w.mu.Unlock()
+	if n != 1 {
+		t.Fatalf("✘ 单条发送必须记账，窗口内实得 %d 条", n)
+	}
+
+	start := time.Now()
+	if err := w.awaitSendSlot(context.Background()); err != nil {
+		t.Fatalf("✘ 等窗口后应放行：%v", err)
+	}
+	if d := time.Since(start); d < window {
+		t.Fatalf("✘ 第二条必须等满窗口 %s，实等 %s", window, d)
 	}
 }

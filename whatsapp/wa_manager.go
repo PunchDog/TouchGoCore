@@ -852,7 +852,18 @@ func (w *waClientWrapper) waitSendSlot(ctx context.Context, window time.Duration
 func (w *waClientWrapper) sendSlotWaitDuration(now time.Time, window time.Duration, max int) time.Duration {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if len(w.sendWindow) == 0 {
+	// 先剪窗口：并发发送可能在上次 takeSendSlot 之后又追加了条目，剪过再算才准。
+	w.pruneSendWindowLocked(now, window)
+	return w.sendSlotWaitLocked(now, window, max)
+}
+
+// sendSlotWaitLocked 是 sendSlotWaitDuration 的无锁内核（调用方须持 w.mu 且已剪窗口）。
+//
+// 单独拆出来是因为「探测还要等多久」这条路径（WhatsappSendSlotWait）要在同一把锁里
+// 先剪窗口、再判满、再算时长，三段必须原子；分三次加锁会在中间被别的发送插队，
+// 算出的 ETA 与实际拿到的槽位对不上。
+func (w *waClientWrapper) sendSlotWaitLocked(now time.Time, window time.Duration, max int) time.Duration {
+	if len(w.sendWindow) == 0 || max <= 0 {
 		return 0
 	}
 	// 要让窗口内剩 max-1 条：第 (len-max) 条过期即可。
@@ -868,6 +879,65 @@ func (w *waClientWrapper) sendSlotWaitDuration(now time.Time, window time.Durati
 		return 0
 	}
 	return d
+}
+
+// awaitSendSlot 让「单条发送」也进入同一本速率账。
+//
+// 【为什么单条发送必须过这道闸】2026-11-02 前只有批量路径（waRunBatch）记账，
+// WhatsappSendMessage / WhatsappSendGroupMessage 直接投递 —— 于是后台/会员端点一次
+// 「发送」按钮就绕开了 send_rate：自动发刚发完 3 秒，手动还能再发一条，两条日志的
+// 时间差完全由「人什么时候点」决定，与配置的 `90|1` 毫无关系。更糟的是手动发不记账，
+// 核心也不知道它发过，紧接着的自动发批次还会在 90 秒内继续发。
+//
+// 现在两条路径共用 w.sendWindow 这一本账：谁发都记账，谁都受同一个窗口约束。
+// 窗口满时与批量一样是**排队**（waitSendSlot）而不是拒单 —— 语义统一为「按配置节奏
+// 发出去」，不是「超了就丢」。
+//
+// ctx 必须能打断：后台 HTTP 预算只有十几秒，等待超过调用方耐心时应当由调用方
+// 用 WhatsappSendSlotWait 先探测、给操作者一句「还要等 N 秒」，而不是静默挂住。
+func (w *waClientWrapper) awaitSendSlot(ctx context.Context) error {
+	rate := w.sendRate()
+	// ctx 为空是本包允许的形态（门面文档写明「ctx 为空退化到包级运行上下文」），
+	// 排队睡眠必须走同一份归一，否则 waSleepCtx(nil) 直接空指针 panic。
+	return w.waitSendSlot(ctxOrRun(ctx), rate.Window, rate.Max)
+}
+
+// sendSlotWait 探测「现在这条能不能立刻发」，不记账、不改状态。
+//
+// 返回值：还要等多久（0 = 立刻可发）与该账号当前生效的速率（供调用方拼文案）。
+func (w *waClientWrapper) sendSlotWait() (time.Duration, config.WaSendRate) {
+	rate := w.sendRate()
+	if rate.Window <= 0 || rate.Max <= 0 {
+		return 0, rate
+	}
+	now := time.Now()
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.pruneSendWindowLocked(now, rate.Window)
+	if len(w.sendWindow) < rate.Max {
+		return 0, rate
+	}
+	return w.sendSlotWaitLocked(now, rate.Window, rate.Max), rate
+}
+
+// WhatsappSendSlotWait 探测某账号「还要等多久才能发下一条」。
+//
+// 只读、不记账、不启动会话：账号不在册或读不到速率时返回 (0, 0)，调用方按
+// 「立刻可发」处理（真正的判定仍在发送时由 awaitSendSlot 做，这里只用于给
+// 操作者一句可读的提示，不能拿它当放行依据）。
+//
+// 返回 (等待时长, 速率窗口)：窗口是文案要用的配置值（如 90|1 的 90 秒）。
+func WhatsappSendSlotWait(fromJID string) (time.Duration, time.Duration) {
+	m, err := currentWA()
+	if err != nil {
+		return 0, 0
+	}
+	w, err := m.ensureAlive(fromJID)
+	if err != nil || w == nil {
+		return 0, 0
+	}
+	wait, rate := w.sendSlotWait()
+	return wait, rate.Window
 }
 
 // waLastSend 是发送账的一条：最近一次经本包发往某会话的消息 id 与服务器时间戳。

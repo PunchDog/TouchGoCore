@@ -68,3 +68,6 @@ tasks/
 whatsapp/outputs/
 whatsapp/.workbuddy-ai/
 outputs/
+
+# Zalo 真机探针的本地环境文件（含 DSN 口令）；模板 zalo/probe/env.example 入库。
+zalo/probe/probe.env

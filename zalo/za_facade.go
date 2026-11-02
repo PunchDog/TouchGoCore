@@ -17,8 +17,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
+
+	zcagoerrs "github.com/amrakk/zcago/errs"
+
+	"touchgocore/vars"
 )
 
 // 门面层的两个参数错误：正文/收件人为空。
@@ -106,6 +111,34 @@ func ZaloSendGroupMessage(ctx context.Context, accountID, groupID, text string) 
 	return a.sendText(ctx, conn, true, groupID, text)
 }
 
+// ZaloSendCard 向单聊线程 to 发送一条三部分卡片（缩略图 + 文字 + 外链），
+// 返回服务端受理的 msgID。卡片整体就是跳转入口，点击打开 card.LinkURL。
+func ZaloSendCard(ctx context.Context, accountID, to string, card OutboundCard) (string, error) {
+	_, a, err := zaFacadeAccount(accountID)
+	if err != nil {
+		return "", err
+	}
+	conn, err := a.ensureConn(ctx)
+	if err != nil {
+		return "", err
+	}
+	return a.sendCard(ctx, conn, false, to, card)
+}
+
+// ZaloSendGroupCard 向群 groupID 发送一条三部分卡片。
+// 群禁言（LockSendMsg）由上游拒发并原样上抛，门面不替业务判定。
+func ZaloSendGroupCard(ctx context.Context, accountID, groupID string, card OutboundCard) (string, error) {
+	_, a, err := zaFacadeAccount(accountID)
+	if err != nil {
+		return "", err
+	}
+	conn, err := a.ensureConn(ctx)
+	if err != nil {
+		return "", err
+	}
+	return a.sendCard(ctx, conn, true, groupID, card)
+}
+
 // ZaloDeleteChat 清空 accountID 账号本端（onlyMe）threadID 会话的消息。
 //
 // 语义与 Zalo App 的「删除会话」一致：只影响本账号这一端，对端/群成员的消息不动。
@@ -181,24 +214,107 @@ func ZaloGetGroupInfo(ctx context.Context, accountID string, groupIDs ...string)
 	return a.groupInfo(ctx, groupIDs)
 }
 
-// sendText 是每账号唯一的发送闸。
-//
-// 顺序固定为「参数检查 → 小时配额 → 随机间隔 → 真发 → 记账」，整段由 sendMu
-// 串行化，同一账号的发送严格顺序执行，不同账号之间互不阻塞。
-//
-// 记账口径：
-//   - 配额在睡眠之前判定：已超限直接 ErrZaloSendLimit，不让调用方等到睡眠结束才被拒；
-//   - 睡眠成功后才 append 小时窗口，随后无论 conn.SendText 成败都占槽（请求已经
-//     打到服务端，失败重试同样计入供应商侧频控）；
-//   - 睡眠被 ctx 取消时立即返回：不 append 窗口、不推进 lastSend，下一次发送仍按
-//     「距上次成功收尾」的间隔计算；
-//   - conn == nil 表示账号没有可用会话，返回 ErrZaloNotLoggedIn；
-//   - 空 msgID（含 err == nil 的空回执）折算 ErrZaloEmptyMessageID：没拿到 id 等于
-//     没受理，不能装成成功。
+// sendText 是文本发送入口：正文校验后交给统一发送闸。
 func (a *zaAccount) sendText(ctx context.Context, conn zaConn, group bool, threadID, text string) (string, error) {
 	if strings.TrimSpace(text) == "" {
 		return "", errZAFacadeEmptyText
 	}
+	return a.sendGuarded(ctx, conn, group, threadID, func(sendCtx context.Context, threadID string) (string, error) {
+		return conn.SendText(sendCtx, threadID, group, text)
+	})
+}
+
+// sendCard 是卡片发送入口：外链与文字校验后交给统一发送闸。
+// 缩略图/标题/描述由目标页 OG 元数据决定，这里只校验外链与文字。
+func (a *zaAccount) sendCard(ctx context.Context, conn zaConn, group bool, threadID string, card OutboundCard) (string, error) {
+	card = OutboundCard{
+		Text:    strings.TrimSpace(card.Text),
+		LinkURL: strings.TrimSpace(card.LinkURL),
+	}
+	if !zaHTTPURL(card.LinkURL) {
+		return "", ErrZaloCardBadLink
+	}
+	if card.Text == "" {
+		return "", ErrZaloCardEmptyText
+	}
+	msgID, err := a.sendGuarded(ctx, conn, group, threadID, func(sendCtx context.Context, threadID string) (string, error) {
+		return conn.SendCard(sendCtx, threadID, group, card)
+	})
+	if err == nil {
+		return msgID, nil
+	}
+	if !zaCardRejected(err) {
+		return "", err
+	}
+	// 卡片被拒：摊成「文字 + 链接」再发一次。这不是重试网络错误，而是换形态；
+	// 第二次发送仍走同一道闸（占第二个槽、重新计 3–5s 间隔）。
+	fallback := zaCardFallbackText(card)
+	reason := zaSafeReason(err)
+	if reason == "" {
+		reason = "服务端拒收"
+	}
+	vars.Warning("zalo 卡片被服务端拒收，降级为「文字 + 链接」发送（原因：%s）", reason)
+	fallbackID, fallbackErr := a.sendText(ctx, conn, group, threadID, fallback)
+	if fallbackErr != nil {
+		return "", fallbackErr
+	}
+	return fallbackID, nil
+}
+
+// zaCardFallbackText 把卡片摊成普通文本：正文 + 换行 + 链接；正文已含链接时不重复。
+func zaCardFallbackText(card OutboundCard) string {
+	text := strings.TrimSpace(card.Text)
+	link := strings.TrimSpace(card.LinkURL)
+	if text == "" {
+		return link
+	}
+	if strings.Contains(text, link) {
+		return text
+	}
+	return text + "\n" + link
+}
+
+// zaCardRejected 判断卡片失败是否属于「服务端拒收」并应降级为文本+链接。
+//
+// 只认 zcago 的 ZaloAPIError：
+//   - 599 是本包传输层兜底合成（请求可能已经出网），不降级，避免重复发送；
+//   - 5xx 视为服务端临时故障，不降级；
+//   - 429 是限流，不降级（再发一条只会更糟）；
+//   - 其余 4xx 与 Zalo 业务码（112/114 等）按拒收处理。
+func zaCardRejected(err error) bool {
+	var apiErr zcagoerrs.ZaloAPIError
+	if !errors.As(err, &apiErr) || apiErr.Code == nil {
+		return false
+	}
+	code := int(*apiErr.Code)
+	switch {
+	case code == 599, code == 429:
+		return false
+	case code >= 500 && code <= 599:
+		return false
+	}
+	return true
+}
+
+// zaHTTPURL 只接受带 host 的 http/https 绝对地址；file:// 与裸路径一律拒绝。
+func zaHTTPURL(raw string) bool {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	return err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != ""
+}
+
+// sendGuarded 是每账号唯一的发送闸，文本与卡片共用。
+//
+// 顺序固定为「小时配额 → 随机间隔 → 发前复核 → 真发 → 记账」，整段由 sendMu
+// 串行化，同一账号的发送严格顺序执行，不同账号之间互不阻塞。
+//
+// 记账口径与旧 sendText 完全一致：
+//   - 配额在睡眠之前判定：已超限直接 ErrZaloSendLimit，不让调用方等到睡眠结束才被拒；
+//   - 睡眠成功后才 append 小时窗口，随后无论发送成败都占槽（请求已经打到服务端，
+//     失败重试同样计入供应商侧频控）；
+//   - 睡眠被 ctx 取消时立即返回：不 append 窗口、不推进 lastSend；
+//   - conn == nil 表示账号没有可用会话，返回 ErrZaloNotLoggedIn；
+//   - 空 msgID（含 err == nil 的空回执）折算 ErrZaloEmptyMessageID。
+func (a *zaAccount) sendGuarded(ctx context.Context, conn zaConn, group bool, threadID string, send func(context.Context, string) (string, error)) (string, error) {
 	threadID = strings.TrimSpace(threadID)
 	if threadID == "" {
 		return "", errZAFacadeEmptyThread
@@ -256,7 +372,7 @@ func (a *zaAccount) sendText(ctx context.Context, conn zaConn, group bool, threa
 
 	sendCtx, cancel := context.WithTimeout(ctx, m.limits.requestTimeout)
 	defer cancel()
-	msgID, err := conn.SendText(sendCtx, threadID, group, text)
+	msgID, err := send(sendCtx, threadID)
 	if err != nil {
 		// 上游 error 可能带响应体；Error() 只给固定文案，Unwrap 保留原错误供排障。
 		return "", zaSafeWrap("zalo 发送失败", err)

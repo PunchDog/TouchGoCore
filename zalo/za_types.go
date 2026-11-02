@@ -47,6 +47,16 @@ type GroupInfo struct {
 	LockSendMsg bool     `json:"lock_send_msg"`
 }
 
+// OutboundCard 一条 Zalo 链接卡片：文字 + 外链。
+//
+// 缩略图/标题/描述由 Zalo 服务端抓取 LinkURL 页面的 OG 元数据决定（zcago v0.3.0
+// 的 SendLink 只接受 Msg/Link），业务不单独传缩略图。卡片整体就是跳转入口：
+// 收件人点击卡片打开 LinkURL。Text 与 LinkURL 必填，一条卡片占一个发送配额槽。
+type OutboundCard struct {
+	Text    string `json:"text"`
+	LinkURL string `json:"link_url"`
+}
+
 // ChatBoundary 是「清空本端会话」的边界消息（上游 deleteconver 的 conver 参数）。
 //
 // 三个字段必须描述同一条消息：OwnerID 是发送者 UID，CliMsgID 是客户端生成的消息
@@ -115,4 +125,8 @@ var (
 	ErrZaloEmptyMessageID = errors.New("zalo 发送回执没有消息 id")
 	// ErrZaloBadAccountID 账号 id 不合法（空串、空白、分隔符或超长）。
 	ErrZaloBadAccountID = errors.New("zalo 账号 id 非法")
+	// ErrZaloCardEmptyText 卡片文字为空：没有文字无法解释卡片内容。
+	ErrZaloCardEmptyText = errors.New("zalo 卡片文字为空")
+	// ErrZaloCardBadLink 卡片外链为空或不是 http/https。
+	ErrZaloCardBadLink = errors.New("zalo 卡片外链为空或不是 http/https")
 )

@@ -268,6 +268,13 @@ func (c *fakeZAConn) SendText(context.Context, string, bool, string) (string, er
 	return c.sendMsgID, c.sendErr
 }
 
+// SendCard 返回注入的 msgID/错误（本文件不测卡片发送）。
+func (c *fakeZAConn) SendCard(context.Context, string, bool, OutboundCard) (string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.sendMsgID, c.sendErr
+}
+
 // DeleteChat 记录边界参数并返回注入错误。
 func (c *fakeZAConn) DeleteChat(_ context.Context, threadID string, group bool, boundary ChatBoundary) error {
 	c.mu.Lock()

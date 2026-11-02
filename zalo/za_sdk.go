@@ -58,6 +58,7 @@ type zaConn interface {
 	UID() string
 	SnapshotCredentials() (zcago.Credentials, error)
 	SendText(ctx context.Context, threadID string, group bool, text string) (string, error)
+	SendCard(ctx context.Context, threadID string, group bool, card OutboundCard) (string, error)
 	DeleteChat(ctx context.Context, threadID string, group bool, boundary ChatBoundary) error
 	GetAllFriends(ctx context.Context) ([]UserInfo, error)
 	GetAllGroups(ctx context.Context) (map[string]string, error) // groupID -> version
@@ -206,6 +207,29 @@ func (c *zaRealConn) SendText(ctx context.Context, threadID string, group bool, 
 		return "", nil
 	}
 	return resp.Message.MsgID, nil
+}
+
+// SendCard 发送一条链接卡片（文字 + 外链），返回服务端受理后的 msgID。
+//
+// 走 zcago 上游的 SendLink：缩略图/标题/描述由 Zalo 服务端抓取 LinkURL 页面的
+// OG 元数据，业务不单独传缩略图。空 msgID 的处理同 SendText。
+func (c *zaRealConn) SendCard(ctx context.Context, threadID string, group bool, card OutboundCard) (string, error) {
+	tt := model.ThreadTypeUser
+	if group {
+		tt = model.ThreadTypeGroup
+	}
+	resp, err := c.api.SendLink(ctx, threadID, tt, zcagoapi.SendLinkOptions{
+		Msg:  card.Text,
+		Link: card.LinkURL,
+		TTL:  0,
+	})
+	if err != nil {
+		return "", err
+	}
+	if resp == nil {
+		return "", nil
+	}
+	return resp.MsgID, nil
 }
 
 // DeleteChat 清空本端（onlyMe）threadID 会话的消息。

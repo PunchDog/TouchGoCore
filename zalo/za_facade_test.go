@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/amrakk/zcago"
+	zcagoerrs "github.com/amrakk/zcago/errs"
 )
 
 // errFacBoom 是门面测试注入的通用失败，用于断言 errors.Is 能穿过包装。
@@ -31,15 +32,25 @@ type facRecordedSend struct {
 	text     string
 }
 
-// facConn 在 fakeZAConn 之上覆盖 SendText：记录 group/threadID/text，返回可注入的
+// facRecordedCard 是一次到达 conn.SendCard 的发送记录。
+type facRecordedCard struct {
+	group    bool
+	threadID string
+	card     OutboundCard
+}
+
+// facConn 在 fakeZAConn 之上覆盖 SendText/SendCard：记录参数，返回可注入的
 // msgID/error。其余方法（UID/快照/好友/群/listener）由嵌入的 fakeZAConn 提供。
 type facConn struct {
 	*fakeZAConn
 
 	recMu   sync.Mutex
 	sends   []facRecordedSend
+	cards   []facRecordedCard
 	msgID   string
 	sendErr error
+	cardMsg string
+	cardErr error
 }
 
 var _ zaConn = (*facConn)(nil)
@@ -53,6 +64,38 @@ func (c *facConn) SendText(_ context.Context, threadID string, group bool, text 
 		return "", c.sendErr
 	}
 	return c.msgID, nil
+}
+
+// SendCard 记录本次调用的全部参数并返回注入结果。
+func (c *facConn) SendCard(_ context.Context, threadID string, group bool, card OutboundCard) (string, error) {
+	c.recMu.Lock()
+	defer c.recMu.Unlock()
+	c.cards = append(c.cards, facRecordedCard{group: group, threadID: threadID, card: card})
+	if c.cardErr != nil {
+		return "", c.cardErr
+	}
+	return c.cardMsg, nil
+}
+
+// recordedCards 返回卡片发送记录副本。
+func (c *facConn) recordedCards() []facRecordedCard {
+	c.recMu.Lock()
+	defer c.recMu.Unlock()
+	return append([]facRecordedCard(nil), c.cards...)
+}
+
+// setCardMsgID 设置 SendCard 返回的 msgID。
+func (c *facConn) setCardMsgID(id string) {
+	c.recMu.Lock()
+	defer c.recMu.Unlock()
+	c.cardMsg = id
+}
+
+// setCardErr 设置 SendCard 返回的错误（nil 表示恢复正常）。
+func (c *facConn) setCardErr(err error) {
+	c.recMu.Lock()
+	defer c.recMu.Unlock()
+	c.cardErr = err
 }
 
 // recorded 返回发送记录副本。
@@ -118,7 +161,8 @@ func (s *facSDK) Login(_ context.Context, _ zcago.Credentials) (zaConn, error) {
 			uid:  "uid-fac",
 			snap: zcago.Credentials{IMEI: "imei-fac", UserAgent: "ua-fac"},
 		},
-		msgID: "msg-fac",
+		msgID:   "msg-fac",
+		cardMsg: "card-fac",
 	}
 	if configure != nil {
 		configure(c)
@@ -459,6 +503,256 @@ func TestZAFacadeSendRejectsBadInput(t *testing.T) {
 			t.Fatalf("错误文案回显了正文: %q", err.Error())
 		}
 	})
+}
+
+// TestZAFacadeSendCardRoutesThread 断言单聊/群聊把链接卡片原样交给 conn.SendCard。
+func TestZAFacadeSendCardRoutesThread(t *testing.T) {
+	_, sdk, _ := facNewSendFixture(t, 0)
+	ctx := context.Background()
+	card := OutboundCard{
+		Text:    "首行\n第二行",
+		LinkURL: "https://example.com/jump",
+	}
+
+	id, err := ZaloSendCard(ctx, "acct", "peer-1", card)
+	if err != nil {
+		t.Fatalf("ZaloSendCard: %v", err)
+	}
+	if id != "card-fac" {
+		t.Fatalf("msgID=%q，期望 card-fac", id)
+	}
+
+	id, err = ZaloSendGroupCard(ctx, "acct", "group-1", card)
+	if err != nil {
+		t.Fatalf("ZaloSendGroupCard: %v", err)
+	}
+	if id != "card-fac" {
+		t.Fatalf("群聊 msgID=%q，期望 card-fac", id)
+	}
+
+	cards := sdk.lastConn().recordedCards()
+	if len(cards) != 2 {
+		t.Fatalf("SendCard 调用 %d 次，期望 2", len(cards))
+	}
+	if cards[0].group || cards[0].threadID != "peer-1" || cards[0].card != card {
+		t.Fatalf("单聊参数不符: %+v", cards[0])
+	}
+	if !cards[1].group || cards[1].threadID != "group-1" || cards[1].card != card {
+		t.Fatalf("群聊参数不符: %+v", cards[1])
+	}
+}
+
+// TestZAFacadeSendCardRejectsBadInput 覆盖三部分字段校验、空 threadID 与空 msgID。
+func TestZAFacadeSendCardRejectsBadInput(t *testing.T) {
+	valid := OutboundCard{
+		Text:    "hello",
+		LinkURL: "https://example.com/jump",
+	}
+
+	t.Run("bad_link", func(t *testing.T) {
+		_, sdk, _ := facNewSendFixture(t, 0)
+		card := valid
+		card.LinkURL = "ftp://example.com/x"
+		if _, err := ZaloSendCard(context.Background(), "acct", "peer-1", card); !errors.Is(err, ErrZaloCardBadLink) {
+			t.Fatalf("非法外链 err=%v，期望 ErrZaloCardBadLink", err)
+		}
+		if conn := sdk.lastConn(); conn != nil && len(conn.recordedCards()) != 0 {
+			t.Fatalf("非法外链仍调了 SendCard")
+		}
+	})
+
+	t.Run("empty_text", func(t *testing.T) {
+		_, sdk, _ := facNewSendFixture(t, 0)
+		card := valid
+		card.Text = "  \n\t "
+		if _, err := ZaloSendCard(context.Background(), "acct", "peer-1", card); !errors.Is(err, ErrZaloCardEmptyText) {
+			t.Fatalf("空文字 err=%v，期望 ErrZaloCardEmptyText", err)
+		}
+		if conn := sdk.lastConn(); conn != nil && len(conn.recordedCards()) != 0 {
+			t.Fatalf("空文字仍调了 SendCard")
+		}
+	})
+
+	t.Run("empty_thread", func(t *testing.T) {
+		_, sdk, _ := facNewSendFixture(t, 0)
+		if _, err := ZaloSendGroupCard(context.Background(), "acct", "   ", valid); !errors.Is(err, errZAFacadeEmptyThread) {
+			t.Fatalf("空 threadID err=%v，期望 errZAFacadeEmptyThread", err)
+		}
+		if conn := sdk.lastConn(); conn != nil && len(conn.recordedCards()) != 0 {
+			t.Fatalf("空 threadID 仍调了 SendCard")
+		}
+	})
+
+	t.Run("empty_msg_id", func(t *testing.T) {
+		_, sdk, _ := facNewSendFixture(t, 0)
+		sdk.configure = func(c *facConn) { c.setCardMsgID("  ") }
+		if _, err := ZaloSendCard(context.Background(), "acct", "peer-1", valid); !errors.Is(err, ErrZaloEmptyMessageID) {
+			t.Fatalf("空 msgID err=%v，期望 ErrZaloEmptyMessageID", err)
+		}
+	})
+}
+
+// TestZAFacadeSendCardSharesQuota 断言卡片与文本共用同一本滚动小时配额。
+func TestZAFacadeSendCardSharesQuota(t *testing.T) {
+	_, sdk, _ := facNewSendFixture(t, 1)
+	ctx := context.Background()
+	if _, err := ZaloSendMessage(ctx, "acct", "peer-1", "first"); err != nil {
+		t.Fatalf("首条文本: %v", err)
+	}
+	_, err := ZaloSendCard(ctx, "acct", "peer-1", OutboundCard{
+		Text:    "card",
+		LinkURL: "https://example.com/x",
+	})
+	if !errors.Is(err, ErrZaloSendLimit) {
+		t.Fatalf("卡片 err=%v，期望与文本共用配额并返回 ErrZaloSendLimit", err)
+	}
+	if cards := sdk.lastConn().recordedCards(); len(cards) != 0 {
+		t.Fatalf("配额已满仍调了 SendCard: %+v", cards)
+	}
+}
+
+// TestZAFacadeSendCardConnErrorIsWrapped 断言 conn 错误可 errors.Is 且不回显卡片文字。
+func TestZAFacadeSendCardConnErrorIsWrapped(t *testing.T) {
+	_, sdk, _ := facNewSendFixture(t, 0)
+	sdk.configure = func(c *facConn) { c.setCardErr(errFacBoom) }
+	const body = "S3CRET-CARD-7781"
+	_, err := ZaloSendCard(context.Background(), "acct", "peer-1", OutboundCard{
+		Text:    body,
+		LinkURL: "https://example.com/x",
+	})
+	if !errors.Is(err, errFacBoom) {
+		t.Fatalf("conn 错误 err=%v，期望可 errors.Is(errFacBoom)", err)
+	}
+	if strings.Contains(err.Error(), body) {
+		t.Fatalf("错误文案回显了卡片文字: %q", err.Error())
+	}
+}
+
+// zaTestAPIErr 构造带 Zalo 业务码的错误，用于驱动拒收降级分支。
+func zaTestAPIErr(code int) error {
+	c := zcagoerrs.ZaloErrorCode(code)
+	return zcagoerrs.NewZaloAPIError("rejected", &c)
+}
+
+// TestZAFacadeSendCardFallsBackOnRejection 断言卡片被业务码拒收后降级为「文字 + 链接」，
+// 且第二次发送仍走同一账号的发送路由。
+func TestZAFacadeSendCardFallsBackOnRejection(t *testing.T) {
+	_, sdk, _ := facNewSendFixture(t, 0)
+	sdk.configure = func(c *facConn) { c.setCardErr(zaTestAPIErr(114)) }
+	card := OutboundCard{
+		Text:    "首行",
+		LinkURL: "https://example.com/jump",
+	}
+	id, err := ZaloSendCard(context.Background(), "acct", "peer-1", card)
+	if err != nil {
+		t.Fatalf("降级发送: %v", err)
+	}
+	if id != "msg-fac" {
+		t.Fatalf("降级后 msgID=%q，期望文本发送的 msg-fac", id)
+	}
+	conn := sdk.lastConn()
+	if got := len(conn.recordedCards()); got != 1 {
+		t.Fatalf("SendCard 调用 %d 次，期望 1", got)
+	}
+	sends := conn.recorded()
+	if len(sends) != 1 {
+		t.Fatalf("降级后 SendText 调用 %d 次，期望 1", len(sends))
+	}
+	if sends[0].group || sends[0].threadID != "peer-1" {
+		t.Fatalf("降级发送路由不符: %+v", sends[0])
+	}
+	if sends[0].text != "首行\nhttps://example.com/jump" {
+		t.Fatalf("降级正文=%q", sends[0].text)
+	}
+}
+
+// TestZAFacadeSendCardNoFallback 断言网络错误、限流与服务端错误都不降级，避免重复发送。
+func TestZAFacadeSendCardNoFallback(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+	}{
+		{"transport_599", zaTestAPIErr(599)},
+		{"rate_limit_429", zaTestAPIErr(429)},
+		{"server_500", zaTestAPIErr(500)},
+		{"non_api_error", errFacBoom},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, sdk, _ := facNewSendFixture(t, 0)
+			sdk.configure = func(fc *facConn) { fc.setCardErr(c.err) }
+			_, err := ZaloSendCard(context.Background(), "acct", "peer-1", OutboundCard{
+				Text:    "card",
+				LinkURL: "https://example.com/x",
+			})
+			if !errors.Is(err, c.err) {
+				t.Fatalf("err=%v，期望可 errors.Is 原始错误", err)
+			}
+			if sends := sdk.lastConn().recorded(); len(sends) != 0 {
+				t.Fatalf("不应降级，实际 SendText %d 次", len(sends))
+			}
+		})
+	}
+}
+
+// TestZAFacadeSendCardFallbackSharesQuota 断言降级是第二次逻辑发送：
+// 首条已占槽，配额为 1 时降级发送必须被配额拦下。
+func TestZAFacadeSendCardFallbackSharesQuota(t *testing.T) {
+	_, sdk, _ := facNewSendFixture(t, 1)
+	sdk.configure = func(c *facConn) { c.setCardErr(zaTestAPIErr(114)) }
+	_, err := ZaloSendCard(context.Background(), "acct", "peer-1", OutboundCard{
+		Text:    "card",
+		LinkURL: "https://example.com/x",
+	})
+	if !errors.Is(err, ErrZaloSendLimit) {
+		t.Fatalf("err=%v，期望降级发送被 ErrZaloSendLimit 拦下", err)
+	}
+	if sends := sdk.lastConn().recorded(); len(sends) != 0 {
+		t.Fatalf("配额已满仍调了 SendText: %+v", sends)
+	}
+}
+
+// TestZAFacadeSendCardFallbackDoesNotDuplicateLink 断言正文已含链接时不重复拼接。
+func TestZAFacadeSendCardFallbackDoesNotDuplicateLink(t *testing.T) {
+	_, sdk, _ := facNewSendFixture(t, 0)
+	sdk.configure = func(c *facConn) { c.setCardErr(zaTestAPIErr(112)) }
+	const text = "看这里 https://example.com/jump"
+	_, err := ZaloSendCard(context.Background(), "acct", "peer-1", OutboundCard{
+		Text:    text,
+		LinkURL: "https://example.com/jump",
+	})
+	if err != nil {
+		t.Fatalf("降级发送: %v", err)
+	}
+	sends := sdk.lastConn().recorded()
+	if len(sends) != 1 || sends[0].text != text {
+		t.Fatalf("降级正文=%+v，期望原文不重复链接", sends)
+	}
+}
+
+// TestZACardRejected 覆盖拒收判定：业务码/4xx 降级，599/429/5xx/非 API 错误不降级。
+func TestZACardRejected(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"业务码114", zaTestAPIErr(114), true},
+		{"业务码112", zaTestAPIErr(112), true},
+		{"http400", zaTestAPIErr(400), true},
+		{"限流429", zaTestAPIErr(429), false},
+		{"服务端500", zaTestAPIErr(500), false},
+		{"传输599", zaTestAPIErr(599), false},
+		{"非API错误", errFacBoom, false},
+		{"nil", nil, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := zaCardRejected(c.err); got != c.want {
+				t.Fatalf("zaCardRejected=%v, want %v", got, c.want)
+			}
+		})
+	}
 }
 
 // TestZAFacadeSendDelay 断言首条不等待、第二条睡眠在 [sendMin,sendMax] 内，

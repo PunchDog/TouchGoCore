@@ -54,6 +54,19 @@ if ! docker compose version >/dev/null 2>&1; then
     exit 1
 fi
 
+# CPU 配额默认真机一半：环境变量或 .env 里没写 CPU_LIMIT 时自动按 nproc/2 计算。
+# 容器配额与 guest vCPU（SMP=half）对齐，避免 vCPU 数超过可用配额。
+if [[ -z "${CPU_LIMIT:-}" ]] && ! grep -qE '^[[:space:]]*CPU_LIMIT[[:space:]]*=' .env 2>/dev/null; then
+    HOST_NPROC="$(nproc 2>/dev/null || echo 4)"
+    [[ "${HOST_NPROC}" =~ ^[0-9]+$ ]] || HOST_NPROC=4
+    CPU_LIMIT=$(( HOST_NPROC / 2 ))
+    if (( CPU_LIMIT < 1 )); then CPU_LIMIT=1; fi
+    export CPU_LIMIT
+    echo "==> CPU 配额: 真机 ${HOST_NPROC} 线程 -> ${CPU_LIMIT} 核（一半）"
+else
+    echo "==> CPU 配额: ${CPU_LIMIT:-由 .env 指定}"
+fi
+
 # 已有实例（运行中或已退出）先 down 掉，避免端口占用/状态残留
 if docker compose ps -aq 2>/dev/null | grep -q .; then
     echo "==> 关闭已有实例: docker compose down"

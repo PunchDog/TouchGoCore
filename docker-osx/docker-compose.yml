@@ -28,6 +28,8 @@ services:
         # 与 environment.SIZE 共用同一变量（.env 或 shell），避免两处不一致
         SIZE: "${SIZE:-200G}"
         RANKMIRRORS: "${RANKMIRRORS:-}"
+        # 写入 build 期 stock 引导盘的 boot-args；排障用 "-v" 看详细启动日志
+        STOCK_KERNEL_ARGS: "${STOCK_KERNEL_ARGS:-}"
     image: docker-osx-tahoe:latest
     tty: true
     stdin_open: true
@@ -53,6 +55,10 @@ services:
       - "${BIND_ADDR:-0.0.0.0}:${HOST_SSH_PORT:-50922}:10022"          # SSH 进 macOS guest
       - "${BIND_ADDR:-0.0.0.0}:${HOST_SCREEN_SHARE_PORT:-5900}:5900"   # macOS 屏幕共享（guest 内开启后）
       - "${BIND_ADDR:-0.0.0.0}:${HOST_VNC_PORT:-5999}:5999"            # QEMU VNC（默认显示方式）
+    # 容器 CPU 配额：默认真机一半（start.sh 按 nproc/2 导出 CPU_LIMIT）。
+    # 直接用 docker compose up 时读 .env 的 CPU_LIMIT，未设置则回落 4。
+    # 容器配额与 guest vCPU 数（SMP=half）保持一致，避免超额订阅。
+    cpus: "${CPU_LIMIT:-4}"
     volumes:
       # 首次创建命名卷时 Docker 会把镜像内 /home/arch/OSX-KVM 整体复制进卷（数 GB）
       - macos-data:/home/arch/OSX-KVM
@@ -62,10 +68,15 @@ services:
       SHORTNAME: "${SHORTNAME:-tahoe}"
       SIZE: "${SIZE:-200G}"         # 仅首次创建系统盘时生效
       RAM: "${RAM:-8}"              # GB，支持 max / half
-      SMP: "${SMP:-4}"
-      CORES: "${CORES:-4}"
+      SMP: "${SMP:-half}"           # half = 真机一半（Launch.sh 按 nproc/2 解析）
+      CORES: "${CORES:-half}"       # 同上；留空或 half 即跟随 SMP
       CPU: "${CPU:-Skylake-Client}"
-      CPUID_FLAGS: "kvm=on,vendor=GenuineIntel,+invtsc,vmware-cpuid-freq=on,-hle,-rtm,+ssse3,+sse4.2,+popcnt,+avx,+aes,+xsave,+xsaveopt,check"
+      # 默认面向 Intel 宿主；宿主为 AMD 时保持 Skylake-Client（伪装 Intel）。
+      # Intel 宿主可改 CPU=host 并精简 CPUID_FLAGS（去掉 check，避免校验失败）。
+      CPUID_FLAGS: "${CPUID_FLAGS:-kvm=on,vendor=GenuineIntel,+invtsc,vmware-cpuid-freq=on,-hle,-rtm,+ssse3,+sse4.2,+popcnt,+avx,+aes,+xsave,+xsaveopt,check}"
+      # 加速器：kvm:tcg = 优先 KVM，失败静默回退 TCG（极慢，macOS 基本装不上）。
+      # 排障时改 accel=kvm 可让 KVM 不可用时直接报错而不是悄悄降级。
+      KVM: "${KVM:-accel=kvm:tcg}"
       AUDIO_DRIVER: "${AUDIO_DRIVER:-auto}"   # 无 PCM 自动 none；WSLg override 使用 pa
       EXTRA: "-display none -vnc 0.0.0.0:99"
       GENERATE_UNIQUE: "${GENERATE_UNIQUE:-false}"  # 每次启动更换硬件标识；需要时再开启
@@ -81,6 +92,10 @@ services:
       HTTP_PROXY: "${CONTAINER_HTTP_PROXY:-}"
       HTTPS_PROXY: "${CONTAINER_HTTP_PROXY:-}"
       NO_PROXY: "${CONTAINER_NO_PROXY:-localhost,127.0.0.1}"
+      # OpenCore boot-args。注意：仅当 GENERATE_UNIQUE/GENERATE_SPECIFIC=true（运行期
+      # 重新生成引导盘）时生效；默认用 build 期 stock 盘，改这里无效，改用
+      # STOCK_KERNEL_ARGS + --build。排障常用 "-v"（详细启动日志）。
+      KERNEL_ARGS: "${KERNEL_ARGS:-}"
       # 有 /dev/kvm 但嵌套虚拟化不可用时，可改 accel=tcg（极慢，仅排障）
       # KVM: "accel=tcg"
       # NOPICKER: "true"        # 已有系统盘时跳过 OpenCore 菜单与安装器下载

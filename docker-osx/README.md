@@ -20,7 +20,7 @@
 
 1. **Tahoe 默认且配置对齐**：MacPro7,1 受支持 SMBIOS；OpenCore 模板取自 OSX-KVM 当前 Tahoe 配置，不再使用 2022 年的旧模板。
 2. **CPU 对齐 Tahoe**：`Skylake-Client,-hle,-rtm` + 对应 CPUID flags。
-3. **RAM 默认 8GB**，仍支持 `max`/`half`。
+3. **RAM 默认 8GB**，仍支持 `max`/`half`；**vCPU 与容器 CPU 配额默认取真机一半**（`SMP`/`CORES`=`half` 运行时按 `nproc/2` 解析，`start.sh` 同步导出 `CPU_LIMIT`）。
 4. **CI 钩子 `OSX_COMMANDS`**：guest SSH 就绪后自动在 macOS 内执行命令（分号分隔），日志 `/tmp/osx-commands.log`。
 5. **HEALTHCHECK**：检测 QEMU 进程存活（首次下载安装器期间由 start-period 覆盖）。
 6. **无头 VNC 默认** + WSLg GUI/音频 override；`AUDIO_DRIVER=auto` 在无 PCM 时自动静音而不是启动失败。
@@ -287,7 +287,8 @@ docker run -itd --device /dev/kvm \
 | `IMAGE_PATH` / `IMAGE_FORMAT` | mac_hdd_ng.img / qcow2 | 系统盘路径与格式；naked 模式必须已存在 |
 | `BASESYSTEM_FORMAT` | qcow2 | 安装器格式；自备 raw 安装器时改为 raw |
 | `RAM` | `8` | GB；`max`=全部内存，`half`=一半 |
-| `SMP` / `CORES` | `4` / `4` | vCPU 线程数 / 核心数 |
+| `SMP` / `CORES` | `half` / `half` | vCPU 线程数 / 核心数；`half`=真机一半（`nproc/2`，运行时解析），也可写死数字 |
+| `CPU_LIMIT` | 真机一半 | 仅 compose：容器 CPU 硬限额（单位=核）；`start.sh` 自动按 `nproc/2` 导出，`.env` 写死数字则以此为准 |
 | `CPU` / `CPUID_FLAGS` | `Skylake-Client` / Tahoe flags | Tahoe/Sonoma+ 建议保持默认 |
 | `KVM` | `accel=kvm:tcg` | 无 `/dev/kvm` 时退回 TCG（极慢） |
 | `DISPLAY` / `WIDTH` / `HEIGHT` | `:0.0` / 1920 / 1080 | GUI 显示；分辨率用于生成引导盘 |
@@ -312,6 +313,21 @@ docker run -itd --device /dev/kvm \
 | `OSX_COMMANDS` | 空 | guest SSH 就绪后执行的分号分隔命令 |
 | `OSX_USERNAME` / `OSX_PASSWORD` / `OSX_SSH_RETRIES` | user / alpine / 120 | CI 钩子账号与轮询 |
 | `ENV` | `/env` | 兼容上游；GENERATE_SPECIFIC 可 source，GENERATE_UNIQUE 可写入 |
+
+### CPU 与内存分配
+
+默认按「真机一半」分配，换机器不用改配置：
+
+| 层 | 变量 | 默认 | 解析方式 |
+|---|---|---|---|
+| guest vCPU | `SMP` / `CORES` | `half` | `Launch.sh` 运行时按 `nproc/2` 计算 |
+| 容器配额 | `CPU_LIMIT` | 真机一半 | `start.sh` 用 `nproc/2` 导出给 compose 的 `cpus` |
+
+- `nproc` 读的是 CPU affinity，**不受容器 `cpus` 配额影响**，所以拿到的是真机线程数（含超线程）。20 线程机器 → 取一半 10，再按下面的 2 的幂规则落到 **8 vCPU**（配额仍是 10 核）。
+- **cores 必须是 2 的幂**：QEMU 的 x86 拓扑按 cores 位宽计算 APIC ID，非 2 的幂会让部分 macOS 版本在多核初始化阶段 panic（屏幕显示 `Your computer restarted because of a problem`）。所以 `half` 算出 10 时会自动收敛到 8，日志打印 `[cpu] cores=10 非 2 的幂，收敛为 8`。这也是为什么默认核数是 8 而不是 10。
+- 容器配额是硬上限，vCPU 超过配额只会互相抢时间片。`Launch.sh` 会读 `/sys/fs/cgroup/cpu.max`，发现 `SMP > 配额` 时自动收敛并打印 `[cpu] 容器配额 N 核 < vCPU M，收敛到 N`。所以直接 `docker compose up`（未经 `start.sh`，配额回落 4）也不会出现 8 vCPU 挤 4 核。
+- 想固定核数：`.env` 里把 `SMP`/`CORES` 写成 2 的幂（如 `4`、`8`），并把 `CPU_LIMIT` 写成不小于它的数字，否则会被配额收敛。
+- `RAM` 同样支持 `half` / `max`，默认固定 8GB（内存不像 CPU 那样适合无脑对半——macOS 至少要 8GB 才顺手）。`Launch.sh` 启动时会比对 `MemAvailable`，余量不足 1GB 会打 `[warn]`——内存打满同样会让安装器 panic 重启。
 
 ## 七、端口
 
@@ -370,5 +386,6 @@ docker run -itd --device /dev/kvm \
 | CI 命令不执行 | guest 未开启 SSH / 用户不存在 / 端口未通；`docker exec <id> cat /tmp/osx-commands.log` |
 | 镜像更新后行为没变 | 数据卷内是旧 OSX-KVM 上游文件；启动脚本/stock 盘在镜像内会更新，运行时生成路径需重建卷 |
 | 想换旧版本 | `-e SHORTNAME=sonoma` 并删除旧 `BaseSystem.img`；High Sierra/Mojave 需改用对应 SMBIOS/`GENERATE_SPECIFIC` |
+| 屏幕显示 `Your computer restarted because of a problem`（多语言） | 这是 **macOS 内核 panic 后的重启提示**，不是 QEMU/容器崩溃，容器通常还是 Up。按顺序排：① `.env` 里 `SMP`/`CORES` 改成 `4`（2 的幂，最小风险组合）再重启，确认是不是核数问题；② 看日志有无 `[warn] 可用内存 ... 余量不足 1GB`，内存打满同样会反复 panic，降 `RAM` 或给 WSL 加内存；③ 加 `KERNEL_ARGS="-v"` 重启，VNC 里能看到卡住的具体驱动/阶段；④ 确认 `BaseSystem.img` 是完整下载（见上面 UDIF 一条）。若只是偶发一次，按任意键让它继续即可，安装器首次引导偶有单次 panic |
 
 > ⚠️ 容器 sshd 默认允许 root+密码登录、QEMU monitor 走 stdio、VNC 无密码；`device_cgroup_rules` 与 `/dev/bus/usb` 会开放 USB 访问，`./share` 会暴露宿主目录。请仅挂载必要目录、限制端口，勿直接暴露公网。macOS 在 Docker/QEMU 中运行请遵守 Apple 软件许可条款。

@@ -254,8 +254,102 @@ sudo chown $(id -u):$(id -g) /dev/kvm 2>/dev/null || true
 sudo chown -R $(id -u):$(id -g) /dev/snd 2>/dev/null || true
 sudo chown -R $(id -u):$(id -g) /dev/bus/usb 2>/dev/null || true
 
+# macOS 会访问一批 KVM 不认识的 MSR（模型特定寄存器）。kvm.ignore_msrs=0（默认）时
+# KVM 直接把错误抛给 guest，macOS 内核随即 panic —— 屏幕显示
+# "Your computer restarted because of a problem"。与核数/内存无关，调 SMP/RAM 不会好。
+if [[ ! -c /dev/kvm ]]; then
+    printf '[kvm] /dev/kvm 不存在，QEMU 将回退 TCG 软件模拟，macOS 安装几乎必然失败\n' >&2
+elif [[ ! -r /dev/kvm || ! -w /dev/kvm ]]; then
+    printf '[kvm] /dev/kvm 权限不足（%s），QEMU 可能回退 TCG\n' "$(ls -l /dev/kvm)" >&2
+fi
+if [[ -r /sys/module/kvm/parameters/ignore_msrs ]]; then
+    IGNORE_MSRS="$(cat /sys/module/kvm/parameters/ignore_msrs 2>/dev/null || echo '?')"
+    # 内核 bool 参数在 sysfs 里显示为 Y/N，也兼容 1/0
+    if [[ "${IGNORE_MSRS}" != "1" && "${IGNORE_MSRS}" != "Y" ]]; then
+        printf '[kvm] !! ignore_msrs=%s（需要 Y / 1）—— macOS 访问未定义 MSR 会被 KVM 判为致命错误\n' \
+            "${IGNORE_MSRS}" >&2
+        printf '[kvm] !! 表现就是 macOS 反复 "Your computer restarted because of a problem"\n' >&2
+        printf '[kvm] !! 修法（WSL 里、容器启动前）：sudo modprobe kvm && echo 1 | sudo tee /sys/module/kvm/parameters/ignore_msrs\n' >&2
+        printf '[kvm] !! 持久化：%%USERPROFILE%%\\.wslconfig 的 [wsl2] 段加 kernelCommandLine=kvm.ignore_msrs=1 后 wsl --shutdown\n' >&2
+    else
+        printf '[kvm] ignore_msrs=%s（正确）\n' "${IGNORE_MSRS}" >&2
+    fi
+else
+    printf '[kvm] 读不到 /sys/module/kvm/parameters/ignore_msrs（kvm 未加载或内建），无法确认 ignore_msrs\n' >&2
+fi
+
 [[ "${RAM}" = max ]] && export RAM="$(("$(head -n1 /proc/meminfo | tr -dc "[:digit:]") / 1000000"))"
 [[ "${RAM}" = half ]] && export RAM="$(("$(head -n1 /proc/meminfo | tr -dc "[:digit:]") / 2000000"))"
+
+# 内存余量自检：guest 内存接近容器可用内存时，宿主 OOM 会让 macOS 在安装器阶段
+# panic（表现就是 "Your computer restarted because of a problem" 反复重启）。
+if [[ "${RAM:-}" =~ ^[0-9]+$ ]]; then
+    MEM_AVAIL_KB="$(grep -m1 MemAvailable /proc/meminfo 2>/dev/null | tr -dc '[:digit:]' || true)"
+    MEM_AVAIL_MB=$(( ${MEM_AVAIL_KB:-0} / 1024 ))
+    MEM_NEED_MB=$(( RAM * 1000 ))
+    if (( MEM_AVAIL_MB <= 0 )); then
+        :   # 读不到 /proc/meminfo（非 Linux 宿主），跳过自检
+    elif (( MEM_AVAIL_MB < MEM_NEED_MB + 1024 )); then
+        printf '[warn] 可用内存 %sMB，guest 需要 %sMB，余量不足 1GB：\n' \
+            "${MEM_AVAIL_MB}" "${MEM_NEED_MB}" >&2
+        printf '[warn] 降低 .env 的 RAM，或给 WSL 分配更多内存（%%USERPROFILE%%\\.wslconfig 的 memory=）\n' >&2
+    else
+        printf '[mem] 可用 %sMB，guest %sMB\n' "${MEM_AVAIL_MB}" "${MEM_NEED_MB}" >&2
+    fi
+fi
+
+# vCPU 默认取真机一半：SMP/CORES 为 half / auto / 未设置时按 nproc/2 计算。
+# nproc 读的是 CPU affinity，不受容器 cpus 配额影响，拿到的是真机核数（含超线程）。
+if [[ -z "${SMP:-}" || -z "${CORES:-}" \
+      || "${SMP}" == half || "${SMP}" == auto \
+      || "${CORES}" == half || "${CORES}" == auto ]]; then
+    HOST_CPUS="$(nproc 2>/dev/null || echo 4)"
+    [[ "${HOST_CPUS}" =~ ^[0-9]+$ ]] || HOST_CPUS=4
+    HALF_CPUS=$(( HOST_CPUS / 2 ))
+    if (( HALF_CPUS < 1 )); then HALF_CPUS=1; fi
+    if [[ -z "${SMP:-}" || "${SMP}" == half || "${SMP}" == auto ]]; then export SMP="${HALF_CPUS}"; fi
+    if [[ -z "${CORES:-}" || "${CORES}" == half || "${CORES}" == auto ]]; then export CORES="${HALF_CPUS}"; fi
+    printf '[cpu] 真机 %s 线程 -> vCPU %s（一半，SMP=%s CORES=%s）\n' \
+        "${HOST_CPUS}" "${HALF_CPUS}" "${SMP}" "${CORES}" >&2
+fi
+
+# cores 不能大于 smp（否则 QEMU 拓扑校验失败）；显式混用时收敛到 SMP
+if [[ "${SMP:-}" =~ ^[0-9]+$ && "${CORES:-}" =~ ^[0-9]+$ ]] && (( CORES > SMP )); then
+    export CORES="${SMP}"
+fi
+
+# cores 必须是 2 的幂：QEMU 的 x86 拓扑按 cores 位宽算 APIC ID，非 2 的幂会让
+# 部分 macOS 版本在多核初始化阶段 panic（屏幕显示 "Your computer restarted because
+# of a problem"）。向下取 2 的幂，SMP 跟随 CORES（sockets=1）。
+if [[ "${SMP:-}" =~ ^[0-9]+$ && "${CORES:-}" =~ ^[0-9]+$ ]]; then
+    POW=1
+    while (( POW * 2 <= CORES )); do POW=$(( POW * 2 )); done
+    if (( POW != CORES )); then
+        printf '[cpu] cores=%s 非 2 的幂，收敛为 %s（SMP 同步），避免 macOS 多核初始化 panic\n' \
+            "${CORES}" "${POW}" >&2
+        export SMP="${POW}"
+        export CORES="${POW}"
+    fi
+fi
+
+# 容器 CPU 配额（compose 的 cpus）是硬上限：vCPU 数超过配额只会互相抢时间片。
+# 直接 docker compose up（未经 start.sh 计算 CPU_LIMIT）时靠这段保证 vCPU <= 配额。
+QUOTA=""
+if [[ -r /sys/fs/cgroup/cpu.max ]]; then
+    read -r _q _p < /sys/fs/cgroup/cpu.max 2>/dev/null || true
+elif [[ -r /sys/fs/cgroup/cpu/cpu.cfs_quota_us ]]; then
+    _q="$(cat /sys/fs/cgroup/cpu/cpu.cfs_quota_us 2>/dev/null || echo -1)"
+    _p="$(cat /sys/fs/cgroup/cpu/cpu.cfs_period_us 2>/dev/null || echo 100000)"
+fi
+if [[ "${_q:-}" =~ ^[0-9]+$ && "${_p:-}" =~ ^[0-9]+$ ]] && (( _p > 0 )); then
+    QUOTA=$(( _q / _p ))
+fi
+if [[ -n "${QUOTA}" ]] && (( QUOTA >= 1 )) && [[ "${SMP:-}" =~ ^[0-9]+$ ]] && (( SMP > QUOTA )); then
+    printf '[cpu] 容器配额 %s 核 < vCPU %s，收敛 SMP/CORES 到 %s\n' \
+        "${QUOTA}" "${SMP}" "${QUOTA}" >&2
+    export SMP="${QUOTA}"
+    export CORES="${QUOTA}"
+fi
 
 if [[ "${AUDIO_DRIVER:-auto}" == auto ]]; then
     if compgen -G "/dev/snd/pcmC*" >/dev/null; then
@@ -699,9 +793,10 @@ ENV IMAGE_FORMAT=qcow2
 ENV BASESYSTEM_FORMAT=qcow2
 
 # CPU / 内存 (Tahoe/Sonoma+ 使用 Skylake-Client,-hle,-rtm)
+# SMP/CORES 默认 half = 真机一半，由 Launch.sh 在运行时按 nproc/2 解析
 ENV RAM=8
-ENV SMP=4
-ENV CORES=4
+ENV SMP=half
+ENV CORES=half
 ENV CPU=Skylake-Client
 ENV CPUID_FLAGS='kvm=on,vendor=GenuineIntel,+invtsc,vmware-cpuid-freq=on,-hle,-rtm,+ssse3,+sse4.2,+popcnt,+avx,+aes,+xsave,+xsaveopt,check'
 ENV KVM='accel=kvm:tcg'

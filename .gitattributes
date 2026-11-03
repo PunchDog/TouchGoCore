@@ -35,6 +35,12 @@ Makefile text eol=lf
 *.bat text eol=crlf
 *.cmd text eol=crlf
 
+# Docker 构建文件必须 LF
+# CRLF 会被 heredoc 原样写进容器内脚本，首行变成 "#!/bin/bash\r"，
+# 构建期报 "/bin/bash^M: bad interpreter: No such file or directory"。
+Dockerfile text eol=lf
+*.dockerignore text eol=lf
+
 # 图片/二进制文件不进行转换
 *.png binary
 *.jpg binary

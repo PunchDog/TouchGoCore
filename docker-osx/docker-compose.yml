@@ -11,7 +11,9 @@
 #   Linux X11: 手工加 /tmp/.X11-unix 挂载与 DISPLAY，见 README。
 #
 # 使用: docker compose up --build
-# VNC : localhost:5999（无密码，仅限本机/受信网络）
+# VNC : 127.0.0.1:5999（无密码，仅绑本机回环）
+#
+# 端口/资源等可调项统一走同目录 .env（参考 .env.example），避免在多处重复定义。
 #
 # USB 示例 (WSL 先 usbipd attach --wsl --busid <BUSID>):
 #   USB_DEVICE="hostbus=1,hostaddr=5" docker compose up
@@ -23,41 +25,64 @@ services:
     build:
       context: .
       args:
-        SIZE: "200G"
-        RANKMIRRORS: ""
+        # 与 environment.SIZE 共用同一变量（.env 或 shell），避免两处不一致
+        SIZE: "${SIZE:-200G}"
+        RANKMIRRORS: "${RANKMIRRORS:-}"
     image: docker-osx-tahoe:latest
     tty: true
     stdin_open: true
+    # QEMU 是 PID 1 的 exec 目标；给足优雅退出时间，避免 SIGKILL 损坏 mac_hdd_ng.img
+    stop_grace_period: 60s
+    restart: "no"
     devices:
+      # 必需: 宿主机/WSL 内必须存在 /dev/kvm，否则 compose 会直接启动失败
+      # （devices 是硬要求，KVM=accel=kvm:tcg 的软回退没有机会执行）。
+      # 确认: ls -l /dev/kvm；无则见 README「常见问题」的无 KVM 兜底做法。
       - /dev/kvm:/dev/kvm
     # 允许容器访问 USB 字符设备 (major 189)；配合下面的 /dev/bus/usb 挂载。
+    # 注意: 该规则在 cgroup v1 生效；cgroup v2（WSL2 / 新版发行版默认）下可能被忽略，
+    # 此时 USB 报权限拒绝，兜底改用 devices: - /dev/bus/usb/001/005，或临时 privileged: true。
     device_cgroup_rules:
       - "c 189:* rwm"
     ports:
-      - "50922:10022"         # SSH 进 macOS guest
-      - "5900:5900"           # macOS 屏幕共享（guest 内开启后）
-      - "5999:5999"           # QEMU VNC（默认显示方式）
+      # BIND_ADDR 默认 0.0.0.0：
+      #   - WSL2 内跑 docker-ce 时，WSL 是 NAT 网络，绑 0.0.0.0 也只有 Windows 宿主能访问，
+      #     局域网进不来；而绑 127.0.0.1 会因 WSL 的 localhost 转发只打到 VM eth0 而连不上。
+      #   - 用 Docker Desktop（端口发布在 Windows 宿主上）时，建议在 .env 设 BIND_ADDR=127.0.0.1。
+      # 变量带 HOST_ 前缀，与容器内的 INTERNAL_SSH_PORT / SCREEN_SHARE_PORT 区分。
+      - "${BIND_ADDR:-0.0.0.0}:${HOST_SSH_PORT:-50922}:10022"          # SSH 进 macOS guest
+      - "${BIND_ADDR:-0.0.0.0}:${HOST_SCREEN_SHARE_PORT:-5900}:5900"   # macOS 屏幕共享（guest 内开启后）
+      - "${BIND_ADDR:-0.0.0.0}:${HOST_VNC_PORT:-5999}:5999"            # QEMU VNC（默认显示方式）
     volumes:
+      # 首次创建命名卷时 Docker 会把镜像内 /home/arch/OSX-KVM 整体复制进卷（数 GB）
       - macos-data:/home/arch/OSX-KVM
       - ./share:/mnt/hostshare      # 文件夹共享；宿主侧就是项目下的 share/
       - /dev/bus/usb:/dev/bus/usb   # USB 设备节点
     environment:
-      SHORTNAME: tahoe
-      SIZE: "200G"            # 仅首次创建系统盘时生效
-      RAM: "8"                # GB，支持 max / half
-      SMP: "4"
-      CORES: "4"
-      CPU: Skylake-Client
-      CPUID_FLAGS: kvm=on,vendor=GenuineIntel,+invtsc,vmware-cpuid-freq=on,-hle,-rtm,+ssse3,+sse4.2,+popcnt,+avx,+aes,+xsave,+xsaveopt,check
-      AUDIO_DRIVER: auto      # 无 PCM 自动 none；WSLg override 使用 pa
+      SHORTNAME: "${SHORTNAME:-tahoe}"
+      SIZE: "${SIZE:-200G}"         # 仅首次创建系统盘时生效
+      RAM: "${RAM:-8}"              # GB，支持 max / half
+      SMP: "${SMP:-4}"
+      CORES: "${CORES:-4}"
+      CPU: "${CPU:-Skylake-Client}"
+      CPUID_FLAGS: "kvm=on,vendor=GenuineIntel,+invtsc,vmware-cpuid-freq=on,-hle,-rtm,+ssse3,+sse4.2,+popcnt,+avx,+aes,+xsave,+xsaveopt,check"
+      AUDIO_DRIVER: "${AUDIO_DRIVER:-auto}"   # 无 PCM 自动 none；WSLg override 使用 pa
       EXTRA: "-display none -vnc 0.0.0.0:99"
-      GENERATE_UNIQUE: "false"  # 每次启动更换硬件标识；需要时再开启
+      GENERATE_UNIQUE: "${GENERATE_UNIQUE:-false}"  # 每次启动更换硬件标识；需要时再开启
       # 文件夹共享 (9p)；guest 内执行: sudo -S mount_9p hostshare
       SHARE_DIR: /mnt/hostshare
-      SHARE_TAG: hostshare
-      SHARE_SECURITY_MODEL: passthrough
+      SHARE_TAG: "${SHARE_TAG:-hostshare}"
+      SHARE_SECURITY_MODEL: "${SHARE_SECURITY_MODEL:-passthrough}"
       # USB: 留空不接；按上方示例设置 USB_DEVICE 后重启容器
       USB_DEVICE: "${USB_DEVICE:-}"
+      # 下载 macOS 安装器要走 Apple CDN。WSL 里访问不到 Windows 的 127.0.0.1 代理，
+      # 需在 .env 用 CONTAINER_HTTP_PROXY 显式指定（如 http://172.29.240.1:7890），
+      # 不要直接继承宿主 shell 的 HTTP(S)_PROXY，避免把失效代理带进容器。
+      HTTP_PROXY: "${CONTAINER_HTTP_PROXY:-}"
+      HTTPS_PROXY: "${CONTAINER_HTTP_PROXY:-}"
+      NO_PROXY: "${CONTAINER_NO_PROXY:-localhost,127.0.0.1}"
+      # 有 /dev/kvm 但嵌套虚拟化不可用时，可改 accel=tcg（极慢，仅排障）
+      # KVM: "accel=tcg"
       # NOPICKER: "true"        # 已有系统盘时跳过 OpenCore 菜单与安装器下载
       # OSX_COMMANDS: "sw_vers; uname -a"
       # KERNEL_ARGS: "-no_compat_check"

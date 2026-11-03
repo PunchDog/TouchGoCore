@@ -32,8 +32,11 @@
 
 ## 三、环境要求
 
-- Linux（或 Windows WSL2 + Docker Desktop / docker-ce），BIOS/系统开启硬件虚拟化
-- `/dev/kvm` 可用：`ls -l /dev/kvm`（WSL2 需在 `%USERPROFILE%\.wslconfig` 设置 `[wsl2] nestedVirtualization=true` 后 `wsl --shutdown`）
+- Linux（或 Windows WSL2 + docker-ce），BIOS/系统开启硬件虚拟化
+- `/dev/kvm` **必须存在**：`ls -l /dev/kvm`。compose 里 `devices: /dev/kvm` 是硬要求，缺失时 `docker compose up` 直接报 `error gathering device information` 失败，不会自动退回 TCG。
+  - WSL2：在 `%USERPROFILE%\.wslconfig` 设置 `[wsl2] nestedVirtualization=true` 后 `wsl --shutdown`，并在 WSL 发行版内安装 docker-ce 运行（Docker Desktop 的 LinuxKit VM 通常不透出 `/dev/kvm`）
+  - 确实没有 KVM 时的兜底见「十、常见问题」
+- Docker Compose v2（`docker compose` 子命令，不是 `docker-compose`）
 - CPU 支持 AVX2（macOS Ventura+ 需要；Tahoe 建议）
 - 内存 ≥ 16GB 宿主机（给 VM 分 8GB+），磁盘预留：镜像 ~5GB + 安装器下载 ~15GB + 系统盘上限 200G（稀疏）
 - 默认无头 VNC 不需要 X11；WSLg GUI 需要 WSLg；Linux X11 需要 X 服务器
@@ -51,7 +54,16 @@ docker build --build-arg RANKMIRRORS=true \
 
 # 或 compose 一键构建+运行（默认无头 VNC）:
 docker compose up --build
+
+# 或脚本：先 down 再启动，首次安装用 -m init
+./start.sh -m init
+./start.sh
 ```
+
+> 可调项（`SIZE` / 端口 / `RAM` / `USB_DEVICE` 等）统一写到同目录 `.env`，模板见 `.env.example`：
+> `cp .env.example .env` 后按需修改。compose 里的 build arg 与运行时 env 共用同一变量，不再两处重复定义。
+
+> **`Dockerfile` 必须是 LF 行尾**。Windows 上 `core.autocrlf=true` 检出会让 Dockerfile 变成 CRLF，heredoc 原样写进容器内脚本，首行变成 `#!/bin/bash\r`，构建到 stock 引导盘步骤时报 `/bin/bash^M: bad interpreter`。仓库根 `.gitattributes` 已加 `Dockerfile text eol=lf`，Dockerfile 内也加了行尾归一化 + 构建期断言双保险。
 
 > 默认 Arch mirrorlist 使用 Aliyun → TUNA → geo（可在 Dockerfile 中调整）。
 > 如果 Docker Hub 拉取 `archlinux:base-devel` 很慢，可先走镜像再打本地标签：
@@ -79,17 +91,42 @@ docker compose up --build
 
 ### 1) 无头 + VNC（默认，推荐）
 
+推荐用 `start.sh`：先 `docker compose down` 关掉已有实例，再按模式启动。
+
 ```bash
-docker compose up --build -d
-# VNC: localhost:5999（无密码）
+./start.sh -m init     # 首次安装：down -> docker compose up --build（前台）
+./start.sh             # 日常启动：down -> docker compose up --build -d（后台）
+```
+
+**首次建议用 `-m init`**：前台能看到下载进度和网络自检结果。日志里那串 `1. High Sierra ... 9. Tahoe` 只是上游脚本打印的可选列表，**不需要输入**——entrypoint 会解析该列表并自动选择最后一项（最新 macOS，当前是 Tahoe），同时把编号喂给 stdin，任何情况下都不会卡在 `input()` 上。QEMU 起来后按 `Ctrl-P Ctrl-Q` 脱离（容器继续跑，别按 `Ctrl-C`）。
+
+不用脚本等价于：
+
+```bash
+docker compose down
+docker compose up --build        # 首次
+docker compose up --build -d     # 日常
+# VNC: 127.0.0.1:5999（无密码）
 docker compose logs -f
 ```
 
+已经 `-d` 起了、日志停在版本菜单上，**不是卡在等输入**——那是上游脚本无条件打印的可选列表，下载随后会继续。真正确认进度看这两行：
+
+```bash
+docker compose logs -f                     # 每 60s 会打一行 [download] BaseSystem.dmg 2.3G
+docker compose exec macos-tahoe du -h /home/arch/OSX-KVM/BaseSystem.dmg
+```
+
+若日志出现 `[net] 访问 swcdn.apple.com 失败` 或 `make exit N`，是网络/代理问题，见「十、常见问题」。
+
 默认 compose 已带：
+- 端口监听地址由 `.env` 的 `BIND_ADDR` 控制（默认 `0.0.0.0`，原因见「七、端口」）：VNC 无密码、容器 sshd 允许 root 密码登录，别把它暴露到公网
+- `stop_grace_period: 60s`：`docker compose down` 时先让 QEMU 收到 SIGTERM 优雅退出，避免强杀损坏 `mac_hdd_ng.img`
+- `restart: "no"`：不自动重启，避免异常时反复拉起 QEMU
 - 文件夹共享：宿主 `./share` ↔ guest `/Volumes/hostshare`（启动后在 macOS 内 `sudo -S mount_9p hostshare`）
 - USB 管道：`/dev/bus/usb` + USB cgroup 规则；设备参数用 `USB_DEVICE` 指定（见 USB 示例）
 
-或直接：
+或直接（手动 run 不会限制绑定地址，注意自行加 `127.0.0.1:` 前缀）：
 
 ```bash
 docker run -itd --name docker-osx \
@@ -105,7 +142,7 @@ docker run -itd --name docker-osx \
 docker compose -f docker-compose.yml -f docker-compose.wslg.yml up --build
 ```
 
-等价于挂载 `/mnt/wslg/.X11-unix` 与 `/mnt/wslg/runtime-dir`，设置 `DISPLAY=:0`、`AUDIO_DRIVER=pa`、`PULSE_SERVER=unix:/mnt/wslg/runtime-dir/pulse/native`。该 override 只覆盖显示/音频，不影响 `SHARE_DIR` 文件夹共享与 USB 透传。
+等价于挂载 `/mnt/wslg/.X11-unix` 与 `/mnt/wslg/runtime-dir`，设置 `DISPLAY=:0`、`AUDIO_DRIVER=pa`、`PULSE_SERVER=unix:/mnt/wslg/runtime-dir/pulse/native`，并把 `EXTRA` 从 `-display none -vnc 0.0.0.0:99` 改为 `-vnc 0.0.0.0:99`——即 QEMU 走默认 GTK 窗口，同时保留 VNC 监听，所以 5999 映射依然可用。该 override 只覆盖显示/音频，不影响 `SHARE_DIR` 文件夹共享与 USB 透传。
 
 ### 3) Linux X11 GUI
 
@@ -116,7 +153,7 @@ docker compose -f docker-compose.yml -f docker-compose.wslg.yml up --build
       - /tmp/.X11-unix:/tmp/.X11-unix
     environment:
       DISPLAY: "${DISPLAY:-:0.0}"
-      EXTRA: ""
+      EXTRA: "-vnc 0.0.0.0:99"   # 留空则用 QEMU 默认 GTK 显示
       AUDIO_DRIVER: "alsa"
     devices:
       - /dev/kvm:/dev/kvm
@@ -257,6 +294,7 @@ docker run -itd --device /dev/kvm \
 | `NETWORKING` | `vmxnet3` | `vmxnet3`（快）或 `e1000-82545em`（兼容） |
 | `MAC_ADDRESS` | `52:54:00:09:49:17` | QEMU 虚拟网卡 MAC；guest 硬件 MAC 由 SMBIOS/ROM 决定 |
 | `INTERNAL_SSH_PORT` / `SCREEN_SHARE_PORT` | 10022 / 5900 | 容器内 QEMU hostfwd 端口 |
+| `HOST_SSH_PORT` / `HOST_SCREEN_SHARE_PORT` / `HOST_VNC_PORT` | 50922 / 5900 / 5999 | 仅 compose：宿主机发布端口，固定绑 `127.0.0.1`（与容器内端口变量区分） |
 | `ADDITIONAL_PORTS` | 空 | 追加 hostfwd，如 `hostfwd=tcp::10023-:80,` |
 | `AUDIO_DRIVER` | `auto` | `auto` / `alsa` / `pa` / `none`；无 PCM 时 auto=none |
 | `EXTRA` | 空 | 追加 QEMU 参数（VNC/SPICE/额外 USB 等） |
@@ -281,16 +319,22 @@ docker run -itd --device /dev/kvm \
 |---|---|---|
 | 50922 | 10022 → guest:22 | SSH 进 macOS |
 | 5900 | 5900 → guest:5900 | macOS 屏幕共享（guest 内开启后） |
-| 5999 | 5999 → QEMU VNC :99 | 默认无头显示 |
+| 5999 | 5999 → QEMU VNC :99 | 默认无头显示（WSLg 模式下同时保留） |
 | 自定义 | `ADDITIONAL_PORTS` | 任意转发（Nginx/开发服务等） |
+
+> 监听地址由 `.env` 的 `BIND_ADDR` 控制，默认 `0.0.0.0`：
+> - **WSL2 内跑 docker-ce**：WSL 是 NAT 网络，绑 `0.0.0.0` 也只有 Windows 宿主能访问，局域网进不来。绑 `127.0.0.1` 反而连不上——WSL 的 localhost 转发打到 VM 的 eth0，不会进 distro 的 loopback。
+> - **Docker Desktop**：端口直接发布在 Windows 宿主上，建议设 `BIND_ADDR=127.0.0.1`，否则同网段可直连（VNC 无密码、容器 sshd 允许 root 密码登录）。
+> - 确实需要跨机访问时用 SSH 隧道（`ssh -L 5999:127.0.0.1:5999 host`），不要直接把 `BIND_ADDR` 暴露到公网。
 
 ## 八、首次启动流程（Tahoe）
 
-1. 容器启动后自动下载 Tahoe 安装器并转换为 qcow2（约 15GB，视网络 10~30 分钟；HEALTHCHECK 此时为 `starting` 属正常）
-2. 用 VNC 客户端连接 `localhost:5999`；OpenCore 菜单选择 `Base System`
+0. `./start.sh -m init`（前台启动；版本列表无需输入，脚本自动选最后一项；QEMU 起来后 `Ctrl-P Ctrl-Q` 脱离）
+1. 容器启动后自动下载 Tahoe 安装器并转换为 qcow2（约 15GB，视网络 10~30 分钟；HEALTHCHECK 此时为 `starting` 属正常，期间 5999 不会监听）
+2. 用 VNC 客户端连接 `127.0.0.1:5999`；OpenCore 菜单选择 `Base System`
 3. 磁盘工具抹掉 `Macintosh HD`（APFS）→ 重新安装 macOS
 4. 安装完成后创建账号，并在「共享」中开启「远程登录」
-5. `ssh user@localhost -p 50922` 进入；命名卷可持久化，之后 `docker start` 复用
+5. `ssh user@localhost -p 50922` 进入；命名卷可持久化，之后 `docker compose start` 或 `./start.sh` 复用
 
 ## 九、持久卷、升级与尺寸
 
@@ -306,15 +350,23 @@ docker run -itd --device /dev/kvm \
 
 | 症状 | 处理 |
 |---|---|
-| `/dev/kvm: no such file or directory` | 开启硬件虚拟化；WSL2 加 `nestedVirtualization=true` 并重启 WSL |
+| `/dev/kvm: no such file or directory` | 开启硬件虚拟化；WSL2 加 `nestedVirtualization=true` 并重启 WSL；在 WSL 内用 docker-ce 而不是 Docker Desktop |
+| `docker compose up` 报 `error gathering device information` | 同上：`/dev/kvm` 不存在，compose 的 `devices` 是硬要求，先建好 KVM 再启动 |
+| 确实没有 KVM 想跑起来 | 临时把 compose 里 `devices:` 那两行注释掉，并加 `KVM: "accel=tcg"`（纯软件模拟，安装可能数小时，仅排障用） |
 | 构建时 pacman GPG 报错 | 已内置 keyring 修复；仍失败可加 `--build-arg RANKMIRRORS=true` |
+| 构建报 `... : /bin/bash^M: bad interpreter: No such file or directory` | Dockerfile 是 CRLF 行尾。Windows 上 `core.autocrlf=true` 检出即会如此。修复：`git add --renormalize docker-osx/Dockerfile`（或 `sed -i 's/\r$//' Dockerfile`）后重新构建；仓库已加 `.gitattributes` 规则与构建期断言 |
 | Tahoe 启动卡死/黑屏 | 确认 `CPU=Skylake-Client` 与 `-hle,-rtm`；内存 ≥8GB；确认使用 MacPro7,1 模板 |
 | 安装器提示机型不受支持 | 默认已是 MacPro7,1；若自行改回旧机型，可加 `-e KERNEL_ARGS=-no_compat_check`，但不保证 iMessage/更新 |
-| VNC 连不上 | 首次启动要先等 15GB 下载完成；`docker compose logs -f` 查看进度；确认 5999 端口未被占用 |
+| VNC 连不上 | 先看 `docker compose ps` 是不是 `Exited`——容器在下载安装器阶段失败时 QEMU 根本没启动，5999 不会监听，见下一条。若容器在跑：等首次 15GB 下载完成；`docker compose logs -f` 看进度；确认 5999 未被占用；WSL 内跑 docker-ce 时把 `BIND_ADDR` 保持 `0.0.0.0` |
+| 日志出现 `[net] 访问 swcdn.apple.com 失败` 或 `make exit N` | 容器内到 Apple CDN 不通。先确认 `[net] HTTPS_PROXY=...` 打的是可达地址（WSL 里不能用 `127.0.0.1`），代理软件需开「允许局域网连接」；`make exit N` 上面会跟 25 行真实报错，据此判断是 DNS、TLS 还是磁盘空间 |
+| 日志 `qemu-img: Could not open 'BaseSystem.dmg': Could not locate UDIF trailer in dmg file` | 安装器没下完整，或被代理/GFW 拦成了 HTML 错误页。先清掉坏文件再重下：<br>`docker compose down`<br>`docker run --rm -v docker-osx_macos-data:/d alpine sh -c 'rm -f /d/BaseSystem.dmg /d/BaseSystem.img'`<br>然后确认 `.env` 的 `CONTAINER_HTTP_PROXY` 指向可达代理，再 `docker compose up -d` |
+| 启动报 `file=.../BaseSystem.img,format=qcow2: Image is not in qcow2 format` | 卷里的安装器是 raw（`make` 的产物），而 QEMU 按 qcow2 打开。entrypoint 现在会 `qemu-img info` 探测实际格式并自动设置 `BASESYSTEM_FORMAT`/`IMAGE_FORMAT`，`--build` 后即可启动。想顺便省空间可手动转：<br>`docker run --rm -v docker-osx_macos-data:/d alpine sh -c 'apk add --no-cache qemu-img >/dev/null && qemu-img convert -O qcow2 -c /d/BaseSystem.img /d/BaseSystem.qcow2 && mv /d/BaseSystem.qcow2 /d/BaseSystem.img'` |
+| 下载 15GB 很慢 / 反复中断 | 同上，走代理；或自备安装器：把有效的 `BaseSystem.img` 放进 `macos-data` 卷并设 `BASESYSTEM_IMAGE`，配合 `NOPICKER=true` 跳过下载 |
 | 无声音 | 默认无头 VNC 不输出音频；WSLg 用 override（`pa`），Linux 桌面用 `alsa` + `/dev/snd` |
 | macOS 内 9p 挂载失败 | 使用 `sudo -S mount_9p hostshare`（不是 `mount -t 9p`）；确认 `SHARE_DIR=/mnt/hostshare` 且 `EXTRA` 没有重复 `-virtfs` |
 | 共享目录不可写 | 确认宿主 `./share` 权限；`SHARE_SECURITY_MODEL=passthrough`；guest 内重新 `sudo -S mount_9p hostshare` |
-| USB 设备不出现/权限拒绝 | 先 `usbipd attach` 或插好设备再启动；设置 `USB_DEVICE`；确认 `lsusb` 与 `/dev/bus/usb`；入口会 chown |
+| USB 设备不出现/权限拒绝 | 先 `usbipd attach` 或插好设备再启动；设置 `USB_DEVICE`；确认 `lsusb` 与 `/dev/bus/usb`；入口会 chown。cgroup v2 环境下 `device_cgroup_rules` 可能不生效，改用 `devices: - /dev/bus/usb/001/005` 或临时 `privileged: true` |
+| 关机后系统盘损坏/无法启动 | 强杀 QEMU 会导致 `mac_hdd_ng.img` 不一致；用 `docker compose stop`（有 60s 优雅退出）并先在 macOS 内正常关机 |
 | CI 命令不执行 | guest 未开启 SSH / 用户不存在 / 端口未通；`docker exec <id> cat /tmp/osx-commands.log` |
 | 镜像更新后行为没变 | 数据卷内是旧 OSX-KVM 上游文件；启动脚本/stock 盘在镜像内会更新，运行时生成路径需重建卷 |
 | 想换旧版本 | `-e SHORTNAME=sonoma` 并删除旧 `BaseSystem.img`；High Sierra/Mojave 需改用对应 SMBIOS/`GENERATE_SPECIFIC` |

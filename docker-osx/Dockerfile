@@ -363,6 +363,10 @@ export KERNEL_ARGS="${KERNEL_ARGS:-}"
 
 cd "${DATA_DIR}"
 
+# 兼容旧数据卷：历史镜像（或 CRLF 检出的 Dockerfile）可能留下 \r 行尾的脚本，
+# 运行时会报 "/bin/bash^M: bad interpreter"。这里就地归一化，失败不阻塞启动。
+find "${DATA_DIR}" -maxdepth 4 -type f -name '*.sh' -exec sed -i 's/\r$//' {} + 2>/dev/null || true
+
 sudo chown $(id -u):$(id -g) /dev/kvm 2>/dev/null || true
 sudo chown -R $(id -u):$(id -g) /dev/snd 2>/dev/null || true
 sudo chown -R $(id -u):$(id -g) /dev/bus/usb 2>/dev/null || true
@@ -372,15 +376,92 @@ fi
 sudo touch "${ENV_FILE}" 2>/dev/null || true
 sudo chown $(id -u):$(id -g) "${ENV_FILE}" 2>/dev/null || true
 
+# 校验下载的 BaseSystem.dmg 是否为完整 UDIF 镜像。
+# 代理/GFW 下常见结果是 HTML 错误页或截断文件，make 会报
+# "qemu-img: Could not open 'BaseSystem.dmg': Could not locate UDIF trailer in dmg file"。
+is_valid_udif() {
+    local f="$1"
+    [[ -f "${f}" ]] || return 1
+    # 完整安装器远大于 1GB，过小必然是错误页/截断
+    (( $(stat -c %s "${f}") > 1073741824 )) || return 1
+    # UDIF 末尾有 512 字节 koly trailer
+    tail -c 512 "${f}" | grep -qa 'koly' || return 1
+    return 0
+}
+
 # 1) 安装器 / 系统盘
 if [[ "${NOPICKER}" == true ]]; then
     if [[ ! -f "${IMAGE_PATH}" ]]; then
         make mac_hdd_ng.img DISK_SIZE="${SIZE:-200G}"
     fi
 else
+    # 上次中断留下的残缺安装器会让 QEMU 直接起不来，先剔除
+    if [[ -e "${BASE_SYSTEM}" ]] && (( $(stat -c %s "${BASE_SYSTEM}") < 1073741824 )); then
+        printf '%s\n' "WARNING: ${BASE_SYSTEM} looks truncated, removing it" >&2
+        rm -f "${BASE_SYSTEM}"
+    fi
     if [[ ! -e "${BASE_SYSTEM}" ]]; then
         printf '%s\n' "No ${BASE_SYSTEM} available, downloading ${SHORTNAME}"
-        make DISK_SIZE="${SIZE:-200G}"
+        # 上次失败残留的残缺 dmg 会让 make 一直复现同一个错误，先清掉
+        if [[ -f ./BaseSystem.dmg ]] && ! is_valid_udif ./BaseSystem.dmg; then
+            printf '%s\n' "Removing invalid BaseSystem.dmg left by a previous run" >&2
+            rm -f ./BaseSystem.dmg
+        fi
+        printf '%s\n' "Downloading ${SHORTNAME} installer (~15GB). QEMU has not started yet, so VNC 5999" \
+            "will NOT accept connections until download + conversion finish (typically 10-30 min)." >&2
+        # 上游 fetch-macOS-v2.py 在 --shortname 为空时会 input() 等待输入。
+        # 这里自动取产品列表最后一项（最新 macOS）并把编号喂给 stdin，
+        # 保证任何情况下都不会卡在交互菜单上等输入。
+        FETCH_PY="$(ls -1 ./fetch-*-v2.py 2>/dev/null | head -n1 || true)"
+        AUTO_IDX=9
+        if [[ -n "${FETCH_PY}" ]]; then
+            _n="$(grep -c '"short":' "${FETCH_PY}" 2>/dev/null || true)"
+            if [[ "${_n}" =~ ^[0-9]+$ ]] && (( _n > 0 )); then
+                AUTO_IDX="${_n}"
+            fi
+            if [[ -z "${SHORTNAME:-}" ]]; then
+                _last="$(grep -o '"short": *"[^"]*"' "${FETCH_PY}" | tail -n1 | sed 's/.*"\([^"]*\)"$/\1/')"
+                if [[ -n "${_last}" ]]; then
+                    export SHORTNAME="${_last}"
+                fi
+            fi
+        fi
+        printf '[installer] 目标版本 %s（自动选择第 %s 项 = 产品列表最后一项）\n' \
+            "${SHORTNAME:-<空>}" "${AUTO_IDX}" >&2
+        # 网络自检：直连/代理不通时在这里立刻暴露，不用等 15GB 下到一半
+        if [[ -n "${HTTPS_PROXY:-}" ]]; then
+            printf '[net] HTTPS_PROXY=%s\n' "${HTTPS_PROXY}" >&2
+        else
+            printf '%s\n' '[net] 未设置代理，直连 Apple CDN' >&2
+        fi
+        curl -sS -m 20 -o /dev/null -w '[net] swcdn.apple.com -> HTTP %{http_code}\n' \
+            https://swcdn.apple.com/ 2>&1 || printf '%s\n' '[net] 访问 swcdn.apple.com 失败' >&2
+        # 每 60s 报一次下载体积，便于区分"在下载"和"卡住了"
+        ( while sleep 60; do
+              if [[ -f ./BaseSystem.dmg ]]; then
+                  printf '[download] BaseSystem.dmg %s\n' \
+                      "$(du -h ./BaseSystem.dmg 2>/dev/null | cut -f1)" >&2
+              fi
+          done ) &
+        DL_MON=$!
+        set +e
+        printf '%s\n' "${AUTO_IDX}" | make DISK_SIZE="${SIZE:-200G}" 2>&1 | tee /tmp/installer.log
+        MAKE_RC=${PIPESTATUS[1]:-1}
+        set -e
+        kill "${DL_MON}" 2>/dev/null || true
+        if (( MAKE_RC != 0 )); then
+            rm -f ./BaseSystem.dmg
+            printf '%s\n' "ERROR: installer download/build failed (make exit ${MAKE_RC})." \
+                "Last lines of /tmp/installer.log:" >&2
+            tail -n 25 /tmp/installer.log >&2 || true
+            exit 1
+        fi
+        if ! is_valid_udif ./BaseSystem.dmg; then
+            rm -f ./BaseSystem.dmg
+            printf '%s\n' "ERROR: BaseSystem.dmg is not a valid UDIF image (truncated or HTML error page)." \
+                "Check network/proxy, then restart the container." >&2
+            exit 1
+        fi
         qemu-img convert BaseSystem.dmg -O qcow2 -p -c "${BASE_SYSTEM}"
         rm -f ./BaseSystem.dmg
         if [[ "${BASE_SYSTEM}" != "${DATA_DIR}/BaseSystem.img" ]]; then
@@ -400,6 +481,33 @@ fi
 if [[ ! -f "${IMAGE_PATH}" ]]; then
     printf '%s\n' "ERROR: system disk ${IMAGE_PATH} not found; naked mode requires an existing image." >&2
     exit 1
+fi
+
+# 1b) 按实际格式对齐 BASESYSTEM_FORMAT / IMAGE_FORMAT
+# make 的 BaseSystem.img 规则产出的是 raw，本脚本随后转成 qcow2；若那一步被中断，
+# 或数据卷里残留了 raw 版本，QEMU 会报
+#   "Image is not in qcow2 format"。
+# 这里读实际格式并导出，避免因为格式假设不一致而启动失败。
+img_format() {
+    qemu-img info --output=json "$1" 2>/dev/null \
+        | grep -o '"format": *"[^"]*"' | head -n1 \
+        | sed 's/.*"\([^"]*\)"$/\1/' || true
+}
+
+if [[ -f "${BASE_SYSTEM}" ]]; then
+    _fmt="$(img_format "${BASE_SYSTEM}")"
+    if [[ -n "${_fmt}" ]]; then
+        export BASESYSTEM_FORMAT="${_fmt}"
+        printf '[installer] %s 实际格式: %s\n' "${BASE_SYSTEM}" "${BASESYSTEM_FORMAT}" >&2
+    fi
+fi
+
+if [[ -f "${IMAGE_PATH}" ]]; then
+    _ifmt="$(img_format "${IMAGE_PATH}")"
+    if [[ -n "${_ifmt}" ]]; then
+        export IMAGE_FORMAT="${_ifmt}"
+        printf '[installer] %s 实际格式: %s\n' "${IMAGE_PATH}" "${IMAGE_FORMAT}" >&2
+    fi
 fi
 
 # 2) launch / bootdisk / plist 选择
@@ -464,6 +572,22 @@ fi
 "${BIN_DIR}/enable-ssh.sh"
 exec /bin/bash "${LAUNCH}"
 ENTRY_EOF
+
+# -----------------------------------------------------------------------------
+# 行尾归一化 + 构建期断言
+# Windows 检出（core.autocrlf=true）时 Dockerfile 可能带 CRLF，heredoc 写出的脚本
+# 首行会变成 "#!/bin/bash\r"，运行时报 "/bin/bash^M: bad interpreter: No such file or directory"。
+# 这里统一去掉 \r，并在构建期直接失败，避免跑到 stock 引导盘步骤才暴露。
+# -----------------------------------------------------------------------------
+RUN CR="$(printf '\r')" \
+    && find /home/arch/OSX-KVM /home/arch/bin -type f -name '*.sh' -exec sed -i 's/\r$//' {} + \
+    && if grep -l "$CR" /home/arch/bin/*.sh \
+                     /home/arch/OSX-KVM/opencore-image-ng.sh \
+                     /home/arch/OSX-KVM/Docker-OSX/osx-serial-generator/*.sh; then \
+           printf '%s\n' "ERROR: CRLF found in generated scripts (Dockerfile line endings are CRLF?)" >&2; \
+           exit 1; \
+       fi \
+    && chmod +x /home/arch/bin/*
 
 # -----------------------------------------------------------------------------
 # Tahoe OpenCore 模板: 从 OSX-KVM 当前 config.plist 生成占位符模板

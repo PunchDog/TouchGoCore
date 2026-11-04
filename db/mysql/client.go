@@ -349,7 +349,7 @@ func (c *Client) Raw(ctx context.Context, fn func(tx *gorm.DB) error) error {
 	return newError("Raw", err, classify(err), "", nil, 0)
 }
 
-// Repository 入口（返回非泛型工厂，因 Go 1.26.7 工具链限制不能在方法上声明类型参数）
+// Repository 入口（返回非泛型工厂，因 Go 不允许在方法上声明类型参数）
 func (c *Client) Repository() *RepositoryFactory {
 	return &RepositoryFactory{client: c, ctx: context.Background()}
 }

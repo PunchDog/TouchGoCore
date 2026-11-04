@@ -1,11 +1,11 @@
 module touchgocore
 
-go 1.26.0
+go 1.27.0
 
 require (
 	github.com/TA-rathnayaka/whatsmeow-antiban v0.1.0
 	github.com/amrakk/zcago v0.3.0
-	github.com/arnodel/golua v0.2.0
+	github.com/arnodel/golua v0.4.0
 	github.com/btcsuite/btcd/btcec/v2 v2.3.6
 	github.com/ethereum/go-ethereum v1.17.1
 	github.com/fbsobreira/gotron-sdk v0.27.1

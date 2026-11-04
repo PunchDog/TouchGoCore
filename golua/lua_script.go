@@ -6,48 +6,14 @@ import (
 	"os"
 	"sync"
 	"sync/atomic"
-	"time"
 
-	"touchgocore/config"
-	"touchgocore/corectx"
 	"touchgocore/localtimer"
-	"touchgocore/metrics"
 	"touchgocore/syncmap"
 	"touchgocore/vars"
 
 	"github.com/arnodel/golua/lib"
 	rt "github.com/arnodel/golua/runtime"
 )
-
-// Lua 定时器和垃圾回收配置
-var (
-	UpdateIntervalMs = getUpdateIntervalMs()
-	GCTickCount      = getGCTickCount()
-)
-
-// getUpdateIntervalMs 从配置获取更新间隔
-func luaCfg() *config.LuaConfig {
-	cfg := corectx.CfgFrom(luaParentCtx)
-	if cfg == nil {
-		return nil
-	}
-	return cfg.LuaConfig
-}
-
-func getUpdateIntervalMs() int64 {
-	if lc := luaCfg(); lc != nil && lc.UpdateInterval > 0 {
-		return lc.UpdateInterval
-	}
-	return 1000 // 默认 1 秒
-}
-
-// getGCTickCount 从配置获取 GC tick 计数
-func getGCTickCount() int64 {
-	if lc := luaCfg(); lc != nil && lc.GCTickCount > 0 {
-		return lc.GCTickCount
-	}
-	return 1800 // 默认 30 分钟 (30 * 60)
-}
 
 // Lua 文件扩展名
 const (
@@ -60,7 +26,6 @@ var (
 	luaInstances   map[int64]*LuaScript
 	luaInstancesMu sync.RWMutex
 	nextInstanceID atomic.Int64
-	luaParentCtx   context.Context = context.Background()
 )
 
 // LuaScript Lua脚本实例
@@ -85,6 +50,11 @@ type LuaScript struct {
 	env          *rt.Table
 	ctx          context.Context
 	cancel       context.CancelFunc
+	// regCtx 是创建方（NewLuaScriptWithContext / ReloadScriptWithContext）传入的上下文，
+	// 注册回放与方法回调捕获它。回调今天拿的就是调用方 ctx，而不是派生自父上下文
+	// 的 ls.ctx；换成 ls.ctx 会让「创建方 ctx 取消后 Lua 方法报 closed」消失，
+	// 那是未经裁决的语义变更，所以单独存一份。
+	regCtx context.Context
 }
 
 // Init 初始化Lua运行时
@@ -101,10 +71,7 @@ func (ls *LuaScript) initLocked() error {
 	ls.closeRuntimeLocked()
 
 	// 创建上下文
-	parent := luaParentCtx
-	if parent == nil {
-		parent = context.Background()
-	}
+	parent := currentLuaParentCtx()
 	ls.ctx, ls.cancel = context.WithCancel(parent)
 
 	// 创建新的运行时
@@ -116,13 +83,34 @@ func (ls *LuaScript) initLocked() error {
 	lib.LoadAll(ls.runtime)()
 
 	// 注册内置函数
-	if err := registerDefaultFunctions(ls); err != nil {
-		return fmt.Errorf("register default functions failed: %w", err)
+	registerDefaultFunctions(ls)
+
+	// Init() 可以在零值实例上被调用（外部直接 &LuaScript{...} 再 Init 的用法真实存在），
+	// 构造器需要登记表，这里先补建。注意不能清空已有内容：热重载靠它跨实例存活。
+	if ls.registeredObjects == nil {
+		ls.registeredObjects = syncmap.NewAny()
 	}
+
+	// 回放全局注册表。Init() 是 poison 恢复与重载失败回退的唯一重建入口：
+	// 不在这里回放，这两条路径重建出的 runtime 就只有 5 个内置函数，
+	// Lua 侧的 Npc() 与宿主函数全部消失。
+	ls.replayRegistrationsLocked(ls.regContextLocked())
 
 	// 新 runtime，清除中毒标记
 	ls.poisoned.Store(false)
 	return nil
+}
+
+// regContextLocked 返回注册回放与方法回调应捕获的上下文。
+// 优先用创建方传入的 regCtx，缺失时退回 ls.ctx，再没有就用 Background。
+func (ls *LuaScript) regContextLocked() context.Context {
+	if ls.regCtx != nil {
+		return ls.regCtx
+	}
+	if ls.ctx != nil {
+		return ls.ctx
+	}
+	return context.Background()
 }
 
 // Close 关闭脚本实例，并回收本实例创建的全部 Go 对象。
@@ -213,7 +201,7 @@ func (ls *LuaScript) releaseRegisteredObjects() {
 func (ls *LuaScript) startTimer() error {
 	// initcallback 里完成实例归属与上下文绑定：实例来自对象池，可能带着上一个
 	// 脚本实例的全部状态，每个字段都要重新赋值（tick 残留会错后 GC 节拍）。
-	_, err := localtimer.NewTimer[*luaTimer](UpdateIntervalMs, -1, func(t *luaTimer) {
+	_, err := localtimer.NewTimer[*luaTimer](luaUpdateIntervalMsValue(), -1, func(t *luaTimer) {
 		ls.timer = t
 		t.luaScript = ls
 		t.ctx = ls.ctx
@@ -229,102 +217,51 @@ func (ls *LuaScript) startTimer() error {
 	return nil
 }
 
-// Call 调用 Lua 函数
-func (ls *LuaScript) Call(funcname string, list ...interface{}) ([]interface{}, error) {
-	return ls.CallWithContext(context.Background(), funcname, list...)
+// replayRegistrationsLocked 把全局注册表（宿主函数与类）回放到当前 runtime。
+//
+// 调用方必须持有 rtMu 写锁；唯一例外是 NewLuaScriptWithContext 的构造期，
+// 那时实例还没登记进 luaInstances，不存在并发调用方。
+//
+// 绑定形状是契约，不是实现细节：
+//   - 宿主函数按「1 个具名槽 + etc」绑定。注册表拿不到宿主函数的真实元数，
+//     hasEtc=false 会让 golua 直接丢掉第 2 个之后的实参（见 RegisterLuaFunc 注释）。
+//   - 类的元表布局约束见 registerClassWithContext。
+func (ls *LuaScript) replayRegistrationsLocked(ctx context.Context) {
+	registeredFuncsMu.RLock()
+	for funcName, function := range registeredFuncs {
+		ls.runtime.SetEnvGoFunc(ls.env, funcName, function, 1, true)
+	}
+	registeredFuncsMu.RUnlock()
+
+	// 反射注册的函数元数是真实的，绑定形状与上面那批不同
+	ls.replayGoFuncsLocked(ctx)
+
+	registeredClassesMu.RLock()
+	for _, class := range registeredClasses {
+		if err := registerClassWithContext(ctx, class, ls); err != nil {
+			vars.Error("register Lua class failed: %v", err)
+		}
+	}
+	registeredClassesMu.RUnlock()
 }
 
-// CallWithContext 使用上下文调用 Lua 函数。
-//
-// 并发约束：rtMu 读锁只保证本调用与热重载（写锁）互斥，不保证多个 Call 之间互斥。
-// golua runtime 与 ls.thread 非线程安全，ls.returnValues 为共享字段；
-// 同一实例的并发调用方必须自行串行化（使用 SafeLuaScript 或外层加锁）。
-//
-// 超时限制：超时只中止等待，后台协程不会被强杀——golua runtime 非线程安全，
-// 无法从外部安全终止正在执行的 Lua 代码。超时后本实例被标记为 poisoned，
-// 后续调用将直接返回错误；需要恢复请调用 Init() 或创建新实例。
-func (ls *LuaScript) CallWithContext(ctx context.Context, funcname string, list ...interface{}) ([]interface{}, error) {
-	// 快速路径：已中毒直接拒绝，无需竞争锁
-	if ls.poisoned.Load() {
-		return nil, fmt.Errorf("lua runtime poisoned: previous call timed out, runtime is unsafe to reuse; call Init() or create a new instance")
+// runMainChunkLocked 读取、编译并执行主脚本块。
+// 调用方必须持有 rtMu 写锁（构造期例外，理由同 replayRegistrationsLocked）。
+func (ls *LuaScript) runMainChunkLocked(path string) error {
+	source, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read Lua script file failed: %w", err)
 	}
 
-	ls.rtMu.RLock()
-	defer ls.rtMu.RUnlock()
-
-	// 取锁后二次检查：可能在等锁期间被 poison 或 close
-	if ls.poisoned.Load() {
-		return nil, fmt.Errorf("lua runtime poisoned: previous call timed out, runtime is unsafe to reuse; call Init() or create a new instance")
-	}
-	if ls.runtime == nil || ls.env == nil {
-		return nil, fmt.Errorf("lua runtime is not available (closed or reloading)")
+	chunk, err := ls.runtime.CompileAndLoadLuaChunk("main", source, rt.TableValue(ls.env))
+	if err != nil {
+		return fmt.Errorf("compile Lua script failed: %w", err)
 	}
 
-	select {
-	case <-ls.ctx.Done():
-		return nil, fmt.Errorf("Lua script is closed")
-	default:
+	if _, err = rt.Call1(ls.thread, rt.FunctionValue(chunk)); err != nil {
+		return fmt.Errorf("execute Lua script failed: %w", err)
 	}
-
-	// 从全局环境获取函数
-	funcVal := ls.env.Get(rt.StringValue(funcname))
-	if funcVal == rt.NilValue {
-		return nil, fmt.Errorf("function not found: '%s'", funcname)
-	}
-
-	// 检查是否是函数类型
-	if _, ok := funcVal.TryCallable(); !ok {
-		return nil, fmt.Errorf("'%s' is not a callable function", funcname)
-	}
-
-	// 转换参数为 rt.Value
-	args := make([]rt.Value, 0, len(list))
-	for _, val := range list {
-		args = append(args, GoToLuaValueWithContext(ctx, val))
-	}
-
-	// 捕获 thread 局部引用：即使超时后 ls.thread 被置 nil，协程仍持有有效引用
-	thread := ls.thread
-
-	// 调用 Lua 函数（带超时保护）
-	resultChan := make(chan rt.Value, 1)
-	errChan := make(chan error, 1)
-
-	go func() {
-		// 防护性 recover：超时后本协程成为泄漏协程，若内部 panic 会崩溃整个进程。
-		// 由于 runtime 已被标记为 poisoned，此处 panic 不影响业务正确性。
-		defer func() {
-			if r := recover(); r != nil {
-				errChan <- fmt.Errorf("lua goroutine panic (poisoned runtime): %v", r)
-			}
-		}()
-		result, err := rt.Call1(thread, funcVal, args...)
-		if err != nil {
-			errChan <- err
-		} else {
-			resultChan <- result
-		}
-	}()
-
-	metrics.Lua.IncCalls(funcname)
-	started := time.Now()
-	select {
-	case <-ctx.Done():
-		// 超时：标记 runtime 为中毒状态，后续调用不再使用该 runtime。
-		// 注意：上面的 goroutine 仍在执行，无法安全终止（golua 非线程安全），
-		// 但由于 poisoned 标记，不会有其他调用者并发访问同一 runtime。
-		ls.poisoned.Store(true)
-		metrics.Lua.IncCalls("timeout:" + funcname)
-		metrics.Lua.ObserveCallLatency(funcname, time.Since(started))
-		return nil, fmt.Errorf("call timeout: %w", ctx.Err())
-	case result := <-resultChan:
-		metrics.Lua.ObserveCallLatency(funcname, time.Since(started))
-		ls.returnValues = []interface{}{LuaToGoValueWithContext(ctx, result)}
-		return ls.returnValues, nil
-	case err := <-errChan:
-		metrics.Lua.ObserveCallLatency(funcname, time.Since(started))
-		return nil, fmt.Errorf("Lua call failed: %w", err)
-	}
+	return nil
 }
 
 // RangeRegisteredObjects 遍历本脚本里由 Lua 构造出来的 Go 对象。
@@ -350,53 +287,25 @@ func NewLuaScript(initluapath string) (*LuaScript, error) {
 
 // NewLuaScriptWithContext 使用上下文创建 Lua 脚本实例
 func NewLuaScriptWithContext(ctx context.Context, initluapath string) (*LuaScript, error) {
-	p := &LuaScript{
+	ls := &LuaScript{
 		returnValues:      make([]interface{}, 0),
 		initScriptPath:    initluapath,
 		registeredObjects: syncmap.NewAny(),
 	}
 
-	// 初始化Lua运行时
-	if err := p.Init(); err != nil {
+	// 初始化Lua运行时（注册表回放在 initLocked 内完成，回调捕获 regCtx）
+	ls.regCtx = ctx
+	if err := ls.Init(); err != nil {
 		return nil, err
 	}
 
-	// 初始化注册的函数
-	// nArgs=1、hasEtc=true：注册表拿不到宿主函数的真实元数，按 1 个具名槽绑定后
-	// 其余实参才会留在 c.Etc() 里；hasEtc=false 会让 golua 直接丢掉第 2 个之后的参数
-	registeredFuncsMu.RLock()
-	for funcName, function := range registeredFuncs {
-		p.runtime.SetEnvGoFunc(p.env, funcName, function, 1, true)
-	}
-	registeredFuncsMu.RUnlock()
-
-	// 注册类
-	registeredClassesMu.RLock()
-	for _, class := range registeredClasses {
-		if err := registerClassWithContext(ctx, class, p); err != nil {
-			vars.Error("register Lua class failed: %v", err)
-		}
-	}
-	registeredClassesMu.RUnlock()
-
-	// 读取并编译脚本文件
-	source, err := os.ReadFile(p.initScriptPath)
-	if err != nil {
-		return nil, fmt.Errorf("read Lua script file failed: %w", err)
-	}
-
-	chunk, err := p.runtime.CompileAndLoadLuaChunk("main", source, rt.TableValue(p.env))
-	if err != nil {
-		return nil, fmt.Errorf("compile Lua script failed: %w", err)
-	}
-
-	// 执行主脚本（带超时保护）
-	if _, err = rt.Call1(p.thread, rt.FunctionValue(chunk)); err != nil {
-		return nil, fmt.Errorf("execute Lua script failed: %w", err)
+	// 读取并编译脚本文件，执行主块
+	if err := ls.runMainChunkLocked(initluapath); err != nil {
+		return nil, err
 	}
 
 	// 创建 update 定时器（必须在主脚本执行完之后）
-	if err := p.startTimer(); err != nil {
+	if err := ls.startTimer(); err != nil {
 		return nil, err
 	}
 
@@ -408,8 +317,8 @@ func NewLuaScriptWithContext(ctx context.Context, initluapath string) (*LuaScrip
 	if luaInstances == nil {
 		luaInstances = make(map[int64]*LuaScript)
 	}
-	luaInstances[instanceID] = p
+	luaInstances[instanceID] = ls
 	luaInstancesMu.Unlock()
-	p.UID = instanceID
-	return p, nil
+	ls.UID = instanceID
+	return ls, nil
 }

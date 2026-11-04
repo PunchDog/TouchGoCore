@@ -17,20 +17,20 @@ type luaTimer struct {
 }
 
 // Tick 执行定时更新
-func (lt *luaTimer) Tick() {
-	tick := lt.tick.Add(1)
+func (tmr *luaTimer) Tick() {
+	tick := tmr.tick.Add(1)
 
 	// 定期触发垃圾回收
-	if tick%GCTickCount == 0 {
+	if tick%luaGCTickCountValue() == 0 {
 		runtime.GC()
 	}
 
 	// 使用工作池并发更新对象
-	lt.updateObjects(lt.ctx)
+	tmr.updateObjects(tmr.ctx)
 }
 
-func (lt *luaTimer) updateObjects(ctx context.Context) {
-	lt.luaScript.registeredObjects.Range(func(key, value interface{}) bool {
+func (tmr *luaTimer) updateObjects(ctx context.Context) {
+	tmr.luaScript.registeredObjects.Range(func(key, value interface{}) bool {
 		if ctx != nil {
 			select {
 			case <-ctx.Done():

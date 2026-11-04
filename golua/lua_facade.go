@@ -24,7 +24,7 @@ func CallWithContext(ctx context.Context, funcName string, args ...interface{}) 
 	dl := defaultLua
 	luaInstancesMu.RUnlock()
 	if dl == nil {
-		return nil, fmt.Errorf("Lua service not started")
+		return nil, fmt.Errorf("lua 服务未启动 (Lua service not started)")
 	}
 	return dl.CallWithContext(ctx, funcName, args...)
 }
@@ -37,6 +37,19 @@ func CallWithContext(ctx context.Context, funcName string, args ...interface{}) 
 func RegisterLuaFunc(funcName string, function func(t *rt.Thread, c *rt.GoCont) (rt.Cont, error)) error {
 	registeredFuncsMu.Lock()
 	defer registeredFuncsMu.Unlock()
+
+	for _, builtin := range defaultFunctionNames {
+		if funcName == builtin {
+			return fmt.Errorf("函数名 '%s' 已被 Lua 内置函数占用", funcName)
+		}
+	}
+	// 与 RegisterGoFunc 共用命名空间：锁序固定 funcs → goFuncs，永不反向
+	registeredGoFuncsMu.RLock()
+	_, dupGoFunc := registeredGoFuncs[funcName]
+	registeredGoFuncsMu.RUnlock()
+	if dupGoFunc {
+		return fmt.Errorf("function '%s' already registered by RegisterGoFunc", funcName)
+	}
 
 	if registeredFuncs == nil {
 		registeredFuncs = make(map[string]func(t *rt.Thread, c *rt.GoCont) (rt.Cont, error))
@@ -86,6 +99,9 @@ func RegisterLuaClass(class ILuaClassInterface) error {
 
 // RunLua 启动 Lua 服务
 func RunLua() error {
+	// 覆盖绕过 Run 直接调本函数的调用方：节拍必须在建实例之前落到配置值上
+	applyLuaTimingConfig()
+
 	lc := luaCfg()
 	if lc == nil {
 		vars.Info("Lua service disabled")
@@ -130,14 +146,34 @@ func StopLua() {
 	}
 }
 
+// swapDefaultLua 在默认实例被换代时把它指向新实例。
+//
+// 自动重载走的是「新建实例」路径：closeKeepingObjects 已把旧实例的 runtime 拆掉，
+// 而 defaultLua 此前没人更新，于是 lua.Call 一直打到那个空壳上，恒返回
+// 「lua runtime is not available (closed or reloading)」。
+//
+// 只在归属匹配时替换：监视器托管的实例未必是默认实例（例如测试里裸建的），
+// 无条件替换会把别人的默认实例顶掉。
+// 锁内不得取 rtMu：defaultLua 的读写与 Close/StopLua 共用 luaInstancesMu，
+// 拿锁再去做会重入锁的事就是死锁（见 StopLua 注释）。
+func swapDefaultLua(old, next *LuaScript) {
+	luaInstancesMu.Lock()
+	if defaultLua == old {
+		defaultLua = next
+	}
+	luaInstancesMu.Unlock()
+}
+
 // Run 启动 Lua 服务（公开接口）
 func Run(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	luaParentCtx = ctx
+	setLuaParentCtx(ctx)
+	// 顺序要紧：applyLuaTimingConfig 读的就是刚存进去的这份父上下文
+	applyLuaTimingConfig()
 	if luaCfg() == nil {
-		vars.Info("不启动lua服务")
+		vars.Info("不启动 lua 服务")
 		return nil
 	}
 	return RunLua()

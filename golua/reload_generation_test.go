@@ -20,7 +20,8 @@ import (
 // 这两个字段替换为新一代对象，旧协程 select 的却是新通道——既收不到自己那一代的
 // 关闭信号（协程泄漏），又可能被新一代的 Stop 误杀（running=true 却无人监控）。
 // 修复：Start 在 mu 内取快照并以参数传给 watch；Stop 只 cancel/close 自己捕获的那一代。
-// 本机无 C 工具链（-race 不可用），用「协程数收敛 + 换代后监控仍有效」替代观测。
+// 本机有 C 工具链（gcc + CGO_ENABLED=1，-race 可跑）；这里仍用「协程数收敛 + 换代后
+// 监控仍有效」做观测量，因为它能直接盯住本 bug 的形状，而 -race 只报内存竞争。
 
 func setupLuaTestInstances(t *testing.T) {
 	t.Helper()

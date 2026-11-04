@@ -134,7 +134,7 @@ func TestMap_LoadOrStore_ExistingWins(t *testing.T) {
 	}
 }
 
-// golua/luatable.go 的 SubTable 依赖「首次插入后直接类型断言」，
+// golua/lua_table.go 的 SubTable 依赖「首次插入后直接类型断言」，
 // MapAny 内嵌 Map[any,any]，这里覆盖它的同一条路径。
 func TestMapAny_LoadOrStore_TypeAssertable(t *testing.T) {
 	type sub struct{ n int }

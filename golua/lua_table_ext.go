@@ -209,13 +209,13 @@ func parsePath(path string) []interface{} {
 }
 
 // GetInt64 获取 int64 值
-func (this *LuaTable) GetInt64(key interface{}) (int64, bool) {
-	return this.GetInt(key)
+func (lt *LuaTable) GetInt64(key interface{}) (int64, bool) {
+	return lt.GetInt(key)
 }
 
 // GetFloat64 获取 float64 值
-func (this *LuaTable) GetFloat64(key interface{}) (float64, bool) {
-	val, ok := this.Get(key)
+func (lt *LuaTable) GetFloat64(key interface{}) (float64, bool) {
+	val, ok := lt.Get(key)
 	if !ok {
 		return 0, false
 	}
@@ -233,8 +233,8 @@ func (this *LuaTable) GetFloat64(key interface{}) (float64, bool) {
 }
 
 // GetBool 获取 bool 值
-func (this *LuaTable) GetBool(key interface{}) (bool, bool) {
-	val, ok := this.Get(key)
+func (lt *LuaTable) GetBool(key interface{}) (bool, bool) {
+	val, ok := lt.Get(key)
 	if !ok {
 		return false, false
 	}
@@ -245,31 +245,36 @@ func (this *LuaTable) GetBool(key interface{}) (bool, bool) {
 }
 
 // HasKey 检查 key 是否存在
-func (this *LuaTable) HasKey(key interface{}) bool {
-	_, ok := this.Get(key)
+func (lt *LuaTable) HasKey(key interface{}) bool {
+	_, ok := lt.Get(key)
 	return ok
 }
 
 // Delete 删除 key
-func (this *LuaTable) Delete(key interface{}) {
-	if this.tbl != nil {
-		this.tbl.Delete(key)
+func (lt *LuaTable) Delete(key interface{}) {
+	if lt.tbl == nil {
+		return
 	}
+	normKey, ok := normalizeTableKey(key)
+	if !ok {
+		return
+	}
+	lt.tbl.Delete(normKey)
 }
 
 // ForEach 遍历 table
-func (this *LuaTable) ForEach(fn func(key, value interface{}) bool) {
-	if this.tbl != nil {
-		this.tbl.Range(fn)
+func (lt *LuaTable) ForEach(fn func(key, value interface{}) bool) {
+	if lt.tbl != nil {
+		lt.tbl.Range(fn)
 	}
 }
 
 // Filter 过滤 table
-func (this *LuaTable) Filter(predicate func(key, value interface{}) bool) *LuaTable {
+func (lt *LuaTable) Filter(predicate func(key, value interface{}) bool) *LuaTable {
 	result := newTable(nil)
 
-	if this.tbl != nil {
-		this.tbl.Range(func(key, value interface{}) bool {
+	if lt.tbl != nil {
+		lt.tbl.Range(func(key, value interface{}) bool {
 			if predicate(key, value) {
 				result.Set(key, value)
 			}
@@ -281,11 +286,11 @@ func (this *LuaTable) Filter(predicate func(key, value interface{}) bool) *LuaTa
 }
 
 // Map 映射转换 table
-func (this *LuaTable) Map(fn func(key, value interface{}) (interface{}, interface{})) *LuaTable {
+func (lt *LuaTable) Map(fn func(key, value interface{}) (interface{}, interface{})) *LuaTable {
 	result := newTable(nil)
 
-	if this.tbl != nil {
-		this.tbl.Range(func(key, value interface{}) bool {
+	if lt.tbl != nil {
+		lt.tbl.Range(func(key, value interface{}) bool {
 			newKey, newValue := fn(key, value)
 			result.Set(newKey, newValue)
 			return true
@@ -296,11 +301,11 @@ func (this *LuaTable) Map(fn func(key, value interface{}) (interface{}, interfac
 }
 
 // Copy 深拷贝 table
-func (this *LuaTable) Copy() *LuaTable {
+func (lt *LuaTable) Copy() *LuaTable {
 	result := newTable(nil)
 
-	if this.tbl != nil {
-		this.tbl.Range(func(key, value interface{}) bool {
+	if lt.tbl != nil {
+		lt.tbl.Range(func(key, value interface{}) bool {
 			// 递归拷贝嵌套 table
 			if nested, ok := value.(*LuaTable); ok {
 				result.Set(key, nested.Copy())
@@ -315,11 +320,11 @@ func (this *LuaTable) Copy() *LuaTable {
 }
 
 // Clone 创建浅拷贝
-func (this *LuaTable) Clone() *LuaTable {
+func (lt *LuaTable) Clone() *LuaTable {
 	result := newTable(nil)
 
-	if this.tbl != nil {
-		this.tbl.Range(func(key, value interface{}) bool {
+	if lt.tbl != nil {
+		lt.tbl.Range(func(key, value interface{}) bool {
 			result.Set(key, value)
 			return true
 		})
@@ -329,15 +334,15 @@ func (this *LuaTable) Clone() *LuaTable {
 }
 
 // String 返回 table 的字符串表示
-func (this *LuaTable) String() string {
-	if this.tbl == nil {
+func (lt *LuaTable) String() string {
+	if lt.tbl == nil {
 		return "{}"
 	}
 
 	result := "{"
 	first := true
 
-	this.tbl.Range(func(key, value interface{}) bool {
+	lt.tbl.Range(func(key, value interface{}) bool {
 		if !first {
 			result += ", "
 		}
@@ -388,26 +393,17 @@ func GetKeyType(v interface{}) KeyType {
 	}
 }
 
-// NormalizeKey 标准化 key（转换为字符串用于存储）
+// NormalizeKey 把 key 归一化成包内统一的表键口径：整数族与整值浮点统一为 int64，
+// string/bool 原样，nil 与 NaN 判为非法。
+//
+// 与 LuaTable 内部读写用的是同一个 normalizeTableKey，不会出现「这里归一化了、
+// 那里按原样存」的两套口径。
 func NormalizeKey(key interface{}) (interface{}, error) {
-	if key == nil {
-		return nil, fmt.Errorf("key 不能为 nil")
-	}
-
-	switch v := key.(type) {
-	case string:
-		return v, nil
-	case int64, int32, int16, int8, int, uint64, uint32, uint16, uint8, uint:
-		return v, nil
-	case float64:
-		return v, nil
-	case float32:
-		return float64(v), nil
-	case bool:
-		return v, nil
-	default:
+	normKey, ok := normalizeTableKey(key)
+	if !ok {
 		return nil, fmt.Errorf("不支持的 key 类型: %T", key)
 	}
+	return normKey, nil
 }
 
 // FormatKey 格式化 key 用于显示
@@ -430,37 +426,16 @@ func FormatKey(key interface{}) string {
 	}
 }
 
-// CompareKeys 比较两个 key 是否相等
+// CompareKeys 比较两个 key 是否相等。两侧先按表键口径归一化再比，
+// 因此 int(1)、int64(1)、float64(1.0) 视为同一个键。
 func CompareKeys(k1, k2 interface{}) bool {
-	if k1 == nil && k2 == nil {
-		return true
-	}
 	if k1 == nil || k2 == nil {
+		return k1 == nil && k2 == nil
+	}
+	norm1, ok1 := normalizeTableKey(k1)
+	norm2, ok2 := normalizeTableKey(k2)
+	if !ok1 || !ok2 {
 		return false
 	}
-
-	if num1, ok1 := k1.(int64); ok1 {
-		if num2, ok2 := k2.(int64); ok2 {
-			return num1 == num2
-		}
-	}
-	if num1, ok1 := k1.(float64); ok1 {
-		if num2, ok2 := k2.(float64); ok2 {
-			return num1 == num2
-		}
-	}
-
-	if str1, ok1 := k1.(string); ok1 {
-		if str2, ok2 := k2.(string); ok2 {
-			return str1 == str2
-		}
-	}
-
-	if bool1, ok1 := k1.(bool); ok1 {
-		if bool2, ok2 := k2.(bool); ok2 {
-			return bool1 == bool2
-		}
-	}
-
-	return false
+	return norm1 == norm2
 }

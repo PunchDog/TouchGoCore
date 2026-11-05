@@ -34,7 +34,7 @@ type timerStatsCounters struct {
 // 各轮独立计数，否则毫秒轮常年背压会把小时轮的告警一并吞掉，
 // 而后者恰恰是「某个低频业务定时器正在丢调度」的唯一线索。
 func wheelShouldWarn(wheel *TimerWheel) bool {
-	now := util.CurrentMS()
+	now := util.RealMS()
 	last := wheel.lastBackpressureWarn.Load()
 	if now-last < 1000 {
 		return false

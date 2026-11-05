@@ -248,7 +248,7 @@ func (m *TimerManager) processWheelTick(wheel *TimerWheel, wheelType TimerType) 
 // check-then-act，若 CAS 漂在锁外，两边能各自读到同一个归属并各扣一次计数
 // （不变前的整轮持锁恰好挡住了这个交错，实测会让 timerCount 打成负数）。
 func (m *TimerManager) tickWheelSection(wheel *TimerWheel, wheelType TimerType) (dropped int64) {
-	currentTime := util.CurrentMS()
+	currentTime := util.RealMS()
 	// 通道数组快照取一次：到期节点按各自 uid 落到不同分片（S68），而本轮扫描期间
 	// 分片数不可能变（改分片只在 TimeStop→Run 之间生效）。
 	channels := currentTimerChannels()
@@ -469,7 +469,7 @@ func (m *TimerManager) drainWheelLocked(wheel *TimerWheel) (expired []timerTask)
 	wheel.wheelLock.Lock()
 	defer wheel.wheelLock.Unlock()
 
-	currentTime := util.CurrentMS()
+	currentTime := util.RealMS()
 
 	// 清空必须放在 defer 里：下面 Range 的回调会调进业务实现的 GetParent/IsActive，
 	// 一旦 panic 逃出 Range，本函数后半段的 Clear 与归零都不执行，

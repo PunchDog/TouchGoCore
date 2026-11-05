@@ -25,7 +25,7 @@ var uidSeed atomic.Int64
 // 现在「取号」与「推进号段」合成为一次原子操作。
 func nextUID() int64 {
 	cur := uidSeed.Load()
-	if now := util.CurrentTime().UnixNano(); now > cur {
+	if now := util.RealTime().UnixNano(); now > cur {
 		// 让号段追上当前时间；CAS 失败说明并发方已推进过，直接 Add 依然唯一
 		uidSeed.CompareAndSwap(cur, now)
 	}
@@ -194,7 +194,7 @@ func (c *Client) initChannels() {
 // 必须在任何常驻协程启动之前调用：此刻实例被本次 NewClient 独占，
 // 清零与新连接的计数之间不存在并发写入。
 func (c *Client) resetStats() {
-	now := util.CurrentTime()
+	now := util.RealTime()
 	c.stats.connectTime = now
 	c.stats.messagesSent.Store(0)
 	c.stats.messagesReceived.Store(0)
@@ -241,8 +241,8 @@ func (c *Client) connectionDial(url string) error {
 			c.setRemoteAddr(url)
 
 			// ============ 改进：初始化统计 ============
-			c.stats.connectTime = util.CurrentTime()
-			c.stats.lastActivity.Store(util.CurrentTime())
+			c.stats.connectTime = util.RealTime()
+			c.stats.lastActivity.Store(util.RealTime())
 
 			return nil
 		}
@@ -303,7 +303,7 @@ func (c *Client) handleLoop() {
 			}
 			// 设置写超时：对端不收时 WriteMessage 会永久阻塞，把本协程
 			// 连同这条连接的发送队列钉死，背压也变成死锁。
-			if err := conn.SetWriteDeadline(util.CurrentTime().Add(currentWriteTimeout())); err != nil {
+			if err := conn.SetWriteDeadline(util.RealTime().Add(currentWriteTimeout())); err != nil {
 				vars.Error("设置写超时失败: %v, 客户端地址: %s", err, c.addr())
 				c.Close("设置写超时失败")
 				return
@@ -318,14 +318,14 @@ func (c *Client) handleLoop() {
 			// ============ 改进：更新统计 ============
 			c.stats.messagesSent.Add(1)
 			c.stats.bytesSent.Add(int64(len(msg)))
-			c.stats.lastActivity.Store(util.CurrentTime())
+			c.stats.lastActivity.Store(util.RealTime())
 		}
 	}
 }
 
 // writePing 发送一次 ping 控制帧（带写超时）
 func (c *Client) writePing(conn *websocket.Conn) error {
-	if err := conn.SetWriteDeadline(util.CurrentTime().Add(currentWriteTimeout())); err != nil {
+	if err := conn.SetWriteDeadline(util.RealTime().Add(currentWriteTimeout())); err != nil {
 		return err
 	}
 	return conn.WriteMessage(websocket.PingMessage, nil)
@@ -356,11 +356,11 @@ func (c *Client) readLoop() {
 	// 读超时 + pong 续期：修复前 ReadMessage 完全没有 deadline，对端拔网线或
 	// 留下半开连接时本协程永久阻塞，Client 实例与底层 socket 一起泄漏到进程退出。
 	conn.SetPongHandler(func(string) error {
-		return conn.SetReadDeadline(util.CurrentTime().Add(currentReadTimeout()))
+		return conn.SetReadDeadline(util.RealTime().Add(currentReadTimeout()))
 	})
 
 	for c.Connected() {
-		if err := conn.SetReadDeadline(util.CurrentTime().Add(currentReadTimeout())); err != nil {
+		if err := conn.SetReadDeadline(util.RealTime().Add(currentReadTimeout())); err != nil {
 			vars.Error("设置读超时失败: %v, 客户端地址: %s", err, c.addr())
 			return
 		}
@@ -748,6 +748,6 @@ func (c *Client) GetStats() ClientStats {
 func (c *Client) UpdateStatsFromMessage(data []byte) {
 	c.stats.messagesReceived.Add(1)
 	c.stats.bytesReceived.Add(int64(len(data)))
-	c.stats.lastActivity.Store(util.CurrentTime())
+	c.stats.lastActivity.Store(util.RealTime())
 	UpdateMessageStats()
 }

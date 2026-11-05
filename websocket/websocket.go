@@ -715,7 +715,7 @@ func (pool *workerPoolState) dropDispatched(workerIdx int, msg *msgQueueType) {
 
 // shouldWarnFull 对「队列满」告警按秒限频，避免高负载下日志本身成为瓶颈
 func (pool *workerPoolState) shouldWarnFull() bool {
-	now := util.CurrentMS()
+	now := util.RealMS()
 	last := pool.lastFullWarn.Load()
 	for now-last >= 1000 {
 		if pool.lastFullWarn.CompareAndSwap(last, now) {
@@ -756,7 +756,7 @@ func (pool *workerPoolState) safeProcess(workerID int, msg *msgQueueType) {
 		pool.stats[workerID].Errors.Add(1)
 	}
 	pool.stats[workerID].Messages.Add(1)
-	pool.stats[workerID].LastMessageAt = util.CurrentTime()
+	pool.stats[workerID].LastMessageAt = util.RealTime()
 }
 
 // ============ 新增改进功能 ============

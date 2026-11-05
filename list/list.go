@@ -51,7 +51,7 @@ func NewUnindexedList() *List {
 func (l *List) generateNextID() int64 {
 	for {
 		cur := l.nextID.Load()
-		next := util.CurrentTime().UnixNano()
+		next := util.RealTime().UnixNano()
 		if next <= cur {
 			next = cur + 1
 		}

@@ -89,7 +89,7 @@ func newSlotRing(wheelConfig int64, slotCount int) *slotRing {
 	}
 	// 游标起于「此刻」：冷启动时 nextTime 是绝对毫秒戳，若留在 0，第一拍会算出
 	// 「落后几十万圈」而走整环扫描分支；空轮那一下不痛，但归桶钳制也会跟着失真。
-	r.cursor.Store(util.CurrentMS() / wheelConfig)
+	r.cursor.Store(util.RealMS() / wheelConfig)
 	return r
 }
 

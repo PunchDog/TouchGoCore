@@ -66,6 +66,14 @@ var (
 	vtPollInterval atomic.Int64
 	vtSyncMu       sync.Mutex
 	vtSyncCancel   context.CancelFunc
+
+	// vtLastRefresh 是「上一次成功从 Redis 拉取偏移」的**真实**时刻（UnixNano）。
+	// 只用于 CalculateVirtualTime 的刷新节流，绝不能用虚拟时间记账（否则自指）。
+	// 由 200ms 轮询、PubSub 通知与本函数自身的强刷共同推进。
+	vtLastRefresh atomic.Int64
+	// vtRefreshMu 把「判定到期 → 拉 Redis」收口成进程内串行，避免热路径上
+	// 同一瞬间几百个 goroutine 同时发现快照过期、一起打 Redis（惊群）。
+	vtRefreshMu sync.Mutex
 )
 
 func init() {
@@ -73,9 +81,14 @@ func init() {
 }
 
 // VirtualTimeData 虚拟时间数据结构
+//
+// ⚠️ 两个字段都是 **Unix 纳秒**，不是毫秒：applyVirtualOffset 用
+// time.Now().UnixNano() 与 time.Unix(0, ...) 换算，SetVirtualTimeData 的调用方
+// （含 util/time_test.go）传的也是 UnixNano。曾误写为「毫秒」，按那个注释传值
+// 会得到 1970 年的时间。StringToUnixTime/MSToTimeString 的毫秒口径与此无关。
 type VirtualTimeData struct {
-	RealTime    int64 // 记录时的真实时间（Unix 毫秒）
-	VirtualTime int64 // 记录时的虚拟时间（Unix 毫秒）
+	RealTime    int64 // 记录时的真实时间（Unix 纳秒）
+	VirtualTime int64 // 记录时的虚拟时间（Unix 纳秒）
 }
 
 func virtualTimeKey() string {
@@ -119,6 +132,7 @@ func startVirtualTimeSync(client redis.Cmdable) {
 func useVirtualTimeBackend(b virtualTimeBackend) {
 	stopVirtualTimeSync()
 	vtBackend = b
+	vtLastRefresh.Store(0)
 	if b == nil {
 		redisClient = nil
 		storeSnapshot(nil, false)
@@ -130,21 +144,28 @@ func useVirtualTimeBackend(b virtualTimeBackend) {
 }
 
 // RefreshVirtualTime 从 Redis（组内共享节点）拉取偏移并更新本地快照。
+// 这是**显式强刷**入口：无条件打一次 Redis，成功（含「确认未设置」）后推进
+// vtLastRefresh。CalculateVirtualTime 的节流只决定是否调用本函数，不改变
+// 本函数语义，所以轮询/PubSub/测试注入三条路径的行为完全不变。
 func RefreshVirtualTime(ctx context.Context) {
 	if vtBackend == nil {
 		storeSnapshot(nil, false)
+		vtLastRefresh.Store(time.Now().UnixNano())
 		return
 	}
 	data, err := GetVirtualTimeData(ctx)
 	if err != nil {
 		if errors.Is(err, ErrVirtualTimeNotSet) {
 			storeSnapshot(nil, false)
+			vtLastRefresh.Store(time.Now().UnixNano())
 			return
 		}
 		// Redis 瞬时失败时保留上一份快照，避免同组一部分节点跳回真实时间。
+		// 不推进 vtLastRefresh：故障期间保持「到期」状态，下次调用继续重试。
 		return
 	}
 	storeSnapshot(data, true)
+	vtLastRefresh.Store(time.Now().UnixNano())
 }
 
 func vtPollLoop(ctx context.Context) {
@@ -253,6 +274,9 @@ func SetVirtualTimeData(ctx context.Context, realTime, virtualTime int64) error 
 		return fmt.Errorf("set virtual time to redis: %w", err)
 	}
 	storeSnapshot(&VirtualTimeData{RealTime: realTime, VirtualTime: virtualTime}, true)
+	// 刚写完 Redis 且本地快照已是最新，推进刷新时刻，避免紧接着的
+	// CalculateVirtualTime 立刻又打一次 HGetAll。
+	vtLastRefresh.Store(time.Now().UnixNano())
 	vtPublish(ctx, "set")
 	return nil
 }
@@ -275,8 +299,16 @@ func snapshotOffset() *VirtualTimeData {
 
 // CalculateVirtualTime 按 Redis 组内共享偏移计算当前虚拟时间。
 // 公式：虚拟时间 = 记录虚拟时间 + (当前真实时间 - 记录真实时间)
+//
+// 热路径节流（2026-11-05）：偏移本来由 200ms 轮询（vtPollLoop）+ Redis PubSub
+// 通知同步，「每次调用都 HGetAll」读不到更新的值，却会把每个 HTTP 响应包络、
+// 每条业务时间戳都变成一次 Redis 往返。因此只在快照到期（默认 vtPollInterval）
+// 时才强刷，其余调用直接对本地快照做纳秒换算，成本与 CurrentTime() 相同。
+// 语义不变：返回值始终是「当前虚拟时间」；设置方 SetVirtualTimeData 会立即
+// storeSnapshot + Publish，同组节点靠 PubSub 在毫秒级跟上，不依赖本函数的刷新。
+// 需要无条件强刷的调用方仍可显式调 RefreshVirtualTime(ctx)。
 func CalculateVirtualTime(ctx context.Context) (time.Time, error) {
-	RefreshVirtualTime(ctx)
+	refreshVirtualTimeIfDue(ctx)
 	if data := snapshotOffset(); data != nil {
 		return applyVirtualOffset(data), nil
 	}
@@ -284,6 +316,22 @@ func CalculateVirtualTime(ctx context.Context) (time.Time, error) {
 		return time.Now(), errors.New("redis client not initialized")
 	}
 	return time.Now(), ErrVirtualTimeNotSet
+}
+
+// refreshVirtualTimeIfDue 把「判定到期 → 拉 Redis」在进程内串行化，避免惊群。
+// 到期判据用真实时钟，绝不能用虚拟时间（否则偏移会反过来影响自己的刷新节奏）。
+func refreshVirtualTimeIfDue(ctx context.Context) {
+	vtRefreshMu.Lock()
+	defer vtRefreshMu.Unlock()
+	d := time.Duration(vtPollInterval.Load())
+	if d <= 0 {
+		d = defaultVTPoll
+	}
+	last := vtLastRefresh.Load()
+	if last != 0 && time.Now().UnixNano()-last < int64(d) {
+		return
+	}
+	RefreshVirtualTime(ctx)
 }
 
 // CurrentTime 返回当前时间。偏移以 Redis 中 GameGroup 共享数据为准，
@@ -295,6 +343,21 @@ func CurrentTime() time.Time {
 	return time.Now()
 }
 
+// RealTime 返回**真实**当前时间，永不受虚拟时间偏移影响。
+//
+// 用途边界（2026-11-05 全链路虚拟时间改造定稿）：一切**基础设施**计时必须用它
+// 或 time.Now()，包括 context deadline/timeout 比较、ticker/timer 周期、重试退避、
+// 缓存与告警去抖的「上次时刻」、连接读写 deadline、计时轮、用时间做种子的 ID/nonce。
+// 把这些换成 CurrentTime()/CalculateVirtualTime()，在运营回拨或前跳虚拟时间时
+// 会让 deadline 永不触发、计时轮停摆或空转、time.Since 变负、随机源重复。
+//
+// 业务时间（写库时间戳、日窗/周期/过期判定、对外展示）才走
+// CurrentTime()/CalculateVirtualTime()。
+func RealTime() time.Time { return time.Now() }
+
+// RealMS 是 RealTime 的毫秒形式，供计时轮等基础设施使用。
+func RealMS() int64 { return time.Now().UnixMilli() }
+
 // ResetVirtualTime 删除组内 Redis 偏移，同组节点随后回到真实时间。
 func ResetVirtualTime(ctx context.Context) error {
 	if vtBackend == nil {
@@ -304,8 +367,50 @@ func ResetVirtualTime(ctx context.Context) error {
 		return err
 	}
 	storeSnapshot(nil, false)
+	vtLastRefresh.Store(time.Now().UnixNano())
 	vtPublish(ctx, "reset")
 	return nil
+}
+
+// SetVirtualTime 把「此刻」映射到目标虚拟时刻 at，是设置虚拟时间的**唯一推荐入口**。
+//
+// 内部用 time.Now().UnixNano() 与 at.UnixNano() 组装 SetVirtualTimeData 的两个
+// 纳秒参数，调用方不需要也不应该碰 int64 单位 —— 本文件同时存在毫秒辅助函数
+// （StringToUnixTime/MSToTimeString/CurrentMS），手工拼 int64 极易把毫秒喂给纳秒
+// 实现，偏移直接放大 1e6 倍（虚拟时间跳到公元数千年后）。
+//
+// 语义：at 是「设置生效瞬间应显示的时间」，offset = at - now；之后每过 1 秒真实
+// 时间虚拟时间也前进 1 秒（不冻结）。允许 at 早于 now（回拨），业务护栏由调用方
+// 负责（后台接口做范围校验与二次确认）。
+func SetVirtualTime(ctx context.Context, at time.Time) error {
+	return SetVirtualTimeData(ctx, time.Now().UnixNano(), at.UnixNano())
+}
+
+// VirtualTimeState 是「当前虚拟时间配置」的只读视图，供后台回显与健康检查。
+// 所有时间字段都是 time.Time，调用方不需要再做纳秒/毫秒换算。
+type VirtualTimeState struct {
+	Enabled    bool      // Redis 中是否存在该组的虚拟时间配置
+	Anchor     time.Time // 设置时记录的虚拟时刻（Enabled=false 时为零值）
+	AnchorReal time.Time // 设置时记录的真实时刻（Enabled=false 时为零值）
+	RedisKey   string    // 实际使用的 key（含 GameGroup），排障与启动对拍用
+}
+
+// GetVirtualTime 读取该组的虚拟时间配置视图。与 GetVirtualTimeData 的区别：
+// 这里把纳秒 int64 还原成 time.Time 并附带 Redis key，避免调用方各自换算单位。
+// 未配置时返回 (Enabled:false, nil) —— 「未配置」是配置态而非错误。
+func GetVirtualTime(ctx context.Context) (VirtualTimeState, error) {
+	state := VirtualTimeState{RedisKey: VirtualTimeRedisKey()}
+	data, err := GetVirtualTimeData(ctx)
+	if err != nil {
+		if errors.Is(err, ErrVirtualTimeNotSet) {
+			return state, nil
+		}
+		return state, err
+	}
+	state.Enabled = true
+	state.Anchor = time.Unix(0, data.VirtualTime)
+	state.AnchorReal = time.Unix(0, data.RealTime)
+	return state, nil
 }
 
 // InitVirtualTime 绑定 Redis 共享节点，并启动组内偏移同步。
@@ -327,6 +432,7 @@ func InitVirtualTime(client redis.Cmdable) {
 func StopVirtualTime() {
 	stopVirtualTimeSync()
 	storeSnapshot(nil, false)
+	vtLastRefresh.Store(0)
 	vtBackend = nil
 	redisClient = nil
 }

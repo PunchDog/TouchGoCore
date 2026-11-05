@@ -306,7 +306,7 @@ func (t *Timer) Init(interval, count int64, self TimerInterface) error {
 	if interval <= 0 {
 		return ErrTimerInvalidInterval
 	}
-	t.nextTime.Store(util.CurrentMS() + interval)
+	t.nextTime.Store(util.RealMS() + interval)
 	t.interval.Store(interval)
 	if count == InfiniteCount {
 		count = CountCorrectionValue
@@ -618,7 +618,7 @@ func (t *Timer) TryAdvance() bool {
 		}
 	}
 
-	t.nextTime.Store(util.CurrentMS() + t.interval.Load())
+	t.nextTime.Store(util.RealMS() + t.interval.Load())
 	return true
 }
 
@@ -666,7 +666,7 @@ func (t *Timer) IsAsyncTick() bool {
 // calculateType 根据间隔计算定时器类型
 func (t *Timer) calculateType(interval int64) TimerType {
 	if interval == -CountCorrectionValue {
-		interval = t.nextTime.Load() - util.CurrentMS()
+		interval = t.nextTime.Load() - util.RealMS()
 	}
 
 	switch {

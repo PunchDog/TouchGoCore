@@ -38,7 +38,7 @@ func NewLoader() *Loader {
 		notifyBatchSize: 100,
 		notifyInterval:  time.Millisecond * 100,
 	}
-	l.lastNotifyTime.Store(util.CurrentTime())
+	l.lastNotifyTime.Store(util.RealTime())
 	return l
 }
 
@@ -154,7 +154,7 @@ func (l *Loader) NotifyObservers() {
 func (l *Loader) notifyObserversIfNeeded(force bool) {
 	if !force {
 		lastNotify := l.lastNotifyTime.Load().(time.Time)
-		if util.CurrentTime().Sub(lastNotify) < l.notifyInterval {
+		if util.RealTime().Sub(lastNotify) < l.notifyInterval {
 			l.scheduleNotify()
 			return
 		}
@@ -188,7 +188,7 @@ func (l *Loader) notifyObserversIfNeeded(force bool) {
 	}
 	wg.Wait()
 
-	l.lastNotifyTime.Store(util.CurrentTime())
+	l.lastNotifyTime.Store(util.RealTime())
 }
 
 // scheduleNotify 安排一次延后补发；同一时刻最多只有一个待执行定时器

@@ -79,8 +79,14 @@ func New(opts Options) (*Engine, error) {
 	e.memberID = opts.memberID
 	e.rewardFn = opts.rewardFn
 
-	// 建立定义索引与任务链；失败则构造失败。
-	if err := e.Reload(context.Background()); err != nil {
+	// 定义索引由进程级注册表加载，本引擎按同一批定义重建链表；失败则构造失败。
+	taskglobal.setStore(e.store)
+	ctx := context.Background()
+	rows, err := taskglobal.loadDefs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if err := e.Reload(ctx, rows); err != nil {
 		return nil, err
 	}
 
@@ -92,21 +98,16 @@ func New(opts Options) (*Engine, error) {
 // newTaskNode 建一个挂任务对象的链表节点。
 //
 // 传 nil 走对象池分配：任务节点在四条链之间只做 Detach/Add，不触发归还；
-// 只有 remove() 收尾时才 Remove 入池，存活期间不会被池复用改写 data。
+// 只有 Remove 收尾时才入池，存活期间不会被池复用改写 data。
 func newTaskNode(t *TaskProgress) list.INode {
 	return list.NewNode(t, nil)
 }
 
-// Reload 重新加载启用定义与会员进度，按状态重建四条链。
+// Reload 按给定启用定义与会员进度重建四条链。
 //
-// 任务定义变更后应调用本方法；建议在低峰调用。
-func (e *Engine) Reload(ctx context.Context) error {
-	rows, err := e.store.ListEnabledDefs(ctx)
-	if err != nil {
-		return err
-	}
-	// 先清后写；清空窗口内 defOf 会回源 DB，语义不变。
-	taskglobal.setDefs(rows)
+// rows 由 taskglobal.Reload / New 统一加载并写入全局定义索引，本方法只负责消费；
+// 任务定义变更后建议在低峰调用。
+func (e *Engine) Reload(ctx context.Context, rows []TaskDef) error {
 	now := util.CurrentTime()
 	// 会员当前周期的进度：加载时按状态决定节点挂到哪条链。
 	progs, err := e.loadProgressMap(ctx, rows, now)
@@ -185,7 +186,7 @@ func (e *Engine) loadProgressMap(ctx context.Context, rows []TaskDef, now time.T
 	return out, nil
 }
 
-// remove 释放引擎持有的全部节点并注销自身；调用后引擎不可再使用。
+// Remove 释放引擎持有的全部节点并注销自身；调用后引擎不可再使用。
 //
 // tasklist 覆盖 active 与 completed（completed 的 tasknode 同样挂在 tasklist 上），
 // claimedtasklist 覆盖 claimed，两条链无交集，各遍历一次即可覆盖全部任务。

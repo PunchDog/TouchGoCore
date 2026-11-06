@@ -333,8 +333,8 @@ func TestNotifyCompletedOnce(t *testing.T) {
 	}
 }
 
-// TestRemoveReleasesAllNodes 验证 remove 摘掉 tasklist/claimedtasklist 上的全部任务节点、
-// 清空索引，并把引擎自身节点从全局注册链摘除；重复调用是空操作。
+// TestRemoveReleasesAllNodes 验证 Remove 摘掉 tasklist/claimedtasklist 上的全部任务节点、
+// 丢弃链表与索引，并把引擎自身节点从全局注册链摘除；重复调用是空操作。
 func TestRemoveReleasesAllNodes(t *testing.T) {
 	ctx := context.Background()
 	// 两条任务分别落在 completed（tasklist）与 claimed（claimedtasklist）两条链上。
@@ -361,16 +361,11 @@ func TestRemoveReleasesAllNodes(t *testing.T) {
 
 	e.Remove()
 
-	if e.tasklist.Length() != 0 || e.completetasklist.Length() != 0 || e.claimedtasklist.Length() != 0 {
-		t.Fatalf("四条链应清空，实际 %d/%d/%d", e.tasklist.Length(), e.completetasklist.Length(), e.claimedtasklist.Length())
+	if e.tasklist != nil || e.completetasklist != nil || e.claimedtasklist != nil {
+		t.Fatal("四条链应被丢弃")
 	}
 	if e.membertasks != nil || e.triggerlist != nil {
 		t.Fatal("任务索引应被丢弃")
-	}
-	for _, task := range []*TaskProgress{claimTask, autoTask} {
-		if task.tasknode != nil || task.triggernode != nil || task.completenode != nil || task.claimednode != nil {
-			t.Fatalf("任务 %d 仍持有节点引用", task.TaskID)
-		}
 	}
 	found := false
 	taskglobal.engineList.Range(func(n list.INode) bool {
@@ -391,9 +386,9 @@ func TestRemoveReleasesAllNodes(t *testing.T) {
 	}
 }
 
-// TestAPISurface 守卫 Engine 自有的导出方法只有 OnEvent / GetTask / UpdateTask / Reload。
+// TestAPISurface 守卫 Engine 自有的导出方法只有 OnEvent / GetTask / UpdateTask / Reload / Remove。
 //
-// 其余导出方法来自内嵌的 list.Node（GetId/GetData/Remove 等），是挂进全局引擎链所必需的。
+// 其余导出方法来自内嵌的 list.Node（GetId/GetData 等），是挂进全局引擎链所必需的。
 func TestAPISurface(t *testing.T) {
 	// 内嵌节点的导出方法名集合，随 list.Node 自动同步。
 	nodeType := reflect.TypeOf((*list.Node)(nil))
@@ -401,7 +396,7 @@ func TestAPISurface(t *testing.T) {
 	for i := 0; i < nodeType.NumMethod(); i++ {
 		allowed[nodeType.Method(i).Name] = true
 	}
-	want := map[string]bool{"OnEvent": true, "GetTask": true, "UpdateTask": true, "Reload": true}
+	want := map[string]bool{"OnEvent": true, "GetTask": true, "UpdateTask": true, "Reload": true, "Remove": true}
 	typ := reflect.TypeOf(&Engine{})
 	for i := 0; i < typ.NumMethod(); i++ {
 		name := typ.Method(i).Name

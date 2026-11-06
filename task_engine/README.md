@@ -16,8 +16,14 @@ func (e *Engine) GetTask(ctx context.Context, taskID int64, group string) ([]*Ta
 // 推进指定任务；task 取 GetTask 返回的常驻对象，parm 是本次上报
 func (e *Engine) UpdateTask(ctx context.Context, task *TaskProgress, parm *ProgressParm) error
 
-// 重载定义与会员进度，按状态重建四条链
-func (e *Engine) Reload(ctx context.Context) error
+// 全局重载：读取启用定义写入索引，并让每个已注册引擎按同一批定义重建四条链
+func (g *Golbal) Reload(ctx context.Context) error
+
+// 按给定定义与会员进度重建四条链（rows 由 taskglobal 统一加载）
+func (e *Engine) Reload(ctx context.Context, rows []TaskDef) error
+
+// 释放全部任务节点与自身注册节点；调用后引擎不可再使用
+func (e *Engine) Remove()
 ```
 
 `Engine` 上其余成员（`advance` / `attachLocked` / `defOf` / `rollCycle` 等）全部不导出，
@@ -42,9 +48,9 @@ func (e *Engine) Reload(ctx context.Context) error
 - 跨周期由 `rollCycle` 兜底：`OnEvent/GetTask/UpdateTask` 入口先扫 complete/claimed 两条链，
   `CycleKey` 已过期的任务清零复位回 active 并重新入链。
 - 节点在四条链之间迁移只走 `Detach` + `Add`：`Detach` 摘链但保留 `data`、不归还对象池，
-  节点可重新挂到别的链；`Remove`（清空 `data` 并回池）只用于 `remove()` 收尾。
+  节点可重新挂到别的链；`Remove`（清空 `data` 并回池）只用于 `Remove()` 收尾。
 - 节点用 `list.NewNode(t, nil)` 走对象池分配：存活期间不调用 `Remove`，不会被池复用改写；
-  `remove()` 摘掉全部任务节点与引擎自身节点，任务节点因此回到 `sync.Pool`
+  `Remove()` 摘掉全部任务节点与引擎自身节点，任务节点因此回到 `sync.Pool`
   （引擎是内嵌 `list.Node`，不属于池分配，只能摘链）。
 
 进程级共享状态集中在 `global.go` 的 `Golbal` 结构体（实例 `taskglobal`）：
@@ -53,10 +59,13 @@ func (e *Engine) Reload(ctx context.Context) error
 |---|---|
 | `defs syncmap.Map[int64, *TaskDef]` | 任务定义索引（只存启用行） |
 | `engineList NodeList` | 已创建引擎的注册链（`Engine` 内嵌 `list.Node`） |
+| `store Store` | 定义读取源；进程内各引擎共用，后装配者覆盖 |
 | `notifytrigger Policy` | 完成通知触发点 |
 
-`Reload` 用 `taskglobal.setDefs` 整体替换定义索引；`TaskProgress.GetDef()` 查它，
-未命中由 `defOf` 回源 DB 后 `taskglobal.storeDef` 回填；`New` 调 `taskglobal.addEngine` 注册引擎。
+`taskglobal.Reload` 用 `loadDefs` 读取启用行并整体替换索引，再广播给每个已注册引擎；
+`New` 也经 `taskglobal.loadDefs` 取同一批 rows 后调 `e.Reload(ctx, rows)`。
+`TaskProgress.GetDef()` 查 defs，未命中由 `defOf` 回源 DB 后 `taskglobal.storeDef` 回填；
+`New` 调 `taskglobal.addEngine` 注册引擎。
 
 ## ProgressParm 与进度口径
 
@@ -152,8 +161,8 @@ engine, err := taskengine.New(taskengine.Options{
   只能在包内（或测试）构造；导出前本包不具备对外可用性。
 - 引擎按「每会员一个 Engine」设计且任务对象常驻内存：装配层要自己持有/回收这批实例，
   在线人数即内存任务数。
-- `remove()` 目前未导出：包外宿主回收引擎需要再包一层；调用前必须确保该会员
-  没有并发的事件或查询（摘链会立即生效，不与 Range 快照对齐）。
+- `Remove()` 调用后引擎不可再使用；调用前必须确保该会员没有并发的事件或查询
+  （摘链会立即生效，不与 Range 快照对齐）。
 - 任务对象的进度字段在摘挂时受 `e.mu` 保护，但 `GetTask` 读字段不加锁；
   同一会员的事件必须串行投递（单逻辑线程）。
 

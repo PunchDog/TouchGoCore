@@ -1,10 +1,23 @@
 package taskengine
 
 import (
+	"context"
+	"errors"
 	"testing"
 
 	"touchgocore/list"
 )
+
+// TestGlobalLoadDefsRequiresStore 验证未注入 Store 时全局定义加载返回 ErrStoreNotConfigured。
+func TestGlobalLoadDefsRequiresStore(t *testing.T) {
+	old := taskglobal.store
+	taskglobal.store = nil
+	defer func() { taskglobal.store = old }()
+
+	if _, err := taskglobal.loadDefs(context.Background()); !errors.Is(err, ErrStoreNotConfigured) {
+		t.Fatalf("未注入 Store 应返回 ErrStoreNotConfigured，实际 %v", err)
+	}
+}
 
 // TestGlobalDefsIndex 验证全局定义索引的写入、整体替换与单条回填。
 func TestGlobalDefsIndex(t *testing.T) {

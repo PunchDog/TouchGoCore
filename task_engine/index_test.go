@@ -93,7 +93,7 @@ func TestReloadRebuildsIndex(t *testing.T) {
 	// 换一个触发点，保证后面的 CHECKIN 事件只针对被停用的定义。
 	added.Trigger = "OTHER"
 	store.defs[added.ID] = added
-	if err := e.Reload(ctx); err != nil {
+	if err := taskglobal.Reload(ctx); err != nil {
 		t.Fatal(err)
 	}
 	list, err := e.GetTask(ctx, 0, "")
@@ -108,7 +108,7 @@ func TestReloadRebuildsIndex(t *testing.T) {
 	}
 
 	def.Enabled = 0
-	if err := e.Reload(ctx); err != nil {
+	if err := taskglobal.Reload(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := e.GetTask(ctx, def.ID, ""); !errors.Is(err, ErrDisabled) {

@@ -96,7 +96,6 @@ func (dbo *DbOperate) RemoveAll(name string, cond interface{}) error {
 		vars.Debug("DbOperate.RemoveAll failed : %s, %v", name, cond)
 		return err
 	}
-	//vars.Debug("DbOperate.RemoveAll: %v", change)
 	return nil
 }
 

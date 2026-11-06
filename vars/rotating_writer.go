@@ -42,7 +42,7 @@ type RotatingFileWriter struct {
 
 // NewRotatingFileWriter 创建旋转日志写入器
 func NewRotatingFileWriter(filePath, fileName string, maxSize int64, maxAge, maxBackups int, compress bool) (*RotatingFileWriter, error) {
-	// 确保目录存在
+	// 目录不存在先建：日志文件要落到这里，建不成直接失败。
 	if err := os.MkdirAll(filePath, 0755); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrDirectoryCreateFailed, err)
 	}
@@ -59,6 +59,7 @@ func NewRotatingFileWriter(filePath, fileName string, maxSize int64, maxAge, max
 		renameFunc:      os.Rename,
 	}
 	writer.copyRotateFunc = writer.copyThenTruncate
+	// 独立 cleanup context：Close 时 cancel 即可停掉过期清理协程，不影响其他业务 ctx。
 	writer.cleanupCtx, writer.cleanupCancel = context.WithCancel(context.Background())
 
 	// 打开或创建文件
@@ -115,6 +116,7 @@ func (w *RotatingFileWriter) Write(p []byte) (n int, err error) {
 		return 0, fmt.Errorf("writer is closed")
 	}
 
+	// 整段 Write 持锁：轮转会换文件句柄，必须串行化避免半路被换。
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
@@ -151,6 +153,7 @@ func (w *RotatingFileWriter) Write(p []byte) (n int, err error) {
 		return n, err
 	}
 
+	// 更新已写字节数：checkRotate 据此判断是否到达轮转阈值。
 	w.currentSize += int64(n)
 
 	// 检查写入后是否需要轮转
@@ -165,6 +168,7 @@ func (w *RotatingFileWriter) Sync() error {
 		return nil
 	}
 
+	// 落盘也持锁：与 Write 互斥，避免 Sync 中途文件被轮转换走。
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
@@ -176,11 +180,12 @@ func (w *RotatingFileWriter) Sync() error {
 
 // Close 关闭写入器
 func (w *RotatingFileWriter) Close() error {
+	// CAS 保证只关一次：并发 Close 第二次直接返回，避免重复 Sync/Close 句柄。
 	if !w.closed.CompareAndSwap(false, true) {
 		return nil
 	}
 
-	// 先停止定期清理协程，再落盘关闭句柄
+	// 先取消 cleanup context：停掉过期清理/压缩协程，再落盘关句柄。
 	w.cleanupCancel()
 
 	w.mu.Lock()
@@ -204,7 +209,7 @@ func (w *RotatingFileWriter) Close() error {
 
 // checkRotate 检查并执行轮转
 func (w *RotatingFileWriter) checkRotate() {
-	// 限制检查频率
+	// 限频：轮转检查本身有开销，一秒内最多查一次，避免每条日志都走 Stat/比较。
 	if w.nowFunc().Sub(w.lastRotateCheck) < time.Second {
 		return
 	}
@@ -235,6 +240,7 @@ func (w *RotatingFileWriter) rotatedPath() string {
 
 // rotate 执行日志轮转（调用方必须持有 w.mu）
 func (w *RotatingFileWriter) rotate() {
+	// 句柄已空（被惰性重建逻辑置空）直接退出，不重复轮转。
 	if w.file == nil {
 		return
 	}
@@ -284,7 +290,7 @@ func (w *RotatingFileWriter) rotate() {
 		}
 	}
 
-	// 异步压缩旧日志与清理超额备份
+	// 压缩/清理异步派发：不放主路径，避免阻塞当前写入协程。
 	if w.compress {
 		w.spawnCleanup(func() { w.compressFile(rotatedPath) })
 	}
@@ -342,6 +348,7 @@ func (w *RotatingFileWriter) copyThenTruncate(currentPath, rotatedPath string) e
 
 // spawnCleanup 在关闭流程之外挂载一次性后台任务
 func (w *RotatingFileWriter) spawnCleanup(task func()) {
+	// 已关闭或上下文已取消则跳过：Shutdown 之后不再派新后台任务。
 	if w.closed.Load() || w.cleanupCtx.Err() != nil {
 		return
 	}
@@ -357,6 +364,7 @@ func (w *RotatingFileWriter) spawnCleanup(task func()) {
 
 // startAgeCleanup 启动过期日志清理循环：首次立即执行，之后每小时执行一次
 func (w *RotatingFileWriter) startAgeCleanup() {
+	// 未设保留时长则不做过期清理。
 	if w.maxAge <= 0 {
 		return
 	}

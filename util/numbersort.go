@@ -44,7 +44,7 @@ func (this NumberSortDesc[T]) Swap(i, j int) {
 	this[i], this[j] = this[j], this[i]
 }
 
-// getNumber 将字符串转换为数值类型（优化：使用类型断言替代反射，避免 reflect 开销）
+// getNumber 将字符串转换为数值类型（用类型断言替代反射，避免 reflect 开销）
 func getNumber[T any](v string) T {
 	var d T
 	switch any(&d).(type) {

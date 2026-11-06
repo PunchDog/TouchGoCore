@@ -90,7 +90,7 @@ func SendPhotoMessage(bot *tgbotapi.BotAPI, chatID int64, desc, bannerURL string
 		tgbotapi.FileURL(tg.GameBannerUrl),
 	)
 
-	if desc == "" { //开始消息
+	if desc == "" { // 开始消息
 		photo.Caption = tg.GameDescription
 		photo.ReplyMarkup = &tgbotapi.InlineKeyboardMarkup{
 			InlineKeyboard: [][]tgbotapi.InlineKeyboardButton{},
@@ -112,7 +112,7 @@ func SendPhotoMessage(bot *tgbotapi.BotAPI, chatID int64, desc, bannerURL string
 					URL:  &gameurl,
 				})
 		}
-	} else { //其他消息
+	} else { // 其他消息
 		if bannerURL != "" {
 			photo.File = tgbotapi.FileURL(bannerURL)
 		}
@@ -147,23 +147,14 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message) {
 	// 处理/start命令
 	if message.Text == "/start" {
 		SendPhotoMessage(bot, message.Chat.ID, "", "")
-		// } else if message.Text == "/game" {
-		// 	for _, v := range config.Cfg_.Telegram.GameToShort {
-		// 		chat := tgbotapi.NewMessage(message.Chat.ID, v)
-		// 		// 发送消息
-		// 		if _, err := bot.Send(chat); err != nil {
-		// 			log.ZError(context.TODO(), "telegram send message error", err)
-		// 		}
-		// 	}
-		// }
 	} else {
-		//按设定的命令发消息
+		// 命令消息：按原文（含斜杠）分发给业务方注册的处理器
 		if len(message.Text) > 0 && message.Text[0] == '/' {
 			if ok := util.DefaultCallFunc.Do(util.CallTelegramMsg+message.Text, bot, message); !ok {
 				vars.Debug("no handler registered for command: %s", message.Text)
 			}
 		} else {
-			//说话消息
+			// 普通说话消息
 			if ok := util.DefaultCallFunc.Do(util.CallTelegramMsg+"Say", message.Text, bot, message); !ok {
 				vars.Debug("no handler registered for say message")
 			}
@@ -206,7 +197,7 @@ type telegramTimer struct {
 }
 
 func (t *telegramTimer) Tick() {
-	//每分钟广播一次心跳
+	// 每分钟广播一次心跳
 	if ok := util.DefaultCallFunc.Do(util.CallTelegramMsg+"Minute", t.bot); !ok {
 		vars.Debug("no handler registered for minute tick")
 	}
@@ -223,7 +214,7 @@ func TelegramStart(ctx context.Context) {
 		vars.Info("不启动Telegram")
 		return
 	}
-	//其他位置设置了key,就用其他地方设置的替换
+	// 业务方在别处设过 BotKey 就用那份，否则沿用配置里的
 	util.DefaultCallFunc.Do(util.CallTelegramMsg+"BotKey", &tg.BotToken)
 	if tg.BotToken == "" {
 		vars.Info("不启动Telegram")

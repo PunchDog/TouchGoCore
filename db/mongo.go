@@ -36,7 +36,7 @@ func (db *DbOperate) GetDbSession() *mongo.Client {
 	return db.session
 }
 
-// 使用有已有的连接资源
+// 复用注册表中已有的连接：connectOnly 命中即直接接管，跳过拨号
 func (this *DbOperate) connectOnly(dataSourceName string) bool {
 	if s, ok := dbmap.Global.Load(dataSourceName); ok {
 		this.session = s.(*mongo.Client)
@@ -80,7 +80,7 @@ func (dbo *DbOperate) newMongoDB(cfg *config.MongoDBConfig) error {
 	// 原始 url 仅限本函数内 ApplyURI 一次性使用，绝不落地。
 	dbo.url = mongoPoolKey(cfg)
 
-	//有连接直接用
+	// 命中注册表则直接复用既有 Mongo 连接，跳过拨号
 	if dbo.connectOnly(dbo.url) {
 		return nil
 	}
@@ -94,7 +94,7 @@ func (dbo *DbOperate) newMongoDB(cfg *config.MongoDBConfig) error {
 		return err
 	}
 
-	// 判断服务是不是可用
+	// 探活：Ping 主节点确认 MongoDB 实例可连通
 	pingCtx, pingCancel := newTimeoutContext()
 	defer pingCancel()
 	err = dbo.session.Ping(pingCtx, readpref.Primary())
@@ -102,7 +102,7 @@ func (dbo *DbOperate) newMongoDB(cfg *config.MongoDBConfig) error {
 		return err
 	}
 
-	//添加查询索引
+	// 按配置预建集合索引，加速后续查询
 	if len(cfg.InitDBTableIndex) > 0 {
 		indexCtx, indexCancel := newTimeoutContext()
 		defer indexCancel()

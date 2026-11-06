@@ -36,7 +36,7 @@ func (sp *StringPool) Intern(s string) string {
 	sp.mu.Lock()
 	defer sp.mu.Unlock()
 
-	// 双重检查
+	// 双重检查锁：读锁未命中后，持写锁再确认一次，避免并发下重复写入同一字符串。
 	if existing, ok := sp.strings[s]; ok {
 		return existing
 	}
@@ -78,7 +78,7 @@ func (sp *StringPool) Stats() StringPoolStats {
 
 // StringPoolStats 字符串池统计信息
 type StringPoolStats struct {
-	Count      int     // 字符串数量
-	TotalLength int     // 总长度（字节）
-	AvgLength  float64 // 平均长度
+	Count      int
+	TotalLength int
+	AvgLength  float64
 }

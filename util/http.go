@@ -104,7 +104,6 @@ func PostJSON(uri string, obj interface{}) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	//variable.Log.Println(string(jsonData))
 	body := bytes.NewBuffer(jsonData)
 	response, err := http.Post(uri, "application/json;charset=utf-8", body)
 	if err != nil {

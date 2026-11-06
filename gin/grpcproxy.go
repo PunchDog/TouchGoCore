@@ -248,7 +248,7 @@ func serveGRPCProxy(c *gin.Context, proxy GRPCProxyStream) {
 	// A-F5：status 钳制——只有合法的最终状态 [200,599] 才透传。1xx 是信息性
 	// 响应（Go net/http 把 WriteHeader(1xx) 当 interim，101 无 hijack 属异常），
 	// 不能作为最终状态放行；负数/超界值写进 WriteHeader 会产生畸形响应
-	//（Go 会打 unknown status code 警告并按 200 处理）。远端客户端已被视为
+	// （Go 会打 unknown status code 警告并按 200 处理）。远端客户端已被视为
 	// 不可信来源，这里直接判为坏响应回 502。
 	if status < 200 || status > 599 {
 		vars.Error("GRPC 代理返回非法状态码 %d %s %s: status=%d，按 502 处理", rsp.Status, c.Request.Method, p, status)

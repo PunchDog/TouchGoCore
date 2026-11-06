@@ -110,8 +110,8 @@ func (c *LRUCache[K, V]) Stats() LRUCacheStats {
 
 // LRUCacheStats LRU 缓存统计信息
 type LRUCacheStats struct {
-	Size     int // 当前大小
-	Capacity int // 容量
+	Size     int
+	Capacity int
 }
 
 // moveToFront 将项移到链表头部

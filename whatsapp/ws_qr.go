@@ -53,7 +53,7 @@ var (
 	// 而注册表没有注销 API，重复注册只留噪音没有收益。
 	qrRouteOnce sync.Once
 	// qrUpgrader 是握手用的升级器。缓冲 4KiB 与 websocket 包默认一致
-	//（websocket/server.go:25）：QR 帧很小，大了是纯内存浪费。
+	// （websocket/server.go:25）：QR 帧很小，大了是纯内存浪费。
 	qrUpgrader = &websocket.Upgrader{
 		ReadBufferSize:  4 * 1024,
 		WriteBufferSize: 4 * 1024,

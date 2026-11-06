@@ -58,7 +58,7 @@ func SaveRanking(rt *RankTree, filename string) bool {
 	// 创建gob编码器
 	enc := gob.NewEncoder(f)
 
-	// 写操作，需要互斥锁
+	// dump 是只读快照：持读锁遍历即可安全编码，不阻塞并发查询与更新。
 	rt.rwMutex.RLock()
 	defer rt.rwMutex.RUnlock()
 
@@ -102,9 +102,9 @@ var (
 	RTSLock sync.RWMutex
 )
 
-// 从dump加载排名模块
+// 从 DB 记录构建排名树集合（按 Type 分桶，每类一棵 RankTree）。
 func LoadRankTrees(infos []DbRankInfo) map[int64]*RankTree {
-	// construct ranktrees
+	// 按 Type 分组，逐个构建 RankTree。
 	rts := make(map[int64]*RankTree)
 	var rt *RankTree
 	for _, info := range infos {

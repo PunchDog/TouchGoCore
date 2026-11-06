@@ -91,8 +91,8 @@ func callOneCallback(fn any, args []reflect.Value) (rets []reflect.Value, panick
 }
 
 const (
-	CallStart        = "StartFunc" //项目启动时加载数据
-	CallStop         = "StopFunc"  //关闭项目时执行保存之类的
+	CallStart        = "StartFunc" // 项目启动时加载数据
+	CallStop         = "StopFunc"  // 关闭项目时执行保存之类的
 	CallDispatch     = "Dispatch"
 	CallWebSocketMsg = "WebSocketMsg"
 	CallRpcMsg       = "RpcMsg"

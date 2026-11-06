@@ -676,7 +676,7 @@ func NewClient(connType interface{}, remoteAddr string, className string) (*Clie
 	}
 
 	client.setRemoteAddr(remoteAddr)
-	//使用反射创建ICall接口
+	// 按类名反射创建 ICall 实现
 	if className != "" {
 		call, _, err := acquireICall(className)
 		if err != nil {
@@ -686,7 +686,7 @@ func NewClient(connType interface{}, remoteAddr string, className string) (*Clie
 		}
 		client.ICall = call
 	} else {
-		//使用默认的
+		// 未指定类名时用默认实现
 		client.ICall = &defaultCall{}
 	}
 
@@ -708,7 +708,6 @@ func NewClient(connType interface{}, remoteAddr string, className string) (*Clie
 	client.liveLoops.Store(2)
 	client.counted.Store(true)
 	table.Store(client.UID, client)
-	// vars.Info("%s 连接建立成功", client.remoteAddr)
 	go client.readLoop()
 	go client.handleLoop()
 

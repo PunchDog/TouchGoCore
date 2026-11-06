@@ -11,7 +11,7 @@ package whatsapp
 // 方言口径（查证）：走 database/sql + pgx v5 的 stdlib 驱动（import 后注册驱动名 "pgx"），
 // 不引 lib/pq——pgx/v5 已是本仓直接依赖（db/postgres 在用），少一个驱动就少一份
 // 连接语义分叉。sqlstore 侧 dbutil.ParseDialect 认 "postgres" 前缀与 "pgx"
-//（查自 go.mau.fi/util@v0.10.1/dbutil/database.go:39-50），这里传 "pgx"。
+// （查自 go.mau.fi/util@v0.10.1/dbutil/database.go:39-50），这里传 "pgx"。
 
 import (
 	"context"

@@ -42,6 +42,7 @@ type ChannelLoggerManager struct {
 
 // NewChannelLoggerManager 创建基于Channel的日志管理器
 func NewChannelLoggerManager(cfg LogConfig) (*ChannelLoggerManager, error) {
+	// 配置非法直接失败：后续全部写入都依赖这份配置，不兜底。
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid log config: %w", err)
 	}
@@ -59,6 +60,7 @@ func NewChannelLoggerManager(cfg LogConfig) (*ChannelLoggerManager, error) {
 
 // init 初始化
 func (m *ChannelLoggerManager) init() error {
+	// 取写锁：initLocked 会改写 writer/slogHandler 等共享字段，初始化全程持锁。
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.initLocked()
@@ -110,6 +112,7 @@ func (m *ChannelLoggerManager) initLocked() error {
 
 // initWithChannel 使用Channel模式初始化
 func (m *ChannelLoggerManager) initWithChannel() error {
+	// 取写锁：initWithChannelLocked 建立旋转写入器与异步通道，均改写共享字段。
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.initWithChannelLocked()
@@ -174,6 +177,7 @@ func (m *ChannelLoggerManager) writeLogged(level slog.Level, msg string, attrs [
 // 级别过滤放在这里而不是调用方：异步通道自己不看级别，此前绕过门面直接调
 // LogAsyncSimple 的调用方能把 debug 灌进 info 级别的文件里。
 func (m *ChannelLoggerManager) writeLoggedAt(level slog.Level, msg string, attrs []slog.Attr, file string, line int) {
+	// 异步入口可能绕过门面直送，此处再挡一道，避免被过滤的级别漏进文件。
 	if !m.accepts(level) {
 		return
 	}
@@ -190,6 +194,7 @@ func (m *ChannelLoggerManager) enqueueRecord(entry logEntry) {
 
 // accepts 该级别的日志是否需要写文件
 func (m *ChannelLoggerManager) accepts(level slog.Level) bool {
+	// 三道闸：未启用、off、低于落盘级别——任一道不过都不写文件。
 	return m.isEnabled.Load() && !m.off.Load() && m.ShouldWriteFile(level)
 }
 
@@ -213,6 +218,7 @@ func (m *ChannelLoggerManager) submit(entry logEntry) {
 // writeEntrySync 通道缺席时同步落到同一个文件句柄。
 // 旋转写入器自带锁且写入即追加，与消费者协程并存时不会互相截断。
 func (m *ChannelLoggerManager) writeEntrySync(entry logEntry) {
+	// 读锁下取 writer 快照：SetLevel 换绑期间 writer 可能被换或置 nil，读锁保证拿到完整的一刻。
 	m.mu.RLock()
 	writer := m.writer
 	m.mu.RUnlock()
@@ -282,11 +288,13 @@ func (m *ChannelLoggerManager) Flush() error {
 
 // Close 关闭日志管理器
 func (m *ChannelLoggerManager) Close() error {
+	// CAS 保证只关闭一次：并发 Close 第二次直接返回，避免重复释放底层句柄。
 	if !m.isEnabled.CompareAndSwap(true, false) {
 		return nil
 	}
 
 	// 关闭Channel（会等待在途日志写完，不能持锁执行）
+	// 先把 channel 置 nil 再关：阻止新日志再投进正在关闭的消费者；且 Close 不能持锁（要等协程退出）。
 	if channel := m.channel.Swap(nil); channel != nil {
 		if err := channel.Close(); err != nil {
 			return err
@@ -393,6 +401,7 @@ func (m *ChannelLoggerManager) SetLevel(level string) error {
 		return err
 	}
 
+	// 持锁改配置并判定模式：通道模式只换过滤位，无需重建整条链路。
 	m.mu.Lock()
 	m.config.LogLevel = level
 	if m.channelMode.Load() {
@@ -460,6 +469,7 @@ func initializeChannelLoggerLocked(cfg LogConfig) (*ChannelLoggerManager, error)
 // 清空是「Shutdown 之后可再 Initialize」的后半：只关不清会让写日志的分支继续持有
 // 一个已关闭的管理器，之后的调用全都落到已释放的 writer 上。
 func shutdownChannelLoggerLocked() error {
+	// 先 Swap(nil) 摘除引用：此后新日志读到 nil 走兜底，不会写进已关闭的管理器。
 	manager := globalChannelLogger.Swap(nil)
 	if manager == nil {
 		return nil

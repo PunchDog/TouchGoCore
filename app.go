@@ -129,13 +129,13 @@ func (app *App) loadConfig() error {
 		return fmt.Errorf("配置校验失败: %w", err)
 	}
 
-	//读取INI
+	// 读 INI 覆盖框架级运行参数（debug/fps/version 等）
 	if p, err := ini.Load(config.GetDefaultFile()); err == nil {
 		util.DEBUG = p.GetString("GLOBAL", "debug", "false") == "true"
 		util.Fps, _ = strconv.Atoi(p.GetString("GLOBAL", "fps", "120"))
 		util.Version = p.GetString(app.ServerName, "Version", "1.0")
 		util.GameGroup = p.GetString("GLOBAL", "GameGroup", "default")
-		//告诉具体代码加载
+		// 把整个 INI 交给业务方自取（业务侧按 util.CallLoadIni 注册回调）
 		util.DefaultCallFunc.Do(util.CallLoadIni, p)
 	}
 
@@ -186,9 +186,6 @@ func (app *App) initDatabase() error {
 		// 初始化虚拟时间模块
 		util.InitVirtualTime(redis.Get())
 	}
-	// } else {
-	// 	return fmt.Errorf("加载配置出错,没有redis配置")
-	// }
 
 	// MySQL（可选）
 	if app.Cfg.MySql != nil {

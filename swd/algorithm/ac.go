@@ -260,7 +260,6 @@ func (ac *AhoCorasick) MatchAllWithDistance(text string, maxDistance int) []core
 
 	if maxDistance <= 0 {
 		// 使用原始匹配方法
-		//// 预分配匹配结果切片，减少动态扩容
 		runes := []rune(text)
 		matches := make([]core.SensitiveWord, 0, len(runes)/10) // 预估每10个字符一个匹配
 		current := ac.root
@@ -307,9 +306,8 @@ func (ac *AhoCorasick) MatchAllWithDistance(text string, maxDistance int) []core
 	var distanceCount int
 	var char rune
 
-	// 遍历文本
 	for startPos := 0; startPos < n; startPos++ {
-		// 从当前位置开始，尝试匹配所有可能的敏感词
+		// 从当前位置开始，逐字符尝试匹配所有可能的敏感词
 		current = ac.root
 		distanceCount = 0
 

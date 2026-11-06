@@ -23,6 +23,7 @@ type modelPressure struct {
 
 // over 判断是否达到任一阈值（maxConcurrency/rpmLimit 任一 >0 才启用对应维度）
 func (mp *modelPressure) over(maxConcurrency, rpmLimit int) bool {
+	// 整段持锁，保证 inflight 计数与 window 窗口的读判断原子，避免并发调用相互穿插。
 	mp.mu.Lock()
 	defer mp.mu.Unlock()
 	mp.pruneLocked()
@@ -37,6 +38,7 @@ func (mp *modelPressure) over(maxConcurrency, rpmLimit int) bool {
 
 // acquire 记录一次调用开始（并发 +1、记入 RPM 窗口），返回释放函数
 func (mp *modelPressure) acquire() func() {
+	// 持锁递增并发在途计数并追加时间戳；返回的释放函数同样持锁递减。
 	mp.mu.Lock()
 	mp.inflight++
 	mp.window = append(mp.window, time.Now())
@@ -85,6 +87,7 @@ func (t *PressureTracker) Reset() {
 // item 取（或惰性创建）模型的压力计数器
 func (t *PressureTracker) item(provider, model string) *modelPressure {
 	k := pressureKey{provider, model}
+	// 双检查锁：先 RLock 命中即返回，未命中再升写锁创建，避免热路径每次都走写锁。
 	t.mu.RLock()
 	mp := t.items[k]
 	t.mu.RUnlock()

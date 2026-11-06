@@ -151,6 +151,7 @@ func (c *Client) Chat(ctx context.Context, req *ChatRequest) (*ChatResponse, err
 	}
 
 	var lastErr error
+	// 重试循环：attempt 从 0 递增，成功即返回；遇到不可重试错误或已达 maxRetry 时由下方 break 跳出。
 	for attempt := 0; ; attempt++ {
 		resp, err := c.doRequest(ctx, body)
 		if err == nil {

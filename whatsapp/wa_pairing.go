@@ -301,7 +301,7 @@ func (m *waManager) startPairing(phone string) (*QRSession, error) {
 	sess := waPairSessionFactory(dev, m.log.Sub("pairing"))
 	sessionCtx, cancel := context.WithTimeout(m.runCtx, waQRTTL)
 	// 必须先 QRChannel 再 Connect：库在已连接时返回 ErrQRAlreadyConnected
-	//（查自 WM/qrchan.go:221-228），顺序错了拿到的就不是二维码而是错误。
+	// （查自 WM/qrchan.go:221-228），顺序错了拿到的就不是二维码而是错误。
 	qrChan, err := sess.QRChannel(sessionCtx)
 	if err != nil {
 		cancel()
@@ -422,7 +422,7 @@ func (m *waManager) runPairing(s *QRSession, sess waPairSession, qrChan <-chan w
 // reloginPaired 等配对后的登录完成。
 //
 // 库在配对确认后会收到 stream error 515，并自己 Disconnect 再 connect
-//（connectionevents.go）。这段时间 socket 还在，再调 Connect 得到的是
+// （connectionevents.go）。这段时间 socket 还在，再调 Connect 得到的是
 // ErrAlreadyConnected，不是失败。若把这次错误当成终局，二维码和配对码都会被标成失败，
 // 随后的 Disconnect 还会拆掉 515 正在进行的重连，手机就停在「正在登录」。
 // 515 没来、socket 已经拆掉时，才由这里补 Connect，并在拆线窗口内重试。

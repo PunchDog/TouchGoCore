@@ -296,7 +296,7 @@ func newRootHandler(staticDir *string) gin.HandlerFunc {
 		if allow := allowedMethods(p); len(allow) > 0 {
 			c.Header("Allow", strings.Join(allow, ", "))
 			vars.Debug("HTTP 405 方法未注册: %s %s (允许: %v)", c.Request.Method, p, allow)
-			//如果 DefaultCallFunc 包含 CallGin，则调用 CallGin
+			// 业务方注册了 CallGin 就交给它处理，否则回标准 405 响应
 			if util.DefaultCallFunc.Do(util.CallGin, c) {
 				return
 			}

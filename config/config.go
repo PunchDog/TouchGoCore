@@ -18,26 +18,26 @@ type Cfg struct {
 	Postgre   *PostgreDBConfig         `json:"postgres"`
 	Mongo     *MongoDBConfig           `json:"mongo"`
 	Cache     *CacheConfig             `json:"cache"`      // 两级缓存（Redis+DB 回源）；nil=不启用
-	Ws        *WebsocketConfig         `json:"ws"`         //websocket启动模式:off不启动;:1234启动监听详细配置
+	Ws        *WebsocketConfig         `json:"ws"`         // websocket启动模式:off不启动;:1234启动监听详细配置
 	LuaConfig *LuaConfig               `json:"lua_config"` // Lua 详细配置,如果没有就不启动lua
-	LogLevel  string                   `json:"log_level"`  //日志等级，off为不开,其次为INFO,DEBUG,WARN,ERROR
-	MapPath   string                   `json:"map_path"`   //地图配置位置
-	Web       *WebConfig               `json:"web"`        //web配置
+	LogLevel  string                   `json:"log_level"`  // 日志等级，off为不开,其次为INFO,DEBUG,WARN,ERROR
+	MapPath   string                   `json:"map_path"`   // 地图配置位置
+	Web       *WebConfig               `json:"web"`        // web配置
 	Rpc       *RpcConfig               `json:"rpc"`        // gRPC 配置
-	Telegram  *TelegramConfig          `json:"telegram"`   //telegram配置
-	Whatsapp  *WhatsappConfig          `json:"whatsapp"`   //WhatsApp 通道（消息）配置，资金链路已删除
-	Zalo      *ZaloConfig              `json:"zalo"`       //Zalo 通道（zcago 协议直连，Postgres 会话库）配置
-	Tron      *TronConfig              `json:"tron"`       //TRON 链通道集合（当前只有 tron.usdt）
-	Bsc       *BscConfig               `json:"bsc"`        //BSC 链通道集合（当前只有 bsc.usdt）
-	Sol       *SolConfig               `json:"sol"`        //Solana 链通道集合（当前只有 sol.usdt）
-	Ton       *TonConfig               `json:"ton"`        //TON 链通道集合（当前只有 ton.native）
+	Telegram  *TelegramConfig          `json:"telegram"`   // telegram配置
+	Whatsapp  *WhatsappConfig          `json:"whatsapp"`   // WhatsApp 通道（消息）配置，资金链路已删除
+	Zalo      *ZaloConfig              `json:"zalo"`       // Zalo 通道（zcago 协议直连，Postgres 会话库）配置
+	Tron      *TronConfig              `json:"tron"`       // TRON 链通道集合（当前只有 tron.usdt）
+	Bsc       *BscConfig               `json:"bsc"`        // BSC 链通道集合（当前只有 bsc.usdt）
+	Sol       *SolConfig               `json:"sol"`        // Solana 链通道集合（当前只有 sol.usdt）
+	Ton       *TonConfig               `json:"ton"`        // TON 链通道集合（当前只有 ton.native）
 	Nft       *NftConfig               `json:"nft"`        // NFT 资产通道（查询持有/详情/铸造/转账/对账）配置
 	NftSDks   map[string]*NftSDKConfig `json:"nft_sdks"`   // NFT SDK 集中登记表，键是段名；nft.provider 用 {sdk, account} 引用这里的一段
 	Server    *ServerConfig            `json:"server"`     // 服务器全局配置
 	Metrics   *MetricsConfig           `json:"metrics"`    // Prometheus 监控配置
 	ModelAPI  *ModelAPIConfig          `json:"model_api"`  // 模型API接入配置（OpenAI 兼容接口）
-	//其他配置
-	Other interface{} `json:"other_data"` //其他配置,需要自行传入想要的数据模型
+	// Other 是业务方自留的配置段，形状由调用方自定
+	Other interface{} `json:"other_data"` // 其他配置,需要自行传入想要的数据模型
 }
 
 // DefaultMaxTimerGoroutines is the fallback async timer worker limit.
@@ -270,7 +270,7 @@ var (
 	_basePath      string
 	_confDir       string
 	_defaultFile   string
-	_defServerId   = flag.String("s", "default", "server flag") //默认服务器ID
+	_defServerId   = flag.String("s", "default", "server flag") // 默认服务器ID
 
 	// 功能配置注册系统
 	_confDirField  string   // INI 中 conf_dir 字段值（读写均持 _stateMu）

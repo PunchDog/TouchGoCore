@@ -10,13 +10,13 @@ import (
 // 链表
 type List struct {
 	mu           sync.RWMutex    // 读写锁，提高读操作并发性能
-	head         INode           //头节点
-	tail         INode           //尾节点
-	len          int             //长度
-	rangeDelList []INode         //删除列表
-	rangeCount   atomic.Int32    //正在遍历的goroutine计数（替代 dellock bool，线程安全）
-	nextID       atomic.Int64    //下一个节点ID（使用原子操作）
-	nodeMap      map[int64]INode //节点ID映射，支持O(1)查询；indexed=false 时始终为 nil
+	head         INode           // 头节点
+	tail         INode           // 尾节点
+	len          int             // 长度
+	rangeDelList []INode         // 删除列表
+	rangeCount   atomic.Int32    // 正在遍历的goroutine计数（替代 dellock bool，线程安全）
+	nextID       atomic.Int64    // 下一个节点ID（使用原子操作）
+	nodeMap      map[int64]INode // 节点ID映射，支持O(1)查询；indexed=false 时始终为 nil
 	// indexed 决定是否维护 ID 索引。取号（CAS + 时钟）与每次 Add/Remove 的
 	// map 写删只在需要按 ID 查询时才有意义，时间轮这类只走 Range/Remove 的
 	// 热路径纯属白付。构造后不可变，因此读取无需加锁。
@@ -130,7 +130,7 @@ func (l *List) Add(node INode) (bret bool) {
 	// 节点重新入链：撤销遍历期间挂起的删除请求
 	obj.delPending.Store(false)
 
-	//添加新的链接
+	// 接入链表尾部：空表时同时设为头尾，否则挂到原尾节点之后
 	if l.head == nil {
 		l.head = node
 		l.tail = node

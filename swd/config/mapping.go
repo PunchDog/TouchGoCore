@@ -70,6 +70,7 @@ func (c *MappingConfig) UseTables(tables *mappingdata.Tables) {
 	}
 }
 
+// cloneRuneMap 深拷贝 rune→rune 映射，使内部状态与外部传入的表互不共享底层 map。
 func cloneRuneMap(src map[rune]rune) map[rune]rune {
 	dst := make(map[rune]rune, len(src))
 	for k, v := range src {
@@ -78,6 +79,7 @@ func cloneRuneMap(src map[rune]rune) map[rune]rune {
 	return dst
 }
 
+// cloneRuneSliceMap 深拷贝 rune→[]rune 映射（含切片元素），避免外部修改影响内部映射。
 func cloneRuneSliceMap(src map[rune][]rune) map[rune][]rune {
 	dst := make(map[rune][]rune, len(src))
 	for k, v := range src {
@@ -187,6 +189,7 @@ func GetGlobalMapping() *MappingConfig {
 
 	globalMu.Lock()
 	defer globalMu.Unlock()
+	// 写锁下二次检查：并发首次访问时，避免多个 goroutine 重复初始化默认配置。
 	if globalMapping == nil {
 		globalMapping = NewDefaultMappingConfig()
 	}

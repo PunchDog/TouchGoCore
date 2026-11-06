@@ -466,7 +466,7 @@ func MillisecondToMidnight(ms int64) time.Time {
 
 // StringToUnixTime 字符串转时间戳时间格式一定是2006-01-02 15:04:05
 func StringToUnixTime(value string) (int64, error) {
-	//时间格式是2006-01-02 15:04:05或者2006/01/02 15:04:05
+	// 接受的格式：2006-01-02 15:04:05 或 2006/01/02 15:04:05（分隔符可为 - 或 /）
 	re := regexp.MustCompile(`^(\d{4})[-/](\d{2})[-/](\d{2}) (\d{2}):(\d{2}):(\d{2})$`)
 	matches := re.FindStringSubmatch(value)
 	if matches == nil || len(matches) != 7 {

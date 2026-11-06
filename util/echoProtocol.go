@@ -140,7 +140,7 @@ func PasreFSMessage(buff interface{}) proto.Message {
 		return nil
 	}
 
-	//通過pb.Cmd找到对应的消息处理函数
+	// 通过 (protocol1, protocol2) 组合键查已注册的消息类型
 	if pb.GetHead() == nil {
 		vars.Error("PasreFSMessage missing head")
 		return nil

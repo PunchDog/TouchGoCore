@@ -8,7 +8,7 @@ import (
 
 // 以下方法是 WhatsappSessionsConfig 的「缺省值」口径：纯读取、不写日志。
 // 所有方法都对 nil 接收者安全——整机没配 whatsapp.sessions 段时，消息侧仍要能拿到可用缺省
-//（此时 DSN 为空、消息侧本来就不启动，但 Effective* 不能因此 panic）。
+// （此时 DSN 为空、消息侧本来就不启动，但 Effective* 不能因此 panic）。
 
 const (
 	waDefaultConnectTimeout = 15 * time.Second

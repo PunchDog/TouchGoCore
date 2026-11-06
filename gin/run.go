@@ -137,7 +137,7 @@ func RegisterRouter(class IRouterInterface) {
 	}
 
 	for _, mname := range mnames {
-		//这个是类型，不进行router注册
+		// RouterType 是类型方法不是 handler，不注册路由
 		// + 同时跳过 RouterPath、RouterTimeout（与 RouterType 一样，是类型方法而非 handler）
 		if mname == "RouterType" || mname == "RouterPath" || mname == "RouterTimeout" {
 			continue
@@ -154,7 +154,7 @@ func RegisterRouter(class IRouterInterface) {
 		}
 
 		var methods map[string]bool = nil
-		if s := class.RouterType(); s != nil && len(s) > 0 { //设置了只注册哪些监控
+		if s := class.RouterType(); s != nil && len(s) > 0 { // 设置了只注册哪些监控
 			methods = make(map[string]bool, len(s))
 			for _, m := range s {
 				methods[m] = true

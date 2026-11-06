@@ -137,17 +137,18 @@ func (n *Npc) SetId(id uint32) {
 	n.mu.Unlock()
 }
 
-// GetId 读取业务 NPC ID
+// GetId 经 n.mu 读取业务 ID，可在 Lua 与游戏逻辑线程间并发调用。
 func (n *Npc) GetId() uint32 {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	return n.ID
 }
 
-// SetName 设置NPC名称
+// SetName 经 n.mu 写入名称，与读取方并发安全。
 func (n *Npc) SetName(name string) {
 	if name == "" {
 		vars.Error("[NPC] 名字无效")
+		// 空名回退占位名，避免下游按空名判定。
 		name = "未知NPC"
 	}
 	n.mu.Lock()
@@ -155,14 +156,14 @@ func (n *Npc) SetName(name string) {
 	n.mu.Unlock()
 }
 
-// GetName 读取NPC名称
+// GetName 经 n.mu 读取名称，与写入方并发安全。
 func (n *Npc) GetName() string {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	return n.Name
 }
 
-// SetShape 设置NPC外观
+// SetShape 经 n.mu 写入外观资源 ID，并发安全。
 func (n *Npc) SetShape(shape string) {
 	n.mu.Lock()
 	n.Shape = shape
@@ -174,6 +175,7 @@ func (n *Npc) SetShape(shape string) {
 func (n *Npc) SetDirection(direction int8) {
 	if direction < 0 || direction > 7 {
 		vars.Error("[NPC] 朝向值无效: %d, 期望范围: 0-7", direction)
+		// 越界朝向回退到 0，不写入非法值。
 		direction = 0
 	}
 	n.mu.Lock()
@@ -212,6 +214,7 @@ func (n *Npc) SetMapId(mapId uint32) {
 
 	if previous != nil {
 		previous.mu.Lock()
+		// 在旧地图的 NPC 列表里摘掉自己：改挂他图时必须清掉旧引用，否则同一 NPC 在两处都留记录。
 		for i, item := range previous.npcs {
 			if item == n {
 				previous.npcs = append(previous.npcs[:i], previous.npcs[i+1:]...)
@@ -305,7 +308,7 @@ func (n *Npc) GetShop(shopId int) []*ShopItem {
 	return out
 }
 
-// HasShop 检查NPC是否有商店
+// HasShop 经 n.mu 判断是否有已挂载且非空的商店（Shop 非 nil 且 Length()>0）。
 func (n *Npc) HasShop() bool {
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -429,7 +432,7 @@ func (n *Npc) GetDefaultDialog() *DialogItem {
 	}
 
 	var defaultDialog *DialogItem
-	minId := int(^uint(0) >> 1) // 最大整数
+	minId := int(^uint(0) >> 1) // 初值取最大整数，保证第一条记录必更小，从而拿到最小 ID
 
 	n.Dialog.Range(func(id int, value *DialogItem) bool {
 		if id < minId {
@@ -463,7 +466,7 @@ func (n *Npc) GetDialogsByType(dialogType string) []*DialogItem {
 	return result
 }
 
-// HasDialog 检查是否有对话配置
+// HasDialog 经 n.mu 判断是否有已挂载且非空的对话（Dialog 非 nil 且 Length()>0）。
 func (n *Npc) HasDialog() bool {
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -494,9 +497,6 @@ func (n *Npc) Validate() []string {
 	if n.MapID <= 0 {
 		errors = append(errors, "NPC所属地图未设置")
 	}
-	// if len(n.MapPoint) == 0 {
-	// 	errors = append(errors, "自动移动NPC必须配置路径点")
-	// }
 
 	return errors
 }

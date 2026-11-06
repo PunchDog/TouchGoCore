@@ -32,7 +32,7 @@ type LoggerManager struct {
 
 // NewLoggerManager 创建新的日志管理器
 func NewLoggerManager(cfg LogConfig) (*LoggerManager, error) {
-	// 验证配置
+	// 配置非法直接失败：后续写入都依赖这份配置。
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid log config: %w", err)
 	}
@@ -53,13 +53,13 @@ func (lm *LoggerManager) init() error {
 	lm.mu.Lock()
 	defer lm.mu.Unlock()
 
-	// 检查日志级别
+	// off 不建任何链路：直接标记未启用并返回，避免打开文件句柄。
 	if strings.EqualFold(lm.config.LogLevel, LogLevelOff) {
 		lm.isEnabled = false
 		return nil
 	}
 
-	// 创建Zap核心
+	// 建核心并打开文件句柄；失败直接上抛，调用方负责关闭。
 	core, file, err := createZapCore(lm.config)
 	if err != nil {
 		return err
@@ -68,13 +68,13 @@ func (lm *LoggerManager) init() error {
 	lm.file = file
 	lm.zapLogger = zap.New(core, zap.AddCaller(), zap.AddCallerSkip(1))
 
-	// 转换日志级别
+	// 把配置字符串解成 slog.Level；非法值上抛而非静默默认。
 	var slogLevel slog.Level
 	if err := slogLevel.UnmarshalText([]byte(lm.config.LogLevel)); err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidLogLevel, err)
 	}
 
-	// 创建Slog处理器
+	// 用桥接 handler 把 slog 记录转给 zap 落盘。
 	handler := NewZapSlogHandler(lm.zapLogger, slogLevel)
 	lm.logger = slog.New(handler)
 	lm.isEnabled = true
@@ -84,6 +84,7 @@ func (lm *LoggerManager) init() error {
 
 // Close 关闭日志管理器
 func (lm *LoggerManager) Close() error {
+	// 整段持锁：Sync/Close 文件句柄与置空字段必须原子，避免与 SetLevel 并发。
 	lm.mu.Lock()
 	defer lm.mu.Unlock()
 
@@ -111,7 +112,7 @@ func (lm *LoggerManager) GetLogger() *slog.Logger {
 	defer lm.mu.RUnlock()
 
 	if !lm.isEnabled || lm.logger == nil {
-		// 返回一个简单的控制台日志器作为fallback
+		// 未启用或 logger 为空时退回 slog.Default()：保证调用方总有可用 logger。
 		return slog.Default()
 	}
 
@@ -120,6 +121,7 @@ func (lm *LoggerManager) GetLogger() *slog.Logger {
 
 // SetLevel 动态设置日志级别
 func (lm *LoggerManager) SetLevel(level string) error {
+	// off 是纯降级：关掉落盘、标记未启用，不必重建链路。
 	if strings.EqualFold(level, LogLevelOff) {
 		lm.mu.Lock()
 		lm.config.LogLevel = level
@@ -148,7 +150,7 @@ func (lm *LoggerManager) SetLevel(level string) error {
 		_ = oldFile.Close()
 	}
 
-	// 重新初始化日志器
+	// 锁外关旧句柄后重建整条链路。
 	return lm.init()
 }
 
@@ -189,7 +191,7 @@ func (h *ZapSlogHandler) Enabled(_ context.Context, level slog.Level) bool {
 	return level >= h.level.Level()
 }
 
-// 字段池，减少内存分配
+// 字段池：每条 Handle 借一片 zap.Field 切片，用完归零归还，减少分配。
 var fieldPool = sync.Pool{
 	New: func() interface{} {
 		return make([]zap.Field, 0, 8) // 预分配合理容量
@@ -198,7 +200,7 @@ var fieldPool = sync.Pool{
 
 // Handle 处理日志记录
 func (h *ZapSlogHandler) Handle(_ context.Context, r slog.Record) error {
-	// 从对象池获取字段切片
+	// 从对象池借字段切片，用完归零归还，避免每条日志分配。
 	fields := fieldPool.Get().([]zap.Field)
 	defer func() {
 		// 重置并放回对象池
@@ -206,19 +208,19 @@ func (h *ZapSlogHandler) Handle(_ context.Context, r slog.Record) error {
 		fieldPool.Put(fields)
 	}()
 
-	// 预分配足够容量
+	// 预分配 pid + 记录属性所需容量，减少 append 扩容。
 	if cap(fields) < r.NumAttrs()+1 {
 		fields = make([]zap.Field, 0, r.NumAttrs()+1)
 	}
 
-	fields = append(fields, zap.Int("PID", h.pid)) // 使用缓存
+	fields = append(fields, zap.Int("PID", h.pid)) // 用启动期缓存的 pid，避免每条日志查 os.Getpid()
 
 	r.Attrs(func(attr slog.Attr) bool {
 		fields = append(fields, zap.Any(attr.Key, attr.Value.Any()))
 		return true
 	})
 
-	// 使用更高效的switch语句
+	// 按级别分派到对应 zap 方法。
 	switch r.Level {
 	case slog.LevelDebug:
 		h.zapLogger.Debug(r.Message, fields...)
@@ -289,6 +291,7 @@ var (
 
 // getWorkdir 获取缓存的工目录
 func getWorkdir() (string, error) {
+	// sync.Once 保证工作目录只解析一次，进程内共用同一结果。
 	workdirOnce.Do(func() {
 		cachedWorkdir, workdirInitError = os.Getwd()
 		if cachedWorkdir != "" {
@@ -300,6 +303,7 @@ func getWorkdir() (string, error) {
 
 // callerEncoder 优化后的调用位置编码器
 func callerEncoder(caller zapcore.EntryCaller, enc zapcore.PrimitiveArrayEncoder) {
+	// 调用点未定义（如测试/合成记录）用占位串，避免空字段引发解析异常。
 	if !caller.Defined {
 		enc.AppendString("unknown:0")
 		return
@@ -310,21 +314,21 @@ func callerEncoder(caller zapcore.EntryCaller, enc zapcore.PrimitiveArrayEncoder
 
 // createZapCore 创建Zap核心配置
 func createZapCore(cfg LogConfig) (zapcore.Core, *os.File, error) {
-	// 创建日志目录
+	// 输出目录不存在先建，否则下面 OpenFile 会失败。
 	if err := os.MkdirAll(cfg.LogPath, 0755); err != nil {
 		return nil, nil, fmt.Errorf("%w: %v", ErrDirectoryCreateFailed, err)
 	}
 
-	// 配置文件路径
+	// 拼接最终文件路径：目录 + 文件名 + .log。
 	filePath := filepath.Join(cfg.LogPath, cfg.LogName+".log")
 
-	// 打开日志文件
+	// 以追加模式打开，保留历史内容而非覆盖。
 	file, err := os.OpenFile(filePath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {
 		return nil, nil, fmt.Errorf("%w: %v", ErrFileCreateFailed, err)
 	}
 
-	// 配置编码器
+	// 组装 zap JSON 编码器，键名与全局链路对齐。
 	encoderCfg := zapcore.EncoderConfig{
 		TimeKey:        "time",
 		LevelKey:       "level",
@@ -339,7 +343,7 @@ func createZapCore(cfg LogConfig) (zapcore.Core, *os.File, error) {
 		EncodeDuration: zapcore.SecondsDurationEncoder,
 	}
 
-	// 创建输出器
+	// 按配置串起标准输出与文件写入器。
 	var writers []zapcore.WriteSyncer
 	if cfg.Stdout {
 		writers = append(writers, zapcore.AddSync(os.Stdout))

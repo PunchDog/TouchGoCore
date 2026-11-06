@@ -82,6 +82,7 @@ type AsyncLoggerChannel struct {
 // 之后异步消费——那样会读到脏数据。仓库内置的 RotatingFileWriter 与
 // AsyncWriteSyncer 都在 Write 内同步落盘或先拷贝，满足该契约。
 func NewAsyncLoggerChannel(writer io.Writer, config AsyncChannelConfig) *AsyncLoggerChannel {
+	// 调用方通常只填部分字段，非正值视作未配置，回落到默认配置避免零缓冲/零批量的退化行为。
 	if config.BufferSize <= 0 {
 		config.BufferSize = DefaultAsyncChannelConfig().BufferSize
 	}
@@ -106,7 +107,7 @@ func NewAsyncLoggerChannel(writer io.Writer, config AsyncChannelConfig) *AsyncLo
 		flushSig: make(chan chan struct{}, 1), // 传递回调 channel（nil 表示无需回执）
 	}
 
-	// 初始化批处理对象池
+	// 对象池回收整批 logEntry 切片，规避每条日志单独分配（清空口径见 batchEntries.reset）。
 	ch.batchPool = sync.Pool{
 		New: func() interface{} {
 			return &batchEntries{
@@ -115,7 +116,7 @@ func NewAsyncLoggerChannel(writer io.Writer, config AsyncChannelConfig) *AsyncLo
 		},
 	}
 
-	// 启动消费者goroutine
+	// 单消费者模型：所有落盘集中在 run 这一协程，多条 Enqueue 协程只投不写，避免多写者抢占同一 writer。
 	ch.wg.Add(1)
 	go ch.run()
 
@@ -140,10 +141,12 @@ func (a *AsyncLoggerChannel) Enqueue(level slog.Level, msg string, attrs []slog.
 // enqueue 投递一条已备好的条目。调用点解析与投递分开，是因为走 slog 入口的条目
 // 带的是 Record.PC（见 callerFromPC），不能扫栈。
 func (a *AsyncLoggerChannel) enqueue(entry logEntry) bool {
+	// 已关闭：不再接收新条目，避免投进正在排空的消费者。
 	if a.closed.Load() {
 		return false
 	}
 
+	// 入队计数置于投递前：即便随后被丢弃也计入 queued，统计上保证 queued ≥ written + dropped。
 	a.queued.Add(1)
 
 	if a.config.DropOnFull {
@@ -158,7 +161,7 @@ func (a *AsyncLoggerChannel) enqueue(entry logEntry) bool {
 	}
 
 	// 阻塞模式：等待写入；关闭进行中立即放弃，避免消费者退出后卡满超时
-	timer := time.NewTimer(5 * time.Second)
+	timer := time.NewTimer(5 * time.Second) // 5s 上限：关闭窗口或消费者卡死时，投递方最多等 5s 后自我放弃，避免业务协程被日志拖死
 	defer timer.Stop()
 	select {
 	case a.input <- entry:
@@ -317,7 +320,7 @@ func (a *AsyncLoggerChannel) IsHealthy() bool {
 		return false
 	}
 
-	// 检查队列是否过载（超过80%容量）
+	// 负载超过 80% 视为不健康：队列接近打满，新日志随时可能开始丢弃。
 	queueLen := len(a.input)
 	capacity := a.config.BufferSize
 	loadFactor := float64(queueLen) / float64(capacity)
@@ -401,13 +404,13 @@ func (a *AsyncLoggerChannel) run() {
 			// 更新峰值
 			a.recordQueuePeak(len(a.input))
 
-			// 检查是否需要立即刷新
+			// 达到阈值立即刷：单批体积受控，避免一次 Write 拖住整个消费循环。
 			if batch.bytes >= a.config.FlushThreshold {
 				flush()
 			}
 
 		case <-ticker.C:
-			// 定时刷新
+			// ticker 与显式 flush 可能几乎同时触发，用 lastWriteTime 去重避免无谓重刷。
 			if time.Since(lastWriteTime) >= a.config.FlushInterval {
 				flush()
 			}
@@ -448,7 +451,9 @@ func (a *AsyncLoggerChannel) writeBatch(batch *batchEntries) {
 		return
 	}
 
+	// 复用消费者私有缓冲：整批格式化进同一块内存，只做一次 Write。
 	buf := a.scratch[:0]
+	// 容量不足才扩容并多留 1/4 余量，避免逐条 append 反复分配。
 	if est := batch.bytes; cap(buf) < est {
 		buf = make([]byte, 0, est+est/4)
 	}
@@ -458,9 +463,11 @@ func (a *AsyncLoggerChannel) writeBatch(batch *batchEntries) {
 
 	_, err := a.writer.Write(buf)
 	a.scratch = buf
+	// 写入失败只记 stderr 不向上抛：消费循环不能因单条写失败而中断，否则后续整批日志全丢。
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "async log write error: %v\n", err)
 		return
 	}
+	// 仅落盘成功才计入 written；失败分支不计数，故 written 单调且不重复。
 	a.written.Add(int64(len(batch.entries)))
 }

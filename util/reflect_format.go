@@ -5,9 +5,9 @@ import (
 	"reflect"
 )
 
-// 获取类名
+// GetClassName 取 p 的类型名与全部导出方法名。
 func GetClassName(p interface{}) (string, []string) {
-	//神奇的获取类名
+	// 反射取类型：TypeOf 拿静态类型，Indirect 剥掉指针层级后取 Name
 	tpy := reflect.TypeOf(p)
 	rcvr := reflect.ValueOf(p)
 	sname := reflect.Indirect(rcvr).Type().Name()

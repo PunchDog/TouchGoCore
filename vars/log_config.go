@@ -23,42 +23,40 @@ const (
 	LogLevelOff   = "off"
 )
 
-// LogConfig 日志配置结构
-// 使用结构体封装配置，提高可维护性
+// LogConfig 日志配置；级别与异步参数均可在运行期经 SetLevel 调整。
 type LogConfig struct {
-	LogPath         string            // 日志文件路径
-	LogName         string            // 日志文件名（不含扩展名）
-	LogLevel        string            // 日志级别
-	MaxSize         int64             // 日志文件最大大小（MB）
-	MaxAge          int               // 日志文件最大保留天数
-	MaxBackups      int               // 最大备份数量（新增）
-	Compress        bool              // 是否压缩旧日志
-	Stdout          bool              // 是否输出到标准输出
-	Async           bool              // 是否异步日志（新增）
-	AsyncBufferSize int               // 异步缓冲区大小（新增）
-	CallerSkip      int               // 调用栈跳过层数（新增）
-	Fields          map[string]string // 全局字段（新增）
+	LogPath         string            // 落盘目录；轮转与过期清理都基于该目录扫描
+	LogName         string            // 日志文件主名（不含扩展名与轮转时间戳）
+	LogLevel        string            // 文件写入级别；off 表示完全静默
+	MaxSize         int64             // 单文件轮转阈值（MB）
+	MaxAge          int               // 备份保留天数，超龄文件被清理
+	MaxBackups      int               // 同时保留的备份数上限
+	Compress        bool              // 轮转后的备份是否 gzip 压缩
+	Stdout          bool              // 是否同时实时打印到标准输出
+	Async           bool              // 是否启用异步通道落盘
+	AsyncBufferSize int               // 异步通道缓冲容量，决定峰值内存与积压上限
+	CallerSkip      int               // 调用栈上跳层数，定位业务代码而非框架帧
+	Fields          map[string]string // 每条日志都附带的全局字段
 }
 
 // Validate 验证配置有效性
 func (cfg *LogConfig) Validate() error {
 	if cfg.MaxSize <= 0 {
-		cfg.MaxSize = 100 // 设置默认值
+		cfg.MaxSize = 100
 	}
 	if cfg.MaxAge < 0 {
-		cfg.MaxAge = 30 // 设置默认值
+		cfg.MaxAge = 30
 	}
 	if cfg.MaxBackups <= 0 {
-		cfg.MaxBackups = 10 // 设置默认值
+		cfg.MaxBackups = 10
 	}
 	if cfg.AsyncBufferSize <= 0 {
-		cfg.AsyncBufferSize = 10000 // 设置默认值
+		cfg.AsyncBufferSize = 10000
 	}
 	if cfg.CallerSkip < 0 {
-		cfg.CallerSkip = 1 // 设置默认值
+		cfg.CallerSkip = 1
 	}
 
-	// 验证日志级别
 	validLevels := map[string]bool{
 		LogLevelDebug: true,
 		LogLevelInfo:  true,
@@ -71,7 +69,7 @@ func (cfg *LogConfig) Validate() error {
 	if !validLevels[level] {
 		return fmt.Errorf("invalid log level: %s", cfg.LogLevel)
 	}
-	cfg.LogLevel = level
+	cfg.LogLevel = level // 归一为小写：后续比较统一走小写，避免 "INFO" 与 "info" 不一致
 
 	return nil
 }

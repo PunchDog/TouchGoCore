@@ -63,7 +63,7 @@ func (wp *WordPersistence) SaveToJSON(path string) error {
 	data := WordData{
 		Words:     words,
 		Version:    "1.0",
-		Timestamp:  0, // 可以添加时间戳
+		Timestamp:  0,
 	}
 
 	// 序列化为JSON

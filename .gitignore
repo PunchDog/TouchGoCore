@@ -74,3 +74,4 @@ zalo/probe/probe.env
 
 # Docker-OSX 本地运行参数（可能含代理地址）；模板 docker-osx/.env.example 入库。
 docker-osx/.env
+deliverables/gstack/

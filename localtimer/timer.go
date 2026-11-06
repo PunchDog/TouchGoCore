@@ -270,7 +270,7 @@ type Timer struct {
 
 	// mu 定时器私有锁：串行化 AddTimer 的「清理旧调度→推进代次→恢复活跃→入队」
 	// 与 handleTimerAdd 的「校验→入链」。单靠 gen 唯一无法保证只有一份 task 入链
-	//（校验通过后、入链前状态可被并发 AddTimer 改写），必须用锁把两段临界区互斥。
+	// （校验通过后、入链前状态可被并发 AddTimer 改写），必须用锁把两段临界区互斥。
 	// 加锁顺序恒为 mu → wheelLock，全库一致，不存在逆序死锁。
 	mu sync.Mutex
 

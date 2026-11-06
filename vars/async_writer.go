@@ -33,6 +33,7 @@ func NewAsyncWriteSyncer(writer io.Writer, bufferSize int) *AsyncWriteSyncer {
 		buffer: make([]byte, 0, 1024),
 	}
 
+	// 异步循环在独立协程跑，Write 与 Sync 只投不写，避免阻塞业务调用方。
 	a.wg.Add(1)
 	go a.run()
 
@@ -45,7 +46,7 @@ func (a *AsyncWriteSyncer) Write(p []byte) (n int, err error) {
 		return 0, fmt.Errorf("writer is closed")
 	}
 
-	// 复制数据以避免竞态条件
+	// 必须拷贝 p：Write 不保证同步消费，原地复用会在另一协程写盘时读到半截数据。
 	buf := make([]byte, len(p))
 	copy(buf, p)
 
@@ -53,6 +54,7 @@ func (a *AsyncWriteSyncer) Write(p []byte) (n int, err error) {
 	case a.input <- buf:
 		return len(p), nil
 	default:
+		// 缓冲满：直接丢弃并记一笔，不阻塞调用方。
 		a.dropped.Add(1)
 		return len(p), nil
 	}
@@ -90,10 +92,11 @@ func (a *AsyncWriteSyncer) Close() error {
 		return nil
 	}
 
+	// 先发停止信号再等协程退出：run 在 stop 触发后自行排空并 return。
 	close(a.stop)
 	a.wg.Wait()
 
-	// 处理剩余数据
+	// 关闭前兜底：把内存里残留的缓冲落盘，否则最后一段日志丢失。
 	if len(a.buffer) > 0 {
 		a.writer.Write(a.buffer)
 	}
@@ -115,6 +118,7 @@ func (a *AsyncWriteSyncer) run() {
 	for {
 		select {
 		case data := <-a.input:
+			// 把已提交的写入并入缓冲，攒够再一次性刷盘。
 			a.buffer = append(a.buffer, data...)
 			// 缓冲区满时立即刷新
 			if len(a.buffer) >= 4096 {
@@ -147,6 +151,7 @@ func (a *AsyncWriteSyncer) run() {
 
 // drainInput 非阻塞地把 input 中已提交的写入搬到缓冲区
 func (a *AsyncWriteSyncer) drainInput() {
+	// 循环取空 input：每次取到 default 即说明已无在途写入，立即退出。
 	for {
 		select {
 		case data := <-a.input:
@@ -159,6 +164,7 @@ func (a *AsyncWriteSyncer) drainInput() {
 
 // flushBuffer 刷新缓冲区
 func (a *AsyncWriteSyncer) flushBuffer() {
+	// 空缓冲直接返回，避免无谓的 Write 系统调用。
 	if len(a.buffer) == 0 {
 		return
 	}

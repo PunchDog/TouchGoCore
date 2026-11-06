@@ -91,9 +91,7 @@ func (sl *SkipList) insert(key int64, val *RankInfo) {
 			if forward == nil {
 				break
 			}
-			// 优化比较逻辑，减少函数调用
 			forwardKey := forward.Key
-			// 实现降序排序：值大的排在前面
 			if forwardKey > key {
 				rank[i] += x.Level[i].Span
 				x = forward
@@ -131,7 +129,6 @@ func (sl *SkipList) insert(key int64, val *RankInfo) {
 		x.Level[i].Forward = forward
 		update[i].Level[i].Forward = x
 
-		// 优化跨度计算，减少算术运算
 		origSpan := update[i].Level[i].Span
 		newRank := rank[0] - rank[i] + 1
 		x.Level[i].Span = origSpan - newRank + 1
@@ -154,7 +151,6 @@ func (sl *SkipList) remove(key int64, val *RankInfo) bool {
 				break
 			}
 			forwardKey := forward.Key
-			// 实现降序排序：值大的排在前面
 			if forwardKey > key {
 				x = forward
 				continue
@@ -175,10 +171,8 @@ func (sl *SkipList) remove(key int64, val *RankInfo) bool {
 	}
 	x = x.Level[0].Forward
 	if x != nil && x.Key == key {
-		// 优化比较逻辑，减少函数调用
 		xVal := x.Value
 		if xVal.Timestamp == val.Timestamp && xVal.ID == val.ID {
-			// delete node
 			for i := int32(0); i < sl.Level; i++ {
 				if update[i].Level[i].Forward == x {
 					update[i].Level[i].Span += x.Level[i].Span - 1
@@ -207,7 +201,6 @@ func (sl *SkipList) search(key int64, val *RankInfo) bool {
 				break
 			}
 			forwardKey := forward.Key
-			// 实现降序排序：值大的排在前面
 			if forwardKey > key {
 				x = forward
 				continue
@@ -241,7 +234,6 @@ func (sl *SkipList) rank(key int64, val *RankInfo) int32 {
 				break
 			}
 			forwardKey := forward.Key
-			// 实现降序排序：值大的排在前面
 			if forwardKey > key {
 				rank += x.Level[i].Span
 				x = forward

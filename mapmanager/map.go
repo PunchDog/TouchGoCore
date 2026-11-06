@@ -15,7 +15,7 @@ import (
 	"touchgocore/vars"
 )
 
-// 地图数据 id/map
+// _maplist 是全局已加载地图表，按 MapId 索引（mapmanager 包级单例）。
 var _maplist *syncmap.Map[uint32, *Map]
 
 func init() {
@@ -92,6 +92,7 @@ func (this *Map) Load(path string) error {
 		return fmt.Errorf("解析配置出错 %s: %w", path, err)
 	}
 	this.path = path
+	// 重复 MapId：保留先加载的那份（existing 即胜出方），新加载直接放弃。
 	if existing, ok := _maplist.LoadOrStore(this.MapId, this); ok {
 		return fmt.Errorf("加载地图配置出错:%s:已经有相同ID的地图了(mapId=%d)，当前保留 %s", path, this.MapId, existing.path)
 	}
@@ -130,6 +131,7 @@ func RunMap(ctx context.Context) error {
 	pathlist := util.GetPathFile(cfg.MapPath, nil)
 
 	var errs []error
+	// 逐个文件装载地图；单文件失败只记错误，不中断其余文件加载。
 	for _, filepath := range pathlist {
 		maps := &Map{}
 		if err := maps.Load(filepath); err != nil {

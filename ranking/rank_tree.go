@@ -35,7 +35,7 @@ func (info1 *RankInfo) Compare(info2 *RankInfo) int {
 // RankTree 基于跳跃表的排名树
 type RankTree struct {
 	Sl *SkipList
-	//EntryMapping map[int64]*RankInfo
+	// EntryMapping 是单号到排名信息的映射
 	EntryMapping *syncmap.Map[int64, *RankInfo]
 	// 读写锁，保护跳跃表的并发访问
 	rwMutex sync.RWMutex

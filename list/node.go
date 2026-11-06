@@ -37,12 +37,12 @@ type Node struct {
 	// id 用原子量：GetId 会在 Range 回调里被无锁调用（Range 的锁外快照遍历），
 	// 而 Clear/摘链会在别的 goroutine 里把它归零。裸 int64 会让「回调读 id」
 	// 与「并发 Clear 写 id」成为数据竞争（-race 实测：list.go 写 vs node.go GetId）。
-	id       atomic.Int64         //节点id
-	pre      INode                //上一个节点
-	next     INode                //下一个节点
-	data     interface{}          //数据
-	list     atomic.Pointer[List] //所属链表
-	nodeType INode                //节点类型
+	id       atomic.Int64         // 节点id
+	pre      INode                // 上一个节点
+	next     INode                // 下一个节点
+	data     interface{}          // 数据
+	list     atomic.Pointer[List] // 所属链表
+	nodeType INode                // 节点类型
 
 	// 内嵌节点保护：只有由节点池分配（acquireNode）的节点才允许归还节点池。
 	// 否则像 `type X struct{ Node }` 这类内嵌节点会被当成独立节点复用，

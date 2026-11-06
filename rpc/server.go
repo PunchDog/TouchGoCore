@@ -806,7 +806,7 @@ func StartGrpcServer(name string, port int, useTLS bool) error {
 	message.RegisterGrpcServer(service.service, service)
 
 	go func(s *RpcServer) {
-		//启动监听
+		// 开始 accept 循环；Serve 返回即监听结束（正常关闭或出错）
 		if err := s.service.Serve(lis); err != nil {
 			vars.Error("gRPC服务启动失败[%s]: %v", s.name, err)
 			service_.Delete(s.name)

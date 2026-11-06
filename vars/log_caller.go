@@ -101,7 +101,8 @@ func computeVarsFuncPrefix() string {
 	if fn == nil {
 		return ""
 	}
-	name := fn.Name() // 形如 touchgocore/vars.computeVarsFuncPrefix
+	// 形如 touchgocore/vars.computeVarsFuncPrefix：先截到末个 '/' 之后，再截到首个 '.' 即得 "touchgocore/vars." 前缀。
+	name := fn.Name()
 	tail := name[strings.LastIndexByte(name, '/')+1:]
 	if i := strings.IndexByte(tail, '.'); i >= 0 {
 		return name[:len(name)-len(tail)+i+1]

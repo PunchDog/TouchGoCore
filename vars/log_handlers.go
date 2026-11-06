@@ -24,7 +24,7 @@ func OptimizeCallerEncoder(caller zapcore.EntryCaller, enc zapcore.PrimitiveArra
 		return
 	}
 
-	// 使用TrimmedPath获取短路径，避免完整路径
+	// 用 TrimmedPath 取短路径：日志里只留文件名，避免完整绝对路径刷屏。
 	enc.AppendString(fmt.Sprintf("%s:%d", caller.TrimmedPath(), caller.Line))
 }
 
@@ -34,7 +34,7 @@ func OptimizeCallerEncoder(caller zapcore.EntryCaller, enc zapcore.PrimitiveArra
 // 返回值里的 asyncWriter 仅在异步模式下非空，调用方必须持有它并在 zap 之后关闭，
 // 否则缓冲区里未落盘的日志会随进程退出丢失。
 func createOptimizedZapCore(cfg LogConfig) (zapcore.Core, io.WriteCloser, *AsyncWriteSyncer, error) {
-	// 创建旋转日志写入器
+	// 新建旋转写入器承接文件落盘；失败直接上抛，调用方负责关闭已建部分。
 	rotatingWriter, err := NewRotatingFileWriter(
 		cfg.LogPath,
 		cfg.LogName,
@@ -47,7 +47,7 @@ func createOptimizedZapCore(cfg LogConfig) (zapcore.Core, io.WriteCloser, *Async
 		return nil, nil, nil, err
 	}
 
-	// 配置编码器
+	// 组装 zap JSON 编码器：时间/级别/调用点等字段键名在此定下，与历史输出对齐。
 	encoderCfg := zapcore.EncoderConfig{
 		TimeKey:        "time",
 		LevelKey:       "level",
@@ -63,10 +63,10 @@ func createOptimizedZapCore(cfg LogConfig) (zapcore.Core, io.WriteCloser, *Async
 		EncodeDuration: zapcore.MillisDurationEncoder,
 	}
 
-	// 创建写入器链
+	// 按配置把文件/异步/标准输出串成写入器链。
 	var writers []zapcore.WriteSyncer
 
-	// 添加异步或同步文件写入器
+	// 异步模式插一层 AsyncWriteSyncer 缓冲写，否则直接写旋转文件。
 	var asyncWriter *AsyncWriteSyncer
 	if cfg.Async {
 		asyncWriter = NewAsyncWriteSyncer(rotatingWriter, cfg.AsyncBufferSize)
@@ -75,12 +75,12 @@ func createOptimizedZapCore(cfg LogConfig) (zapcore.Core, io.WriteCloser, *Async
 		writers = append(writers, zapcore.AddSync(rotatingWriter))
 	}
 
-	// 添加标准输出
+	// Stdout 开启时把日志同时打到终端。
 	if cfg.Stdout {
 		writers = append(writers, zapcore.AddSync(os.Stdout))
 	}
 
-	// 组合写入器
+	// 单写入器直接用，多个则用 MultiWriteSyncer 扇出。
 	var writeSyncer zapcore.WriteSyncer
 	if len(writers) == 1 {
 		writeSyncer = writers[0]
@@ -88,7 +88,7 @@ func createOptimizedZapCore(cfg LogConfig) (zapcore.Core, io.WriteCloser, *Async
 		writeSyncer = zapcore.NewMultiWriteSyncer(writers...)
 	}
 
-	// 设置日志级别
+	// 解析级别：未知级别在此直接报错而非退化成 Debug。
 	zapLevel, err := zapLevelFor(cfg.LogLevel)
 	if err != nil {
 		if asyncWriter != nil {
@@ -98,7 +98,7 @@ func createOptimizedZapCore(cfg LogConfig) (zapcore.Core, io.WriteCloser, *Async
 		return nil, nil, nil, err
 	}
 
-	// 创建核心
+	// 用 JSON 编码器 + 写入器链 + 原子级别组装核心。
 	core := zapcore.NewCore(
 		zapcore.NewJSONEncoder(encoderCfg),
 		writeSyncer,
@@ -201,7 +201,7 @@ func (h *OptimizedZapSlogHandler) Enabled(_ context.Context, level slog.Level) b
 
 // Handle 处理日志记录
 func (h *OptimizedZapSlogHandler) Handle(_ context.Context, r slog.Record) error {
-	// 从对象池获取字段切片
+	// 从对象池借字段切片：每条日志用完归零归还，避免反复分配。
 	fields := h.fieldsPool.Get().([]zap.Field)
 	defer func() {
 		fields = fields[:0]
@@ -210,22 +210,22 @@ func (h *OptimizedZapSlogHandler) Handle(_ context.Context, r slog.Record) error
 
 	globalAttrs := h.globalAttrList()
 
-	// 预分配足够容量
+	// 预分配时间/pid/全局属性/记录属性所需容量，减少后续 append 扩容。
 	attrCount := r.NumAttrs() + len(globalAttrs) + 2 // +2 for time and pid
 	if cap(fields) < attrCount {
 		fields = make([]zap.Field, 0, attrCount)
 	}
 
-	// 添加时间戳
+	// 显式带时间戳与 pid：命令行及文件解析器都依赖这两个固定键。
 	fields = append(fields, zap.Time("time", r.Time))
 	fields = append(fields, zap.Int("pid", h.pid))
 
-	// 添加全局属性
+	// 铺入 copy-on-write 的全局属性。
 	for _, attr := range globalAttrs {
 		fields = append(fields, zap.Any(attr.Key, attr.Value.Any()))
 	}
 
-	// 添加记录属性
+	// 逐条铺记录自带属性；group 前缀在此拼到键名前。
 	r.Attrs(func(attr slog.Attr) bool {
 		// 处理分组前缀
 		if h.groupPrefix != "" {
@@ -236,7 +236,7 @@ func (h *OptimizedZapSlogHandler) Handle(_ context.Context, r slog.Record) error
 		return true
 	})
 
-	// 使用更高效的switch语句
+	// 按级别分派到对应 zap 方法，default 兜底到 Info。
 	switch r.Level {
 	case slog.LevelDebug:
 		h.zapLogger.Debug(r.Message, fields...)

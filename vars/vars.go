@@ -49,6 +49,7 @@ func Initialize(cfg LogConfig) error {
 		cfg.AsyncBufferSize = 10000
 	}
 
+	// 已初始化：直接返回，使重复 Initialize 幂等（旧实现用 Once 焊死，重启只能换进程）。
 	if loggerActive {
 		return nil
 	}
@@ -71,6 +72,7 @@ var slogPrevDefault *slog.Logger
 
 // adoptSlogDefault 接管默认 slog 记录器。调用方必须持有 loggerMu。
 func adoptSlogDefault(manager *ChannelLoggerManager) {
+	// 首次接管才保存旧默认器，Shutdown 时换回，避免覆盖别处已设的默认器。
 	if slogPrevDefault == nil {
 		slogPrevDefault = slog.Default()
 	}
@@ -115,7 +117,7 @@ func Shutdown() error {
 
 // ==================== 日志门面（命令行 + 文件双通道） ====================
 
-// verbBytes 占位符动词集合（fmt 标准库允许的全部动词字母）
+// verbBytes 占位符动词集合：fmt 允许的全部动词字母，scanPercent 据此判定一个占位符的结尾。
 const verbBytes = "bcdefFGgopsqStTvxXUwW"
 
 // scanPercent 从 format[i]（必为 '%'）起尝试匹配一个合法的 fmt 片段。
@@ -215,6 +217,7 @@ func escapeStrayPercents(format string) string {
 }
 
 func isDigitByte(c byte) bool {
+	// 判定 ASCII 数字：格式串扫描只认 0-9，不处理其他进制字符。
 	return c >= '0' && c <= '9'
 }
 
@@ -230,9 +233,11 @@ func hasFormatVerbs(s string) bool {
 //
 // 参数签名采用 []any 而非 ...any，避开 go vet 对 (string, ...any) 形式的 printf 静态分析。
 func assembleLine(msg string, args []any) string {
+	// 无附加参数：原样返回，避免无谓拼接。
 	if len(args) == 0 {
 		return msg
 	}
+	// 首参无占位符：按空格把所有参数拼成一句话，多余的参数不再被 Sprintf 吞掉。
 	if !hasFormatVerbs(msg) {
 		// 无格式化占位符：将所有参数直接拼接（首参 + 各参数，空格分隔）
 		var sb strings.Builder
@@ -328,6 +333,7 @@ func startConsoleFlusherLocked() {
 	stop := consoleFlushStop
 
 	go func() {
+		// 独立协程按间隔刷屏：主路径不阻塞，退出由 CloseConsole 关 stop 信号触发。
 		for {
 			select {
 			case <-stop:
@@ -384,6 +390,7 @@ func CloseConsole() error {
 // 就是「轮转之后日志写进备份文件」的来源。
 func writeToFile(level slog.Level, msg, file string, line int) {
 	ch := GetChannelLogger()
+	// 未初始化：只丢文件日志，命令行那路已先跑过，消息不会整体消失。
 	if ch == nil {
 		warnLoggerMissing()
 		return

@@ -15,8 +15,8 @@ type logEntry struct {
 	time    time.Time
 	attrs   []slog.Attr
 	context context.Context
-	file    string // 调用者文件路径（新增）
-	line    int    // 调用者行号（新增）
+	file    string // 调用者文件路径，用于日志定位业务代码
+	line    int    // 调用者行号，配合 file 定位到具体代码位置
 }
 
 // batchEntries 批处理条目容器。

@@ -36,6 +36,7 @@ func (h *channelSlogHandler) Enabled(_ context.Context, level slog.Level) bool {
 }
 
 func (h *channelSlogHandler) Handle(ctx context.Context, r slog.Record) error {
+	// 预分配：公共字段 + 记录属性一次到位，减少 append 扩容。
 	attrs := make([]slog.Attr, 0, len(h.attrs)+r.NumAttrs())
 	attrs = append(attrs, h.attrs...)
 	if r.NumAttrs() > 0 {
@@ -48,6 +49,7 @@ func (h *channelSlogHandler) Handle(ctx context.Context, r slog.Record) error {
 		})
 	}
 
+	// 走 slog 入口的调用点自带 PC，用 Record.PC 反解而非再扫栈（见 callerFromPC）。
 	file, line := callerFromPC(r.PC)
 	when := r.Time
 	if when.IsZero() {
@@ -103,12 +105,14 @@ type managerSlogHandler struct {
 
 // current 取当前生效的 handler 快照（可能为 nil）。
 func (h *managerSlogHandler) current() slog.Handler {
+	// 读锁下取当前 handler 快照：SetLevel 换绑期间 handler 可能被换或置 nil。
 	h.m.mu.RLock()
 	defer h.m.mu.RUnlock()
 	return h.m.slogHandler
 }
 
 func (h *managerSlogHandler) Enabled(ctx context.Context, level slog.Level) bool {
+	// 取不到当前 handler（未初始化或已关）视为不启用，调用方会走默认。
 	if c := h.current(); c != nil {
 		return c.Enabled(ctx, level)
 	}

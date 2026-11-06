@@ -11,6 +11,8 @@ import (
 	"touchgocore/vars"
 )
 
+// facade 全局单例状态：clients/defaultName/strategy/priceSrc/pressure 均受 facadeMu 保护，
+// 读路径用 RLock、写路径（Run/Stop）用 Lock，避免并发读写竞争。
 var (
 	facadeMu    sync.RWMutex
 	clients     map[string]*Client
@@ -73,6 +75,7 @@ func Run(ctx context.Context) error {
 		}
 	}
 
+	// 整段持锁，原子替换全局 facade 状态，避免读方看到半初始化的中间状态。
 	facadeMu.Lock()
 	clients = m
 	defaultName = def

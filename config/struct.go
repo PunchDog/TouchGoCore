@@ -7,55 +7,56 @@ import (
 	"strings"
 )
 
-/*
-数据库配置结构体
-*/
+// MySqlDBConfig 是 MySQL 连接配置。
+//
+// Host 用 "host:port" 形态（DSN 拼装见 db/mysql/client.go 的 buildDSNWithOptions），
+// Port 不单独成字段；<=0 的池字段在装配时不设置，沿用 database/sql 的缺省池大小。
 type MySqlDBConfig struct {
-	Host         string `json:"db_host"`           //连接地址
-	Username     string `json:"db_username"`       //用户名
-	Password     string `json:"db_password"`       //用户密码
-	DBName       string `json:"db_name"`           //数据库名
-	MaxIdleConns int    `json:"db_max_idle_conns"` //连接池最大空闲连接数
-	MaxOpenConns int    `json:"db_max_open_conns"` //连接池最大连接数
-	Loc          string `json:"db_loc"`            //连接时区（如 "UTC"、"Local"、"+08:00"）；为空时沿用默认 loc=Local
+	Host         string `json:"db_host"`           // 连接地址
+	Username     string `json:"db_username"`       // 用户名
+	Password     string `json:"db_password"`       // 用户密码
+	DBName       string `json:"db_name"`           // 数据库名
+	MaxIdleConns int    `json:"db_max_idle_conns"` // 连接池最大空闲连接数
+	MaxOpenConns int    `json:"db_max_open_conns"` // 连接池最大连接数
+	Loc          string `json:"db_loc"`            // 连接时区（如 "UTC"、"Local"、"+08:00"）；为空时沿用默认 loc=Local
 }
 
 // PostgreDBConfig 是 PostgreSQL 连接配置。与 MySqlDBConfig 同构，差异在于
 // PG 用 host+port 而非 host:port 拼地址，且带 sslmode/时区两个 PG 特有维度。
 // <=0 的池字段与 ConnMaxLifetime 在装配时回落 db/postgres 框架默认值。
 type PostgreDBConfig struct {
-	Host            string `json:"pg_host"`              //连接地址（不含端口）
-	Port            int    `json:"pg_port"`              //端口，<=0 时用默认 5432
-	Username        string `json:"pg_username"`          //用户名
-	Password        string `json:"pg_password"`          //用户密码
-	DBName          string `json:"pg_dbname"`            //数据库名
-	SSLMode         string `json:"pg_sslmode"`           //disable/require/verify-ca/verify-full，为空时默认 disable
-	TimeZone        string `json:"pg_timezone"`          //连接时区，为空时默认 UTC
-	MaxIdleConns    int    `json:"pg_max_idle_conns"`    //连接池最大空闲连接数
-	MaxOpenConns    int    `json:"pg_max_open_conns"`    //连接池最大连接数
-	ConnMaxLifetime int    `json:"pg_conn_max_lifetime"` //连接最大存活秒数，<=0 时用默认 24h
-	Schema          string `json:"pg_schema"`            //PG schema 名，为空时默认 public
+	Host            string `json:"pg_host"`              // 连接地址（不含端口）
+	Port            int    `json:"pg_port"`              // 端口，<=0 时用默认 5432
+	Username        string `json:"pg_username"`          // 用户名
+	Password        string `json:"pg_password"`          // 用户密码
+	DBName          string `json:"pg_dbname"`            // 数据库名
+	SSLMode         string `json:"pg_sslmode"`           // disable/require/verify-ca/verify-full，为空时默认 disable
+	TimeZone        string `json:"pg_timezone"`          // 连接时区，为空时默认 UTC
+	MaxIdleConns    int    `json:"pg_max_idle_conns"`    // 连接池最大空闲连接数
+	MaxOpenConns    int    `json:"pg_max_open_conns"`    // 连接池最大连接数
+	ConnMaxLifetime int    `json:"pg_conn_max_lifetime"` // 连接最大存活秒数，<=0 时用默认 24h
+	Schema          string `json:"pg_schema"`            // PG schema 名，为空时默认 public
 }
 
 type MongoTableIndex struct {
-	TableName string   `json:"table"` //数据表名
-	Index     []string `json:"index"` //哪些关键字设置查询索引
+	TableName string   `json:"table"` // 数据表名
+	Index     []string `json:"index"` // 哪些关键字设置查询索引
 }
 type MongoDBConfig struct {
-	Host             string             `json:"db_host"`             //连接地址
-	Username         string             `json:"db_username"`         //用户名
-	Password         string             `json:"db_password"`         //用户密码
-	DBName           string             `json:"db_name"`             //数据库名
-	MongoUpUrl       string             `json:"mongo_up_url"`        //连接格式化信息
-	MongoUrl         string             `json:"mongo_url"`           //连接格式化信息
-	ReplicaSetName   string             `json:"db_replica_set_name"` //集群名（设置集群模式需要）
-	InitDBTableIndex []*MongoTableIndex `json:"init_dbtable_index"`  //初始化时创建查询索引
+	Host             string             `json:"db_host"`             // 连接地址
+	Username         string             `json:"db_username"`         // 用户名
+	Password         string             `json:"db_password"`         // 用户密码
+	DBName           string             `json:"db_name"`             // 数据库名
+	MongoUpUrl       string             `json:"mongo_up_url"`        // 连接格式化信息
+	MongoUrl         string             `json:"mongo_url"`           // 连接格式化信息
+	ReplicaSetName   string             `json:"db_replica_set_name"` // 集群名（设置集群模式需要）
+	InitDBTableIndex []*MongoTableIndex `json:"init_dbtable_index"`  // 初始化时创建查询索引
 }
 
 type RedisConfig struct {
-	Host     string `json:"redis_host"`      //连接地址
-	Password string `json:"redis_password"`  //用户密码
-	Db       int    `json:"redis_db"`        //库编号
+	Host     string `json:"redis_host"`      // 连接地址
+	Password string `json:"redis_password"`  // 用户密码
+	Db       int    `json:"redis_db"`        // 库编号
 	PoolSize int    `json:"redis_pool_size"` // 连接池大小；<=0 时用默认 512
 }
 
@@ -110,8 +111,8 @@ type TLSConfig struct {
 }
 
 type WebConfig struct {
-	HTTPPort     int        `json:"httpport"`      //监听端口
-	Static       *string    `json:"static"`        //文件服
+	HTTPPort     int        `json:"httpport"`      // 监听端口
+	Static       *string    `json:"static"`        // 文件服
 	AllowOrigins []string   `json:"allow_origins"` // CORS 允许的来源，空则不允许跨域（生产默认）
 	TLS          *TLSConfig `json:"tls"`
 	// PublicOrigin 是**对外访问地址**（形如 https://admin.example.com，不带路径），
@@ -126,17 +127,17 @@ type WebConfig struct {
 }
 
 type WebsocketPort struct {
-	//连接的端口
+	// Port 是本条监听的端口号。
 	Port int `json:"port"`
-	//端口对应的回调类名
+	// CallbackClassName 是该端口对应的回调类名；路由注册时按它反射取处理函数。
 	CallbackClassName string `json:"callbackclassname"`
 }
 type WebsocketConfig struct {
-	//监听配置,多个端口用|分割
+	// Port 是监听端口列表（JSON 数组，每个元素一个端口；不是分隔字符串）。
 	Port []*WebsocketPort `json:"port"`
-	//外网地址
+	// URL 是对外访问地址。
 	URL string `json:"url"`
-	//内网地址
+	// InURL 是内网访问地址。
 	InURL string `json:"inurl"`
 	// 允许的 Origin 白名单；启用 CheckOrigin 时为空则拒绝。显式 "*" 表示允许所有
 	AllowedOrigins []string `json:"allowed_origins"`
@@ -197,9 +198,9 @@ type RpcAuthConfig struct {
 }
 
 type RpcConfig struct {
-	//监听配置,多个端口用|分割
+	// Server 是服务端监听地址列表（JSON 数组，每个元素一个地址；不是分隔字符串）。
 	Server []*RpcAddr `json:"server"`
-	//客户端配置
+	// Client 是客户端连接地址列表（JSON 数组，每个元素一个地址；不是分隔字符串）。
 	Client []*RpcAddr `json:"client"`
 	// TLS 配置
 	TLS *RpcTLSConfig `json:"tls"`
@@ -329,7 +330,7 @@ type WhatsappConfig struct {
 	// 必须是缺省，而不是靠「记得别填 dsn」。
 	Enable string `json:"enable"`
 	// Sessions 是 whatsmeow 消息侧的会话库与连接参数。Enable 为 on 但整段留空
-	//（或 dsn 为空）即消息侧不装配——本包已没有「只跑钱、不跑协议」这种形态可配。
+	// （或 dsn 为空）即消息侧不装配——本包已没有「只跑钱、不跑协议」这种形态可配。
 	Sessions *WhatsappSessionsConfig `json:"sessions"`
 }
 

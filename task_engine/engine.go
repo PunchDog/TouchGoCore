@@ -91,10 +91,10 @@ func New(opts Options) (*Engine, error) {
 
 // newTaskNode 建一个挂任务对象的链表节点。
 //
-// nodeType 必须传非 nil：传 nil 时 list 走对象池分配，节点 Remove 后会被回收复用，
-// 而任务节点是常驻持有、在四条链之间来回摘挂的，被复用改写 data 会踩坏任务对象。
+// 传 nil 走对象池分配：任务节点在四条链之间只做 Detach/Add，不触发归还；
+// 只有 remove() 收尾时才 Remove 入池，存活期间不会被池复用改写 data。
 func newTaskNode(t *TaskProgress) list.INode {
-	return list.NewNode(t, &list.Node{})
+	return list.NewNode(t, nil)
 }
 
 // Reload 重新加载启用定义与会员进度，按状态重建四条链。
@@ -185,15 +185,32 @@ func (e *Engine) loadProgressMap(ctx context.Context, rows []TaskDef, now time.T
 	return out, nil
 }
 
-// nodeFor 取某条链上该任务的节点，必要时重建。
+// remove 释放引擎持有的全部节点并注销自身；调用后引擎不可再使用。
 //
-// list.Node 在 Remove 时会清空 data（对象池语义），所以摘过链的节点不能再直接挂回去，
-// 否则链表里就是一个 data 为空的幽灵节点。
-func nodeFor(t *TaskProgress, cur list.INode) list.INode {
-	if cur == nil || cur.GetData() == nil {
-		return newTaskNode(t)
+// tasklist 覆盖 active 与 completed（completed 的 tasknode 同样挂在 tasklist 上），
+// claimedtasklist 覆盖 claimed，两条链无交集，各遍历一次即可覆盖全部任务。
+// 节点统一走 Remove 归还对象池；已 Detach 的节点（终态任务未复用的那几条）
+// 先挂进临时链再摘，否则 Remove 对无归属节点是空操作，会漏掉回池。
+func (e *Engine) Remove() {
+	e.mu.Lock()
+	// 先拷贝任务对象再摘链，避免遍历过程中改链。
+	tasks := append(tasksOf(e.tasklist), tasksOf(e.claimedtasklist)...)
+	for _, t := range tasks {
+		t.claimednode.Remove()
+		t.completenode.Remove()
+		t.tasknode.Remove()
+		t.triggernode.Remove()
 	}
-	return cur
+	// 丢弃四条链与索引；任务对象随之失去引擎侧引用。
+	e.tasklist = nil
+	e.completetasklist = nil
+	e.claimedtasklist = nil
+	e.membertasks = nil
+	e.triggerlist = nil
+	e.mu.Unlock()
+
+	// 引擎内嵌节点从全局注册链摘下；内嵌节点不属于对象池，无法归还。
+	e.Node.Remove()
 }
 
 // attachLocked 按当前状态把任务节点挂入链表（须持有 e.mu）。
@@ -202,23 +219,18 @@ func nodeFor(t *TaskProgress, cur list.INode) list.INode {
 // completed → 挂 tasklist + completetasklist，不挂 triggerlist；
 // active    → 挂 tasklist + triggerlist。
 func (e *Engine) attachLocked(t *TaskProgress) {
+	def := t.GetDef()
+	if def == nil {
+		return
+	}
 	switch t.Status {
 	case ProgressClaimed:
-		t.claimednode = nodeFor(t, t.claimednode)
 		e.claimedtasklist.Add(t.claimednode)
 	case ProgressCompleted:
-		t.tasknode = nodeFor(t, t.tasknode)
-		t.completenode = nodeFor(t, t.completenode)
 		e.tasklist.Add(t.tasknode)
 		e.completetasklist.Add(t.completenode)
 	default:
-		t.tasknode = nodeFor(t, t.tasknode)
-		t.triggernode = nodeFor(t, t.triggernode)
 		e.tasklist.Add(t.tasknode)
-		def := t.GetDef()
-		if def == nil {
-			return
-		}
 		tl := e.triggerlist[def.Trigger]
 		if tl == nil {
 			tl = list.NewUnindexedList()
@@ -230,19 +242,19 @@ func (e *Engine) attachLocked(t *TaskProgress) {
 
 // detachLocked 摘掉任务在四条链上的全部节点（须持有 e.mu）。
 //
-// 临时对象没有节点，逐个判空；摘链会清掉节点 data，入链时由 nodeFor 重建。
+// 临时对象没有节点，逐个判空；Detach 保留节点 data 且不归还池，便于重挂到别的链。
 func (e *Engine) detachLocked(t *TaskProgress) {
 	if t.tasknode != nil {
-		t.tasknode.Remove()
+		t.tasknode.Detach()
 	}
 	if t.triggernode != nil {
-		t.triggernode.Remove()
+		t.triggernode.Detach()
 	}
 	if t.completenode != nil {
-		t.completenode.Remove()
+		t.completenode.Detach()
 	}
 	if t.claimednode != nil {
-		t.claimednode.Remove()
+		t.claimednode.Detach()
 	}
 }
 

@@ -333,6 +333,64 @@ func TestNotifyCompletedOnce(t *testing.T) {
 	}
 }
 
+// TestRemoveReleasesAllNodes 验证 remove 摘掉 tasklist/claimedtasklist 上的全部任务节点、
+// 清空索引，并把引擎自身节点从全局注册链摘除；重复调用是空操作。
+func TestRemoveReleasesAllNodes(t *testing.T) {
+	ctx := context.Background()
+	// 两条任务分别落在 completed（tasklist）与 claimed（claimedtasklist）两条链上。
+	claimDef := sampleDef(1)
+	claimDef.Trigger = "CLAIM_EVT"
+	autoDef := sampleDef(1)
+	autoDef.ID = 2
+	autoDef.Trigger = "AUTO_EVT"
+	autoDef.GrantMode = GrantAuto
+	store := newFakeStore(claimDef, autoDef)
+	e := newTestEngine(t, store)
+
+	claimTask := fetchTask(t, e, claimDef.ID)
+	if err := e.UpdateTask(ctx, claimTask, addParm(claimDef.Trigger)); err != nil {
+		t.Fatalf("claim 任务达标: %v", err)
+	}
+	autoTask := fetchTask(t, e, autoDef.ID)
+	if err := e.UpdateTask(ctx, autoTask, addParm(autoDef.Trigger)); err != nil {
+		t.Fatalf("auto 任务达标: %v", err)
+	}
+	if !inList(e.tasklist, claimTask) || !inList(e.claimedtasklist, autoTask) {
+		t.Fatal("前置状态：claim 任务应在 tasklist，auto 任务应在 claimedtasklist")
+	}
+
+	e.Remove()
+
+	if e.tasklist.Length() != 0 || e.completetasklist.Length() != 0 || e.claimedtasklist.Length() != 0 {
+		t.Fatalf("四条链应清空，实际 %d/%d/%d", e.tasklist.Length(), e.completetasklist.Length(), e.claimedtasklist.Length())
+	}
+	if e.membertasks != nil || e.triggerlist != nil {
+		t.Fatal("任务索引应被丢弃")
+	}
+	for _, task := range []*TaskProgress{claimTask, autoTask} {
+		if task.tasknode != nil || task.triggernode != nil || task.completenode != nil || task.claimednode != nil {
+			t.Fatalf("任务 %d 仍持有节点引用", task.TaskID)
+		}
+	}
+	found := false
+	taskglobal.engineList.Range(func(n list.INode) bool {
+		if n.GetData() == e {
+			found = true
+			return false
+		}
+		return true
+	})
+	if found {
+		t.Fatal("引擎应已从全局注册链摘除")
+	}
+
+	// 重复调用不得 panic。
+	e.Remove()
+	if got, err := e.GetTask(ctx, 0, ""); err != nil || len(got) != 0 {
+		t.Fatalf("remove 后 GetTask 应为空: %v, %d", err, len(got))
+	}
+}
+
 // TestAPISurface 守卫 Engine 自有的导出方法只有 OnEvent / GetTask / UpdateTask / Reload。
 //
 // 其余导出方法来自内嵌的 list.Node（GetId/GetData/Remove 等），是挂进全局引擎链所必需的。

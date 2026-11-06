@@ -8,12 +8,21 @@ import (
 
 // 节点接口
 type INode interface {
+	// 获取节点id
 	GetId() int64
+	// 获取节点数据
 	GetData() interface{}
+	// 设置节点数据
 	SetData(d any)
+	// 在当前节点后插入一个节点
 	InsertAfter(data interface{}) INode
+	// 在当前节点前插入一个节点
 	InsertBefore(data interface{}) INode
+	// Remove 删除当前节点并归还对象池
 	Remove()
+	// Detach 从链表摘下但不归还对象池，供 Add 复用同一节点
+	Detach()
+	// 获取节点对象
 	GetNode() *Node
 }
 
@@ -172,8 +181,8 @@ func (n *Node) Remove() {
 	n.remove(true)
 }
 
-// detach 从链表摘下但不归还对象池，供 Add 复用同一节点
-func (n *Node) detach() {
+// Detach 从链表摘下但不归还对象池，供 Add 复用同一节点
+func (n *Node) Detach() {
 	n.remove(false)
 }
 

@@ -41,9 +41,11 @@ func (e *Engine) Reload(ctx context.Context) error
   AUTO 摘 trigger+task 挂 claimed。
 - 跨周期由 `rollCycle` 兜底：`OnEvent/GetTask/UpdateTask` 入口先扫 complete/claimed 两条链，
   `CycleKey` 已过期的任务清零复位回 active 并重新入链。
-- 节点摘挂必须走 `nodeFor`：`list.Node` 在 `Remove()` 时会清空 `data`（对象池语义），
-  摘过链的旧节点不能再直接挂回去，否则链上会留下 `data` 为空的幽灵节点。
-- 节点用 `list.NewNode(t, &list.Node{})` 创建，**不传 nil**：池分配节点 `Remove` 后会被复用改写。
+- 节点在四条链之间迁移只走 `Detach` + `Add`：`Detach` 摘链但保留 `data`、不归还对象池，
+  节点可重新挂到别的链；`Remove`（清空 `data` 并回池）只用于 `remove()` 收尾。
+- 节点用 `list.NewNode(t, nil)` 走对象池分配：存活期间不调用 `Remove`，不会被池复用改写；
+  `remove()` 摘掉全部任务节点与引擎自身节点，任务节点因此回到 `sync.Pool`
+  （引擎是内嵌 `list.Node`，不属于池分配，只能摘链）。
 
 进程级共享状态集中在 `global.go` 的 `Golbal` 结构体（实例 `taskglobal`）：
 
@@ -150,6 +152,8 @@ engine, err := taskengine.New(taskengine.Options{
   只能在包内（或测试）构造；导出前本包不具备对外可用性。
 - 引擎按「每会员一个 Engine」设计且任务对象常驻内存：装配层要自己持有/回收这批实例，
   在线人数即内存任务数。
+- `remove()` 目前未导出：包外宿主回收引擎需要再包一层；调用前必须确保该会员
+  没有并发的事件或查询（摘链会立即生效，不与 Range 快照对齐）。
 - 任务对象的进度字段在摘挂时受 `e.mu` 保护，但 `GetTask` 读字段不加锁；
   同一会员的事件必须串行投递（单逻辑线程）。
 

@@ -108,7 +108,7 @@ func (l *List) Add(node INode) (bret bool) {
 		return
 	}
 	// 从旧链表摘下但不回池，避免 Add 复用节点时被 sync.Pool 改写
-	node.GetNode().detach()
+	node.GetNode().Detach()
 
 	l.mu.Lock()
 	defer l.mu.Unlock()

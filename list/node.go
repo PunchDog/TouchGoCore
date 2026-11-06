@@ -10,6 +10,7 @@ import (
 type INode interface {
 	GetId() int64
 	GetData() interface{}
+	SetData(d any)
 	InsertAfter(data interface{}) INode
 	InsertBefore(data interface{}) INode
 	Remove()
@@ -60,6 +61,11 @@ func (n *Node) GetId() int64 {
 // 获取数据
 func (n *Node) GetData() interface{} {
 	return n.data
+}
+
+// 设置数据
+func (n *Node) SetData(d any) {
+	n.data = d
 }
 
 func (n *Node) new() INode {

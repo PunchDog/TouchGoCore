@@ -446,6 +446,22 @@ func (r *Repository[T]) DeleteHard(ctx context.Context, id any) error {
 	})
 }
 
+// DeleteBy 按条件硬删（dbcache 删除接口使用）。q 为空或条件为空时报错，
+// 避免无 WHERE 的全表删除。
+func (r *Repository[T]) DeleteBy(ctx context.Context, q *Query) error {
+	if q == nil || q.whereExpr == "" {
+		return wrap("DeleteBy", errNilQuery, KindInvalidColumn)
+	}
+	r2 := r.WithContext(ctx)
+	return r2.runWithAutoMigrate(ctx, "DeleteBy", func() error {
+		start := time.Now()
+		if err := r2.gormDB().Unscoped().Where(q.whereExpr, q.whereArgs...).Delete(new(T)).Error; err != nil {
+			return newError("DeleteBy", err, classify(err), "", q.whereArgs, time.Since(start))
+		}
+		return nil
+	})
+}
+
 // AutoMigrate 手动建表（不依赖 Option 开关）
 func (r *Repository[T]) AutoMigrate(ctx context.Context) error {
 	r2 := r.WithContext(ctx)

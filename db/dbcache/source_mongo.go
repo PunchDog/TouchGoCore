@@ -15,6 +15,7 @@ type MongoCollection interface {
 	FindOne(name string, query interface{}, ret interface{}) error
 	FindAll(name string, query interface{}, resHandler func(*mongo.Cursor) error) error
 	UpdateInsert(name string, cond interface{}, doc interface{}) error
+	RemoveOneByCond(name string, cond interface{}) error
 }
 
 // BindMongo 把一张表绑定到 MongoDB 集合。
@@ -83,6 +84,9 @@ func BindMongo[T any](table string, dbo MongoCollection, opt BindOption[T]) erro
 			}
 		}
 		return nil
+	}
+	b.sinkDelete = func(_ context.Context, vals []condVal) error {
+		return dbo.RemoveOneByCond(table, mongoFilter(vals))
 	}
 	return e.register(b)
 }

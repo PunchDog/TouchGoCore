@@ -57,6 +57,9 @@ func BindPostgres[T any](table string, c *pgdb.Client, opt BindOption[T]) error 
 		}
 		return rep.UpsertBatch(ctx, typed, b.conflictCols)
 	}
+	b.sinkDelete = func(ctx context.Context, vals []condVal) error {
+		return rep.DeleteBy(ctx, buildPostgresQuery(vals, nil))
+	}
 	return e.register(b)
 }
 

@@ -38,7 +38,7 @@ func (e *Engine) save[T any](ctx context.Context, table string, key string, row 
 		return err
 	}
 	rowKey := b.keys.rowPrefix + key
-	if err := e.store.HSetAll(ctx, rowKey, fields, b.ttl); err != nil {
+	if err := e.store.HSetAll(ctx, rowKey, b.keys.tombPrefix+key, fields, b.ttl); err != nil {
 		// 立即写不能因 Redis 故障丢失：退化为直写数据库。
 		if mustSave {
 			if uerr := e.upsert(ctx, b, []any{rowAny}); uerr != nil {
@@ -79,7 +79,7 @@ func (e *Engine) flushKey(ctx context.Context, b *binding, key string) error {
 		if !ok {
 			return nil
 		}
-		h, claimed, err := e.store.Claim(ctx, b.keys.dirty, b.keys.rowPrefix+key, key, score)
+		h, claimed, err := e.store.Claim(ctx, b.keys.dirty, b.keys.rowPrefix+key, b.keys.tombPrefix+key, key, score)
 		if err != nil {
 			return err
 		}

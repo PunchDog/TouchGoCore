@@ -51,7 +51,7 @@ func (e *Engine) flushRange(ctx context.Context, b *binding, maxScore int64) err
 		rows := make([]any, 0, len(members))
 		claimed := make([]dirtyMember, 0, len(members))
 		for _, m := range members {
-			h, ok, cerr := e.store.Claim(ctx, b.keys.dirty, b.keys.rowPrefix+m.Member, m.Member, m.Score)
+			h, ok, cerr := e.store.Claim(ctx, b.keys.dirty, b.keys.rowPrefix+m.Member, b.keys.tombPrefix+m.Member, m.Member, m.Score)
 			if cerr != nil {
 				return cerr
 			}

@@ -1,8 +1,9 @@
 // Package dbcache 提供 Redis 一级缓存 + 数据库定时回写的统一读写门面。
 //
-// 对外数据接口只有 Query（条件查询）与 Save（全值写入）。Redis 采用
-// 「一行一 hash」：{prefix:table}:r:<key>，field 为列名，value 为列值字符串；
-// 延迟落库用同表的脏 ZSET 记录待写主键，每表一个周期定时器批量回写数据库。
+// 对外数据接口为 Query（条件查询）、Save（全值写入）与 Delete（物理删除）。
+// Redis 采用「一行一 hash」：{prefix:table}:r:<key>，field 为列名，value 为列值
+// 字符串；延迟落库用同表的脏 ZSET 记录待写主键，每表一个周期定时器批量回写数据库。
+// 删除用 {prefix:table}:t:<key> 墓碑阻挡在途脏账把行写回来。
 //
 // # 读写路径
 //
@@ -11,6 +12,9 @@
 //   - 列表或含非键列的查询：直接读数据库，命中行回填 Redis，返回数据库结果。
 //   - Save(mustSave=false)：写 Redis 全字段 + 刷新脏 ZSET 到期时间，由周期定时器落库。
 //   - Save(mustSave=true)：写 Redis 后立即落库；落库失败保留脏账并返回错误。
+//   - Delete(cond)：条件必须恰好覆盖全部键列，否则返回 ErrPartialKey；顺序为
+//     立墓碑 → 删数据库 → 清 Redis 行 hash / 脏账 / 重试账。数据库删除失败时
+//     回滚墓碑并保留 Redis 内容。
 //
 // # 已知限制
 //
@@ -25,4 +29,6 @@
 //     Mongo 模型的多单词字段必须显式写 bson tag，否则缓存列名与集合字段名不一致。
 //  7. 跨进程并发 flush 只保证幂等 upsert 与不误删新脏账，不保证写序。
 //  8. *string 指向空串与 nil 在 hash 中同为 ""，读回为 nil。
+//  9. 删除与「已 Claim 未 upsert」的在途批次并发时，该批次仍可能把行整行写回；
+//     窗口等于一次批量落库耗时，下一轮 Query 回源后自愈。
 package dbcache

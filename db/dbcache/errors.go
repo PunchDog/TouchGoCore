@@ -29,4 +29,6 @@ var (
 	ErrBadColumn = errors.New("dbcache: invalid column")
 	// ErrNilRow 表示 Save 收到 nil 行。
 	ErrNilRow = errors.New("dbcache: nil row")
+	// ErrPartialKey 表示删除条件未覆盖全部行键列（拒绝多行删除）。
+	ErrPartialKey = errors.New("dbcache: delete requires all key columns")
 )

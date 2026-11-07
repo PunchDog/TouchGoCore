@@ -32,6 +32,7 @@ type fakeStore struct {
 	hashes    map[string]map[string]string
 	dirty     map[string]map[string]int64 // dirtyKey → member → score
 	retry     map[string]map[string]int64
+	tomb      map[string]int64 // tombKey → 过期时刻(UnixMilli)，0 表示不过期
 	ttl       map[string]time.Duration
 	backfills int
 	hsetErr   error
@@ -42,6 +43,7 @@ func newFakeStore() *fakeStore {
 		hashes: make(map[string]map[string]string),
 		dirty:  make(map[string]map[string]int64),
 		retry:  make(map[string]map[string]int64),
+		tomb:   make(map[string]int64),
 		ttl:    make(map[string]time.Duration),
 	}
 }
@@ -52,19 +54,21 @@ func (s *fakeStore) HGetAll(_ context.Context, key string) (map[string]string, e
 	return copyMap(s.hashes[key]), nil
 }
 
-func (s *fakeStore) HSetAll(_ context.Context, key string, fields []string, ttl time.Duration) error {
+func (s *fakeStore) HSetAll(_ context.Context, rowKey, tombKey string, fields []string, ttl time.Duration) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.hsetErr != nil {
 		return s.hsetErr
 	}
+	// 重建该行前先清墓碑，与 redisStore 的 pipeline 语义一致。
+	delete(s.tomb, tombKey)
 	h := make(map[string]string, len(fields)/2)
 	for i := 0; i+1 < len(fields); i += 2 {
 		h[fields[i]] = fields[i+1]
 	}
-	s.hashes[key] = h
+	s.hashes[rowKey] = h
 	if ttl > 0 {
-		s.ttl[key] = ttl
+		s.ttl[rowKey] = ttl
 	}
 	return nil
 }
@@ -120,9 +124,13 @@ func (s *fakeStore) DueMembers(_ context.Context, key string, maxScore int64, co
 	return out, nil
 }
 
-func (s *fakeStore) Claim(_ context.Context, dirtyKey, rowKey, member string, score int64) (map[string]string, bool, error) {
+func (s *fakeStore) Claim(_ context.Context, dirtyKey, rowKey, tombKey, member string, score int64) (map[string]string, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.tombAlive(tombKey) {
+		delete(s.dirty[dirtyKey], member)
+		return nil, false, nil
+	}
 	cur, ok := s.dirty[dirtyKey][member]
 	if !ok || cur != score {
 		return nil, false, nil
@@ -168,6 +176,61 @@ func (s *fakeStore) HIncrBy(_ context.Context, key, member string) (int64, error
 	return m[member], nil
 }
 
+func (s *fakeStore) SetTomb(_ context.Context, tombKey string, ttl time.Duration) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	exp := int64(0)
+	if ttl > 0 {
+		exp = time.Now().Add(ttl).UnixMilli()
+	}
+	s.tomb[tombKey] = exp
+	return nil
+}
+
+func (s *fakeStore) DelTomb(_ context.Context, tombKey string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.tomb, tombKey)
+	return nil
+}
+
+func (s *fakeStore) DelRow(_ context.Context, dirtyKey, rowKey, retryKey, tombKey, member string, tombTTL time.Duration) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	exp := int64(0)
+	if tombTTL > 0 {
+		exp = time.Now().Add(tombTTL).UnixMilli()
+	}
+	s.tomb[tombKey] = exp
+	delete(s.dirty[dirtyKey], member)
+	delete(s.retry[retryKey], member)
+	if _, ok := s.hashes[rowKey]; ok {
+		delete(s.hashes, rowKey)
+		return 1, nil
+	}
+	return 0, nil
+}
+
+// tombAlive 判断墓碑是否仍生效（调用方需持有 s.mu）。
+func (s *fakeStore) tombAlive(tombKey string) bool {
+	exp, ok := s.tomb[tombKey]
+	if !ok {
+		return false
+	}
+	if exp > 0 && exp <= time.Now().UnixMilli() {
+		delete(s.tomb, tombKey)
+		return false
+	}
+	return true
+}
+
+// hasTomb 返回墓碑是否仍生效（测试断言用）。
+func (s *fakeStore) hasTomb(tombKey string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.tombAlive(tombKey)
+}
+
 func (s *fakeStore) Ping(context.Context) error { return nil }
 
 // hash 返回某行当前内容（测试断言用）。
@@ -207,9 +270,12 @@ type fakeSource struct {
 	list      []*testUser
 	oneErr    error
 	listErr   error
+	delErr    error
 	oneCalls  int
 	listCalls int
+	delCalls  int
 	lastVals  []condVal
+	deleted   [][]condVal
 }
 
 // fakeSink 记录批量落库内容，可注入错误。
@@ -287,6 +353,14 @@ func newTestEngine(t *testing.T) (*Engine, *fakeStore, *fakeSource, *fakeSink, *
 			typed[i] = row.(*testUser)
 		}
 		return sink.add(typed)
+	}
+	b.sinkDelete = func(_ context.Context, vals []condVal) error {
+		src.delCalls++
+		if src.delErr != nil {
+			return src.delErr
+		}
+		src.deleted = append(src.deleted, vals)
+		return nil
 	}
 	if err := e.register(b); err != nil {
 		t.Fatalf("register: %v", err)

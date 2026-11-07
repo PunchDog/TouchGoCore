@@ -39,6 +39,7 @@ type binding struct {
 	srcFindOne   func(context.Context, []condVal) (any, error)
 	srcFindList  func(context.Context, []condVal) ([]any, error)
 	sinkBatch    func(context.Context, []any) error
+	sinkDelete   func(context.Context, []condVal) error
 
 	timerMu sync.Mutex
 	timer   *tableTimer

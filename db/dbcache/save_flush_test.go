@@ -130,15 +130,16 @@ func TestClaimDoesNotDropConcurrentSave(t *testing.T) {
 	ctx := context.Background()
 	rowKey := "{tgc:t}:r:7"
 	dirtyKey := "{tgc:t}:dirty"
-	_ = fs.HSetAll(ctx, rowKey, []string{"name", "old"}, 0)
+	tombKey := "{tgc:t}:t:7"
+	_ = fs.HSetAll(ctx, rowKey, tombKey, []string{"name", "old"}, 0)
 	_ = fs.ZAdd(ctx, dirtyKey, "7", 100)
 
-	if _, ok, _ := fs.Claim(ctx, dirtyKey, rowKey, "7", 100); !ok {
+	if _, ok, _ := fs.Claim(ctx, dirtyKey, rowKey, tombKey, "7", 100); !ok {
 		t.Fatal("首次领取应成功")
 	}
 	// 并发 Save 刷新了 score，旧 score 的领取不得销账。
 	_ = fs.ZAdd(ctx, dirtyKey, "7", 200)
-	if _, ok, _ := fs.Claim(ctx, dirtyKey, rowKey, "7", 100); ok {
+	if _, ok, _ := fs.Claim(ctx, dirtyKey, rowKey, tombKey, "7", 100); ok {
 		t.Fatal("score 已变更时领取应失败")
 	}
 	if n := fs.dirtyCount(dirtyKey); n != 1 {

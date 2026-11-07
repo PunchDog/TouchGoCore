@@ -57,6 +57,9 @@ func BindMySQL[T any](table string, c *mysqldb.Client, opt BindOption[T]) error 
 		}
 		return rep.UpsertBatch(ctx, typed, b.conflictCols)
 	}
+	b.sinkDelete = func(ctx context.Context, vals []condVal) error {
+		return rep.DeleteBy(ctx, buildMySQLQuery(vals, nil))
+	}
 	return e.register(b)
 }
 

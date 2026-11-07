@@ -14,15 +14,18 @@ import (
 // kvStore 是缓存层依赖的窄 Redis 语义接口；测试用内存实现替换。
 type kvStore interface {
 	HGetAll(ctx context.Context, key string) (map[string]string, error)
-	HSetAll(ctx context.Context, key string, fields []string, ttl time.Duration) error
+	HSetAll(ctx context.Context, rowKey, tombKey string, fields []string, ttl time.Duration) error
 	BackfillAndGet(ctx context.Context, key string, fields []string, ttl time.Duration) (map[string]string, error)
 	ZAdd(ctx context.Context, key, member string, score int64) error
 	DueMembers(ctx context.Context, key string, maxScore int64, count int) ([]dirtyMember, error)
-	Claim(ctx context.Context, dirtyKey, rowKey, member string, score int64) (map[string]string, bool, error)
+	Claim(ctx context.Context, dirtyKey, rowKey, tombKey, member string, score int64) (map[string]string, bool, error)
 	ZRem(ctx context.Context, key, member string) error
 	ZScore(ctx context.Context, key, member string) (int64, bool, error)
 	HDel(ctx context.Context, key, member string) error
 	HIncrBy(ctx context.Context, key, member string) (int64, error)
+	SetTomb(ctx context.Context, tombKey string, ttl time.Duration) error
+	DelTomb(ctx context.Context, tombKey string) error
+	DelRow(ctx context.Context, dirtyKey, rowKey, retryKey, tombKey, member string, tombTTL time.Duration) (int64, error)
 	Ping(ctx context.Context) error
 }
 
@@ -32,11 +35,13 @@ type dirtyMember struct {
 	Score  int64
 }
 
-// tableKeys 是一张表在 Redis 中的三个键。统一使用 hash tag 保证集群同槽。
+// tableKeys 是一张表在 Redis 中的键集合。统一使用 hash tag 保证集群同槽。
+// tombPrefix 下的键是删除墓碑：存在期间该行禁止被脏账回写。
 type tableKeys struct {
-	rowPrefix string
-	dirty     string
-	retry     string
+	rowPrefix  string
+	dirty      string
+	retry      string
+	tombPrefix string
 }
 
 var tableNameRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_.-]*$`)
@@ -48,9 +53,10 @@ func makeTableKeys(prefix, table string) (tableKeys, error) {
 	}
 	tag := "{" + prefix + ":" + table + "}"
 	return tableKeys{
-		rowPrefix: tag + ":r:",
-		dirty:     tag + ":dirty",
-		retry:     tag + ":retry",
+		rowPrefix:  tag + ":r:",
+		dirty:      tag + ":dirty",
+		retry:      tag + ":retry",
+		tombPrefix: tag + ":t:",
 	}, nil
 }
 
@@ -63,13 +69,29 @@ local ttl = tonumber(ARGV[1])
 if #ARGV > 1 then redis.call('HSET', KEYS[1], unpack(ARGV, 2)) end
 if ttl and ttl > 0 then redis.call('PEXPIRE', KEYS[1], ttl) end
 return redis.call('HGETALL', KEYS[1])`
-	// claimScript：仅当脏账 score 未被刷新时才读取行并销账，避免误删并发写入。
+	// claimScript：先查删除墓碑，仅当脏账 score 未被刷新时才读取行并销账，
+	// 避免误删并发写入，也避免已删除的行被在途脏账回写。
 	claimScript = `
+if redis.call('EXISTS', KEYS[3]) == 1 then
+  redis.call('ZREM', KEYS[1], ARGV[1])
+  return {}
+end
 local s = redis.call('ZSCORE', KEYS[1], ARGV[1])
 if not s or tonumber(s) ~= tonumber(ARGV[2]) then return {} end
 local h = redis.call('HGETALL', KEYS[2])
 redis.call('ZREM', KEYS[1], ARGV[1])
 return h`
+	// deleteScript：立墓碑、销脏账与重试计数、删行 hash，返回行 hash 是否曾存在。
+	deleteScript = `
+local ttl = tonumber(ARGV[2])
+if ttl and ttl > 0 then
+  redis.call('SET', KEYS[4], '1', 'PX', ttl)
+else
+  redis.call('SET', KEYS[4], '1')
+end
+redis.call('ZREM', KEYS[1], ARGV[1])
+redis.call('HDEL', KEYS[3], ARGV[1])
+return redis.call('DEL', KEYS[2])`
 )
 
 // redisStore 是 kvStore 的 go-redis 实现（单机/集群统一走 Cmdable）。
@@ -83,8 +105,8 @@ func (s *redisStore) HGetAll(ctx context.Context, key string) (map[string]string
 	return s.rdb.HGetAll(ctx, key).Result()
 }
 
-func (s *redisStore) HSetAll(ctx context.Context, key string, fields []string, ttl time.Duration) error {
-	if len(fields) == 0 {
+func (s *redisStore) HSetAll(ctx context.Context, rowKey, tombKey string, fields []string, ttl time.Duration) error {
+	if len(fields) == 0 && tombKey == "" {
 		return nil
 	}
 	args := make([]any, len(fields))
@@ -92,9 +114,15 @@ func (s *redisStore) HSetAll(ctx context.Context, key string, fields []string, t
 		args[i] = f
 	}
 	p := s.rdb.Pipeline()
-	p.HSet(ctx, key, args...)
-	if ttl > 0 {
-		p.PExpire(ctx, key, ttl)
+	// 重建该行前先清墓碑，否则删除后的首次写入会被 Claim 丢弃。
+	if tombKey != "" {
+		p.Del(ctx, tombKey)
+	}
+	if len(fields) > 0 {
+		p.HSet(ctx, rowKey, args...)
+		if ttl > 0 {
+			p.PExpire(ctx, rowKey, ttl)
+		}
 	}
 	_, err := p.Exec(ctx)
 	return err
@@ -137,8 +165,8 @@ func (s *redisStore) DueMembers(ctx context.Context, key string, maxScore int64,
 	return out, nil
 }
 
-func (s *redisStore) Claim(ctx context.Context, dirtyKey, rowKey, member string, score int64) (map[string]string, bool, error) {
-	raw, err := s.rdb.Eval(ctx, claimScript, []string{dirtyKey, rowKey}, member, score).Result()
+func (s *redisStore) Claim(ctx context.Context, dirtyKey, rowKey, tombKey, member string, score int64) (map[string]string, bool, error) {
+	raw, err := s.rdb.Eval(ctx, claimScript, []string{dirtyKey, rowKey, tombKey}, member, score).Result()
 	if err != nil {
 		return nil, false, err
 	}
@@ -166,6 +194,23 @@ func (s *redisStore) ZScore(ctx context.Context, key, member string) (int64, boo
 
 func (s *redisStore) HDel(ctx context.Context, key, member string) error {
 	return s.rdb.HDel(ctx, key, member).Err()
+}
+
+func (s *redisStore) SetTomb(ctx context.Context, tombKey string, ttl time.Duration) error {
+	return s.rdb.Set(ctx, tombKey, "1", ttl).Err()
+}
+
+func (s *redisStore) DelTomb(ctx context.Context, tombKey string) error {
+	return s.rdb.Del(ctx, tombKey).Err()
+}
+
+func (s *redisStore) DelRow(ctx context.Context, dirtyKey, rowKey, retryKey, tombKey, member string, tombTTL time.Duration) (int64, error) {
+	raw, err := s.rdb.Eval(ctx, deleteScript, []string{dirtyKey, rowKey, retryKey, tombKey}, member, tombTTL.Milliseconds()).Result()
+	if err != nil {
+		return 0, err
+	}
+	n, _ := raw.(int64)
+	return n, nil
 }
 
 func (s *redisStore) HIncrBy(ctx context.Context, key, member string) (int64, error) {

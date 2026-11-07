@@ -1,7 +1,7 @@
 // Package db 的统一缓存门面。
 //
 // 实现在 db/dbcache 子包；本文件只做类型别名与薄封装，调用方 import
-// touchgocore/db 后即可使用 CacheQuery / CacheSave / CacheBind*。
+// touchgocore/db 后即可使用 CacheQuery / CacheSave / CacheDelete / CacheBind*。
 // 子包不 import 根 db，因此这里的反向引用不会形成循环依赖。
 package db
 
@@ -52,6 +52,8 @@ var (
 	ErrCacheBadColumn = dbcache.ErrBadColumn
 	// ErrCacheNilRow 表示 CacheSave 收到 nil 行。
 	ErrCacheNilRow = dbcache.ErrNilRow
+	// ErrCachePartialKey 表示 CacheDelete 的条件未覆盖全部行键列。
+	ErrCachePartialKey = dbcache.ErrPartialKey
 )
 
 // ==================== 生命周期 ====================
@@ -108,4 +110,10 @@ func CacheQuery[T any](ctx context.Context, table string, cond any, out any) err
 // CacheSave 全值写入一行；mustSave 决定是否在返回前落库。
 func CacheSave[T any](ctx context.Context, table string, key string, row *T, mustSave bool) error {
 	return dbcache.Save[T](ctx, table, key, row, mustSave)
+}
+
+// CacheDelete 物理删除一行：先删数据库，再清 Redis 行 hash、脏账与重试账，
+// 并留下删除墓碑阻止在途脏账回写。cond 必须覆盖表的全部 KeyColumns。
+func CacheDelete(ctx context.Context, table string, cond any) error {
+	return dbcache.Delete(ctx, table, cond)
 }

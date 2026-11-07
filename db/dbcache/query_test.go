@@ -14,7 +14,7 @@ func TestQueryRedisHitSkipsDB(t *testing.T) {
 	if err != nil {
 		t.Fatalf("encodeRow: %v", err)
 	}
-	if err := fs.HSetAll(context.Background(), b.keys.rowPrefix+"7", fields, 0); err != nil {
+	if err := fs.HSetAll(context.Background(), b.keys.rowPrefix+"7", b.keys.tombPrefix+"7", fields, 0); err != nil {
 		t.Fatalf("HSetAll: %v", err)
 	}
 

@@ -34,8 +34,8 @@ func (e *Engine) GetTask(ctx context.Context, taskID int64, group string) ([]*Ta
 			}
 			return []*TaskProgress{t}, nil
 		}
-		// 常驻索引里没有（Reload 后新增或已停用）：回源 DB 定义区分缺失 / 停用 / 窗口外。
-		def, err := e.store.FindDefByID(ctx, taskID)
+		// 常驻索引里没有（Reload 后新增或已停用）：回源定义区分缺失 / 停用 / 窗口外。
+		def, err := loadDef(ctx, taskID)
 		if err != nil {
 			return nil, err
 		}
@@ -72,11 +72,8 @@ func (e *Engine) GetTask(ctx context.Context, taskID int64, group string) ([]*Ta
 	return out, nil
 }
 
-// progressOf 读某任务本周期的进度行；无缓存走单行查询，有缓存走 GetOrLoad。
+// progressOf 读某任务本周期的进度行。
 func (e *Engine) progressOf(ctx context.Context, def *TaskDef, now time.Time) (*TaskProgress, error) {
 	cycle := TaskCycleKey(def.Cycle, now, def.ID)
-	if e.cache != nil {
-		return e.loadCached(ctx, ProgressKey{MemberID: e.memberID, TaskID: def.ID, CycleKey: cycle})
-	}
-	return e.store.LoadProgress(ctx, e.memberID, def.ID, cycle)
+	return loadProgressRow(ctx, e.memberID, def.ID, cycle)
 }

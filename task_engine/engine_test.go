@@ -11,21 +11,6 @@ import (
 	"touchgocore/util"
 )
 
-// newTestEngine 构造会员 1 的引擎。
-func newTestEngine(t *testing.T, store Store) *Engine {
-	return newTestEngineFor(t, store, 1)
-}
-
-// newTestEngineFor 构造指定会员的引擎；rewardFn 由需要的用例自行注入。
-func newTestEngineFor(t *testing.T, store Store, memberID int64) *Engine {
-	t.Helper()
-	e, err := New(Options{Store: store, memberID: memberID})
-	if err != nil {
-		t.Fatalf("new engine: %v", err)
-	}
-	return e
-}
-
 // sampleDef 一个最小可用任务定义（ADD 口径、目标 1）。
 func sampleDef(enabled int8) *TaskDef {
 	return &TaskDef{
@@ -33,17 +18,6 @@ func sampleDef(enabled int8) *TaskDef {
 		Cycle: CycleDaily, GrantMode: GrantClaim, ProgressType: ProgressTypeAdd,
 		TargetCount: 1, Enabled: enabled,
 	}
-}
-
-// rowsFor 取某任务的全部进度行。
-func rowsFor(store *fakeStore, taskID int64) []TaskProgress {
-	out := make([]TaskProgress, 0)
-	for _, r := range store.rows {
-		if r.TaskID == taskID {
-			out = append(out, r)
-		}
-	}
-	return out
 }
 
 // fetchTask 通过 GetTask 取单条常驻任务对象。
@@ -80,25 +54,24 @@ func TestUpdateTaskInviteOverwrites(t *testing.T) {
 	def := sampleDef(1)
 	def.ProgressType = ProgressTypeInvite
 	def.TargetCount = 5
-	store := newFakeStore(def)
-	e := newTestEngine(t, store)
+	e := newTestEngine(t, def)
 
 	task := fetchTask(t, e, def.ID)
 	if err := e.UpdateTask(ctx, task, &ProgressParm{ProgressParmInvite: 2}); !errors.Is(err, ErrNotComplete) {
 		t.Fatalf("2/5 未达标，got %v", err)
 	}
-	rows := rowsFor(store, def.ID)
-	if len(rows) != 1 || rows[0].Progress != 2 || rows[0].Status != ProgressActive {
-		t.Fatalf("覆盖后进度: %+v", rows)
+	row := progressOf(t, def)
+	if row == nil || row.Progress != 2 || row.Status != ProgressActive {
+		t.Fatalf("覆盖后进度: %+v", row)
 	}
 
 	task = fetchTask(t, e, def.ID)
 	if err := e.UpdateTask(ctx, task, &ProgressParm{ProgressParmInvite: 5}); err != nil {
 		t.Fatalf("5/5 应达标: %v", err)
 	}
-	rows = rowsFor(store, def.ID)
-	if rows[0].Progress != 5 || rows[0].Status != ProgressCompleted {
-		t.Fatalf("CLAIM 达标应 completed: %+v", rows[0])
+	row = progressOf(t, def)
+	if row == nil || row.Progress != 5 || row.Status != ProgressCompleted {
+		t.Fatalf("CLAIM 达标应 completed: %+v", row)
 	}
 	if task.Progress != 5 || task.Status != ProgressCompleted {
 		t.Fatalf("常驻对象未同步: %+v", task)
@@ -111,8 +84,7 @@ func TestUpdateTaskAddAccumulates(t *testing.T) {
 	def := sampleDef(1)
 	def.GrantMode = GrantAuto
 	def.TargetCount = 3
-	store := newFakeStore(def)
-	e := newTestEngine(t, store)
+	e := newTestEngine(t, def)
 
 	task := fetchTask(t, e, def.ID)
 	for i := 1; i <= 2; i++ {
@@ -123,15 +95,15 @@ func TestUpdateTaskAddAccumulates(t *testing.T) {
 	if err := e.UpdateTask(ctx, task, &ProgressParm{ProgressParmAdd: 1}); err != nil {
 		t.Fatalf("第 3 次应达标: %v", err)
 	}
-	rows := rowsFor(store, def.ID)
-	if len(rows) != 1 || rows[0].Progress != 3 || rows[0].Status != ProgressClaimed {
-		t.Fatalf("AUTO 达标应 claimed: %+v", rows)
+	row := progressOf(t, def)
+	if row == nil || row.Progress != 3 || row.Status != ProgressClaimed {
+		t.Fatalf("AUTO 达标应 claimed: %+v", row)
 	}
 
 	if err := e.UpdateTask(ctx, task, &ProgressParm{ProgressParmAdd: 1}); !errors.Is(err, ErrAlreadyClaimed) {
 		t.Fatalf("已结算应拒绝，got %v", err)
 	}
-	if got := rowsFor(store, def.ID)[0].Progress; got != 3 {
+	if got := progressOf(t, def).Progress; got != 3 {
 		t.Fatalf("已结算后进度不得变化，实际 %d", got)
 	}
 }
@@ -142,8 +114,7 @@ func TestDefaultProgressType(t *testing.T) {
 	def := sampleDef(1)
 	def.ProgressType = ""
 	def.TargetCount = 3
-	store := newFakeStore(def)
-	e := newTestEngine(t, store)
+	e := newTestEngine(t, def)
 
 	task := fetchTask(t, e, def.ID)
 	for i := 1; i <= 2; i++ {
@@ -151,13 +122,13 @@ func TestDefaultProgressType(t *testing.T) {
 			t.Fatalf("add 第 %d 次: %v", i, err)
 		}
 	}
-	if got := rowsFor(store, def.ID)[0].Progress; got != 2 {
+	if got := progressOf(t, def).Progress; got != 2 {
 		t.Fatalf("add 累计=%d", got)
 	}
 	if err := e.UpdateTask(ctx, task, &ProgressParm{ProgressParmInvite: 3}); err != nil {
 		t.Fatalf("invite 非零应覆盖并达标: %v", err)
 	}
-	if got := rowsFor(store, def.ID)[0].Progress; got != 3 {
+	if got := progressOf(t, def).Progress; got != 3 {
 		t.Fatalf("invite 覆盖=%d", got)
 	}
 }
@@ -169,8 +140,7 @@ func TestTargetCountFloatCompare(t *testing.T) {
 	def.ProgressType = ProgressTypeInvite
 	def.TargetCount = 2.5
 	def.TargetCountType = TargetCountTypeGT
-	store := newFakeStore(def)
-	e := newTestEngine(t, store)
+	e := newTestEngine(t, def)
 
 	task := fetchTask(t, e, def.ID)
 	if err := e.UpdateTask(ctx, task, &ProgressParm{ProgressParmInvite: 2}); !errors.Is(err, ErrNotComplete) {
@@ -186,8 +156,7 @@ func TestTargetCountFallbackOne(t *testing.T) {
 	ctx := context.Background()
 	def := sampleDef(1)
 	def.TargetCount = 0
-	store := newFakeStore(def)
-	e := newTestEngine(t, store)
+	e := newTestEngine(t, def)
 
 	task := fetchTask(t, e, def.ID)
 	if err := e.UpdateTask(ctx, task, &ProgressParm{ProgressParmAdd: 1}); err != nil {
@@ -198,7 +167,7 @@ func TestTargetCountFallbackOne(t *testing.T) {
 // TestUpdateTaskGuards 覆盖 nil/缺定义/停用/窗口外/前置未完成等拒绝路径。
 func TestUpdateTaskGuards(t *testing.T) {
 	ctx := context.Background()
-	e := newTestEngine(t, newFakeStore(sampleDef(1)))
+	e := newTestEngine(t, sampleDef(1))
 
 	if err := e.UpdateTask(ctx, nil, nil); !errors.Is(err, ErrDefMissing) {
 		t.Fatalf("nil task: %v", err)
@@ -217,7 +186,8 @@ func TestUpdateTaskGuards(t *testing.T) {
 
 	// 停用定义不会进常驻索引，只能靠 DB 回源判定。
 	disabled := sampleDef(0)
-	de := newTestEngine(t, newFakeStore(disabled))
+	resetStorage(t)
+	de := newTestEngine(t, disabled)
 	if err := de.UpdateTask(ctx, &TaskProgress{TaskID: disabled.ID}, &ProgressParm{ProgressParmAdd: 1}); !errors.Is(err, ErrDisabled) {
 		t.Fatalf("disabled: %v", err)
 	}
@@ -226,7 +196,8 @@ func TestUpdateTaskGuards(t *testing.T) {
 	past := util.CurrentTime().Add(-time.Hour)
 	expired := sampleDef(1)
 	expired.EndAt = &past
-	ee := newTestEngine(t, newFakeStore(expired))
+	resetStorage(t)
+	ee := newTestEngine(t, expired)
 	if err := ee.UpdateTask(ctx, &TaskProgress{TaskID: expired.ID}, &ProgressParm{ProgressParmAdd: 1}); !errors.Is(err, ErrNotEligible) {
 		t.Fatalf("窗口外: %v", err)
 	}
@@ -235,8 +206,8 @@ func TestUpdateTaskGuards(t *testing.T) {
 	pre := &TaskDef{ID: 8, Cycle: CycleOnce, Enabled: 1, TargetCount: 1}
 	gated := sampleDef(1)
 	gated.PreTaskID = 8
-	store := newFakeStore(gated, pre)
-	ge := newTestEngine(t, store)
+	resetStorage(t)
+	ge := newTestEngine(t, gated, pre)
 	if err := ge.UpdateTask(ctx, &TaskProgress{TaskID: gated.ID}, &ProgressParm{ProgressParmAdd: 1}); !errors.Is(err, ErrNotEligible) {
 		t.Fatalf("前置未完成: %v", err)
 	}
@@ -257,24 +228,23 @@ func TestOnEventFanout(t *testing.T) {
 	b := sampleDef(1)
 	b.ID = 11
 	b.PreTaskID = 10
-	store := newFakeStore(a, b)
-	e := newTestEngine(t, store)
+	e := newTestEngine(t, a, b)
 
 	if err := e.OnEvent(ctx, addParm("CHECKIN")); err != nil {
 		t.Fatalf("on event: %v", err)
 	}
-	if len(rowsFor(store, 10)) != 1 || len(rowsFor(store, 11)) != 0 {
-		t.Fatalf("前置未完成不应触发后继: %+v", store.rows)
+	if progressOf(t, a) == nil || progressOf(t, b) != nil {
+		t.Fatalf("前置未完成不应触发后继: a=%+v b=%+v", progressOf(t, a), progressOf(t, b))
 	}
-	if got := rowsFor(store, 10)[0].Status; got != ProgressCompleted {
+	if got := progressOf(t, a).Status; got != ProgressCompleted {
 		t.Fatalf("CLAIM 应 completed，实际 %s", got)
 	}
 
 	if err := e.OnEvent(ctx, addParm("CHECKIN")); err != nil {
 		t.Fatalf("second event: %v", err)
 	}
-	if len(rowsFor(store, 11)) != 1 {
-		t.Fatalf("前置完成后应推进后继: %+v", store.rows)
+	if progressOf(t, b) == nil {
+		t.Fatalf("前置完成后应推进后继: %+v", progressOf(t, b))
 	}
 }
 
@@ -284,8 +254,7 @@ func TestOnEventSkipsWindowAndEmptyParm(t *testing.T) {
 	past := util.CurrentTime().Add(-time.Hour)
 	expired := sampleDef(1)
 	expired.EndAt = &past
-	store := newFakeStore(expired)
-	e := newTestEngine(t, store)
+	e := newTestEngine(t, expired)
 
 	if err := e.OnEvent(ctx, nil); err != nil {
 		t.Fatalf("nil parm: %v", err)
@@ -296,8 +265,8 @@ func TestOnEventSkipsWindowAndEmptyParm(t *testing.T) {
 	if err := e.OnEvent(ctx, addParm("CHECKIN")); err != nil {
 		t.Fatalf("窗口外不应报错: %v", err)
 	}
-	if len(store.rows) != 0 {
-		t.Fatalf("窗口外不得推进: %+v", store.rows)
+	if progressOf(t, expired) != nil {
+		t.Fatalf("窗口外不得推进: %+v", progressOf(t, expired))
 	}
 }
 
@@ -311,25 +280,24 @@ func TestNotifyCompletedOnce(t *testing.T) {
 
 	follower := sampleDef(1)
 	follower.ID = 20
-	follower.Trigger = "TASK_COMPLETED"
+	follower.Trigger = string(CompletedNotifyTrigger)
 	follower.GrantMode = GrantAuto
 	follower.TargetCount = 1
 
-	store := newFakeStore(leader, follower)
-	e := newTestEngine(t, store)
+	e := newTestEngine(t, leader, follower)
 
 	if err := e.OnEvent(ctx, addParm("CHECKIN")); err != nil {
 		t.Fatalf("leader event: %v", err)
 	}
-	rows := rowsFor(store, follower.ID)
-	if len(rows) != 1 || rows[0].Status != ProgressClaimed {
-		t.Fatalf("follower 应被完成通知推进: %+v", rows)
+	row := progressOf(t, follower)
+	if row == nil || row.Status != ProgressClaimed {
+		t.Fatalf("follower 应被完成通知推进: %+v", row)
 	}
 	if err := e.OnEvent(ctx, addParm("CHECKIN")); err != nil {
 		t.Fatalf("重复事件不应报错: %v", err)
 	}
-	if got := len(rowsFor(store, follower.ID)); got != 1 {
-		t.Fatalf("完成通知不得重复写入，rows=%d", got)
+	if row := progressOf(t, follower); row == nil || row.Status != ProgressClaimed {
+		t.Fatalf("完成通知不得改变终态，row=%+v", row)
 	}
 }
 
@@ -344,8 +312,7 @@ func TestRemoveReleasesAllNodes(t *testing.T) {
 	autoDef.ID = 2
 	autoDef.Trigger = "AUTO_EVT"
 	autoDef.GrantMode = GrantAuto
-	store := newFakeStore(claimDef, autoDef)
-	e := newTestEngine(t, store)
+	e := newTestEngine(t, claimDef, autoDef)
 
 	claimTask := fetchTask(t, e, claimDef.ID)
 	if err := e.UpdateTask(ctx, claimTask, addParm(claimDef.Trigger)); err != nil {

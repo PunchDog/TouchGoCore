@@ -21,8 +21,6 @@ type Golbal struct {
 	defs syncmap.Map[int64, *TaskDef]
 	// engineList 已创建的引擎节点链，节点数据是 *Engine 本身。
 	engineList NodeList
-	// store 任务定义读取源；进程内各引擎应共用同一个 Store。
-	store Store
 }
 
 // taskglobal 进程级共享状态实例；链表必须在这里初始化，零值链表不可用。
@@ -60,17 +58,9 @@ func (g *Golbal) addEngine(e *Engine) {
 	g.engineList.Add(e)
 }
 
-// setStore 注入定义读取源；进程内各引擎共用同一个 Store，后装配者覆盖。
-func (g *Golbal) setStore(s Store) {
-	g.store = s
-}
-
 // loadDefs 读取启用定义并整体替换定义索引，返回同一批定义供引擎重建链表。
 func (g *Golbal) loadDefs(ctx context.Context) ([]TaskDef, error) {
-	if g.store == nil {
-		return nil, ErrStoreNotConfigured
-	}
-	rows, err := g.store.ListEnabledDefs(ctx)
+	rows, err := listEnabledDefs(ctx)
 	if err != nil {
 		return nil, err
 	}

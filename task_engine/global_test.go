@@ -1,23 +1,10 @@
 package taskengine
 
 import (
-	"context"
-	"errors"
 	"testing"
 
 	"touchgocore/list"
 )
-
-// TestGlobalLoadDefsRequiresStore 验证未注入 Store 时全局定义加载返回 ErrStoreNotConfigured。
-func TestGlobalLoadDefsRequiresStore(t *testing.T) {
-	old := taskglobal.store
-	taskglobal.store = nil
-	defer func() { taskglobal.store = old }()
-
-	if _, err := taskglobal.loadDefs(context.Background()); !errors.Is(err, ErrStoreNotConfigured) {
-		t.Fatalf("未注入 Store 应返回 ErrStoreNotConfigured，实际 %v", err)
-	}
-}
 
 // TestGlobalDefsIndex 验证全局定义索引的写入、整体替换与单条回填。
 func TestGlobalDefsIndex(t *testing.T) {
@@ -47,7 +34,7 @@ func TestGlobalDefsIndex(t *testing.T) {
 // TestNewRegistersEngine 验证 New 把引擎挂进全局引擎链。
 func TestNewRegistersEngine(t *testing.T) {
 	before := taskglobal.engineList.Length()
-	e := newTestEngine(t, newFakeStore(sampleDef(1)))
+	e := newTestEngine(t, sampleDef(1))
 
 	if got := taskglobal.engineList.Length(); got != before+1 {
 		t.Fatalf("引擎注册数 %d → %d，应 +1", before, got)

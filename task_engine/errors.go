@@ -15,8 +15,8 @@ var (
 	ErrNotComplete = errors.New("taskengine: target not met")
 	// ErrAlreadyClaimed 本周期已结算。
 	ErrAlreadyClaimed = errors.New("taskengine: already claimed")
-	// ErrStoreNotConfigured Store/DB 未装配。
-	ErrStoreNotConfigured = errors.New("taskengine: store not configured")
+	// ErrCacheNotInitialized 统一缓存层未初始化或存储表未绑定。
+	ErrCacheNotInitialized = errors.New("taskengine: cache not initialized")
 	// 创建node节点失败
 	ErrCreateEngineFail = errors.New("task engine:create engine fail")
 )

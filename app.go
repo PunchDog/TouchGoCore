@@ -41,7 +41,7 @@ type App struct {
 	MySQL    *db.Client
 	Postgres *db.PostgresClient
 	MongoDB  *db.DbOperate
-	Cache    *db.CacheLayer // 两级缓存层（Redis+DB 回源）；cache 段未配置/未启用时为 nil
+	Cache    *db.CacheEngine // 统一缓存层（Redis 一级 + 定时回写 DB）；未启用时为 nil
 	TimerMgr *localtimer.TimerManager
 	CallFunc *util.CallFunction
 
@@ -227,21 +227,17 @@ func (app *App) initDatabase() error {
 		vars.Info("加载Mongo数据成功")
 	}
 
-	// 两级缓存层（可选）：Redis 就绪后装配；业务在启动期用 app.Cache + db.OpenCache 注册类型。
-	// 注意 app.Redis 是具体类型断言进 KV 门面（db.NewRedisKV），Layer 不感知连接来源。
+	// 统一缓存层（可选）：Redis 就绪后装配；业务用 dbcache.Bind* 注册表后
+	// 通过 dbcache.Query/Save 读写。未配置 cache 段时 app.Cache 保持 nil。
 	if app.Cfg.Cache != nil && app.Cfg.Cache.Enabled {
 		if app.Redis == nil {
-			// app.Cache 保持 nil：缓存层未创建。业务此时不能经 db.OpenCache 注册缓存类型
-			// （nil Layer 会报错），需要读写只能自行直连数据库——并非「读写线自动降级」。
-			vars.Warning("cache 段已启用但无 Redis 连接，缓存层未创建（app.Cache 为 nil，业务无法注册缓存类型）")
+			vars.Warning("cache 段已启用但无 Redis 连接，缓存层未创建（app.Cache 为 nil）")
 		} else {
-			kv := db.NewRedisKV(app.Redis)
-			if kv == nil {
-				return fmt.Errorf("初始化缓存层失败: Redis 句柄为空")
+			if err := db.InitCache(db.CacheConfigFrom(app.Cfg.Cache), app.Redis.Get()); err != nil {
+				return fmt.Errorf("初始化缓存层失败: %w", err)
 			}
-			app.Cache = db.NewCacheLayer(kv, db.WithLayerConfig(db.CacheConfigFrom(app.Cfg.Cache)))
-			vars.Info("加载两级缓存层成功（ttl_ms=%d flush_interval_ms=%d）",
-				app.Cfg.Cache.TTLMS, app.Cfg.Cache.FlushIntervalMS)
+			app.Cache = db.DefaultCache()
+			vars.Info("加载统一缓存层成功（key_prefix=%s）", app.Cfg.Cache.KeyPrefix)
 		}
 	}
 
@@ -401,6 +397,9 @@ func stopService(svc Service, budget time.Duration) error {
 }
 
 func (app *App) closeDatabase() {
+	// 缓存层已由 cacheService.Stop 完成 final flush；这里只卸载全局引擎。
+	db.CloseCache()
+	app.Cache = nil
 	if app.MongoDB != nil {
 		app.MongoDB.DBClose()
 		app.MongoDB = nil

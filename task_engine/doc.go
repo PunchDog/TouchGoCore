@@ -21,9 +21,9 @@
 // 终态链上的任务由 rollCycle 复位回进行中。
 //
 // 进程级共享状态都在 global.go 的 Golbal 结构体里（实例为 taskglobal）：
-// defs 定义索引、engineList 引擎注册表、store 定义读取源与完成通知配置。
+// defs 定义索引、engineList 引擎注册表与完成通知配置。
 // taskglobal.Reload 把启用行整体写入 defs 并广播给各引擎，索引未命中时按 id 回源
-// DB 并回填；TaskProgress.GetDef 即查这张表。New 会把引擎挂进 engineList。
+// 缓存门面并回填；TaskProgress.GetDef 即查这张表。New 会把引擎挂进 engineList。
 //
 // 进度口径由 TaskDef.ProgressType 决定：INVITE 用 ProgressParmInvite 覆盖，
 // ADD 用 ProgressParmAdd 累加；与 TargetCount 按 TargetCountType（> / = / <，空按 =）
@@ -31,10 +31,11 @@
 //
 // 发奖由宿主注入的 Options.rewardFn 完成：只有 AUTO 达标时引擎回调一次，
 // 回调入参是即将落库的任务对象；CLAIM 只落 completed，等宿主自行发放。
-// 完成通知由 SetCompletedNotifyTrigger 控制，零值关闭。
+// 完成通知的触发点是固定常量 CompletedNotifyTrigger。
 //
-// 进度写线可接入 touchgocore/db 两级缓存（OpenProgressCache + Options.Cache），
-// 未配置缓存时走 Store 事务 upsert。
+// 存储读写统一走 touchgocore/db 的缓存门面：读用 CacheQuery、写用 CacheSave，
+// 包内不区分 Redis 与数据库。使用前必须先 db.InitCache 并调用 OpenStorage
+// 把 task_def / task_progress 绑定到统一缓存层。
 //
 // 本包是库，不是 Service：没有 Run/Stop 生命周期，由调用方在装配层构造 *Engine 并持有。
 package taskengine

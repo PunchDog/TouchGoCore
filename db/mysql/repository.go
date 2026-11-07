@@ -417,7 +417,7 @@ func (r *Repository[T]) Upsert(ctx context.Context, entity *T, conflictColumns [
 }
 
 // UpsertBatch 批量插入或更新（ON DUPLICATE KEY UPDATE ALL）。
-// conflictColumns 为空时退化为 CreateBatch。缓存写线（db/cache）定时批量落库使用。
+// conflictColumns 为空时退化为 CreateBatch。dbcache 写线定时批量落库使用。
 func (r *Repository[T]) UpsertBatch(ctx context.Context, entities []*T, conflictColumns []string) error {
 	if len(entities) == 0 {
 		return nil

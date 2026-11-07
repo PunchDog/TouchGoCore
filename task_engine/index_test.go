@@ -12,7 +12,7 @@ import (
 func TestGetTaskReturnsResident(t *testing.T) {
 	def := sampleDef(1)
 	def.TargetCount = 3
-	e := newTestEngine(t, newFakeStore(def))
+	e := newTestEngine(t, def)
 
 	task := fetchTask(t, e, def.ID)
 	if task != e.teak_progress(def.ID) {
@@ -28,9 +28,8 @@ func TestMemberIsolation(t *testing.T) {
 	ctx := context.Background()
 	def := sampleDef(1)
 	def.TargetCount = 3
-	store := newFakeStore(def)
-	e1 := newTestEngineFor(t, store, 1)
-	e2 := newTestEngineFor(t, store, 2)
+	e1 := newTestEngineFor(t, 1, def)
+	e2 := newTestEngineFor(t, 2, def)
 
 	task1 := fetchTask(t, e1, def.ID)
 	if err := e1.UpdateTask(ctx, task1, &ProgressParm{ProgressParmAdd: 1}); !errors.Is(err, ErrNotComplete) {
@@ -53,12 +52,12 @@ func TestMemberIsolation(t *testing.T) {
 func TestStaleCycleIgnored(t *testing.T) {
 	def := sampleDef(1)
 	def.TargetCount = 3
-	store := newFakeStore(def)
-	store.rows = []TaskProgress{{
-		ID: 1, MemberID: 1, TaskID: def.ID, CycleKey: "2000-01-01",
+	setupStorage(t)
+	seedProgress(t, TaskProgress{
+		MemberID: 1, TaskID: def.ID, CycleKey: "2000-01-01",
 		Progress: 2, Status: ProgressClaimed, SnapshotJSON: "{}",
-	}}
-	e := newTestEngine(t, store)
+	})
+	e := newTestEngine(t, def)
 
 	got := fetchTask(t, e, def.ID)
 	if got.Progress != 0 {
@@ -81,8 +80,7 @@ func TestStaleCycleIgnored(t *testing.T) {
 func TestReloadRebuildsIndex(t *testing.T) {
 	ctx := context.Background()
 	def := sampleDef(1)
-	store := newFakeStore(def)
-	e := newTestEngine(t, store)
+	e := newTestEngine(t, def)
 
 	if _, err := e.GetTask(ctx, 0, ""); err != nil {
 		t.Fatal(err)
@@ -92,7 +90,7 @@ func TestReloadRebuildsIndex(t *testing.T) {
 	added.ID = 2
 	// 换一个触发点，保证后面的 CHECKIN 事件只针对被停用的定义。
 	added.Trigger = "OTHER"
-	store.defs[added.ID] = added
+	seedDefs(t, added)
 	if err := taskglobal.Reload(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +105,7 @@ func TestReloadRebuildsIndex(t *testing.T) {
 		t.Fatal("新增定义应挂入触发点链")
 	}
 
-	def.Enabled = 0
+	setDefEnabled(t, def, 0)
 	if err := taskglobal.Reload(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -125,7 +123,7 @@ func TestReloadRebuildsIndex(t *testing.T) {
 	if err := e.OnEvent(ctx, addParm(def.Trigger)); err != nil {
 		t.Fatalf("停用后事件不应报错: %v", err)
 	}
-	if len(store.rows) != 0 {
-		t.Fatalf("停用定义不得推进: %+v", store.rows)
+	if progressOf(t, def) != nil {
+		t.Fatalf("停用定义不得推进: %+v", progressOf(t, def))
 	}
 }

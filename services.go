@@ -6,7 +6,6 @@ import (
 	"touchgocore/ai"
 	"touchgocore/bsc"
 	"touchgocore/corectx"
-	"touchgocore/db"
 	"touchgocore/gin"
 	lua "touchgocore/golua"
 	"touchgocore/localtimer"
@@ -248,11 +247,8 @@ func (s *modelAPIService) Stop(ctx context.Context) error {
 	return nil
 }
 
-// Layer 与 Service 同形断言：db/cache 不能 import 根包（成环），断言放在这里做。
-var _ Service = (*db.CacheLayer)(nil)
-
-// cacheService 两级缓存层服务适配器。
-// cache 段未配置或未启用时 App.Cache 为 nil，Start/Stop 直接跳过（与 telegram/usdt
+// cacheService 统一缓存层服务适配器。
+// cache 段未配置或未启用时 app.Cache 为 nil，Start/Stop 直接跳过（与 telegram/usdt
 // 等「没配就不启动」的既有约定一致）。注册在 services 列表末尾：
 // Shutdown 反序停止保证它的 final flush 早于 closeDatabase。
 type cacheService struct{ app *App }

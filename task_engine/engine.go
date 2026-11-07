@@ -15,11 +15,6 @@ import (
 
 // Options Engine 构造参数。
 type Options struct {
-	// Store 任务定义读取与进度读写存储（必填）。
-	Store Store
-	// Cache 可选：进度写线走两级缓存（Redis 一级 + 定时回写 DB）。
-	// 为 nil 时走 Store 事务路径。
-	Cache *db.Cache[ProgressKey, TaskProgress]
 	// memberID 该引擎绑定的玩家 ID；一个会员一个 Engine。
 	memberID int64
 	// rewardFn AUTO 达标时的发奖回调；为 nil 则不发奖。
@@ -39,8 +34,6 @@ type Options struct {
 // 换挂到 complete 或 claimed 链；Reload 重新加载时按库中状态重挂。
 type Engine struct {
 	list.Node
-	store Store                                // 定义读取与进度回退存储
-	cache *db.Cache[ProgressKey, TaskProgress] // 可选进度缓存
 
 	mu               sync.Mutex              // 保护下面的索引表与任务节点摘挂
 	tasklist         NodeList                // 全部任务节点链
@@ -52,19 +45,11 @@ type Engine struct {
 	rewardFn         func(*TaskProgress)     // AUTO 发奖回调
 }
 
-// progressRowKey 会员进度行在周期内的键。
-type progressRowKey struct {
-	// TaskID 任务定义 ID。
-	TaskID int64
-	// CycleKey 周期片。
-	CycleKey string
-}
-
 // New 构造引擎，并立即 Reload 任务定义与会员进度。
 func New(opts Options) (*Engine, error) {
-	// Store 是唯一必填依赖。
-	if opts.Store == nil {
-		return nil, ErrStoreNotConfigured
+	// 存储读写全部走统一缓存门面，未初始化时直接失败。
+	if db.DefaultCache() == nil {
+		return nil, ErrCacheNotInitialized
 	}
 
 	// 创建新任务引擎
@@ -74,13 +59,10 @@ func New(opts Options) (*Engine, error) {
 	}
 	e.SetData(e)
 
-	e.store = opts.Store
-	e.cache = opts.Cache
 	e.memberID = opts.memberID
 	e.rewardFn = opts.rewardFn
 
 	// 定义索引由进程级注册表加载，本引擎按同一批定义重建链表；失败则构造失败。
-	taskglobal.setStore(e.store)
 	ctx := context.Background()
 	rows, err := taskglobal.loadDefs(ctx)
 	if err != nil {
@@ -151,35 +133,15 @@ func (e *Engine) Reload(ctx context.Context, rows []TaskDef) error {
 	return nil
 }
 
-// loadProgressMap 取该会员本轮期的进度行，按 taskID 归档。
+// loadProgressMap 逐任务读取本周期进度行，按 taskID 归档。
 func (e *Engine) loadProgressMap(ctx context.Context, rows []TaskDef, now time.Time) (map[int64]*TaskProgress, error) {
 	out := make(map[int64]*TaskProgress, len(rows))
-	if e.cache != nil {
-		// 缓存路径：逐任务 GetOrLoad，回源由缓存层负责。
-		for _, def := range rows {
-			p, err := e.loadCached(ctx, ProgressKey{MemberID: e.memberID, TaskID: def.ID, CycleKey: TaskCycleKey(def.Cycle, now, def.ID)})
-			if err != nil {
-				return nil, err
-			}
-			if p != nil {
-				out[def.ID] = p
-			}
-		}
-		return out, nil
-	}
-	progRows, err := e.store.ListProgressByMember(ctx, e.memberID)
-	if err != nil {
-		return nil, err
-	}
-	// 只认本周期行，旧周期进度不得复活。
-	byKey := make(map[progressRowKey]*TaskProgress, len(progRows))
-	for i := range progRows {
-		p := progRows[i]
-		byKey[progressRowKey{TaskID: p.TaskID, CycleKey: p.CycleKey}] = &p
-	}
 	for _, def := range rows {
-		key := progressRowKey{TaskID: def.ID, CycleKey: TaskCycleKey(def.Cycle, now, def.ID)}
-		if p := byKey[key]; p != nil {
+		p, err := loadProgressRow(ctx, e.memberID, def.ID, TaskCycleKey(def.Cycle, now, def.ID))
+		if err != nil {
+			return nil, err
+		}
+		if p != nil {
 			out[def.ID] = p
 		}
 	}
@@ -278,7 +240,7 @@ func (e *Engine) defOf(ctx context.Context, id int64) (*TaskDef, error) {
 	if d, ok := taskglobal.getDef(id); ok {
 		return d, nil
 	}
-	d, err := e.store.FindDefByID(ctx, id)
+	d, err := loadDef(ctx, id)
 	if err != nil || d == nil {
 		return nil, err
 	}
@@ -423,6 +385,9 @@ func (e *Engine) UpdateTask(ctx context.Context, task *TaskProgress, parm *Progr
 	t := task
 	if live := e.teak_progress(task.TaskID); live != nil {
 		t = live
+	} else {
+		// 传进来的副本可能只填了 TaskID，补齐归属会员，否则无法构造缓存行键。
+		t.MemberID = e.memberID
 	}
 	def := t.GetDef()
 	// 不在定义索引里（停用或 Reload 后新增）：回源 DB 才能区分缺失与停用。
@@ -474,7 +439,7 @@ func (e *Engine) advance(ctx context.Context, t *TaskProgress, parm *ProgressPar
 	if achieved && def.GrantMode == GrantAuto {
 		e.reward(t)
 	}
-	if err := e.persist(ctx, t, now); err != nil {
+	if err := e.persist(ctx, t); err != nil {
 		return err
 	}
 	if !achieved {
@@ -539,15 +504,14 @@ func applyProgress(t *TaskProgress, def *TaskDef, parm *ProgressParm, now time.T
 	return achieved
 }
 
-// persist 落库一次进度；缓存路径同步写 Redis 并定时回写，回退路径走事务 upsert。
-func (e *Engine) persist(ctx context.Context, t *TaskProgress, now time.Time) error {
-	if e.cache != nil {
-		key := ProgressKey{MemberID: e.memberID, TaskID: t.TaskID, CycleKey: t.CycleKey}
-		return e.cache.Write(ctx, key, t)
+// persist 写一次进度：写 Redis 并登记脏账，由缓存层定时落库。
+func (e *Engine) persist(ctx context.Context, t *TaskProgress) error {
+	// 快照列 NOT NULL，空值落空对象。
+	if t.SnapshotJSON == "" {
+		t.SnapshotJSON = "{}"
 	}
-	return e.store.WithTx(ctx, func(tx Tx) error {
-		return tx.UpsertProgress(ctx, t, now)
-	})
+	// key 留空：缓存层按 member_id/task_id/cycle_key 推导行键。
+	return db.CacheSave(ctx, tableTaskProgress, "", t, false)
 }
 
 // reward 触发宿主发奖回调；回调没有返回值，失败无法回滚本次写入。
@@ -555,19 +519,6 @@ func (e *Engine) reward(p *TaskProgress) {
 	if e.rewardFn != nil {
 		e.rewardFn(p)
 	}
-}
-
-// loadCached 从两级缓存读进度；回源确认不存在时返回 (nil, nil)。
-func (e *Engine) loadCached(ctx context.Context, key ProgressKey) (*TaskProgress, error) {
-	p, err := e.cache.GetOrLoad(ctx, key)
-	if err != nil {
-		// 源确认不存在：视为没有进度行。
-		if errors.Is(err, db.ErrCacheNotFound) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	return p, nil
 }
 
 // notifyDepthKey 完成通知的递归深度键。
@@ -615,7 +566,7 @@ func (e *Engine) prerequisiteReady(ctx context.Context, def *TaskDef) (bool, err
 	}
 	// 前置按自己的周期计算当前 cycle_key。
 	cycle := TaskCycleKey(pre.Cycle, util.CurrentTime(), pre.ID)
-	return e.store.HasDoneProgress(ctx, e.memberID, pre.ID, cycle)
+	return hasDoneProgress(ctx, e.memberID, pre.ID, cycle)
 }
 
 // defInWindow 投放窗口判定；now == start/end 视为在窗内。

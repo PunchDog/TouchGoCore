@@ -23,12 +23,13 @@ func TestGetTaskListAndSingle(t *testing.T) {
 	disabled := sampleDef(0)
 	disabled.ID = 4
 
-	store := newFakeStore(visible, hidden, grouped, disabled)
 	cycle := TaskCycleKey(CycleDaily, util.CurrentTime(), 1)
-	store.rows = []TaskProgress{
-		{ID: 1, MemberID: 1, TaskID: 1, CycleKey: cycle, Progress: 2, Status: ProgressActive, SnapshotJSON: "{}"},
-	}
-	e := newTestEngine(t, store)
+	setupStorage(t)
+	seedDefs(t, visible, hidden, grouped, disabled)
+	seedProgress(t, TaskProgress{
+		MemberID: 1, TaskID: 1, CycleKey: cycle, Progress: 2, Status: ProgressActive, SnapshotJSON: "{}",
+	})
+	e := newEngineFor(t, 1)
 	ctx := context.Background()
 
 	list, err := e.GetTask(ctx, 0, "")
@@ -84,8 +85,7 @@ func TestGetTaskRoundTripUpdate(t *testing.T) {
 	ctx := context.Background()
 	def := sampleDef(1)
 	def.TargetCount = 2
-	store := newFakeStore(def)
-	e := newTestEngine(t, store)
+	e := newTestEngine(t, def)
 
 	task := fetchTask(t, e, def.ID)
 	if task.Status != "" || task.Progress != 0 {
@@ -102,7 +102,7 @@ func TestGetTaskRoundTripUpdate(t *testing.T) {
 	if err := e.UpdateTask(ctx, task, &ProgressParm{ProgressParmAdd: 1}); err != nil {
 		t.Fatalf("2/2 应达标: %v", err)
 	}
-	if got := rowsFor(store, def.ID)[0].Status; got != ProgressCompleted {
+	if got := progressOf(t, def).Status; got != ProgressCompleted {
 		t.Fatalf("status=%s", got)
 	}
 }
@@ -112,8 +112,7 @@ func TestGetTaskSnapshotRecordsParm(t *testing.T) {
 	ctx := context.Background()
 	def := sampleDef(1)
 	def.TargetCount = 5
-	store := newFakeStore(def)
-	e := newTestEngine(t, store)
+	e := newTestEngine(t, def)
 
 	task := fetchTask(t, e, def.ID)
 	if err := e.UpdateTask(ctx, task, &ProgressParm{ProgressParmAdd: 3}); !errors.Is(err, ErrNotComplete) {
@@ -122,7 +121,7 @@ func TestGetTaskSnapshotRecordsParm(t *testing.T) {
 	if task.SnapshotJSON == "" || task.SnapshotJSON == "{}" {
 		t.Fatalf("快照应记录上报参数，实际 %q", task.SnapshotJSON)
 	}
-	if got := rowsFor(store, def.ID)[0].SnapshotJSON; got != task.SnapshotJSON {
+	if got := progressOf(t, def).SnapshotJSON; got != task.SnapshotJSON {
 		t.Fatalf("落库快照=%q 内存快照=%q", got, task.SnapshotJSON)
 	}
 }

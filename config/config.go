@@ -14,10 +14,10 @@ import (
 
 type Cfg struct {
 	Redis     *RedisConfig             `json:"redis"`
+	Cache     *CacheConfig             `json:"cache"` // 统一数据库缓存层（Redis 一级 + 定时回写 DB）
 	MySql     *MySqlDBConfig           `json:"mysql"`
 	Postgre   *PostgreDBConfig         `json:"postgres"`
 	Mongo     *MongoDBConfig           `json:"mongo"`
-	Cache     *CacheConfig             `json:"cache"`      // 两级缓存（Redis+DB 回源）；nil=不启用
 	Ws        *WebsocketConfig         `json:"ws"`         // websocket启动模式:off不启动;:1234启动监听详细配置
 	LuaConfig *LuaConfig               `json:"lua_config"` // Lua 详细配置,如果没有就不启动lua
 	LogLevel  string                   `json:"log_level"`  // 日志等级，off为不开,其次为INFO,DEBUG,WARN,ERROR

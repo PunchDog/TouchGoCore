@@ -6,6 +6,9 @@
 -- 达成阈值是 target_count（float64）；status 只有 active/completed/claimed。
 --
 -- 建表后由宿主按自己的业务写入 task_def；本包不提供后台 CRUD 服务。
+--
+-- 注意：task_progress 依赖 (member_id, task_id, cycle_key) 唯一键做 Upsert 落库。
+-- 已有历史库请先执行 migrate_unique_progress.sql 去重再加键。
 
 SET NAMES utf8mb4;
 
@@ -46,5 +49,5 @@ CREATE TABLE IF NOT EXISTS `task_progress` (
   `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
-  KEY `ix_task_progress_cycle` (`member_id`,`task_id`,`cycle_key`)
+  UNIQUE KEY `uk_task_progress_cycle` (`member_id`,`task_id`,`cycle_key`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='任务进度（每周期一行）';

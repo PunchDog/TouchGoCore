@@ -2,7 +2,7 @@
 
 `db/postgres` 子包在 GORM v2 + pgx 之上复刻了 `db/mysql` 的全部能力：泛型
 `Repository[T]`、链式 `Query`、事务 `Tx`、错误分类 `Kind`、可观测性插件，并接入
-既有的 Redis 两级缓存架构（脏账本 / 分布式锁 / Seq CAS 全部复用，无需额外配置）。
+既有的统一缓存层（`touchgocore/db/dbcache`）可直接绑定 PostgreSQL 表。
 
 对外统一走 `db` 门面（`db/postgres_api.go`），与 MySQL 一样带 `Postgres` 前缀，
 调用方无需关心实现位置。
@@ -80,44 +80,31 @@ return tx.Commit()
 | `db.PGInt64Array` | `bigint[]` / `integer[]` | 一维整型数组 |
 | `db.PGHStore` | `hstore` | 需服务端启用 `hstore` 扩展 |
 
-## 接入 Redis 两级缓存
+## 接入统一缓存（dbcache）
 
-回源/落库适配器在 `db/cache/postgres_source.go`，与 MySQL 版同构。缓存实例本身的
-脏账本、分布式锁、Seq CAS、写缓冲全部由 `db/cache` 框架提供，Postgres 侧零额外配置。
+PostgreSQL 表通过根包门面 `db.CacheBindPostgres` 绑定；缓存实例由 `db.InitCache` 创建，
+延迟落库、脏 ZSET、行 hash 模型全部由 `db/dbcache` 提供，Postgres 侧零额外配置。
 
 ```go
-// WithLoader/WithSaver 是泛型函数，门面无法别名转发，须直接引入子包：
-import cachepkg "touchgocore/db/cache"
+// 启动期绑定：键列与冲突列必须对应唯一索引。
+err := db.CacheBindPostgres[Player]("player", app.Postgres, db.CacheBindOption[Player]{
+    KeyColumns:      []string{"name"},
+    ConflictColumns: []string{"name"},
+    OrderBy:         []string{"id DESC"},
+})
 
-repo := db.NewPostgresRepository[Player](app.Postgres)
-// 业务键 = 玩家名；name 必须有唯一索引（回源按它 IN 查，落库按它冲突）
-keyToID := func(k string) any { return k }        // 业务键 → 主键列取值
-idOf := func(p *Player) string { return p.Name }  // 实体 → 业务键（回填映射用）
+// 读：条件恰好覆盖键列时先查 Redis，未命中回源 Postgres 并回填。
+var p Player
+err = db.CacheQuery[Player](ctx, "player", playerCond{Name: &name}, &p)
 
-c, err := db.OpenCache[string, Player](
-    app.Cache, "player",
-    cachepkg.WithLoader[string, Player](
-        db.NewPostgresCacheBatchSource(repo, keyToID, "name", nil, idOf)),
-    cachepkg.WithSaver[string, Player](
-        db.NewPostgresCacheBatchSink(repo, keyToID, "name")), // 冲突列与回源列必须一致
-)
-if err != nil {
-    return err
-}
-
-// 读线：Redis 命中直接返回，未命中回源 Postgres 并回填
-p, _ := c.GetOrLoad(ctx, "alice")
-// 写线：同步写 Redis + 入写缓冲，定时器批量 UpsertBatch 落 Postgres
-_ = c.Write(ctx, "alice", &Player{Name: "alice"})
+// 写：false=延迟落库（脏 ZSET + 定时器），true=返回前落库。
+err = db.CacheSave(ctx, "player", name, &p, false)
 ```
 
-> `idCol`（回源 `IN` 的列）与 sink 的 `idCols`（`UpsertBatch` 冲突目标）必须指向
-> 同一个唯一列。回源按 `name` 查、落库按 `id` 冲突，会让更新落在错误的行上。
-> 第 4 参 `keyFn` 传 `nil` 即用框架默认的键序列化，与该 Cache 的 `WithKeyFunc`
-> 不一致时必须显式传同一个函数。
+> `KeyColumns` 决定 Redis 行键与默认冲突列；表上没有对应唯一索引时必须提供
+> `FlushFn` 自定义落库（参考 `task_engine.OpenProgressCache`）。
 
-资金类只读表沿用框架口径：只挂 `Loader` 不挂 `Saver`，事务 COMMIT 成功后再
-`InvalidateOnCommit` 失效缓存，不要走 `Write`。
+资金类只读表不要调用 `Save`；事务 COMMIT 后仍需按业务自行失效或更新缓存。
 
 ## 错误分类
 

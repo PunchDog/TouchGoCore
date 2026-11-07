@@ -59,12 +59,10 @@ func (e *Engine) Remove()
 |---|---|
 | `defs syncmap.Map[int64, *TaskDef]` | 任务定义索引（只存启用行） |
 | `engineList NodeList` | 已创建引擎的注册链（`Engine` 内嵌 `list.Node`） |
-| `store Store` | 定义读取源；进程内各引擎共用，后装配者覆盖 |
-| `notifytrigger Policy` | 完成通知触发点 |
 
 `taskglobal.Reload` 用 `loadDefs` 读取启用行并整体替换索引，再广播给每个已注册引擎；
 `New` 也经 `taskglobal.loadDefs` 取同一批 rows 后调 `e.Reload(ctx, rows)`。
-`TaskProgress.GetDef()` 查 defs，未命中由 `defOf` 回源 DB 后 `taskglobal.storeDef` 回填；
+`TaskProgress.GetDef()` 查 defs，未命中由 `defOf` 经 `CacheQuery` 回源后 `taskglobal.storeDef` 回填；
 `New` 调 `taskglobal.addEngine` 注册引擎。
 
 ## ProgressParm 与进度口径
@@ -112,39 +110,41 @@ for _, tk := range tasks {
 
 ## 完成通知
 
-`SetCompletedNotifyTrigger(Policy)` / `CompletedNotifyTrigger()` 读写全局完成通知触发点
-（存在 `taskglobal.notifytrigger`）：达标后以 `ProgressParmAdd=1` 再扇出一次 `OnEvent`，
-递归深度上限 8。**零值（空串）即关闭**，装配层启动时设置。
+`CompletedNotifyTrigger` 是固定触发点常量：达标后以 `ProgressParmAdd=1` 再扇出一次 `OnEvent`，
+递归深度上限 8。把任务的 `trigger` 配成 `CompletedNotifyTrigger` 即可接收完成通知；
+没有任何任务挂在该触发点时不产生额外写入。
 
 ## 快速接入
 
 ```go
-store := taskengine.NewMySQLStore(app.MySQL)
+// 1. 统一缓存层必须先初始化（Redis 一级 + 定时回写 DB）
+if err := db.InitCache(db.CacheConfigFrom(app.Cfg.Cache), app.Redis.Get()); err != nil { ... }
 
-// 可选：进度写线走两级缓存（Redis 一级 + 定时回写 DB）
-progressCache, err := taskengine.OpenProgressCache(app.Cache, store)
-if err != nil { ... }
+// 2. 把 task_def / task_progress 绑定到缓存层
+if err := taskengine.OpenStorage(app.MySQL); err != nil { ... }
 
-taskengine.SetCompletedNotifyTrigger("TASK_COMPLETED") // 不需要就留空
-
+// 3. 每个会员一个引擎
 engine, err := taskengine.New(taskengine.Options{
-    Store:    store,
-    Cache:    progressCache, // nil = 直接走 Store 事务
-    memberID: uid,           // 见「已知缺口」
+    memberID: uid,  // 见「已知缺口」
     rewardFn: func(p *taskengine.TaskProgress) { /* 按 p.GetDef().Reward 发放 */ },
 })
 ```
 
-`New` 会立即 `Reload`（读 `task_def` + 该会员 `task_progress`），Store 不可用时构造失败。
-建表见 `task_engine/schema.sql`。`MySQLStore` 另外提供 `CreateDef`/`UpdateDef` 两个存储原语。
+`New` 会立即 `Reload`（读 `task_def` + 该会员 `task_progress`），缓存层未初始化时构造失败。
+建表见 `task_engine/schema.sql`；历史库需先执行 `task_engine/migrate_unique_progress.sql`
+补三列唯一键。`CreateDef`/`UpdateDef` 是包级存储原语，入参都是完整的 `TaskDef`：
+`CreateDef` 要求调用方给出非零 `id`（行键由主键组成），`UpdateDef` 先读旧行再全量写回；
+两者都走 `CacheSave(mustSave=true)`，返回前已落库。
 
 ## 缓存与落库
 
-- `OpenProgressCache(layer, store, opts...)` 在 `app.Cache` 上注册 `task_progress` 类型；
-- `Reload` 读线：缓存路径逐任务 `GetOrLoad`，回退路径一次 `ListProgressByMember`；
-- 写线 `persist`：缓存路径 `Cache.Write`（同步写 Redis，框架定时回写 `SaveProgress`）；
-  未配置缓存时走 `Store.WithTx` + `UpsertProgress`；
-- 内存对象与缓存里是同一份进度，崩溃时以最后一次 `persist` 为准。
+- 读：`CacheQuery`。按 (member_id, task_id, cycle_key) 点查先读 Redis，未命中回源 DB 并回填；
+  定义按 id 点查、启用列表查 DB（列表查询不走 Redis）。
+- 写：`CacheSave(mustSave=false)`。进度写只更新 Redis 并登记脏账，由缓存层定时批量落库，
+  默认滞后约一个 `flush_interval_ms`（3s）；停机时 `StopCache` 做 final flush。
+- 落库依赖 `task_progress(member_id, task_id, cycle_key)` 唯一键，走
+  `INSERT ... ON DUPLICATE KEY UPDATE`，每个周期严格一行。
+- 内存对象与 Redis 里是同一份进度；进程崩溃最多丢失最后一个 flush 周期。
 
 ## 关键语义
 
@@ -168,7 +168,12 @@ engine, err := taskengine.New(taskengine.Options{
 
 ## 存储注意事项
 
-- `UpsertProgress` 前先 `LoadProgress` 定位 id，再 `WHERE id=? FOR UPDATE`；直接
-  `ORDER BY id DESC LIMIT 1 FOR UPDATE` 会在 `status` 二级索引上死锁（1213）。
-- 无行路径不加 `FOR UPDATE`（gap lock 会与并发 INSERT 互相等 insert intention）。
+- `task_progress` 必须有 `(member_id, task_id, cycle_key)` 唯一键，否则批量落库的
+  `ON DUPLICATE KEY UPDATE` 不触发，会插入重复行。
+- 进度写是延迟落库（`mustSave=false`）：读到的是 Redis 最新值，DB 可能滞后一个 flush 周期；
+  需要强一致的外部读取应先 `db.FlushCache(ctx, "task_progress")`。
+- 定义表也纳入缓存（TTL 跟随全局配置，默认不过期）：绕过 `UpdateDef` 直接改库，
+  Redis 里的旧定义在键过期前不可见。定义变更统一走 `UpdateDef` + `taskglobal.Reload`。
+- `CacheSave` 是全行覆盖：调用方必须持有完整行（`UpdateDef` 会先读旧行合并）。
 - `defs` 与四条链都是单进程视图；多实例部署时任务定义变更需各自 `Reload`。
+- 运行集成测试需提供真实 Redis/MySQL（见 `storage_test.go` 中的 `TASKENGINE_TEST_*` 环境变量）。

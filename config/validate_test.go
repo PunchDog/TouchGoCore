@@ -12,6 +12,31 @@ func TestValidateNil(t *testing.T) {
 	}
 }
 
+// TestValidateCacheDBType 验证 cache.db_type 只接受框架已实现的三种后端。
+func TestValidateCacheDBType(t *testing.T) {
+	redis := &RedisConfig{Host: "127.0.0.1:6379"}
+	tests := []struct {
+		name    string
+		dbType  string
+		wantErr bool
+	}{
+		{name: "空值按 mysql", dbType: "", wantErr: false},
+		{name: "mysql", dbType: DBTypeMySQL, wantErr: false},
+		{name: "mongo", dbType: DBTypeMongo, wantErr: false},
+		{name: "postgres", dbType: DBTypePostgres, wantErr: false},
+		{name: "大小写不敏感", dbType: "MySQL", wantErr: false},
+		{name: "不支持的后端", dbType: "sqlite", wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateCache(&CacheConfig{Enabled: true, DBType: tc.dbType}, redis)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("db_type=%q err=%v wantErr=%v", tc.dbType, err, tc.wantErr)
+			}
+		})
+	}
+}
+
 func TestTimerGoroutineLimit(t *testing.T) {
 	tests := []struct {
 		name string

@@ -100,12 +100,6 @@ func WithPostgresAutoMigrate(enable bool) PostgresOption {
 	return pgdb.WithAutoMigrate(enable)
 }
 
-// ==================== PostgreSQL 缓存回源/落库适配器 ====================
-//
-// 缓存适配器包装函数（NewPostgresCacheSource / NewPostgresCacheBatchSource /
-// NewPostgresCacheSink / NewPostgresCacheBatchSink）与 MySQL 版同处 cache_api.go，
-// 便于「回源/落库」这组能力在一处对照查阅。底层实现在 db/cache/postgres_source.go。
-
 // ==================== PostgreSQL 默认 metrics 适配器 ====================
 
 // PostgresMetricsAdapter 把 metrics.DB 适配为 pgdb.MetricsHook

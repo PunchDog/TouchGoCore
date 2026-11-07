@@ -161,10 +161,6 @@ func (c *Cfg) Validate() error {
 		return err
 	}
 
-	if err := validateCache(c); err != nil {
-		return err
-	}
-
 	rpc := c.Rpc
 	if rpc != nil {
 		for i, s := range rpc.Server {
@@ -206,6 +202,61 @@ func (c *Cfg) Validate() error {
 		}
 	}
 
+	if err := validateCache(c.Cache, c.Redis); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// validateCache 校验缓存层配置的取值范围与依赖关系。
+func validateCache(c *CacheConfig, redis *RedisConfig) error {
+	if c == nil || !c.Enabled {
+		return nil
+	}
+	if redis == nil {
+		return fmt.Errorf("cache.enabled=true 但缺少 redis 配置")
+	}
+	// db_type 只允许框架已实现的三种后端；空值按 mysql 处理。
+	switch strings.ToLower(strings.TrimSpace(c.DBType)) {
+	case "", DBTypeMySQL, DBTypeMongo, DBTypePostgres:
+	default:
+		return fmt.Errorf("cache.db_type 只支持 mysql/mongo/postgres，当前 %q", c.DBType)
+	}
+	if c.TTLMS < 0 {
+		return fmt.Errorf("cache.ttl_ms 不能为负")
+	}
+	if c.FlushIntervalMS < 0 {
+		return fmt.Errorf("cache.flush_interval_ms 不能为负")
+	}
+	if c.FlushIntervalMS > 0 && c.FlushIntervalMS < 100 {
+		return fmt.Errorf("cache.flush_interval_ms 必须为 0 或 >= 100")
+	}
+	if c.QueryTimeoutMS < 0 {
+		return fmt.Errorf("cache.query_timeout_ms 不能为负")
+	}
+	if c.FlushTimeoutMS < 0 {
+		return fmt.Errorf("cache.flush_timeout_ms 不能为负")
+	}
+	if c.CloseBudgetMS < 0 {
+		return fmt.Errorf("cache.close_budget_ms 不能为负")
+	}
+	if c.MaxRetry < 0 {
+		return fmt.Errorf("cache.max_retry 不能为负")
+	}
+	if c.DirtyBatchSize < 0 {
+		return fmt.Errorf("cache.dirty_batch_size 不能为负")
+	}
+	// TTL 早于落库会让行在被写回 DB 前消失，必须显著大于扫描间隔。
+	if c.TTLMS > 0 {
+		interval := c.FlushIntervalMS
+		if interval <= 0 {
+			interval = 3000
+		}
+		if c.TTLMS < 3*interval {
+			return fmt.Errorf("cache.ttl_ms 必须为 0 或至少为 flush_interval_ms 的 3 倍")
+		}
+	}
 	return nil
 }
 
@@ -525,35 +576,6 @@ func checkNftBaseURL(name, raw string) error {
 		}
 	}
 	return fmt.Errorf("nft_sdks.%s.base_url 必须 https（明文通道仅允许 http://127.0.0.1/localhost/[::1]）", name)
-}
-
-// validateCache 校验两级缓存配置的明显错误。时长类字段 <=0 一律回落框架默认，
-// 不在此报错；这里拦的是逻辑上不成立的取值。
-func validateCache(c *Cfg) error {
-	cc := c.Cache
-	if cc == nil || !cc.Enabled {
-		return nil
-	}
-	if cc.LogicalPct != 0 && (cc.LogicalPct < 1 || cc.LogicalPct > 99) {
-		return fmt.Errorf("cache.logical_pct=%d 必须在 1..99（0 表示用默认）", cc.LogicalPct)
-	}
-	if cc.JitterPct != 0 && (cc.JitterPct < 0 || cc.JitterPct > 50) {
-		return fmt.Errorf("cache.jitter_pct=%d 必须在 0..50（0 表示用默认）", cc.JitterPct)
-	}
-	if cc.Shards != 0 && (cc.Shards < 1 || cc.Shards&(cc.Shards-1) != 0) {
-		return fmt.Errorf("cache.shards=%d 必须是 2 的幂", cc.Shards)
-	}
-	switch s := strings.ToLower(strings.TrimSpace(cc.StalePolicy)); s {
-	case "", "async", "wait":
-	default:
-		return fmt.Errorf("cache.stale_policy=%s 非法（可选 async / wait）", cc.StalePolicy)
-	}
-	switch s := strings.ToLower(strings.TrimSpace(cc.Overflow)); s {
-	case "", "block", "drop":
-	default:
-		return fmt.Errorf("cache.overflow=%s 非法（可选 block / drop）", cc.Overflow)
-	}
-	return nil
 }
 
 // sortedMapKeys 只为报错顺序稳定：同一份错配置两次启动报同一个首条错误，

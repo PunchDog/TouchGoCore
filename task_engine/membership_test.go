@@ -22,12 +22,13 @@ func TestReloadAttachesByStatus(t *testing.T) {
 	claimed.GrantMode = GrantAuto
 
 	now := util.CurrentTime()
-	store := newFakeStore(active, done, claimed)
-	store.rows = []TaskProgress{
-		{ID: 10, MemberID: 1, TaskID: 2, CycleKey: TaskCycleKey(done.Cycle, now, 2), Progress: 1, Status: ProgressCompleted, SnapshotJSON: "{}"},
-		{ID: 11, MemberID: 1, TaskID: 3, CycleKey: TaskCycleKey(claimed.Cycle, now, 3), Progress: 1, Status: ProgressClaimed, SnapshotJSON: "{}"},
-	}
-	e := newTestEngine(t, store)
+	setupStorage(t)
+	seedDefs(t, active, done, claimed)
+	seedProgress(t,
+		TaskProgress{MemberID: 1, TaskID: 2, CycleKey: TaskCycleKey(done.Cycle, now, 2), Progress: 1, Status: ProgressCompleted, SnapshotJSON: "{}"},
+		TaskProgress{MemberID: 1, TaskID: 3, CycleKey: TaskCycleKey(claimed.Cycle, now, 3), Progress: 1, Status: ProgressClaimed, SnapshotJSON: "{}"},
+	)
+	e := newEngineFor(t, 1)
 
 	tasks := e.teak_progress(1)
 	dones := e.teak_progress(2)
@@ -77,8 +78,7 @@ func TestOnEventSwitchesToCompleteList(t *testing.T) {
 	ctx := context.Background()
 	def := sampleDef(1)
 	def.TargetCount = 2
-	store := newFakeStore(def)
-	e := newTestEngine(t, store)
+	e := newTestEngine(t, def)
 	task := e.teak_progress(def.ID)
 
 	if err := e.OnEvent(ctx, addParm("CHECKIN")); err != nil {
@@ -103,12 +103,11 @@ func TestOnEventSwitchesToCompleteList(t *testing.T) {
 		t.Fatal("completed 应挂 completetasklist+tasklist")
 	}
 	// 事件再来得不到该任务（triggerlist 已无节点），进度不再变化。
-	rowsBefore := len(rowsFor(store, def.ID))
 	if err := e.OnEvent(ctx, addParm("CHECKIN")); err != nil {
 		t.Fatalf("第三次事件: %v", err)
 	}
-	if task.Progress != 2 || len(rowsFor(store, def.ID)) != rowsBefore {
-		t.Fatalf("completed 不应被再次推进: %+v rows=%+v", task, store.rows)
+	if task.Progress != 2 || progressOf(t, def).Status != ProgressCompleted {
+		t.Fatalf("completed 不应被再次推进: %+v", task)
 	}
 }
 
@@ -117,8 +116,7 @@ func TestOnEventSwitchesToClaimedList(t *testing.T) {
 	ctx := context.Background()
 	def := sampleDef(1)
 	def.GrantMode = GrantAuto
-	store := newFakeStore(def)
-	e := newTestEngine(t, store)
+	e := newTestEngine(t, def)
 	task := e.teak_progress(def.ID)
 
 	if err := e.OnEvent(ctx, addParm("CHECKIN")); err != nil {
@@ -145,8 +143,7 @@ func TestUpdateTaskSwitchesLists(t *testing.T) {
 	def := sampleDef(1)
 	def.GrantMode = GrantAuto
 	def.TargetCount = 1
-	store := newFakeStore(def)
-	e := newTestEngine(t, store)
+	e := newTestEngine(t, def)
 	task := fetchTask(t, e, def.ID)
 
 	if err := e.UpdateTask(ctx, task, &ProgressParm{ProgressParmAdd: 1}); err != nil {
@@ -162,8 +159,7 @@ func TestRollCycleReactivatesTerminalTasks(t *testing.T) {
 	ctx := context.Background()
 	def := sampleDef(1)
 	def.GrantMode = GrantAuto
-	store := newFakeStore(def)
-	e := newTestEngine(t, store)
+	e := newTestEngine(t, def)
 	task := e.teak_progress(def.ID)
 
 	if err := e.OnEvent(ctx, addParm("CHECKIN")); err != nil {
@@ -198,14 +194,13 @@ func TestRollCycleReactivatesTerminalTasks(t *testing.T) {
 func TestUpdateTaskTempObjectNotAttached(t *testing.T) {
 	ctx := context.Background()
 	def := sampleDef(1)
-	store := newFakeStore(def)
-	e := newTestEngine(t, store)
+	e := newTestEngine(t, def)
 	before := e.tasklist.Length()
 
 	late := sampleDef(1)
 	late.ID = 42
 	late.Trigger = "LATE"
-	store.defs[late.ID] = late
+	seedDefs(t, late)
 
 	if err := e.UpdateTask(ctx, &TaskProgress{TaskID: late.ID}, &ProgressParm{ProgressParmAdd: 1}); err != nil {
 		t.Fatalf("回源定义应可推进: %v", err)
@@ -220,7 +215,7 @@ func TestUpdateTaskTempObjectNotAttached(t *testing.T) {
 		t.Fatalf("临时对象不得进 triggerlist，长度=%d", tl.Length())
 	}
 	// 落库仍然发生。
-	if len(rowsFor(store, late.ID)) != 1 {
-		t.Fatalf("应落一行进度: %+v", store.rows)
+	if progressOf(t, late) == nil {
+		t.Fatalf("应落一行进度: %+v", progressOf(t, late))
 	}
 }

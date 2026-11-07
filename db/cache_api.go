@@ -1,334 +1,111 @@
-// 本文件是两级缓存（db/cache 子包）的对外门面，风格对齐 mysql_api.go：
-// 类型别名 + 泛型包装函数 + 配置转换。构造选项（WithTTL/WithLoader 等）是
-// 泛型函数，无法别名转发，直接从 touchgocore/db/cache 包引入使用即可。
+// Package db 的统一缓存门面。
+//
+// 实现在 db/dbcache 子包；本文件只做类型别名与薄封装，调用方 import
+// touchgocore/db 后即可使用 CacheQuery / CacheSave / CacheBind*。
+// 子包不 import 根 db，因此这里的反向引用不会形成循环依赖。
 package db
 
 import (
 	"context"
-	"strings"
-	"time"
-
-	"touchgocore/config"
-	"touchgocore/util"
-
-	cachepkg "touchgocore/db/cache"
 
 	"github.com/redis/go-redis/v9"
+
+	"touchgocore/config"
+	"touchgocore/db/dbcache"
 )
 
-// ==================== 缓存类型别名 ====================
+// CacheEngine 是统一缓存层实例。
+type CacheEngine = dbcache.Engine
 
-type (
-	KV             = cachepkg.KV
-	CacheConfig    = cachepkg.Config
-	StatsSnapshot  = cachepkg.StatsSnapshot
-	StalePolicy    = cachepkg.StalePolicy
-	OverflowPolicy = cachepkg.OverflowPolicy
-	CacheLayer     = cachepkg.Layer
-	LayerOption    = cachepkg.LayerOption
-	Codec          = cachepkg.Codec
-	OpKind         = cachepkg.OpKind
+// CacheConfig 是缓存层运行参数。
+type CacheConfig = dbcache.Config
 
-	Cache[K comparable, V any]       = cachepkg.Cache[K, V]
-	CacheOption[K comparable, V any] = cachepkg.Option[K, V]
-	Loader[K comparable, V any]      = cachepkg.Loader[K, V]
-	BatchLoader[K comparable, V any] = cachepkg.BatchLoader[K, V]
-	Saver[K comparable, V any]       = cachepkg.Saver[K, V]
-	BatchSaver[K comparable, V any]  = cachepkg.BatchSaver[K, V]
-	Item[K comparable]               = cachepkg.Item[K]
+// CacheBindOption 是表绑定的可选参数。
+type CacheBindOption[T any] = dbcache.BindOption[T]
 
-	// PostCommitAction 业务事务 COMMIT 成功后才允许执行的缓存动作（见下 WithPostCommit）。
-	PostCommitAction = cachepkg.PostCommitAction
-)
-
-const (
-	StaleAsync      = cachepkg.StaleAsync
-	StaleWait       = cachepkg.StaleWait
-	OverflowBlock   = cachepkg.OverflowBlock
-	OverflowDrop    = cachepkg.OverflowDrop
-	OpUpsert        = cachepkg.OpUpsert
-	OpDelete        = cachepkg.OpDelete
-	DefaultCacheTTL = 5 * time.Minute
-)
+// ==================== 缓存错误 ====================
 
 var (
-	ErrNoEntry           = cachepkg.ErrNoEntry           // Redis 无该键
-	ErrCacheNotFound     = cachepkg.ErrNotFound          // 源确认不存在
-	ErrCacheMiss         = cachepkg.ErrMiss              // 只查缓存未命中
-	ErrSourceUnavailable = cachepkg.ErrSourceUnavailable // 回源失败退避中
-	ErrLockTimeout       = cachepkg.ErrLockTimeout       // 分布式锁等待超时（跨进程回源/写被占用）
-
-	ErrNoPostCommitSink = cachepkg.ErrNoPostCommitSink // ctx 未挂 post-commit 队列
-	ErrPostCommitNested = cachepkg.ErrPostCommitNested // 重复挂载（嵌套事务失效归属不明）
-	ErrPostCommitRan    = cachepkg.ErrPostCommitRan    // 队列已执行，再排动作永不被运行
-	ErrFlushNotDurable  = cachepkg.ErrFlushNotDurable  // FlushNow 后仍有未落库脏数据
+	// ErrCacheNotInitialized 表示 InitCache 尚未调用。
+	ErrCacheNotInitialized = dbcache.ErrNotInitialized
+	// ErrCacheTableUnbound 表示表未通过 CacheBind* 注册。
+	ErrCacheTableUnbound = dbcache.ErrTableUnbound
+	// ErrCacheTableBound 表示同名表重复绑定。
+	ErrCacheTableBound = dbcache.ErrTableBound
+	// ErrCacheTypeMismatch 表示调用方模型类型与绑定类型不一致。
+	ErrCacheTypeMismatch = dbcache.ErrTypeMismatch
+	// ErrCacheEmptyCondition 表示条件为空（拒绝全表查询）。
+	ErrCacheEmptyCondition = dbcache.ErrEmptyCondition
+	// ErrCacheNoRows 表示数据库中没有符合条件的行。
+	ErrCacheNoRows = dbcache.ErrNoRows
+	// ErrCacheBadOut 表示 out 参数不是 *T 或 *[]T。
+	ErrCacheBadOut = dbcache.ErrBadOut
+	// ErrCacheBadCond 表示条件不是结构体指针。
+	ErrCacheBadCond = dbcache.ErrBadCond
+	// ErrCacheKeyMissing 表示无法从行或参数得到主键。
+	ErrCacheKeyMissing = dbcache.ErrKeyMissing
+	// ErrCacheDecode 表示 hash 行无法解码回模型。
+	ErrCacheDecode = dbcache.ErrDecode
+	// ErrCacheFlushIncomplete 表示停机时仍有未落库的脏键。
+	ErrCacheFlushIncomplete = dbcache.ErrFlushIncomplete
+	// ErrCacheBadColumn 表示列名不合法或不存在。
+	ErrCacheBadColumn = dbcache.ErrBadColumn
+	// ErrCacheNilRow 表示 CacheSave 收到 nil 行。
+	ErrCacheNilRow = dbcache.ErrNilRow
 )
 
-// DefaultCacheConfig 返回框架默认缓存配置
-func DefaultCacheConfig() CacheConfig { return cachepkg.DefaultConfig() }
+// ==================== 生命周期 ====================
 
-// WithLayerConfig 设置 Layer 注册默认配置（转发 db/cache.WithLayerConfig）
-func WithLayerConfig(c CacheConfig) LayerOption { return cachepkg.WithLayerConfig(c) }
-
-// NewJSONCodec 标准库 JSON 编解码
-func NewJSONCodec() Codec { return cachepkg.NewJSONCodec() }
-
-// WithLockTTL 设置分布式锁持有时长（<=0 禁用）；WithLockWait 设置抢锁最大等待。
-// 读线 miss 回源与写路径都会先抢这把锁（SETNX），未抢到则轮询等待，超时 ErrLockTimeout。
-func WithLockTTL[K comparable, V any](d time.Duration) CacheOption[K, V] {
-	return cachepkg.WithLockTTL[K, V](d)
-}
-func WithLockWait[K comparable, V any](d time.Duration) CacheOption[K, V] {
-	return cachepkg.WithLockWait[K, V](d)
-}
-func WithLockPollInterval[K comparable, V any](d time.Duration) CacheOption[K, V] {
-	return cachepkg.WithLockPollInterval[K, V](d)
+// CacheConfigFrom 把配置段转换为缓存运行参数；nil 或缺失字段回落默认值。
+func CacheConfigFrom(c *config.CacheConfig) CacheConfig {
+	return dbcache.ConfigFrom(c)
 }
 
-// ==================== 构造 ====================
-
-// NewRedisKV 用 App.Redis 的连接构造一级缓存句柄；连接缺失返回 nil。
-func NewRedisKV(r *Redis) KV {
-	if r == nil {
-		return nil
-	}
-	cmd := r.Get()
-	if cmd == nil {
-		return nil
-	}
-	return cachepkg.NewRedisStore(cmd, 16)
+// InitCache 创建并安装默认缓存引擎。rdb 为 nil 时返回错误。
+func InitCache(cfg CacheConfig, rdb redis.Cmdable) error {
+	return dbcache.Init(cfg, rdb)
 }
 
-// NewRedisKVStore 从原始 redis.Cmdable 构造 KV（集群批量读自动退化并发单键）
-func NewRedisKVStore(cmd redis.Cmdable, conc int) KV {
-	return cachepkg.NewRedisStore(cmd, conc)
+// DefaultCache 返回默认缓存引擎；未初始化时为 nil。
+func DefaultCache() *CacheEngine { return dbcache.Default() }
+
+// StartCache 启动默认引擎的延迟落库定时器。
+func StartCache(ctx context.Context) error { return dbcache.Start(ctx) }
+
+// StopCache 停止默认引擎并执行 final flush。
+func StopCache(ctx context.Context) error { return dbcache.Stop(ctx) }
+
+// CloseCache 卸载默认引擎并尽力完成 final flush。
+func CloseCache() { dbcache.Close() }
+
+// FlushCache 立即把指定表的全部脏键写入数据库。
+func FlushCache(ctx context.Context, table string) error { return dbcache.Flush(ctx, table) }
+
+// ==================== 表绑定 ====================
+
+// CacheBindMySQL 把表绑定到 MySQL 后端。
+func CacheBindMySQL[T any](table string, c *Client, opt CacheBindOption[T]) error {
+	return dbcache.BindMySQL[T](table, c, opt)
 }
 
-// NewCacheLayer 构造缓存层（多类型 Cache 的注册表 + 生命周期容器）
-func NewCacheLayer(kv KV, opts ...LayerOption) *CacheLayer {
-	return cachepkg.NewLayer(kv, opts...)
+// CacheBindPostgres 把表绑定到 PostgreSQL 后端。
+func CacheBindPostgres[T any](table string, c *PostgresClient, opt CacheBindOption[T]) error {
+	return dbcache.BindPostgres[T](table, c, opt)
 }
 
-// NewCache 独立构造一个类型的缓存（不经 Layer 时自行驱动 Run/Close）
-func NewCache[K comparable, V any](name string, r *Redis, opts ...CacheOption[K, V]) (*Cache[K, V], error) {
-	return cachepkg.New[K, V](name, NewRedisKV(r), opts...)
+// CacheBindMongo 把表绑定到 MongoDB 集合。
+func CacheBindMongo[T any](table string, dbo *DbOperate, opt CacheBindOption[T]) error {
+	return dbcache.BindMongo[T](table, dbo, opt)
 }
 
-// OpenCache 在 Layer 上注册一个类型的 Cache（名称唯一，继承 Layer 默认配置）
-func OpenCache[K comparable, V any](l *CacheLayer, name string, opts ...CacheOption[K, V]) (*Cache[K, V], error) {
-	return cachepkg.Register[K, V](l, name, opts...)
+// ==================== 数据接口 ====================
+
+// CacheQuery 按条件查询：out 传 *T 查单条，传 *[]T 查列表。
+func CacheQuery[T any](ctx context.Context, table string, cond any, out any) error {
+	return dbcache.Query[T](ctx, table, cond, out)
 }
 
-// ==================== 后端闭包工厂 ====================
-
-// NewLoaderFunc 闭包版回源（任意数据源通用）
-func NewLoaderFunc[K comparable, V any](f func(ctx context.Context, key K) (*V, error)) Loader[K, V] {
-	return cachepkg.LoaderFunc[K, V](f)
-}
-
-// NewSaverFunc 闭包版落库
-func NewSaverFunc[K comparable, V any](
-	save func(ctx context.Context, key K, val *V) error,
-	del func(ctx context.Context, key K) error,
-) Saver[K, V] {
-	return cachepkg.SaverFunc[K, V]{SaveFn: save, DeleteFn: del}
-}
-
-// NewMysqlCacheSource MySQL 主键回源（gorm 未命中 → ErrCacheNotFound）
-func NewMysqlCacheSource[T any, K comparable](r *Repository[T], keyToID func(K) any) Loader[K, T] {
-	return cachepkg.MysqlSource[T, K](r, keyToID)
-}
-
-// NewMysqlCacheBatchSource MySQL 多主键一次回源（FindAll + IN）。
-// keyFn 必须与该 Cache 的 WithKeyFunc 逐字一致，idOf 从实体取回业务键——
-// 三者错位会让批量结果对不上键，退化成「命中即 miss」的静默低效。
-func NewMysqlCacheBatchSource[T any, K comparable](
-	r *Repository[T],
-	keyToID func(K) any,
-	idCol string,
-	keyFn func(K) string,
-	idOf func(*T) K,
-) BatchLoader[K, T] {
-	return cachepkg.MysqlBatchSource[T, K](r, keyToID, idCol, keyFn, idOf)
-}
-
-// NewMysqlCacheSink MySQL 单条落库（Save→Upsert，Delete→软删）
-func NewMysqlCacheSink[T any, K comparable](r *Repository[T], keyToID func(K) any, idCols ...string) Saver[K, T] {
-	return cachepkg.MysqlSink[T, K](r, keyToID, idCols...)
-}
-
-// NewMysqlCacheBatchSink MySQL 批量落库（UpsertBatch 一条 SQL 搞定 upsert 集）
-func NewMysqlCacheBatchSink[T any, K comparable](r *Repository[T], keyToID func(K) any, idCols ...string) BatchSaver[K, T] {
-	return cachepkg.MysqlBatchSink[T, K](r, keyToID, idCols...)
-}
-
-// NewPostgresCacheSource PostgreSQL 主键回源（gorm 未命中 → ErrCacheNotFound）。
-// 与 NewMysqlCacheSource 同构，实体类型是 PostgresRepository[T]（与 MySQL 的
-// Repository[T] 是不同类型，故函数名单列 Postgres 前缀）。
-func NewPostgresCacheSource[T any, K comparable](r *PostgresRepository[T], keyToID func(K) any) Loader[K, T] {
-	return cachepkg.PostgresSource[T, K](r, keyToID)
-}
-
-// NewPostgresCacheBatchSource PostgreSQL 多主键一次回源（FindAll + IN）。
-// keyFn 必须与该 Cache 的 WithKeyFunc 逐字一致，idOf 从实体取回业务键——
-// 三者错位会让批量结果对不上键，退化成「命中即 miss」的静默低效。
-func NewPostgresCacheBatchSource[T any, K comparable](
-	r *PostgresRepository[T],
-	keyToID func(K) any,
-	idCol string,
-	keyFn func(K) string,
-	idOf func(*T) K,
-) BatchLoader[K, T] {
-	return cachepkg.PostgresBatchSource[T, K](r, keyToID, idCol, keyFn, idOf)
-}
-
-// NewPostgresCacheSink PostgreSQL 单条落库（Save→Upsert，Delete→软删）
-func NewPostgresCacheSink[T any, K comparable](r *PostgresRepository[T], keyToID func(K) any, idCols ...string) Saver[K, T] {
-	return cachepkg.PostgresSink[T, K](r, keyToID, idCols...)
-}
-
-// NewPostgresCacheBatchSink PostgreSQL 批量落库（UpsertBatch 一条 SQL 搞定 upsert 集）
-func NewPostgresCacheBatchSink[T any, K comparable](r *PostgresRepository[T], keyToID func(K) any, idCols ...string) BatchSaver[K, T] {
-	return cachepkg.PostgresBatchSink[T, K](r, keyToID, idCols...)
-}
-
-// ==================== 强一致写 / 事务边界（资金级路径用这组） ====================
-//
-// 写线 Write 是「同步写 Redis + 缓冲异步落库」，对资金表不可接受（丢失窗口 = flush 间隔，
-// 且整行 Upsert 会盖掉并发的增量更新）。资金表的正确形态是：持久化真源仍在业务事务里，
-// 缓存只做失效（DEL），且必须等 COMMIT 成功之后才动 Redis。
-//
-// 典型接线（数据访问层的事务包装）：
-//
-//	cctx, err := db.WithPostCommit(ctx)   // 挂失效动作队列
-//	tx := ...Begin...
-//	if err := fn(tx); err != nil { tx.Rollback(); return err }  // 回滚 → 队列一条不执行
-//	if err := tx.Commit(); err != nil { return err }
-//	if err := db.RunPostCommit(cctx); err != nil {
-//	    vars.Error("缓存失效失败（库已提交，至多陈旧一个 TTL）: %v", err) // 只告警，不翻转业务结果
-//	}
-// 业务函数内部则写 db.InvalidateOnCommit(cctx, infra.UserCache(), uid)。
-
-// WithPostCommit 给 ctx 挂 post-commit 动作队列（见 cachepkg.postcommit.go）。
-func WithPostCommit(ctx context.Context) (context.Context, error) {
-	return cachepkg.WithPostCommit(ctx)
-}
-
-// AppendPostCommit 追加动作；ctx 未挂队列返回 ErrNoPostCommitSink（不静默丢弃）。
-func AppendPostCommit(ctx context.Context, acts ...PostCommitAction) error {
-	return cachepkg.AppendPostCommit(ctx, acts...)
-}
-
-// RunPostCommit 执行并清空队列（COMMIT 成功后由事务包装器调用），返回聚合错误。
-func RunPostCommit(ctx context.Context) error { return cachepkg.RunPostCommit(ctx) }
-
-// Invalidate 生成「只失效 Redis」的动作；c 为 nil（本进程未启用缓存）时是空动作。
-func Invalidate[K comparable, V any](ctx context.Context, c *Cache[K, V], key K) PostCommitAction {
-	return cachepkg.Invalidate(ctx, c, key)
-}
-
-// InvalidateOnCommit 事务内标准失效：有队列则等 COMMIT，无队列则立即失效并告警。
-func InvalidateOnCommit[K comparable, V any](ctx context.Context, c *Cache[K, V], key K) error {
-	return cachepkg.InvalidateOnCommit(ctx, c, key)
-}
-
-// FlushNow 资金级「立即落库」：清掉指定键的异步残留，并对结果做诚实断言（详见
-// cachepkg.Cache.FlushNow 的注释）。nil 的含义是「这些键库里已追上，或结构上不存在
-// 异步路径」；未落库时返回包装了 ErrFlushNotDurable 的错误，绝不做静默 no-op。
-func FlushNow[K comparable, V any](ctx context.Context, c *Cache[K, V], keys ...K) error {
-	return c.FlushNow(ctx, keys...)
-}
-
-// FlushAll 立即把 Layer 上全部 Cache 的写缓冲落库（同步，聚合错误）。
-// l 为 nil（缓存层未启用）时是空操作。
-func FlushAll(ctx context.Context, l *CacheLayer) error {
-	if l == nil {
-		return nil
-	}
-	return l.FlushAll(ctx)
-}
-
-// Pending 报告指定键是否仍有未落库脏条目（观测/断言用）。
-func Pending[K comparable, V any](c *Cache[K, V], keys ...K) bool {
-	return c.Pending(keys...)
-}
-
-// ==================== 配置转换 ====================
-
-// CacheConfigFrom 把 JSON 配置段（_ms 约定）转成 db/cache.Config；
-// 零值字段回落框架默认。cc==nil 时返回默认配置（Enabled=false 语义由调用方判断）。
-func CacheConfigFrom(cc *config.CacheConfig) CacheConfig {
-	cfg := cachepkg.DefaultConfig()
-	cfg.Group = util.GameGroup
-	if cc == nil {
-		return cfg
-	}
-	if cc.KeyPrefix != "" {
-		cfg.KeyPrefix = cc.KeyPrefix
-	}
-	ms := func(v int, target *time.Duration) {
-		if v > 0 {
-			*target = time.Duration(v) * time.Millisecond
-		}
-	}
-	ms(cc.TTLMS, &cfg.TTL)
-	ms(cc.NegativeTTLMS, &cfg.NegativeTTL)
-	ms(cc.ReadTimeoutMS, &cfg.ReadTimeout)
-	ms(cc.WriteTimeoutMS, &cfg.WriteTimeout)
-	ms(cc.FailBackoffMS, &cfg.FailBackoff)
-	ms(cc.FlushIntervalMS, &cfg.FlushInterval)
-	ms(cc.MaxDirtyAgeMS, &cfg.MaxDirtyAge)
-	ms(cc.LockTTLMS, &cfg.LockTTL)
-	ms(cc.LockWaitMS, &cfg.LockWait)
-	ms(cc.LockPollIntervalMS, &cfg.LockPollInterval)
-	if cc.LockTTLMS < 0 {
-		cfg.LockTTL = 0 // 负值显式禁用分布式锁
-	}
-	if cc.LockWaitMS < 0 {
-		cfg.LockWait = 0 // 负值显式禁用锁等待（立即降级无锁执行）
-	}
-	if cc.LogicalPct != 0 {
-		cfg.LogicalPct = cc.LogicalPct
-	}
-	if cc.JitterPct != 0 {
-		cfg.JitterPct = cc.JitterPct
-	}
-	if cc.NegativeTTLMS < 0 {
-		cfg.NegativeTTL = 0 // 负值显式关闭空值缓存
-	}
-	if cc.BatchSize > 0 {
-		cfg.BatchSize = cc.BatchSize
-	}
-	if cc.MaxDirtyKeys > 0 {
-		cfg.MaxDirtyKeys = cc.MaxDirtyKeys
-	}
-	if cc.Shards > 0 {
-		cfg.Shards = cc.Shards
-	}
-	if cc.MaxRetry > 0 {
-		cfg.MaxRetry = cc.MaxRetry
-	}
-	if cc.SaveConcurrency > 0 {
-		cfg.SaveConcurrency = cc.SaveConcurrency
-	}
-	if cc.RequireRedis != nil {
-		cfg.RequireRedis = *cc.RequireRedis
-	}
-	if cc.Journal != nil {
-		cfg.Journal = *cc.Journal
-	}
-	switch strings.ToLower(strings.TrimSpace(cc.StalePolicy)) {
-	case "wait":
-		cfg.Stale = cachepkg.StaleWait
-	case "async", "":
-		cfg.Stale = cachepkg.StaleAsync
-	}
-	switch strings.ToLower(strings.TrimSpace(cc.Overflow)) {
-	case "drop":
-		cfg.Overflow = cachepkg.OverflowDrop
-	case "block", "":
-		cfg.Overflow = cachepkg.OverflowBlock
-	}
-	cfg.Enabled = cc.Enabled
-	return cfg
+// CacheSave 全值写入一行；mustSave 决定是否在返回前落库。
+func CacheSave[T any](ctx context.Context, table string, key string, row *T, mustSave bool) error {
+	return dbcache.Save[T](ctx, table, key, row, mustSave)
 }

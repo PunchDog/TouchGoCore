@@ -93,12 +93,19 @@ func (m *TimerManager) finishTimerTick(task timerTask, parent *Timer) {
 		return
 	}
 	if !task.timer.HasNext() {
-		// HasNext 为 false 有两种成因，必须用活跃标记区分：
-		//   1) 有限次数自然耗尽——定时器仍是活跃的，本条就是它的最后一次执行，
-		//      就此作废并归还对象池，否则实例永久滞留在无人管理的状态；
+		// HasNext 为 false 有三种成因，必须用活跃标记与代次一起区分：
+		//   1) 有限次数自然耗尽——定时器仍是活跃的，且代次未变，本条就是它的
+		//      最后一次执行，就此作废并归还对象池，否则实例永久滞留在无人管理的状态；
 		//   2) 业务在 Tick 里自己 Pause()/Remove() 了——收尾已由那两次调用做完，
-		//      这里再动手会把「只是暂停」的定时器送进池，把所有权交出去。
-		if parent.IsActive() {
+		//      这里再动手会把「只是暂停」的定时器送进池，把所有权交出去；
+		//   3) 业务在 Tick 收尾瞬间做 Pause+AddTimer 重连：AddTimer 在临界区里先把
+		//      isActive 置 false、推进代次、再恢复 true。本函数读 HasNext/IsActive
+		//      都不持 parent.mu，可能读到「false 的 isActive + 已推进的 gen +
+		//      恢复后的 active」，看起来像自然耗尽，实则是业务刚把实例重新挂回调度。
+		// 代次相等才说明本条调度项仍代表该定时器的当前生命周期；代次已变时
+		// 收尾权属于新主人，旧调度项只许退出，绝不能归还实例，否则重连后的
+		// 定时器会连同刚挂上的调度项一起被作废。
+		if parent.IsActive() && parent.gen.Load() == task.gen {
 			m.retireAfterExhaustion(parent)
 		}
 		return

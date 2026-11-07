@@ -36,7 +36,7 @@ func (t timerTask) isValid() bool {
 	if parent == nil {
 		return false
 	}
-	return parent.IsActive() && parent.gen.Load() == t.gen
+	return parent.ownsGen(t.gen)
 }
 
 // TimerManager 管理所有时间轮
@@ -76,7 +76,6 @@ func NewTimerManager() *TimerManager {
 			addTimerChan: make(chan timerTask, MaxAddTimerChannelNum),
 			mgr:          mgr,
 		}
-		wheel.isRunning.Store(true)
 		mgr.wheels[i] = wheel
 
 		// 挂上桶环的隔离与限频钩子（B-F5）：确定性 panic 的肇事节点由轮侧按

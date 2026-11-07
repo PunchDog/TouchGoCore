@@ -127,6 +127,18 @@ func TestTimer_CalculateType(t *testing.T) {
 	}
 }
 
+// TestTimer_CalculateTypeEmptyTable 空精度表不得返回 -1 档位（会越界索引 m.wheels）。
+func TestTimer_CalculateTypeEmptyTable(t *testing.T) {
+	orig := defaultWheelConfigs
+	t.Cleanup(func() { defaultWheelConfigs = orig })
+	defaultWheelConfigs = nil
+
+	tr := &Timer{}
+	if got := tr.calculateType(1); got != TimerTypeMillisecond {
+		t.Fatalf("空精度表应退回毫秒档, got=%v", got)
+	}
+}
+
 func TestTimerType_String(t *testing.T) {
 	cases := map[TimerType]string{
 		TimerTypeMillisecond: "millisecond",

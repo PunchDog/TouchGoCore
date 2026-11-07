@@ -16,9 +16,8 @@ import (
 type TimerWheel struct {
 	wheelConfig  int64          // 时间轮精度（毫秒）
 	tickWheel    *slotRing      // 定时器桶环（S67：一 tick 只扫到期桶）
-	wheelLock    sync.RWMutex   // 时间轮锁（读写优化）
+	wheelLock    sync.Mutex     // 时间轮锁
 	addTimerChan chan timerTask // 定时器添加通道
-	isRunning    atomic.Bool    // 是否运行
 	timerCount   atomic.Int64   // 定时器计数（用于监控）
 
 	// mgr 反向归属：摘链发生在 Timer 一侧（RemoveFromManager），那里只有 wheel 指针，
@@ -30,11 +29,10 @@ type TimerWheel struct {
 	lastBackpressureWarn atomic.Int64
 }
 
-// executeTimer 执行定时器并在需要时重新调度。
+// executeTimer 执行一次已派发的 Tick。
 //
-// 调用前提：不得持有任何 wheelLock。
-// Tick 内部允许调用 Remove / Pause / AddTimer（业务最常见的写法），
-// 因此本函数必须在完全无锁的上下文中运行，否则会自锁死锁。
+// 调用前提：不得持有任何 wheelLock。Tick 内部允许调用 Remove / Pause / AddTimer
+// （业务最常见的写法），因此本函数必须在完全无锁的上下文中运行，否则会自锁死锁。
 func (m *TimerManager) executeTimer(task timerTask) {
 	if !task.isValid() {
 		return // 已被移除或被复用的过期调度项，直接丢弃
@@ -45,22 +43,30 @@ func (m *TimerManager) executeTimer(task timerTask) {
 	}
 	// 只有声明异步执行的 Timer 才可能被 worker 并发执行，需要跨路径单飞令牌；
 	// 纯同步 Timer 保持原有零全局锁的热路径。此处必须非阻塞取令牌：消费者一旦
-	// 卡在令牌上，就没人再处理异步完成事件，而完成事件正是令牌的释放方。
+	// 卡在令牌上，它负责的整片调度就停摆，而令牌正由另一条路径（cleanupWheel）
+	// 在执行业务回调，等它只会把停机流程拖长。
 	if shouldRunAsyncTick(task.timer) {
-		flightKey := asyncTimerKey{parent: parent, epoch: parent.poolEpoch.Load()}
-		releaseFlight, ok := tryAcquireTimerFlight(flightKey)
+		key := asyncTimerKey{parent: parent, epoch: parent.poolEpoch.Load()}
+		releaseFlight, ok := tryAcquireTimerFlight(key)
 		if !ok {
-			return // 该 Timer 的异步 Tick 仍在飞：本次派发让位，由在飞者收尾并续期
+			return
 		}
 		defer releaseFlight()
-		if parent.poolEpoch.Load() != flightKey.epoch {
+		if parent.poolEpoch.Load() != key.epoch {
 			return
 		}
 	}
+	m.runTimerTask(task, parent)
+}
+
+// runTimerTask 执行 Tick 并完成续期/作废收尾，同步消费者与异步 worker 共用。
+//
+// 调用方必须已确保同一 Timer 不会并发进入（同步路径靠单飞令牌，异步路径靠
+// asyncTickPool 的 busy/parked）；endTick 是最后一步，之后不得再碰 parent。
+func (m *TimerManager) runTimerTask(task timerTask, parent *Timer) {
 	if !task.isValid() || !parent.beginTick(task.gen) {
 		return
 	}
-
 	m.runTimerTick(task.timer)
 	m.finishTimerTick(task, parent)
 }
@@ -84,8 +90,8 @@ func (m *TimerManager) finishTimerTick(task timerTask, parent *Timer) {
 	defer parent.endTick()
 
 	if m.isClosed.Load() {
-		if parent.IsActive() && parent.gen.Load() == task.gen {
-			m.retireAfterExhaustion(parent)
+		if parent.ownsGen(task.gen) {
+			parent.RemoveFromManager(true)
 		}
 		return
 	}
@@ -105,8 +111,8 @@ func (m *TimerManager) finishTimerTick(task timerTask, parent *Timer) {
 		// 代次相等才说明本条调度项仍代表该定时器的当前生命周期；代次已变时
 		// 收尾权属于新主人，旧调度项只许退出，绝不能归还实例，否则重连后的
 		// 定时器会连同刚挂上的调度项一起被作废。
-		if parent.IsActive() && parent.gen.Load() == task.gen {
-			m.retireAfterExhaustion(parent)
+		if parent.ownsGen(task.gen) {
+			parent.RemoveFromManager(true)
 		}
 		return
 	}
@@ -132,7 +138,7 @@ func (m *TimerManager) discardDispatchedTask(task timerTask) {
 	if parent == nil || !parent.beginTick(task.gen) {
 		return
 	}
-	m.retireAfterExhaustion(parent)
+	parent.RemoveFromManager(true)
 	parent.endTick()
 }
 
@@ -170,36 +176,41 @@ func (m *TimerManager) runWheel(wheel *TimerWheel, wheelType TimerType) {
 
 	vars.Info("启动时间轮: %s (精度: %dms)", wheelType.String(), wheel.wheelConfig)
 
-	for wheel.isRunning.Load() {
-		// recover 放在循环内：避免单次 panic 直接杀死时间轮协程，导致后续所有定时器失效
-		func() {
-			defer func() {
-				if err := recover(); err != nil {
-					vars.Error("时间轮运行发生panic错误: %v, 类型: %s", err, wheelType.String())
-				}
-			}()
-
-			select {
-			case <-m.closeChan:
-				wheel.isRunning.Store(false)
-				m.cleanupWheel(wheel, wheelType)
-				vars.Info("时间轮停止: %s", wheelType.String())
-
-			case task, ok := <-wheel.addTimerChan:
-				// 通道永不关闭（resetTimerChannel 刻意不 close，见其注释），
-				// 此分支只是防御性兜底：真收到 ok=false 说明上游被改坏了，
-				// 继续循环只会对着 nil 通道空转，直接退出把这个轮暴露出来。
-				if !ok {
-					wheel.isRunning.Store(false)
-					return
-				}
-				m.handleTimerAdd(wheel, task)
-
-			case <-ticker.C:
-				m.processWheelTick(wheel, wheelType)
-			}
-		}()
+	for m.runWheelStep(wheel, wheelType, ticker) {
 	}
+}
+
+// runWheelStep 执行一拍并返回是否继续；closeChan 是生命周期的唯一真源。
+//
+// recover 放在每拍内：单次 panic 不能杀死整档轮。只有收尾阶段（已收到关闭信号）
+// 的 panic 才退出循环，避免 closeChan 已关时反复重跑 cleanup。
+func (m *TimerManager) runWheelStep(wheel *TimerWheel, wheelType TimerType, ticker *time.Ticker) (next bool) {
+	next = true
+	defer func() {
+		if err := recover(); err != nil {
+			vars.Error("时间轮运行发生panic错误: %v, 类型: %s", err, wheelType.String())
+		}
+	}()
+
+	select {
+	case <-m.closeChan:
+		next = false
+		m.cleanupWheel(wheel, wheelType)
+		vars.Info("时间轮停止: %s", wheelType.String())
+
+	case task, ok := <-wheel.addTimerChan:
+		// 通道永不关闭（resetTimerChannel 刻意不 close），此分支只是防御性兜底：
+		// 真收到 ok=false 说明上游被改坏了，直接退出把这个轮暴露出来。
+		if !ok {
+			next = false
+			return
+		}
+		m.handleTimerAdd(wheel, task)
+
+	case <-ticker.C:
+		m.processWheelTick(wheel, wheelType)
+	}
+	return next
 }
 
 // migratingMarker 是「节点已离开原轮、调度项正在投递途中」的占位归属。
@@ -344,8 +355,8 @@ func (m *TimerManager) commitDispatch(wheel *TimerWheel, parent *Timer, node lis
 		// 后续每个 tick 都会跳过它，等价于永久停摆。
 		parent.wheel.Store(wheel)
 		// 节点留在原桶不动，但要告诉桶环「这一格里有东西没送走」：桶化后原地不动
-		// 意味着下一拍不再覆盖这一格，重试会拖到一整圈之后（见 markResidue）。
-		wheel.tickWheel.markResidue()
+		// 意味着下一拍不再覆盖这一格，重试会拖到一整圈之后。
+		wheel.tickWheel.residue = true
 		return dispatchFull
 	}
 }
@@ -368,10 +379,21 @@ func (m *TimerManager) unlinkStale(wheel *TimerWheel, parent *Timer, node list.I
 	if parent.ownedWheel() != wheel || !parent.claimFromWheel(wheel) {
 		return
 	}
+	unlinkNodeLocked(wheel, m, node)
+	parent.wheel.Store(nil)
+}
+
+// unlinkNodeLocked 在已持有 parent.mu 与 wheelLock 时摘链、扣计数并记账。
+// mgr 为 nil 时退回 wheel 的反向归属；仍为 nil（裸轮测试）则只做链表与计数收尾。
+func unlinkNodeLocked(wheel *TimerWheel, mgr *TimerManager, node list.INode) {
 	node.GetNode().Remove()
 	wheel.timerCount.Add(-1)
-	parent.wheel.Store(nil)
-	m.stats.timersRemoved.Add(1)
+	if mgr == nil {
+		mgr = wheel.mgr
+	}
+	if mgr != nil {
+		mgr.stats.timersRemoved.Add(1)
+	}
 }
 
 // quarantinePanicNode 隔离桶环上的「确定性炸点」节点（B-F5）：同一桶连续 panic
@@ -394,9 +416,7 @@ func (m *TimerManager) quarantinePanicNode(wheel *TimerWheel, node list.INode) {
 		// 拿不到归属（非定时器节点 / GetParent panic）：轮锁下做裸摘链
 		wheel.wheelLock.Lock()
 		defer wheel.wheelLock.Unlock()
-		node.GetNode().Remove()
-		wheel.timerCount.Add(-1)
-		m.stats.timersRemoved.Add(1)
+		unlinkNodeLocked(wheel, m, node)
 		return
 	}
 	m.unlinkStale(wheel, parent, node)

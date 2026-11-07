@@ -17,10 +17,8 @@ func (m *TimerManager) Close() {
 // 锁上的 Tick 就能让 TimeStop 永久挂起，进程停不下来。ctx 到期后不再等待，
 // 把剩余定时器强制归还对象池并告警——宁可丢一次回调，也不能丢整个进程退出。
 //
-// 同时把自身从管理器注册表摘除：Run 的「关闭上一轮全部管理器」与业务侧
-// NewTimerManager 的注册一旦交错，新管理器会被 Clear 掉却从未 Close，
-// 它名下 5 个时间轮协程 + 5 个 ticker 就永久泄漏。自摘让「离开注册表」与
-// 「已经 Close」严格同义。
+// 同时把自身从管理器注册表摘除：Run 先取存量快照再逐个 Close，自摘让
+// 「离开注册表」与「已经 Close」严格同义，已关闭的管理器不会再被下一轮收尾。
 func (m *TimerManager) CloseCtx(ctx context.Context) bool {
 	if ctx == nil {
 		ctx = context.Background()
@@ -37,14 +35,7 @@ func (m *TimerManager) CloseCtx(ctx context.Context) bool {
 	close(m.closeChan)
 
 	timedOut := false
-	done := make(chan struct{})
-	go func() {
-		m.wheelWG.Wait()
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-ctx.Done():
+	if !runWithin(ctx, m.wheelWG.Wait) {
 		// 时间轮协程仍卡在业务回调里：标记已置位，后续 AddTimer 一律被拒，
 		// 这里不能再等，否则整个进程退出流程被一个 Tick 拖死。
 		timedOut = true
@@ -52,28 +43,31 @@ func (m *TimerManager) CloseCtx(ctx context.Context) bool {
 			m.GetTimerCount(), ctx.Err())
 	}
 
-	for _, wheel := range m.wheels {
-		wheel.isRunning.Store(false)
-	}
 	// drainPendingAdds 同样纳入收尾预算：它要逐条取 task.timer 的 parent.mu，
 	// 病态场景（某个消费者卡在 handleTimerAdd 持锁不放）下无预算等待会无限阻塞，
 	// 恰好复现本方法声称修复的「一个卡住的收尾拖死进程退出」。放到协程里跑、
 	// 只等预算：超时后放弃等待（协程泄漏有界——它只可能卡在这把 mu 上），
 	// 与 wheelWG 等待同一取舍口径。
-	drainDone := make(chan struct{})
-	go func() {
-		m.drainPendingAdds()
-		close(drainDone)
-	}()
-	select {
-	case <-drainDone:
-	case <-ctx.Done():
-		if !timedOut {
-			timedOut = true
-			vars.Error("排空入队通道残留未在收尾预算内完成，放弃等待: %v", ctx.Err())
-		}
+	if !runWithin(ctx, m.drainPendingAdds) && !timedOut {
+		timedOut = true
+		vars.Error("排空入队通道残留未在收尾预算内完成，放弃等待: %v", ctx.Err())
 	}
 	return timedOut
+}
+
+// runWithin 在协程里执行 fn，并在 ctx 到期时放弃等待；返回 fn 是否在预算内完成。
+func runWithin(ctx context.Context, fn func()) bool {
+	done := make(chan struct{})
+	go func() {
+		fn()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
 
 // drainPendingAdds 排空各时间轮残留的入队调度项并计入统计。
@@ -106,7 +100,7 @@ func (m *TimerManager) drainPendingAdds() {
 						// 本管理器侧并发的 AddTimer 会在入口直接返回 ErrTimerManagerClosed，
 						// 不会重写这个标记。
 						parent.mu.Lock()
-						if parent.IsActive() && parent.gen.Load() == task.gen {
+						if parent.ownsGen(task.gen) {
 							parent.isActive.Store(false)
 						}
 						parent.mu.Unlock()

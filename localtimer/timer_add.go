@@ -93,7 +93,7 @@ func (m *TimerManager) addTimerLocked(timer TimerInterface, parent *Timer, renew
 
 	// 先选轮再改状态：类型非法时保持定时器原样返回，不必回滚活跃标记。
 	wheelType := parent.GetType()
-	if int(wheelType) >= len(m.wheels) {
+	if int(wheelType) < 0 || int(wheelType) >= len(m.wheels) {
 		return ErrTimerInvalidType, nil
 	}
 	wheel := m.wheels[wheelType]

@@ -32,7 +32,7 @@ import (
 // 需要改时刻的调用方必须走 AddTimer 重挂——它先 removeFromManagerLocked 摘干净、
 // 再按当前 nextTime 归桶，跨档迁移照旧发生。
 //
-// 例外由残留机制兜住：投递通道满时节点留在原桶，markResidue 让游标退回这一格，
+// 例外由残留机制兜住：投递通道满时节点留在原桶，residue 标记让游标退回这一格，
 // 下一拍重试，不必等一圈（S64 的背压语义原样保留）。
 // ============================================================================
 
@@ -55,6 +55,8 @@ type slotRing struct {
 
 	// residue 只由本档轮的消费协程读写（runWheel 每档一条），不参与跨协程通信，
 	// 其效果最终通过 cursor 这一个原子量体现，故不必原子。
+	// 只允许在 RangeWindow 驱动的扫描链（scanSlot / commitDispatch）里置位：
+	// 它表示「这一格有节点没送走」，不是通用的删除标记。
 	residue bool // 本桶扫描中有节点被留在原地（投递通道满或回调 panic）
 
 	// panicStreak 每桶的连续 panic 计数（下标即物理桶号）。与 residue 同一口径：
@@ -155,22 +157,6 @@ func (r *slotRing) Add(node list.INode) (bret bool) {
 	return r.slots[r.slotOfStep(r.slotFor(node))].Add(node)
 }
 
-// markResidue 记下「本次扫描有节点因为目标通道满而留在原地」。
-//
-// 桶化后「留在原地」的含义变了：变更前每拍全扫，它下一拍必然再被看到；现在它所在
-// 的那个桶要等游标绕完一整圈才被重访（秒档 60s、分档 10min），等于把 S64 的
-// 「背压时下个 tick 重试」悄悄改成了「下圈重试」。于是 RangeWindow 收尾时把游标
-// 退回本段第一个残留桶之前，下一拍重新覆盖这一段。
-//
-// 调用约束：只允许出现在 slotRing.scanSlot 的调用链里（即 RangeWindow 驱动的那次扫描）。
-// 别处都不该调 —— 收尾路径（drainWheelLocked/cleanupWheel）不投递、业务 Remove 与
-// 测试直调都没有「本拍没送走」这层含义；残留的唯一来源就是扫描中被留下的节点。
-// 不加锁同理：状态只在本档轮消费协程（runWheel 每档一条）上读写，
-// 对外只通过 cursor 这一个原子量生效。
-func (r *slotRing) markResidue() {
-	r.residue = true
-}
-
 // Length 环内在链总数。逐桶求和（桶数最大 1000），不另设计数器：
 // 节点在桶间物理迁移由 List.Add 的 detach 完成，外挂计数会跟丢，
 // 而本方法只在测试与诊断路径上被调用，不在每拍热路径里。
@@ -228,7 +214,7 @@ func (r *slotRing) Range(f func(list.INode) bool) {
 //
 // 游标在扫完之后才推进：中途 panic 时下一次仍会重扫这一段，宁可重复派发一次
 // （认领协议会把重复派发判给 dispatchSkipped）也不能把整段桶永久留在身后。
-// 扫描中留下残留（通道满）时同样回退游标，见 markResidue。
+// 扫描中留下残留（通道满）时同样回退游标，见 residue 字段的说明。
 //
 // 回退幅度恒不超过一圈：窗口分支退回「本段第一个残留桶之前」，整环分支退回
 // target-slotCount（下一拍仍满足整环条件，保持变更前的全扫节奏）。两条都以本拍的
@@ -238,10 +224,6 @@ func (r *slotRing) Range(f func(list.INode) bool) {
 // 钳制，因此这里不额外加锁；钳制读到的是「刚刚扫过」而非「正要扫」的游标，
 // 至多让一个节点提前一格被看到，不会让它等上一整圈。
 func (r *slotRing) RangeWindow(currentTime int64, f func(list.INode) bool) {
-	if r.wheelConfig <= 0 {
-		r.Range(f)
-		return
-	}
 	r.residue = false
 	target := currentTime / r.wheelConfig
 	cur := r.cursor.Load()
@@ -351,7 +333,7 @@ func (r *slotRing) scanSlot(idx int, f func(list.INode) bool) (cont bool) {
 				cont = true
 				return
 			}
-			r.markResidue()
+			r.residue = true
 			if r.shouldWarn == nil || r.shouldWarn() {
 				vars.Error("时间轮桶扫描回调发生panic，本桶剩余节点推迟到下一拍重试: %v", err)
 			}
@@ -383,34 +365,21 @@ func (r *slotRing) quarantineSlot(idx int, f func(list.INode) bool) {
 		return true
 	})
 	for _, n := range nodes {
-		if r.callScanNode(n, f) {
+		// 回调与隔离各自包 recover：任一环再炸都不能把整档轮带下去，
+		// 也不能漏掉桶里排在后面的炸点。
+		panicked := func() (panicked bool) {
+			defer func() { panicked = recover() != nil }()
+			f(n)
+			return false
+		}()
+		if !panicked {
 			continue
 		}
-		r.quarantineOne(n)
+		func() {
+			defer func() { _ = recover() }()
+			r.quarantineNode(n)
+		}()
 	}
-}
-
-// callScanNode 把单个节点喂给扫描回调，返回是否未 panic。
-//
-// 回调返回 false（要求终止扫描）也按「未 panic」处理：终止语义由主扫描路径负责，
-// 隔离扫描必须走完整个桶，否则可能漏掉排在后面的肇事节点。
-func (r *slotRing) callScanNode(n list.INode, f func(list.INode) bool) (ok bool) {
-	defer func() {
-		if recover() != nil {
-			ok = false
-		}
-	}()
-	f(n)
-	return true
-}
-
-// quarantineOne 隔离单个肇事节点；隔离动作自身再包一层 recover，钩子出任何问题
-// 都不允许打断本桶其余节点的定位。
-func (r *slotRing) quarantineOne(n list.INode) {
-	defer func() {
-		_ = recover()
-	}()
-	r.quarantineNode(n)
 }
 
 // rangeSlot 包一层，让回调返回 false 能终止整个窗口/全环扫描。

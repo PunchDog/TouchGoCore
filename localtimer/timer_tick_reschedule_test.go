@@ -342,10 +342,10 @@ func TestTickReschedule_InvariantUnderLoad(t *testing.T) {
 			}
 			var sumCount int64
 			for wi, w := range m.wheels {
-				w.wheelLock.RLock()
+				w.wheelLock.Lock()
 				c := w.timerCount.Load()
 				l := int64(w.tickWheel.Length())
-				w.wheelLock.RUnlock()
+				w.wheelLock.Unlock()
 				if c < 0 {
 					t.Errorf("✘ 压测期间 wheel[%d] 计数为负: %d", wi, c)
 					return
@@ -430,10 +430,10 @@ func TestTickReschedule_InvariantUnderLoad(t *testing.T) {
 	for {
 		var sumCount, sumLen int64
 		for _, w := range m.wheels {
-			w.wheelLock.RLock()
+			w.wheelLock.Lock()
 			sumCount += w.timerCount.Load()
 			sumLen += int64(w.tickWheel.Length())
-			w.wheelLock.RUnlock()
+			w.wheelLock.Unlock()
 		}
 		if sumCount == 0 && sumLen == 0 {
 			break

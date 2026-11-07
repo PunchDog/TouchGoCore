@@ -22,7 +22,7 @@ func shardCapFor(n int) int64 {
 func ensureTimerChannel() {
 	timerChannelMu.Lock()
 	defer timerChannelMu.Unlock()
-	if timerChannelReady && len(timerChannels) > 0 {
+	if len(timerChannels) > 0 {
 		return
 	}
 	n := effectiveShards()
@@ -32,7 +32,6 @@ func ensureTimerChannel() {
 		channels[i] = make(chan timerTask, per)
 	}
 	timerChannels = channels
-	timerChannelReady = true
 }
 
 // resetTimerChannel 释放调度通道。
@@ -42,7 +41,6 @@ func resetTimerChannel() {
 	timerChannelMu.Lock()
 	defer timerChannelMu.Unlock()
 	timerChannels = nil
-	timerChannelReady = false
 }
 
 // currentTimerChannels 返回当前调度通道数组快照（无通道时为 nil）。

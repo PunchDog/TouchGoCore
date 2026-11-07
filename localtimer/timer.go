@@ -24,9 +24,6 @@ var (
 	// ErrTimerCanceled 续期窗口内定时器被业务移除或被另一次 AddTimer 接管，
 	// 本次续期作废。这是正常收尾，不计入调度失败统计。
 	ErrTimerCanceled = errors.New("timer renewal canceled")
-	// ErrTimerInvalidated 定时器已作废（不活跃或已归还），SafeHandle 的操作
-	// 在检测到作废状态时返回此错误，将「作废契约」从注释约束升级为类型/返回值约束。
-	ErrTimerInvalidated = errors.New("timer has been invalidated (inactive or released)")
 )
 
 // 常量定义
@@ -301,6 +298,14 @@ type Timer struct {
 	poolEpoch atomic.Uint64
 }
 
+// normalizeCount 把对外的 InfiniteCount 归一成内部哨兵值。
+func normalizeCount(count int64) int64 {
+	if count == InfiniteCount {
+		return CountCorrectionValue
+	}
+	return count
+}
+
 // Init 初始化定时器
 func (t *Timer) Init(interval, count int64, self TimerInterface) error {
 	if interval <= 0 {
@@ -308,10 +313,7 @@ func (t *Timer) Init(interval, count int64, self TimerInterface) error {
 	}
 	t.nextTime.Store(util.RealMS() + interval)
 	t.interval.Store(interval)
-	if count == InfiniteCount {
-		count = CountCorrectionValue
-	}
-	t.count.Store(count)
+	t.count.Store(normalizeCount(count))
 	if self != nil {
 		t.self.Store(&self)
 	}
@@ -553,20 +555,10 @@ func (t *Timer) detachFromWheelLocked(wheel *TimerWheel) {
 	// 时绝不能再无条件 Node.Remove：那会把节点从「当前归属轮」的链表里无锁
 	// 扯出，且归属轮的 timerCount 无人扣减，形成永久幻影 +1（count=1 而
 	// len=0）。节点归属已易主，其收尾交由新归属轮的派发/清理路径，计数自然配对。
-	t.Node.Remove()
-	// 「摘链 → 减计数 → 清引用」三者必须在同一把 wheelLock 临界区内
-	// 原子完成：若清引用延后到解锁之后，processWheelTick 的派发/清理
-	// 分支可能在这段间隙里看到一个「已不在链却仍挂着 wheel 引用」的
-	// 节点，或入链方在间隙入链后被本处的 Store(nil) 无痕清掉归属，
-	// 造成计数与链表长度漂移（-1 / 幻影 +1）。
-	wheel.timerCount.Add(-1)
+	// 「摘链 → 减计数 → 记账」必须在同一把 wheelLock 临界区内原子完成；
+	// 清引用紧随其后，避免扫描侧看到「已不在链却仍挂着 wheel 引用」的节点。
+	unlinkNodeLocked(wheel, wheel.mgr, &t.Node)
 	t.wheel.Store(nil)
-	// 统计口径挂在「真正摘掉一条链」这一点上：暂停、移除、耗尽回收、复活前清理
-	// 都会经过这里，而派发与迁移走的是 Node.Remove（不改归属为 nil 的语义），
-	// 不会被误计。轮上没有归属管理器时（构造期）留空跳过。
-	if wheel.mgr != nil {
-		wheel.mgr.stats.timersRemoved.Add(1)
-	}
 }
 
 // Remove 公共移除方法：彻底作废本实例——停止调度并归还对象池。
@@ -647,14 +639,19 @@ func (t *Timer) GetParent() *Timer {
 	return t
 }
 
-// GetType 返回定时器类型
+// GetType 返回定时器类型（按剩余时间选档）
 func (t *Timer) GetType() TimerType {
-	return t.calculateType(-CountCorrectionValue)
+	return t.calculateType(t.nextTime.Load() - util.RealMS())
 }
 
 // IsActive 检查定时器是否活跃
 func (t *Timer) IsActive() bool {
 	return t.isActive.Load()
+}
+
+// ownsGen 报告实例是否仍活跃且代次未变：调用方据此确认某条调度项仍属当前生命周期。
+func (t *Timer) ownsGen(gen uint64) bool {
+	return t.isActive.Load() && t.gen.Load() == gen
 }
 
 // IsAsyncTick reports whether Tick should run in an asynchronous worker.
@@ -663,24 +660,21 @@ func (t *Timer) IsAsyncTick() bool {
 	return false
 }
 
-// calculateType 根据间隔计算定时器类型
+// calculateType 按 defaultWheelConfigs 逐档比较。
+//
+// 精度表是唯一真源：桶数推导（slotCountFor）与档位选择共用它，改表不会再出现
+// 「轮按新表建、分档还按旧常量」的静默漂移。
 func (t *Timer) calculateType(interval int64) TimerType {
-	if interval == -CountCorrectionValue {
-		interval = t.nextTime.Load() - util.RealMS()
-	}
-
-	switch {
-	case interval < util.MILLISECONDS_OF_SECOND:
+	// 精度表被测试改写是允许的；空表时退回毫秒档，避免返回 -1 造成越界索引。
+	if len(defaultWheelConfigs) == 0 {
 		return TimerTypeMillisecond
-	case interval < util.MILLISECONDS_OF_MINUTE:
-		return TimerTypeSecond
-	case interval < util.MILLISECONDS_OF_10_MINUTE:
-		return TimerTypeMinute
-	case interval < util.MILLISECONDS_OF_HOUR:
-		return TimerTypeTenMinute
-	default:
-		return TimerTypeHour
 	}
+	for i := 1; i < len(defaultWheelConfigs); i++ {
+		if interval < defaultWheelConfigs[i] {
+			return TimerType(i - 1)
+		}
+	}
+	return TimerType(len(defaultWheelConfigs) - 1)
 }
 
 // SetCount 设置执行次数
@@ -688,10 +682,7 @@ func (t *Timer) SetCount(count int64) {
 	if !t.isActive.Load() {
 		return
 	}
-	if count == InfiniteCount {
-		count = CountCorrectionValue
-	}
-	t.count.Store(count)
+	t.count.Store(normalizeCount(count))
 }
 
 // GetInterval 返回定时器间隔

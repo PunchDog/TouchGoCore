@@ -111,11 +111,10 @@ func Run(ctx context.Context) {
 		vars.Error("等待上一轮消费协程退出超时: 有分片卡在业务 Tick 里未返回，本轮照常启动（该协程醒来后会因生命周期检查自行退出）")
 	}
 
-	// 关闭上一轮全部管理器后重建。只 Clear 不 Close 会泄漏 5 个时间轮协程 + 5 个 ticker。
-	// 待关清单在冻结注册表的窗口内取出（snapshotTimerManagers），放开锁后才逐个 Close：
-	// Close 反过来要申请同一把锁做自摘，持锁等待退出会自锁。窗口外并发的
-	// NewTimerManager 只能排在本函数之后登记，不会再出现「已注册却从未 Close 就被抹掉」。
-	// 预算刻意不继承本次 ctx：重启往往正是因为旧 ctx 已取消。
+	// 关闭上一轮全部管理器后重建：必须先 Close 才能回收 5 个时间轮协程 + 5 个 ticker。
+	// 待关清单在注册表锁内一次性取出，放开锁后才逐个 Close——Close 反过来要申请
+	// 同一把锁做自摘，持锁等待退出会自锁。预算刻意不继承本次 ctx：重启往往
+	// 正是因为旧 ctx 已取消。
 	closeAllManagers(context.Background())
 	// NewTimerManager 内部会 ensureTimerChannel，必须先于 timeTick 协程启动。
 	// 通道数组在 NewTimerManager 里按当前分片数建好，之后的 scheduleShardCount()
@@ -127,7 +126,7 @@ func Run(ctx context.Context) {
 	// 少起的分片则被两个协程同抢而失去片内保序，正是 SetScheduleShards 拒绝中途
 	// 改数的同一理由。
 	shards := scheduleShardCount()
-	rt.asyncPool = newAsyncTickPool(asyncWorkerLimit(), shards)
+	rt.asyncPool = newAsyncTickPool(asyncWorkerLimit())
 	for idx := 0; idx < shards; idx++ {
 		rt.tickWG.Add(1)
 		go func(shard int) {
@@ -193,7 +192,7 @@ func AddTimer(timer ...TimerInterface) error {
 	}
 
 	for i, v := range timer {
-		if v == nil || v.GetParent() == nil {
+		if v == nil {
 			rollbackTimers(timer[:i])
 			return ErrTimerNilParent
 		}
@@ -233,8 +232,8 @@ const channelSnapshotInterval = 10 * time.Millisecond
 // 同一条通道上，由本协程按 FIFO 取出，于是同一定时器绝不会并发执行；
 // 反过来，本协程卡在业务 Tick 里时，受影响的也只有这一片。
 //
-// 分片下标越界（TimeStop 释放通道后数组长度变短）不判错：读到 nil 通道就走
-// 「等生命周期切换」分支，与「尚未 Run」同一条路径。
+// 异步 Tick 只在这里做一次非阻塞投递；执行、续期与归还全部由 worker 自己完成，
+// 所以本协程退出时没有「待收尾的完成事件」要等。
 func timeTick(rt *timerRuntime, shard int) {
 	liveConsumers.Add(1)
 	defer liveConsumers.Add(-1)
@@ -242,7 +241,6 @@ func timeTick(rt *timerRuntime, shard int) {
 		if err := recover(); err != nil {
 			vars.Error("定时器滴答协程发生panic: 分片=%d 错误=%v", shard, err)
 			rt.degradeShard(fmt.Sprintf("第 %d 号分片消费协程 panic 退出", shard))
-			drainAsyncCompletions(rt.asyncPool, shard)
 		}
 	}()
 
@@ -250,56 +248,36 @@ func timeTick(rt *timerRuntime, shard int) {
 	recheck := time.NewTicker(channelSnapshotInterval)
 	defer recheck.Stop()
 	pool := rt.asyncPool
+	ch := scheduleChannelAt(shard)
 	stopping := false
+
+	// 进入收尾：closech 只是本轮停止；ctx 取消还要把系统从全局摘除并留下告警。
+	stop := func(reason string) {
+		if reason != "" {
+			rt.retire(reason)
+		}
+		if pool != nil {
+			pool.stopAccepting()
+		}
+		ch = nil
+		stopping = true
+	}
 
 	for {
 		if stopping {
-			// Do not read the global dispatch channel after this lifecycle ends: a later
-			// Run reuses that channel set, and an old consumer must never steal new work.
-			if pool.pendingForShard(shard) == 0 {
-				return
-			}
-			select {
-			case completion := <-pool.resultsForShard(shard):
-				consumeAsyncTickCompletion(completion)
-			case <-pool.progressForShard(shard):
-			case <-recheck.C:
-			}
-			continue
+			// 异步任务由 worker 自己完成续期/作废，本片没有待处理的完成事件。
+			return
 		}
 
-		// Check lifecycle before taking a fresh global channel snapshot so an old
-		// consumer cannot accidentally read dispatches created by a later Run.
+		// 生命周期检查必须在取新通道快照之前：旧消费者绝不能读到新一轮的通道。
 		select {
 		case <-rt.closech:
-			stopping = true
+			stop("")
 			continue
 		case <-ctxDone:
-			rt.retire("上下文已取消")
-			if pool != nil {
-				pool.stopAccepting()
-			}
-			stopping = true
+			stop("上下文已取消")
 			continue
 		default:
-		}
-
-		ch := scheduleChannelAt(shard)
-		if ch == nil {
-			select {
-			case completion := <-pool.resultsForShard(shard):
-				consumeAsyncTickCompletion(completion)
-			case <-rt.closech:
-				stopping = true
-			case <-ctxDone:
-				rt.retire("上下文已取消")
-				if pool != nil {
-					pool.stopAccepting()
-				}
-				stopping = true
-			case <-recheck.C:
-			}
-			continue
 		}
 
 		select {
@@ -308,38 +286,25 @@ func timeTick(rt *timerRuntime, shard int) {
 				return
 			}
 			// 管理器已关闭说明这条是上一轮遗留（或在停机途中刚入队）的陈旧调度项：
-			// 既不能执行也不能续期，否则跨 Run 把旧定时器复活。这道闸门放在消费端
-			// 而非 isValid 里，因为收尾路径 cleanupWheel 正是靠关闭后补跑最后一拍
-			// 把实例交回对象池。
+			// 既不能执行也不能续期，否则跨 Run 把旧定时器复活。
 			if task.mgr == nil || task.mgr.isClosed.Load() {
 				continue
 			}
-			// Keep the synchronous path unchanged: executeTimer performs the validity
-			// check and a framework panic there still degrades this shard.
 			if task.timer != nil && shouldRunAsyncTick(task.timer) {
-				if !safeTimerTaskValid(task) {
-					task.mgr.discardDispatchedTask(task)
-					continue
-				}
-				if !pool.submit(asyncTickJob{task: task, shard: shard}) {
+				if !pool.submit(task) {
 					task.mgr.discardDispatchedTask(task)
 				}
 				continue
 			}
 			task.mgr.executeTimer(task)
 
-		case completion := <-pool.resultsForShard(shard):
-			consumeAsyncTickCompletion(completion)
 		case <-rt.closech:
-			stopping = true
+			stop("")
 		case <-ctxDone:
-			rt.retire("上下文已取消")
-			if pool != nil {
-				pool.stopAccepting()
-			}
-			stopping = true
+			stop("上下文已取消")
 		case <-recheck.C:
-			// Refresh the global dispatch-channel snapshot after lifecycle changes.
+			// 刷新全局调度通道快照：TimeStop 会置 nil、下一次 Run 再重建。
+			ch = scheduleChannelAt(shard)
 		}
 	}
 }
@@ -352,83 +317,6 @@ func shouldRunAsyncTick(timer TimerInterface) (async bool) {
 		}
 	}()
 	return timer.IsAsyncTick()
-}
-
-// drainAsyncCompletions 在分片消费者 panic 退出后接管该片的异步完成事件。
-//
-// 不能调用 pool.stopAccepting：那会连带拒绝其它健康分片的异步提交。这里只排空本片，
-// 并带预算退出——业务 Tick 永不返回时，超时后声明该片不再接收，残留 worker
-// 转为本地孤儿收尾，不会永久卡在会合投递上。
-func drainAsyncCompletions(pool *asyncTickPool, shard int) {
-	drainAsyncCompletionsWithin(pool, shard, DefaultCloseBudget)
-}
-
-// drainAsyncCompletionsWithin 是带显式预算的实现，供测试用短预算驱动超时路径。
-func drainAsyncCompletionsWithin(pool *asyncTickPool, shard int, budget time.Duration) {
-	if pool == nil {
-		return
-	}
-	deadline := time.After(budget)
-	for pool.pendingForShard(shard) > 0 {
-		select {
-		case completion := <-pool.resultsForShard(shard):
-			consumeAsyncTickCompletion(completion)
-		case <-pool.progressForShard(shard):
-		case <-deadline:
-			remaining := pool.pendingForShard(shard)
-			vars.Error("分片 %d 异步完成事件排空超时，剩余未收尾任务=%d，转为孤儿收尾", shard, remaining)
-			// 声明本片不再接收：残留 worker 的会合投递据此改为本地收尾，
-			// 否则它们连同单飞令牌与 busy 标记一起永久滞留。
-			pool.markShardGone(shard)
-			return
-		}
-	}
-}
-
-func consumeAsyncTickCompletion(completion asyncTickCompletion) {
-	defer func() {
-		if recovered := recover(); recovered != nil {
-			vars.Error("异步定时器完成处理发生panic: %v", recovered)
-		}
-		if completion.releaseFlight != nil {
-			completion.releaseFlight()
-		}
-		if completion.pool != nil {
-			completion.pool.releaseTimer(completion.flightKey)
-		}
-		completion.ack <- struct{}{}
-	}()
-
-	parent := completion.parent
-	if parent == nil {
-		return
-	}
-	manager := completion.job.task.mgr
-	if completion.orphan {
-		// 原分片消费者已永久退出，续期只会把调度项塞进无人消费的通道。
-		// 按「管理器已关闭」同一语义作废并归还实例：该定时器此后不再触发，
-		// 而不是留下一个永远等不到 Tick 的活跃实例。
-		if manager != nil {
-			manager.stats.timersDropped.Add(1)
-		}
-		if manager != nil && parent.IsActive() && parent.gen.Load() == completion.job.task.gen {
-			manager.retireAfterExhaustion(parent)
-		}
-		parent.endTick()
-		return
-	}
-	if completion.ran {
-		if manager != nil {
-			manager.finishTimerTick(completion.job.task, parent)
-		} else {
-			parent.endTick()
-		}
-		return
-	}
-	if manager != nil && manager.isClosed.Load() && parent.IsActive() && parent.gen.Load() == completion.job.task.gen {
-		manager.retireAfterExhaustion(parent)
-	}
-	parent.endTick()
 }
 
 // retire 消费协程退出时把自身从全局 runtime 摘除。

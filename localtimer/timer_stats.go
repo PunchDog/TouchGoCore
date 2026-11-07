@@ -81,8 +81,8 @@ func (m *TimerManager) GetStats() TimerStats {
 // GetTimerCount 返回所有时间轮中的定时器总数
 func (m *TimerManager) GetTimerCount() int64 {
 	var total int64
-	for _, wheel := range m.wheels {
-		total += wheel.timerCount.Load()
+	for i := range m.wheels {
+		total += m.GetWheelTimerCount(TimerType(i))
 	}
 	return total
 }

@@ -13,43 +13,12 @@ import (
 //
 // 重试仍失败说明这条调度项已经永久消失：节点不在任何轮里、isActive 也已回滚，
 // 业务侧表现为该定时器的 Tick 再也不触发，且从外部完全无法察觉。这里主动作废
-// 实例（此刻 inTick 仍为 1，归还会由 endTick 落地），把「静默失联」变成一次
-// 显式回收 + 一条可接管的回调，业务据此重建定时器而不是等一个永远不来的 Tick。
+// 实例（此刻 inTick 仍为 1，归还会由 endTick 落地），把「静默失联」变成一条
+// 明确的错误日志与一次回收。
 func (m *TimerManager) notifyTimerLost(timer TimerInterface, parent *Timer, cause error) {
-	info := TimerLostInfo{
-		Manager:   m,
-		UID:       timer.GetUID(),
-		Interval:  parent.GetInterval(),
-		Remaining: parent.GetRemainingCount(),
-		Cause:     cause,
-	}
 	vars.Error("定时器续期失败已强制回收: uid=%d, 间隔=%dms, 剩余次数=%d, 原因=%v",
-		info.UID, info.Interval, info.Remaining, cause)
-
-	if fn := onTimerLost.Load(); fn != nil {
-		// 回调来自业务，绝不能让它把收尾（下面的 retire 与 endTick）打断
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					vars.Error("OnTimerLost 回调发生panic: %v", r)
-				}
-			}()
-			(*fn)(info)
-		}()
-	}
-	m.retireAfterExhaustion(parent)
-}
-
-// retireAfterExhaustion 作废执行完最后一拍的定时器并归还对象池。
-//
-// 此刻 inTick 仍为 1，归还请求会被挂起、由 executeTimer 尾部的 endTick 落地，
-// 因此本函数返回时实例还没有交给池，调用链上后续的状态读取都是安全的。
-func (m *TimerManager) retireAfterExhaustion(parent *Timer) {
-	parent.mu.Lock()
-	parent.removeFromManagerLocked(true)
-	parent.mu.Unlock()
-	// 不在这里补 Put：结论必为 releaseDeferred（inTick 仍为 1），
-	// 由 executeTimer 尾部的 endTick 独占落地，避免两头争同一次归还。
+		timer.GetUID(), parent.GetInterval(), parent.GetRemainingCount(), cause)
+	parent.RemoveFromManager(true)
 }
 
 // timerRuntime 是一次 Run → TimeStop 生命周期的全部可变状态。
@@ -86,59 +55,44 @@ type asyncTimerKey struct {
 	epoch  uint64
 }
 
+// asyncTickJob 是一次异步 Tick 执行请求。
+//
+// 时间轮只负责判定到期并把任务投进池；worker 取到后自己跑完 Tick、续期/作废与
+// endTick，不再把完成事件回传给分片消费者——异步不是第二套调度系统。
 type asyncTickJob struct {
-	task      timerTask
-	shard     int
-	flightKey asyncTimerKey
+	task timerTask
+	key  asyncTimerKey
 }
 
-type asyncTickCompletion struct {
-	pool          *asyncTickPool
-	job           asyncTickJob
-	parent        *Timer
-	flightKey     asyncTimerKey
-	releaseFlight func()
-	ran           bool
-	// orphan 标记本次完成事件的原分片消费者已永久退出，无处投递。
-	// 收尾改为「作废归还」而不是续期：续期只会把调度项塞进无人消费的通道。
-	orphan bool
-	ack    chan struct{}
-}
-
-type asyncTickWorker struct {
-	id    uint64
-	queue []asyncTickJob
-}
-
-// asyncTickPool owns a bounded number of worker goroutines and an unbounded FIFO
-// queue per worker. All worker registration and queue mutations use mu.
+// asyncTickPool 是有上限的异步 Tick 执行池。
+//
+// 队列无长度上限：派发时节点已经摘链，提交若因容量被拒，定时器就静默失联。
 type asyncTickPool struct {
-	mu       sync.Mutex
-	limit    int
-	stopped  bool
-	nextID   uint64
-	round    int
-	workers  []*asyncTickWorker
-	busy     map[asyncTimerKey]bool
-	deferred map[asyncTimerKey][]asyncTickJob
-	pending  []int
-	results  []chan asyncTickCompletion
-	progress []chan struct{}
-	// gone 是「该分片消费者已永久退出」的信号，close 表示不再有人接收完成事件。
-	// 没有它，worker 会永久阻塞在会合投递上，连带它的单飞令牌与 busy 标记一起滞留。
-	gone     []chan struct{}
-	goneOnce []sync.Once
-	orphaned atomic.Int64
+	mu      sync.Mutex
+	limit   int
+	stopped bool
+
+	// queue 是待执行任务的全局 FIFO。
+	queue []asyncTickJob
+	// busy 标记某个 Timer 已有任务在执行。
+	busy map[asyncTimerKey]bool
+	// parked 保存执行期间到达的后续任务。每个 Timer 只留最新一条：更早的
+	// 调度项 gen 必然已被新的 AddTimer 取代，执行也只会被 isValid 丢弃。
+	parked map[asyncTimerKey]asyncTickJob
+	// active 是当前存活的 worker 数，不超过 limit。
+	active int
+	// running 是正在执行回调的任务数，用于统计在飞量。
+	running int
+
 	workerWG sync.WaitGroup
 }
 
 // AsyncWorkerStats is a snapshot of the asynchronous Tick worker pool.
 type AsyncWorkerStats struct {
-	Limit    int   // configured maximum worker count
-	Workers  int   // currently registered workers
-	Queued   int   // tasks waiting in worker queues
-	InFlight int   // async tasks accepted but not finalized by their shard
-	Orphaned int64 // completions finalized locally because their shard consumer was gone
+	Limit    int // configured maximum worker count
+	Workers  int // currently registered workers
+	Queued   int // tasks waiting in queue or parked for their timer
+	InFlight int // async tasks currently executing
 }
 
 // DefaultAsyncWorkerLimit is the default maximum number of asynchronous Tick workers.
@@ -156,8 +110,8 @@ type timerFlightGate struct {
 	refs  int
 }
 
-// acquireTimerFlight 阻塞取得单飞令牌。仅异步 worker 使用：它阻塞时消费者仍能
-// 处理完成事件，令牌必然会被归还。
+// acquireTimerFlight 阻塞取得单飞令牌。仅异步 worker 使用：worker 阻塞时，
+// 其它 worker 与分片消费者仍在推进，令牌必然会被当前持有者归还。
 func acquireTimerFlight(key asyncTimerKey) func() {
 	gate := lookupOrCreateFlight(key)
 	<-gate.token
@@ -170,8 +124,8 @@ func acquireTimerFlight(key asyncTimerKey) func() {
 	}
 }
 
-// tryAcquireTimerFlight 尝试取得单飞令牌但不阻塞。消费者协程必须走这条路径：
-// 它在等待令牌时无法处理异步完成事件，而完成事件正是令牌的释放方，阻塞即死锁。
+// tryAcquireTimerFlight 尝试取得单飞令牌但不阻塞。分片消费者必须走这条路径：
+// 它一卡在令牌上，整片调度就停摆，而令牌可能正被 cleanupWheel 的长回调持有。
 func tryAcquireTimerFlight(key asyncTimerKey) (func(), bool) {
 	gate := lookupOrCreateFlight(key)
 	select {
@@ -241,184 +195,140 @@ func GetAsyncWorkerStats() AsyncWorkerStats {
 func (p *asyncTickPool) stats() AsyncWorkerStats {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	stats := AsyncWorkerStats{Limit: p.limit, Workers: len(p.workers), Orphaned: p.orphaned.Load()}
-	for _, pending := range p.pending {
-		stats.InFlight += pending
+	return AsyncWorkerStats{
+		Limit:    p.limit,
+		Workers:  p.active,
+		Queued:   len(p.queue) + len(p.parked),
+		InFlight: p.running,
 	}
-	for _, worker := range p.workers {
-		stats.Queued += len(worker.queue)
-	}
-	for _, jobs := range p.deferred {
-		stats.Queued += len(jobs)
-	}
-	stats.InFlight -= stats.Queued
-	return stats
 }
 
-func newAsyncTickPool(limit, shards int) *asyncTickPool {
+func newAsyncTickPool(limit int) *asyncTickPool {
 	if limit <= 0 {
 		limit = DefaultAsyncWorkerLimit
 	}
-	if shards <= 0 {
-		shards = 1
+	return &asyncTickPool{
+		limit:  limit,
+		busy:   make(map[asyncTimerKey]bool),
+		parked: make(map[asyncTimerKey]asyncTickJob),
 	}
-	pool := &asyncTickPool{
-		limit:    limit,
-		busy:     make(map[asyncTimerKey]bool),
-		deferred: make(map[asyncTimerKey][]asyncTickJob),
-		pending:  make([]int, shards),
-		results:  make([]chan asyncTickCompletion, shards),
-		progress: make([]chan struct{}, shards),
-		gone:     make([]chan struct{}, shards),
-		goneOnce: make([]sync.Once, shards),
-	}
-	for i := range pool.results {
-		// Rendezvous delivery prevents a second unbounded completion queue.
-		pool.results[i] = make(chan asyncTickCompletion)
-		pool.progress[i] = make(chan struct{}, 1)
-		pool.gone[i] = make(chan struct{})
-	}
-	return pool
 }
 
-func (p *asyncTickPool) submit(job asyncTickJob) bool {
-	if p == nil || job.shard < 0 || job.shard >= len(p.results) || job.task.timer == nil {
+func (p *asyncTickPool) submit(task timerTask) bool {
+	if p == nil || task.timer == nil {
 		return false
 	}
-	parent := safeAsyncTimerParent(job.task.timer)
+	// 过期调度项不进入队列：它的代次已被新的 AddTimer 接管，既不该执行，
+	// 也不该占掉 parked 里更新的一条任务。
+	if !safeTimerTaskValid(task) {
+		return true
+	}
+	parent := safeAsyncTimerParent(task.timer)
 	if parent == nil {
 		return false
 	}
-	epoch := parent.poolEpoch.Load()
-	job.flightKey = asyncTimerKey{parent: parent, epoch: epoch}
+	job := asyncTickJob{
+		task: task,
+		key:  asyncTimerKey{parent: parent, epoch: parent.poolEpoch.Load()},
+	}
 
 	p.mu.Lock()
 	if p.stopped {
 		p.mu.Unlock()
 		return false
 	}
-	p.pending[job.shard]++
-	if p.busy[job.flightKey] {
-		p.deferred[job.flightKey] = append(p.deferred[job.flightKey], job)
+	if p.busy[job.key] {
+		// 同一 Timer 已有任务在执行：只保留最新一条。更早的调度项代次已被
+		// 新的 AddTimer 取代，即使执行也会被 isValid 丢弃。
+		if cur, ok := p.parked[job.key]; ok && cur.task.gen > job.task.gen {
+			p.mu.Unlock()
+			return true
+		}
+		p.parked[job.key] = job
 		p.mu.Unlock()
 		return true
 	}
-	// Reserve this Timer incarnation before exposing the job to a worker. This
-	// closes the submit-to-beginTick window without confusing later pool reuse.
-	p.busy[job.flightKey] = true
-
-	var start *asyncTickWorker
-	if len(p.workers) < p.limit {
-		p.nextID++
-		start = &asyncTickWorker{id: p.nextID, queue: []asyncTickJob{job}}
-		p.workers = append(p.workers, start)
-		p.workerWG.Add(1)
-	} else {
-		idx := p.leastQueuedWorkerLocked()
-		if idx < 0 {
-			delete(p.busy, job.flightKey)
-			p.pending[job.shard]--
-			p.mu.Unlock()
-			return false
-		}
-		p.workers[idx].queue = append(p.workers[idx].queue, job)
-	}
+	p.busy[job.key] = true
+	p.queue = append(p.queue, job)
+	spawn := p.ensureWorkersLocked()
 	p.mu.Unlock()
-
-	if start != nil {
-		go p.runWorker(start)
-	}
+	p.startWorkers(spawn)
 	return true
 }
 
-func (p *asyncTickPool) leastQueuedWorkerLocked() int {
-	if len(p.workers) == 0 {
-		return -1
+// ensureWorkersLocked 在有排队任务时补一个 worker，返回本次需要新起的数量。
+//
+// workerWG.Add 与 active 自增必须在同一临界区：wait 只在 stopAccepting 之后调用，
+// 而 stopAccepting 与 submit 共用这把锁，锁内 Add 才能保证 wait 看不到半成品。
+func (p *asyncTickPool) ensureWorkersLocked() (spawn int) {
+	if p.active >= p.limit || len(p.queue) == 0 {
+		return 0
 	}
-	start := p.round % len(p.workers)
-	best := start
-	for i := 1; i < len(p.workers); i++ {
-		idx := (start + i) % len(p.workers)
-		if len(p.workers[idx].queue) < len(p.workers[best].queue) {
-			best = idx
-		}
-	}
-	p.round = (best + 1) % len(p.workers)
-	return best
+	p.active++
+	p.workerWG.Add(1)
+	return 1
 }
 
-func (p *asyncTickPool) nextJob(worker *asyncTickWorker) (asyncTickJob, bool) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if len(worker.queue) == 0 {
-		for i, candidate := range p.workers {
-			if candidate == worker {
-				p.workers = append(p.workers[:i], p.workers[i+1:]...)
-				if p.round >= len(p.workers) {
-					p.round = 0
-				}
-				break
-			}
-		}
-		return asyncTickJob{}, false
+func (p *asyncTickPool) startWorkers(n int) {
+	for i := 0; i < n; i++ {
+		go p.runWorker()
 	}
-	job := worker.queue[0]
-	worker.queue[0] = asyncTickJob{}
-	worker.queue = worker.queue[1:]
-	switch {
-	case len(worker.queue) == 0:
-		worker.queue = nil
-	case len(worker.queue)*4 < cap(worker.queue):
-		compacted := make([]asyncTickJob, len(worker.queue))
-		copy(compacted, worker.queue)
-		worker.queue = compacted
-	}
-	return job, true
 }
 
-func (p *asyncTickPool) runWorker(worker *asyncTickWorker) {
+func (p *asyncTickPool) runWorker() {
 	defer p.workerWG.Done()
 	for {
-		job, ok := p.nextJob(worker)
-		if !ok {
+		p.mu.Lock()
+		if len(p.queue) == 0 {
+			p.active--
+			p.mu.Unlock()
 			return
 		}
-		if job.task.timer == nil {
-			p.releaseTimer(job.flightKey)
-			p.finishWithoutCompletion(job.shard)
-			continue
-		}
-		parent := safeAsyncTimerParent(job.task.timer)
-		if parent == nil || !safeTimerTaskValid(job.task) || parent.poolEpoch.Load() != job.flightKey.epoch {
-			p.releaseTimer(job.flightKey)
-			p.finishWithoutCompletion(job.shard)
-			continue
-		}
-		releaseFlight := acquireTimerFlight(job.flightKey)
-		if !safeTimerTaskValid(job.task) || !parent.beginTick(job.task.gen) {
-			releaseFlight()
-			p.releaseTimer(job.flightKey)
-			p.finishWithoutCompletion(job.shard)
-			continue
-		}
+		job := p.queue[0]
+		p.queue[0] = asyncTickJob{}
+		p.queue = p.queue[1:]
+		p.running++
+		p.mu.Unlock()
 
-		ran := false
-		if job.task.mgr != nil && !job.task.mgr.isClosed.Load() {
-			job.task.mgr.runTimerTick(job.task.timer)
-			ran = true
-		}
-		completion := asyncTickCompletion{
-			pool:          p,
-			job:           job,
-			parent:        parent,
-			flightKey:     job.flightKey,
-			releaseFlight: releaseFlight,
-			ran:           ran,
-			ack:           make(chan struct{}, 1),
-		}
-		p.deliverCompletion(completion, job.shard)
-		p.finishWithoutCompletion(job.shard)
+		p.runJob(job)
+
+		p.mu.Lock()
+		p.running--
+		p.mu.Unlock()
 	}
+}
+
+// runJob 执行一个异步 Tick 的完整生命周期：取单飞令牌、执行 Tick、续期/作废、endTick。
+//
+// releaseKey 必须放在 defer 里：无论正常返回、提前返回还是 panic，都要把该 Timer 的
+// 执行位交还，否则后续任务只能堆在 parked 里永不执行。
+func (p *asyncTickPool) runJob(job asyncTickJob) {
+	defer p.releaseKey(job.key)
+	defer func() {
+		if r := recover(); r != nil {
+			vars.Error("异步定时器任务发生panic: %v", r)
+		}
+	}()
+
+	parent := safeAsyncTimerParent(job.task.timer)
+	if parent == nil || parent.poolEpoch.Load() != job.key.epoch {
+		return
+	}
+	// 单飞令牌与同步收尾路径（cleanupWheel → executeTimer）互斥。同一 Timer 的
+	// 并发异步任务已被 busy/parked 挡住，所以这里只可能等同步路径的那一次 Tick。
+	releaseFlight := acquireTimerFlight(job.key)
+	defer releaseFlight()
+	if !safeTimerTaskValid(job.task) {
+		return
+	}
+	if job.task.mgr == nil {
+		return
+	}
+	if job.task.mgr.isClosed.Load() {
+		job.task.mgr.discardDispatchedTask(job.task)
+		return
+	}
+	job.task.mgr.runTimerTask(job.task, parent)
 }
 
 func safeAsyncTimerParent(timer TimerInterface) (parent *Timer) {
@@ -439,142 +349,21 @@ func safeTimerTaskValid(task timerTask) (valid bool) {
 	return task.isValid()
 }
 
-// releaseTimer unblocks same-Timer jobs only after the current callback and its
-// consumer-side finalization have completed.
-func (p *asyncTickPool) releaseTimer(key asyncTimerKey) {
-	if key.parent == nil {
-		return
-	}
+// releaseKey 交还某个 Timer 的执行位；有 parked 任务则把它移入队列尾部。
+//
+// 不在这里补 worker：本函数由刚结束一个 job 的 worker 调用，它回到循环后会立刻
+// 看到新入队的任务。
+func (p *asyncTickPool) releaseKey(key asyncTimerKey) {
 	p.mu.Lock()
-	delete(p.busy, key)
-	jobs := p.deferred[key]
-	if len(jobs) == 0 {
-		delete(p.deferred, key)
+	next, ok := p.parked[key]
+	if !ok {
+		delete(p.busy, key)
 		p.mu.Unlock()
 		return
 	}
-	job := jobs[0]
-	if !safeTimerTaskValid(job.task) || key.parent.poolEpoch.Load() != key.epoch {
-		if len(jobs) == 1 {
-			delete(p.deferred, key)
-		} else {
-			p.deferred[key] = jobs[1:]
-		}
-		p.mu.Unlock()
-		p.finishWithoutCompletion(job.shard)
-		p.releaseTimer(key)
-		return
-	}
-	if len(jobs) == 1 {
-		delete(p.deferred, key)
-	} else {
-		p.deferred[key] = jobs[1:]
-	}
-	p.busy[key] = true
-
-	var start *asyncTickWorker
-	if len(p.workers) < p.limit {
-		p.nextID++
-		start = &asyncTickWorker{id: p.nextID, queue: []asyncTickJob{job}}
-		p.workers = append(p.workers, start)
-		p.workerWG.Add(1)
-	} else {
-		idx := p.leastQueuedWorkerLocked()
-		if idx < 0 {
-			delete(p.busy, key)
-			p.deferred[key] = append([]asyncTickJob{job}, p.deferred[key]...)
-			p.mu.Unlock()
-			return
-		}
-		p.workers[idx].queue = append(p.workers[idx].queue, job)
-	}
+	delete(p.parked, key)
+	p.queue = append(p.queue, next)
 	p.mu.Unlock()
-
-	if start != nil {
-		go p.runWorker(start)
-	}
-}
-
-func (p *asyncTickPool) finishWithoutCompletion(shard int) {
-	p.mu.Lock()
-	if shard >= 0 && shard < len(p.pending) && p.pending[shard] > 0 {
-		p.pending[shard]--
-	}
-	p.mu.Unlock()
-	if shard >= 0 && shard < len(p.progress) {
-		select {
-		case p.progress[shard] <- struct{}{}:
-		default:
-		}
-	}
-}
-
-func (p *asyncTickPool) pendingForShard(shard int) int {
-	if p == nil || shard < 0 || shard >= len(p.pending) {
-		return 0
-	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.pending[shard]
-}
-
-func (p *asyncTickPool) resultsForShard(shard int) <-chan asyncTickCompletion {
-	if p == nil || shard < 0 || shard >= len(p.results) {
-		return nil
-	}
-	return p.results[shard]
-}
-
-func (p *asyncTickPool) progressForShard(shard int) <-chan struct{} {
-	if p == nil || shard < 0 || shard >= len(p.progress) {
-		return nil
-	}
-	return p.progress[shard]
-}
-
-// markShardGone 声明第 shard 号分片的消费者已永久退出，此后不再接收完成事件。
-//
-// 幂等：同一分片可能被排空路径与分片降级路径各声明一次。
-func (p *asyncTickPool) markShardGone(shard int) {
-	if p == nil || shard < 0 || shard >= len(p.gone) {
-		return
-	}
-	p.goneOnce[shard].Do(func() { close(p.gone[shard]) })
-}
-
-func (p *asyncTickPool) goneForShard(shard int) <-chan struct{} {
-	if p == nil || shard < 0 || shard >= len(p.gone) {
-		return nil
-	}
-	return p.gone[shard]
-}
-
-// deliverCompletion 把完成事件交回原分片消费者，并等它收尾完毕。
-//
-// 会合投递要求「必须有接收方在场」。消费者 panic 退出且排空超时后，这个前提
-// 永久不成立：继续阻塞投递会让 worker、它的单飞令牌与 busy 标记一起滞留，
-// 该 Timer 之后所有调度都堆进 deferred 永不再执行，pending 也永不归零。
-// 因此消费者消失时改为本地孤儿收尾——不续期，直接作废并归还实例。
-func (p *asyncTickPool) deliverCompletion(completion asyncTickCompletion, shard int) {
-	if p == nil {
-		completion.orphan = true
-		consumeAsyncTickCompletion(completion)
-		return
-	}
-	if shard < 0 || shard >= len(p.results) {
-		completion.orphan = true
-		p.orphaned.Add(1)
-		consumeAsyncTickCompletion(completion)
-		return
-	}
-	select {
-	case p.results[shard] <- completion:
-		<-completion.ack
-	case <-p.goneForShard(shard):
-		completion.orphan = true
-		p.orphaned.Add(1)
-		consumeAsyncTickCompletion(completion)
-	}
 }
 
 func (p *asyncTickPool) stopAccepting() {
@@ -607,36 +396,11 @@ func (p *asyncTickPool) wait(ctx context.Context) bool {
 	}
 }
 
-// TimerLostInfo 描述一个彻底失联（续期重试仍失败、已被强制回收）的定时器。
-type TimerLostInfo struct {
-	Manager   *TimerManager // 归属管理器
-	UID       int64         // 定时器唯一ID
-	Interval  int64         // 执行间隔（毫秒）
-	Remaining int64         // 剩余执行次数，-1 表示无限
-	Cause     error         // 续期失败的最终原因
-}
-
-// onTimerLost 业务注册的失联回调（copy-on-write，读写不竞争）
-var onTimerLost atomic.Pointer[func(TimerLostInfo)]
-
-// SetOnTimerLost 注册「定时器彻底失联」回调；传 nil 取消。
-//
-// 正常路径下该回调永不触发；一旦触发说明下游 Tick 太慢导致调度项被丢弃，
-// 业务必须据此重建定时器。回调在 timeTick 消费协程上执行，禁止阻塞。
-func SetOnTimerLost(fn func(TimerLostInfo)) {
-	if fn == nil {
-		onTimerLost.Store(nil)
-		return
-	}
-	onTimerLost.Store(&fn)
-}
-
 // 全局状态（定时器系统单例相关）
 var (
-	// timerRegistryMu 冻结注册表的「批量关闭」与「单个注册」：Run/TimeStop 取待关
-	// 清单的窗口内，并发 NewTimerManager 必须排在它后面。否则刚建好的管理器会
-	// 落在清单外却被随后的清空抹掉，且从未 Close —— 它名下 5 个时间轮协程 +
-	// 5 个 ticker 永久泄漏。清单内的管理器各自 Close 时自摘，不碰这段临界区。
+	// timerRegistryMu 串行化注册表写入与「取存量快照」：Run/TimeStop 在同一临界区
+	// 取出待关清单，放开锁后才逐个 Close，避免并发 NewTimerManager 给快照制造
+	// 「取到一半」的视图。管理器 Close 时自摘也不碰这段临界区。
 	timerRegistryMu     sync.Mutex
 	timerManagerMap     = syncmap.NewMap[*TimerManager, bool]() // map[*TimerManager]bool
 	globalTimerUID      atomic.Int64                            // 定时器ID：跨管理器全局唯一
@@ -646,9 +410,8 @@ var (
 	// timerChannels 刻意保持全局、跨生命周期共享：
 	// NewTimerManager 可以在未 Run 的情况下独立调用，此时也得有地方派发。
 	// S68 起为分片数组：下标即分片号，一条分片一个消费协程，同一 uid 恒定落同一分片。
-	timerChannels     []chan timerTask
-	timerChannelMu    sync.Mutex
-	timerChannelReady bool
+	timerChannels  []chan timerTask
+	timerChannelMu sync.Mutex
 )
 
 // registerTimerManager 把管理器登记进注册表

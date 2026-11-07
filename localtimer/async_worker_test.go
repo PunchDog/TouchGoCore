@@ -26,56 +26,15 @@ func (t *asyncPoolTestTimer) Tick() {
 
 func (t *asyncPoolTestTimer) IsAsyncTick() bool { return true }
 
-func newAsyncPoolTestTimer(t *testing.T, mgr *TimerManager, id int, started chan<- int, release <-chan struct{}) asyncTickJob {
+// newAsyncPoolTestTimer 构造一条异步任务。mgr 用离线管理器：worker 在 Tick 后
+// 走正常续期路径，把任务放进无人消费的轮通道，测试只观察执行调度本身。
+func newAsyncPoolTestTimer(t *testing.T, mgr *TimerManager, id int, started chan<- int, release <-chan struct{}) timerTask {
 	t.Helper()
 	timer := &asyncPoolTestTimer{id: id, started: started, release: release}
 	if err := timer.Timer.Init(1, InfiniteCount, timer); err != nil {
 		t.Fatalf("init timer: %v", err)
 	}
-	parent := timer.GetParent()
-	return asyncTickJob{
-		task:      timerTask{timer: timer, gen: timer.gen.Load(), mgr: mgr},
-		shard:     0,
-		flightKey: asyncTimerKey{parent: parent, epoch: parent.poolEpoch.Load()},
-	}
-}
-
-func ackAsyncCompletion(completion asyncTickCompletion) {
-	completion.parent.endTick()
-	if completion.releaseFlight != nil {
-		completion.releaseFlight()
-	}
-	if completion.pool != nil {
-		completion.pool.releaseTimer(completion.flightKey)
-	}
-	completion.ack <- struct{}{}
-}
-
-func receiveAsyncCompletion(t *testing.T, pool *asyncTickPool) asyncTickCompletion {
-	t.Helper()
-	select {
-	case completion := <-pool.resultsForShard(0):
-		return completion
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for async completion")
-		return asyncTickCompletion{}
-	}
-}
-
-func waitAsyncPending(t *testing.T, pool *asyncTickPool, want int) {
-	t.Helper()
-	timer := time.NewTimer(2 * time.Second)
-	defer timer.Stop()
-	for {
-		if got := pool.pendingForShard(0); got == want {
-			return
-		}
-		select {
-		case <-pool.progressForShard(0):
-		case <-timer.C:
-			t.Fatalf("pending jobs = %d, want %d", pool.pendingForShard(0), want)
-		}
-	}
+	return timerTask{timer: timer, gen: timer.gen.Load(), mgr: mgr}
 }
 
 func TestTimerIsAsyncTickDefaultFalse(t *testing.T) {
@@ -85,12 +44,14 @@ func TestTimerIsAsyncTickDefaultFalse(t *testing.T) {
 	var _ TimerInterface = (*asyncPoolTestTimer)(nil)
 }
 
-func TestAsyncWorkerPoolExpandsAndUsesShortestUnboundedQueue(t *testing.T) {
-	mgr := &TimerManager{}
+// TestAsyncWorkerPoolExpandsToLimitAndQueueIsUnbounded 校验 worker 上限与无界队列：
+// 两个回调用各自的 release 钉住 worker，后续任务只能排队，且不得被容量拒绝。
+func TestAsyncWorkerPoolExpandsToLimitAndQueueIsUnbounded(t *testing.T) {
+	mgr := newRawWheelManager()
 	started := make(chan int, 2)
 	release1 := make(chan struct{})
 	release2 := make(chan struct{})
-	pool := newAsyncTickPool(2, 1)
+	pool := newAsyncTickPool(2)
 
 	if !pool.submit(newAsyncPoolTestTimer(t, mgr, 1, started, release1)) {
 		t.Fatal("submit first job")
@@ -106,106 +67,97 @@ func TestAsyncWorkerPoolExpandsAndUsesShortestUnboundedQueue(t *testing.T) {
 	}
 
 	queuedRelease := make(chan struct{})
-	queuedJobs := make([]asyncTickJob, 100)
-	for i := range queuedJobs {
-		queuedJobs[i] = newAsyncPoolTestTimer(t, mgr, i+3, nil, queuedRelease)
+	for i := 0; i < 100; i++ {
+		if !pool.submit(newAsyncPoolTestTimer(t, mgr, i+3, nil, queuedRelease)) {
+			t.Fatal("unbounded queue rejected a job")
+		}
 	}
-	pool.mu.Lock()
-	workerCount := len(pool.workers)
-	pool.mu.Unlock()
-	if workerCount != 2 {
-		t.Fatalf("worker count = %d, want 2", workerCount)
-	}
-
-	var submitWG sync.WaitGroup
-	submitWG.Add(len(queuedJobs))
-	for _, queuedJob := range queuedJobs {
-		job := queuedJob
-		go func() {
-			defer submitWG.Done()
-			if !pool.submit(job) {
-				t.Error("submit queued job")
-			}
-		}()
-	}
-	submitWG.Wait()
-	pool.mu.Lock()
-	queued := 0
-	for _, worker := range pool.workers {
-		queued += len(worker.queue)
-	}
-	pool.mu.Unlock()
-	if queued != 100 {
-		t.Fatalf("queued jobs = %d, want 100", queued)
+	stats := pool.stats()
+	if stats.Workers != 2 || stats.Queued != 100 || stats.InFlight != 2 {
+		t.Fatalf("stats = %+v, want workers=2 queued=100 inFlight=2", stats)
 	}
 
 	pool.stopAccepting()
 	close(release1)
 	close(release2)
 	close(queuedRelease)
-	for range 102 {
-		ackAsyncCompletion(receiveAsyncCompletion(t, pool))
-	}
-	waitAsyncPending(t, pool, 0)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if !pool.wait(ctx) {
-		t.Fatal("workers did not exit after their queues drained")
+		t.Fatalf("workers did not exit after drain: %+v", pool.stats())
 	}
-	pool.mu.Lock()
-	remainingWorkers := len(pool.workers)
-	pool.mu.Unlock()
-	if remainingWorkers != 0 {
-		t.Fatalf("worker count after drain = %d, want 0", remainingWorkers)
+	if stats := pool.stats(); stats != (AsyncWorkerStats{Limit: 2}) {
+		t.Fatalf("stats after drain = %+v", stats)
 	}
 }
 
-func TestAsyncWorkerPoolSelectsShortestQueue(t *testing.T) {
-	pool := &asyncTickPool{
-		limit:   2,
-		pending: []int{6},
-		results: []chan asyncTickCompletion{make(chan asyncTickCompletion)},
-		workers: []*asyncTickWorker{
-			{queue: make([]asyncTickJob, 4)},
-			{queue: make([]asyncTickJob, 1)},
-		},
-		busy:     make(map[asyncTimerKey]bool),
-		deferred: make(map[asyncTimerKey][]asyncTickJob),
-	}
-	timer := &asyncPoolTestTimer{}
-	if err := timer.Timer.Init(1, InfiniteCount, timer); err != nil {
-		t.Fatal(err)
-	}
-	parent := timer.GetParent()
-	if !pool.submit(asyncTickJob{
-		task:      timerTask{timer: timer, gen: timer.gen.Load(), mgr: &TimerManager{}},
-		shard:     0,
-		flightKey: asyncTimerKey{parent: parent, epoch: parent.poolEpoch.Load()},
-	}) {
-		t.Fatal("submit job to saturated pool")
-	}
-	if got := len(pool.workers[0].queue); got != 4 {
-		t.Fatalf("non-shortest queue length = %d, want 4", got)
-	}
-	if got := len(pool.workers[1].queue); got != 2 {
-		t.Fatalf("shortest queue length = %d, want 2", got)
-	}
-}
+// TestAsyncWorkerPoolSingleWorkerQueueHasNoLengthCap 单 worker 下 256 条任务
+// 必须全部排队而不是被拒绝。
+func TestAsyncWorkerPoolSingleWorkerQueueHasNoLengthCap(t *testing.T) {
+	mgr := newRawWheelManager()
+	started := make(chan int, 1)
+	release := make(chan struct{})
+	pool := newAsyncTickPool(1)
 
-func TestAsyncWorkerPoolStats(t *testing.T) {
-	pool := newAsyncTickPool(3, 2)
-	pool.pending[0] = 6
-	pool.workers = []*asyncTickWorker{
-		{queue: []asyncTickJob{{}, {}}},
-		{queue: []asyncTickJob{{}}},
+	if !pool.submit(newAsyncPoolTestTimer(t, mgr, 1, started, release)) {
+		t.Fatal("submit running job")
 	}
-	key := asyncTimerKey{parent: &Timer{}, epoch: 1}
-	pool.busy[key] = true
-	pool.deferred[key] = []asyncTickJob{{}, {}}
+	<-started
+	queuedRelease := make(chan struct{})
+	for id := 0; id < 256; id++ {
+		if !pool.submit(newAsyncPoolTestTimer(t, mgr, id+2, nil, queuedRelease)) {
+			t.Fatal("unbounded queue rejected a job")
+		}
+	}
 	stats := pool.stats()
-	if stats != (AsyncWorkerStats{Limit: 3, Workers: 2, Queued: 5, InFlight: 1}) {
-		t.Fatalf("stats = %+v", stats)
+	if stats.Workers != 1 || stats.Queued != 256 || stats.InFlight != 1 {
+		t.Fatalf("stats = %+v, want workers=1 queued=256 inFlight=1", stats)
+	}
+
+	pool.stopAccepting()
+	close(release)
+	close(queuedRelease)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if !pool.wait(ctx) {
+		t.Fatalf("worker did not exit: %+v", pool.stats())
+	}
+}
+
+// TestAsyncWorkerPoolStats 校验执行中、parked 与空闲三种状态的口径。
+func TestAsyncWorkerPoolStats(t *testing.T) {
+	mgr := newRawWheelManager()
+	pool := newAsyncTickPool(2)
+	started := make(chan int, 1)
+	release := make(chan struct{})
+	task := newAsyncPoolTestTimer(t, mgr, 1, started, release)
+
+	if !pool.submit(task) {
+		t.Fatal("submit job")
+	}
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("async timer did not start")
+	}
+	if stats := pool.stats(); stats != (AsyncWorkerStats{Limit: 2, Workers: 1, Queued: 0, InFlight: 1}) {
+		t.Fatalf("running stats = %+v", stats)
+	}
+
+	// 同一 Timer 的后续任务只进 parked，不占 worker。
+	if !pool.submit(task) {
+		t.Fatal("submit parked job")
+	}
+	if stats := pool.stats(); stats != (AsyncWorkerStats{Limit: 2, Workers: 1, Queued: 1, InFlight: 1}) {
+		t.Fatalf("parked stats = %+v", stats)
+	}
+
+	pool.stopAccepting()
+	close(release)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if !pool.wait(ctx) {
+		t.Fatalf("worker did not exit: %+v", pool.stats())
 	}
 }
 
@@ -232,19 +184,22 @@ func (t *asyncSingleFlightTimer) Tick() {
 
 func (t *asyncSingleFlightTimer) IsAsyncTick() bool { return true }
 
-func TestAsyncWorkerPoolSerializesSameTimer(t *testing.T) {
-	mgr := &TimerManager{}
+// TestAsyncWorkerPoolNeverRunsSameTimerConcurrently 同一 Timer 连续两条任务
+// 不得重叠执行；第二条即使因代次过期被丢弃，执行位也必须归还。
+func TestAsyncWorkerPoolNeverRunsSameTimerConcurrently(t *testing.T) {
+	mgr := newRawWheelManager()
 	started := make(chan struct{}, 2)
 	release := make(chan struct{})
 	timer := &asyncSingleFlightTimer{started: started, release: release}
 	if err := timer.Timer.Init(1, InfiniteCount, timer); err != nil {
 		t.Fatal(err)
 	}
-	job := asyncTickJob{task: timerTask{timer: timer, gen: timer.gen.Load(), mgr: mgr}}
-	pool := newAsyncTickPool(2, 1)
-	if !pool.submit(job) || !pool.submit(job) {
+	task := timerTask{timer: timer, gen: timer.gen.Load(), mgr: mgr}
+	pool := newAsyncTickPool(2)
+	if !pool.submit(task) || !pool.submit(task) {
 		t.Fatal("submit repeated timer jobs")
 	}
+
 	select {
 	case <-started:
 	case <-time.After(2 * time.Second):
@@ -257,38 +212,33 @@ func TestAsyncWorkerPoolSerializesSameTimer(t *testing.T) {
 	}
 
 	close(release)
-	first := receiveAsyncCompletion(t, pool)
-	ackAsyncCompletion(first)
-	select {
-	case <-started:
-	case <-time.After(2 * time.Second):
-		t.Fatal("deferred same-timer job was lost")
+	pool.stopAccepting()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if !pool.wait(ctx) {
+		t.Fatalf("workers did not exit: %+v", pool.stats())
 	}
-	second := receiveAsyncCompletion(t, pool)
-	ackAsyncCompletion(second)
-	waitAsyncPending(t, pool, 0)
 	if got := timer.max.Load(); got != 1 {
 		t.Fatalf("maximum concurrent same-timer callbacks = %d, want 1", got)
 	}
-	pool.stopAccepting()
-	if !pool.wait(context.Background()) {
-		t.Fatal("workers did not stop")
-	}
 }
 
+// TestAsyncWorkerWaitsForSynchronousSameTimerTick 同步收尾路径持有令牌时，
+// 异步 worker 必须等它结束，而不是并行执行同一个 Timer。
 func TestAsyncWorkerWaitsForSynchronousSameTimerTick(t *testing.T) {
-	mgr := &TimerManager{}
+	mgr := newRawWheelManager()
 	started := make(chan int, 1)
 	release := make(chan struct{})
-	job := newAsyncPoolTestTimer(t, mgr, 1, started, release)
-	parent := job.task.timer.GetParent()
-	if !parent.beginTick(job.task.gen) {
+	task := newAsyncPoolTestTimer(t, mgr, 1, started, release)
+	parent := task.timer.GetParent()
+	if !parent.beginTick(task.gen) {
 		t.Fatal("failed to simulate a synchronous callback")
 	}
-	flightRelease := acquireTimerFlight(job.flightKey)
+	key := asyncTimerKey{parent: parent, epoch: parent.poolEpoch.Load()}
+	flightRelease := acquireTimerFlight(key)
 
-	pool := newAsyncTickPool(1, 1)
-	if !pool.submit(job) {
+	pool := newAsyncTickPool(1)
+	if !pool.submit(task) {
 		t.Fatal("submit async job")
 	}
 	select {
@@ -304,64 +254,26 @@ func TestAsyncWorkerWaitsForSynchronousSameTimerTick(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("async callback did not start after synchronous callback ended")
 	}
+
 	close(release)
-	ackAsyncCompletion(receiveAsyncCompletion(t, pool))
-	waitAsyncPending(t, pool, 0)
 	pool.stopAccepting()
-	if !pool.wait(context.Background()) {
-		t.Fatal("worker did not exit")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if !pool.wait(ctx) {
+		t.Fatalf("worker did not exit: %+v", pool.stats())
 	}
 }
 
-func TestAsyncWorkerPoolSingleWorkerQueueHasNoLengthCap(t *testing.T) {
-	mgr := &TimerManager{}
-	started := make(chan int, 1)
-	release := make(chan struct{})
-	pool := newAsyncTickPool(1, 1)
-
-	if !pool.submit(newAsyncPoolTestTimer(t, mgr, 1, started, release)) {
-		t.Fatal("submit running job")
-	}
-	<-started
-	queuedRelease := make(chan struct{})
-	for id := 0; id < 256; id++ {
-		if !pool.submit(newAsyncPoolTestTimer(t, mgr, id+2, nil, queuedRelease)) {
-			t.Fatal("unbounded queue rejected a job")
-		}
-	}
-	pool.mu.Lock()
-	workers := len(pool.workers)
-	queued := len(pool.workers[0].queue)
-	pool.mu.Unlock()
-	if workers != 1 || queued != 256 {
-		t.Fatalf("workers=%d queued=%d, want 1 and 256", workers, queued)
-	}
-
-	pool.stopAccepting()
-	close(release)
-	ackAsyncCompletion(receiveAsyncCompletion(t, pool))
-	close(queuedRelease)
-	for range 256 {
-		ackAsyncCompletion(receiveAsyncCompletion(t, pool))
-	}
-	waitAsyncPending(t, pool, 0)
-	if !pool.wait(context.Background()) {
-		t.Fatal("worker did not exit")
-	}
-}
-
+// TestAsyncWorkerPoolSubmissionAndExitAreSerialized 并发提交与 worker 退出必须
+// 串行化：stopAccepting 之后不再接收，但已入队的任务要跑完。
 func TestAsyncWorkerPoolSubmissionAndExitAreSerialized(t *testing.T) {
-	pool := newAsyncTickPool(1, 1)
-	mgr := &TimerManager{}
+	mgr := newRawWheelManager()
+	pool := newAsyncTickPool(1)
 	const jobs = 100
-	jobsToSubmit := make([]asyncTickJob, jobs)
-	for i := range jobsToSubmit {
-		jobsToSubmit[i] = newAsyncPoolTestTimer(t, mgr, i, nil, nil)
-	}
 	var wg sync.WaitGroup
 	wg.Add(jobs)
-	for i := range jobsToSubmit {
-		job := jobsToSubmit[i]
+	for i := 0; i < jobs; i++ {
+		job := newAsyncPoolTestTimer(t, mgr, i, nil, nil)
 		go func() {
 			defer wg.Done()
 			if !pool.submit(job) {
@@ -370,20 +282,15 @@ func TestAsyncWorkerPoolSubmissionAndExitAreSerialized(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+
 	pool.stopAccepting()
-	deadline := time.NewTimer(2 * time.Second)
-	defer deadline.Stop()
-	for pool.pendingForShard(0) > 0 {
-		select {
-		case completion := <-pool.resultsForShard(0):
-			ackAsyncCompletion(completion)
-		case <-pool.progressForShard(0):
-		case <-deadline.C:
-			t.Fatalf("pending jobs after concurrent submit = %d", pool.pendingForShard(0))
-		}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if !pool.wait(ctx) {
+		t.Fatalf("worker did not exit after concurrent submissions: %+v", pool.stats())
 	}
-	if !pool.wait(context.Background()) {
-		t.Fatal("worker did not exit after concurrent submissions")
+	if stats := pool.stats(); stats != (AsyncWorkerStats{Limit: 1}) {
+		t.Fatalf("stats after drain = %+v", stats)
 	}
 }
 
@@ -571,12 +478,14 @@ func TestAsyncTickPanicDoesNotStopWorkerOrConsumer(t *testing.T) {
 		}
 		select {
 		case <-deadline.C:
-			t.Fatal("panic isolation or async completion processing stalled")
+			t.Fatal("panic isolation or async finalization stalled")
 		case <-time.After(time.Millisecond):
 		}
 	}
 }
 
+// TestAsyncTickDrainsAfterTimeStopBudgetExpires 停机预算耗尽时不得强杀在飞回调；
+// 回调结束后必须由 worker 自己完成作废与归还。
 func TestAsyncTickDrainsAfterTimeStopBudgetExpires(t *testing.T) {
 	_, cleanup := prepareAsyncRuntimeTest(t, 1)
 	defer cleanup()
@@ -618,7 +527,6 @@ func TestAsyncTickDrainsAfterTimeStopBudgetExpires(t *testing.T) {
 	if rt == nil || rt.asyncPool == nil {
 		t.Fatal("runtime async pool was not initialized")
 	}
-	waitAsyncPending(t, rt.asyncPool, 0)
 	waitCtx, cancelWait := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancelWait()
 	if !rt.asyncPool.wait(waitCtx) {
@@ -635,116 +543,62 @@ func TestAsyncTickDrainsAfterTimeStopBudgetExpires(t *testing.T) {
 	}
 }
 
-// waitPoolExit 等待 pool 全部 worker 退出，超时即判定为泄漏。
-func waitPoolExit(t *testing.T, pool *asyncTickPool, budget time.Duration) {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), budget)
-	defer cancel()
-	if !pool.wait(ctx) {
-		t.Fatalf("workers did not exit within %s: pending=%d workers=%d",
-			budget, pool.pendingForShard(0), pool.stats().Workers)
-	}
+// asyncReconnectTimer 在第一次 Tick 内重新注册自己，模拟业务在异步回调里重连。
+type asyncReconnectTimer struct {
+	Timer
+	n      atomic.Int32
+	active atomic.Int32
+	max    atomic.Int32
 }
 
-func TestAsyncCompletionOrphanedWhenShardGone(t *testing.T) {
-	pool := newAsyncTickPool(1, 1)
-	started := make(chan int, 1)
-	release := make(chan struct{})
-	var releaseOnce sync.Once
-	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+func (t *asyncReconnectTimer) IsAsyncTick() bool { return true }
 
-	// mgr 非 nil 才会真正执行 Tick：完成事件在 Tick 返回后才产生，
-	// 于是这里精确落在「投递」这一步上。
-	job := newAsyncPoolTestTimer(t, &TimerManager{}, 1, started, release)
-	if !pool.submit(job) {
-		t.Fatal("submit rejected")
+func (t *asyncReconnectTimer) Tick() {
+	active := t.active.Add(1)
+	for {
+		max := t.max.Load()
+		if active <= max || t.max.CompareAndSwap(max, active) {
+			break
+		}
 	}
-	select {
-	case <-started:
-	case <-time.After(2 * time.Second):
-		t.Fatal("async timer did not start")
+	n := t.n.Add(1)
+	if n == 1 {
+		// 新调度项的代次与当前任务不同：本次收尾会作废，后续任务进 parked 等待执行。
+		_ = AddTimer(t)
 	}
-
-	// 消费者已永久退出：没有它，会合投递会让 worker 永久阻塞。
-	pool.markShardGone(0)
-	releaseOnce.Do(func() { close(release) })
-
-	waitPoolExit(t, pool, 2*time.Second)
-	if got := pool.pendingForShard(0); got != 0 {
-		t.Fatalf("pending = %d, want 0", got)
-	}
-	if got := pool.orphaned.Load(); got != 1 {
-		t.Fatalf("orphaned = %d, want 1", got)
-	}
-	pool.mu.Lock()
-	busy, deferred := len(pool.busy), len(pool.deferred)
-	pool.mu.Unlock()
-	if busy != 0 || deferred != 0 {
-		t.Fatalf("busy=%d deferred=%d after orphan finalize, want 0/0", busy, deferred)
-	}
-	if got := pool.stats().Orphaned; got != 1 {
-		t.Fatalf("stats.Orphaned = %d, want 1", got)
-	}
-	parent := job.task.timer.GetParent()
-	if parent == nil {
-		t.Fatal("timer lost its parent")
-	}
-	if parent.IsActive() {
-		t.Fatal("orphan finalize rescheduled the timer instead of retiring it")
-	}
+	t.active.Add(-1)
 }
 
-func TestDrainTimeoutMarksShardGoneAndReleasesWorker(t *testing.T) {
-	pool := newAsyncTickPool(1, 1)
-	started := make(chan int, 1)
-	release := make(chan struct{})
-	var releaseOnce sync.Once
-	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+// TestAsyncTickReconnectKeepsScheduling 异步 Tick 内 AddTimer 复活后，后续任务
+// 必须被 parked 接住并继续执行，不能因为当前收尾作废而永久失联。
+func TestAsyncTickReconnectKeepsScheduling(t *testing.T) {
+	_, cleanup := prepareAsyncRuntimeTest(t, 1)
+	defer cleanup()
 
-	job := newAsyncPoolTestTimer(t, &TimerManager{}, 1, started, release)
-	if !pool.submit(job) {
-		t.Fatal("submit rejected")
+	timer, err := NewTimer[*asyncReconnectTimer](5, InfiniteCount, func(t *asyncReconnectTimer) {
+		// 池复用时宿主字段会原样带过来，必须在这里清回初值。
+		t.n.Store(0)
+		t.active.Store(0)
+		t.max.Store(0)
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
-	select {
-	case <-started:
-	case <-time.After(2 * time.Second):
-		t.Fatal("async timer did not start")
+	if err := AddTimer(timer); err != nil {
+		t.Fatal(err)
 	}
+	defer timer.Remove()
 
-	// 业务 Tick 卡住不返回，排空必然超时：此时必须声明该片不再接收，
-	// 否则 worker 释放后仍会卡在会合投递上永不退出。
-	drained := make(chan struct{})
-	go func() {
-		drainAsyncCompletionsWithin(pool, 0, 30*time.Millisecond)
-		close(drained)
-	}()
-	select {
-	case <-drained:
-	case <-time.After(2 * time.Second):
-		t.Fatal("drain did not honor its budget")
+	deadline := time.NewTimer(3 * time.Second)
+	defer deadline.Stop()
+	for timer.n.Load() < 3 {
+		select {
+		case <-deadline.C:
+			t.Fatalf("async reconnect lost ticks: n=%d", timer.n.Load())
+		case <-time.After(time.Millisecond):
+		}
 	}
-	select {
-	case <-pool.goneForShard(0):
-	default:
-		t.Fatal("drain timeout did not mark the shard gone")
-	}
-	if got := pool.pendingForShard(0); got != 1 {
-		t.Fatalf("pending before release = %d, want 1", got)
-	}
-
-	releaseOnce.Do(func() { close(release) })
-	waitPoolExit(t, pool, 2*time.Second)
-	if got := pool.pendingForShard(0); got != 0 {
-		t.Fatalf("pending after orphan finalize = %d, want 0", got)
-	}
-	if got := pool.orphaned.Load(); got != 1 {
-		t.Fatalf("orphaned = %d, want 1", got)
-	}
-	parent := job.task.timer.GetParent()
-	if parent == nil {
-		t.Fatal("timer lost its parent")
-	}
-	if parent.IsActive() {
-		t.Fatal("orphan finalize rescheduled the timer instead of retiring it")
+	if got := timer.max.Load(); got != 1 {
+		t.Fatalf("maximum concurrent async callbacks = %d, want 1", got)
 	}
 }

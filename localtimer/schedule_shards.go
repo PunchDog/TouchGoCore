@@ -34,17 +34,20 @@ const (
 
 var scheduleShardWant atomic.Int32
 
+// normalizeShards 把请求值夹到合法区间；告警由调用方按需发出。
+func normalizeShards(n int) int {
+	if n <= 0 {
+		return DefaultScheduleShards
+	}
+	if n > MaxScheduleShards {
+		return MaxScheduleShards
+	}
+	return n
+}
+
 // effectiveShards 取下一次建通道时分片数量（越界的期望值就地夹到合法区间）。
 func effectiveShards() int {
-	n := int(scheduleShardWant.Load())
-	switch {
-	case n <= 0:
-		return DefaultScheduleShards
-	case n > MaxScheduleShards:
-		return MaxScheduleShards
-	default:
-		return n
-	}
+	return normalizeShards(int(scheduleShardWant.Load()))
 }
 
 // scheduleShardCount 返回当前生效的分片数：通道已建好时以通道数组为准，
@@ -55,13 +58,6 @@ func scheduleShardCount() int {
 		return len(channels)
 	}
 	return effectiveShards()
-}
-
-// channelSetReady 报告调度通道是否已建好（建好即不可改分片数）
-func channelSetReady() bool {
-	timerChannelMu.Lock()
-	defer timerChannelMu.Unlock()
-	return timerChannelReady && len(timerChannels) > 0
 }
 
 // SetScheduleShards 设置调度通道分片数（即消费者协程数），返回实际生效值。
@@ -80,20 +76,17 @@ func channelSetReady() bool {
 // 定时器自身仍然安全：同一 uid 恒定落同一片，跨片之间互不相同的对象没有共享状态；
 // 对象池、代次与归属协议与分片数无关。
 func SetScheduleShards(n int) int {
-	if n <= 0 {
-		n = DefaultScheduleShards
-	}
 	if n > MaxScheduleShards {
 		vars.Warning("调度通道分片数超出上限，已夹到 %d: 请求=%d", MaxScheduleShards, n)
-		n = MaxScheduleShards
 	}
-	if channelSetReady() {
-		cur := scheduleShardCount()
+	n = normalizeShards(n)
+	channels := currentTimerChannels()
+	if len(channels) > 0 {
 		// 用 Error 而不是 Warning：调用方的意图被整段忽略，而后果是「定时器照样
 		// 跑、只是没并行」，跑起来看不出区别。忽略返回值的宿主必须被吵醒。
 		vars.Error("调度通道已建立，分片数保持 %d 不变: 请求=%d（须在 Run/NewTimerManager 之前设置，"+
-			"用框架时是 NewApp 之后、Start 之前）", cur, n)
-		return cur
+			"用框架时是 NewApp 之后、Start 之前）", len(channels), n)
+		return len(channels)
 	}
 	scheduleShardWant.Store(int32(n))
 	return n

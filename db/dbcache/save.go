@@ -10,10 +10,60 @@ import (
 //
 // key 为空时按表的 KeyColumns 从 row 推导；mustSave=true 时返回前会尝试写入数据库，
 // 写入失败会保留脏账并返回错误。
-func Save[T any](ctx context.Context, table string, key string, row *T, mustSave bool) error {
+func Save[T any](ctx context.Context, table string, key string, row *T, mustSave bool, opt ...Option) error {
 	e := defaultEngine.Load()
 	if e == nil {
 		return ErrNotInitialized
+	}
+	o := ParseOptions(opt)
+	if st := txStateFrom(ctx); st != nil {
+		atomic := o.Increment != "" || o.CASSet != nil
+		var b *binding
+		var err error
+		if atomic {
+			// 原子写只按表找绑定：调用方不需要构造缓存行类型，只给条件与列。
+			b, err = e.lookupTable(table)
+		} else {
+			b, err = e.lookupTyped(table, typeOf[T]())
+		}
+		if err != nil {
+			return err
+		}
+		if key == "" && !atomic {
+			if row == nil {
+				return ErrNilRow
+			}
+			key, err = b.keyFromRow(any(row))
+			if err != nil {
+				return err
+			}
+		}
+		var payload any
+		if row != nil {
+			payload = any(row)
+		}
+		return st.saveInTx(ctx, b, key, payload, o)
+	}
+	if o.Sequence != nil {
+		return fmt.Errorf("dbcache: 原子取号必须在事务内执行")
+	}
+	if o.Increment != "" || o.CASSet != nil {
+		// 事务外的原子写：直接落库并同步刷新缓存行（资金/状态列必须走这条）。
+		b, c, err := e.resolveMySQL(table)
+		if err != nil {
+			return err
+		}
+		gx := c.Engine().WithContext(ctx)
+		var n int64
+		if o.Increment != "" {
+			n, err = e.incrementOn(ctx, gx, b, o.Cond, o.Increment, o.Delta, nil)
+		} else {
+			n, err = e.casOn(ctx, gx, b, o.Cond, o.CASExpect, o.CASSet, nil)
+		}
+		if o.Affected != nil {
+			*o.Affected = n
+		}
+		return err
 	}
 	return e.save[T](ctx, table, key, row, mustSave)
 }

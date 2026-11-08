@@ -17,6 +17,9 @@ func BindMySQL[T any](table string, c *mysqldb.Client, opt BindOption[T]) error 
 	if e == nil {
 		return ErrNotInitialized
 	}
+	e.mu.Lock()
+	e.mysqlClient = c
+	e.mu.Unlock()
 	keys, err := makeTableKeys(e.cfg.KeyPrefix, table)
 	if err != nil {
 		return err

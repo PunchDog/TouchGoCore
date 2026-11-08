@@ -9,6 +9,8 @@ import (
 	"sync/atomic"
 
 	"github.com/redis/go-redis/v9"
+
+	mysqldb "touchgocore/db/mysql"
 )
 
 // Engine 是缓存层实例：持有一张张表的绑定、Redis 语义存储与生命周期状态。
@@ -21,6 +23,8 @@ type Engine struct {
 	ctx     context.Context
 	cancel  context.CancelFunc
 	stopped atomic.Bool
+	// mysqlClient 由 BindMySQL 注入，供事务/原子写原语使用（不对外暴露）。
+	mysqlClient *mysqldb.Client
 }
 
 var defaultEngine atomic.Pointer[Engine]

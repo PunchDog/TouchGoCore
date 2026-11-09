@@ -2,7 +2,8 @@
 
 `touchgocore/task_engine`（包名 `taskengine`）是与业务无关的任务进度/状态机。
 它是**库**，没有 Run/Stop 生命周期，不注册进根包 `services.go`。
-一个 `*Engine` 绑定一个玩家：`Options.memberID` 决定该实例服务谁，接口上不再传 memberID。
+一个 `*Engine` 绑定一个玩家：导出的 `Options.MemberID` 决定该实例服务谁，接口上不再传 memberID；
+`Options.RewardFn` 由包外宿主直接注入。
 
 ## 对外接口
 
@@ -96,17 +97,39 @@ for _, tk := range tasks {
 
 `UpdateTask` 传副本也可以：按 `TaskID` 换回常驻对象后再推进，否则节点摘挂作用不到索引上。
 
-## 发奖（rewardFn）
+## 发奖（Options.RewardFn）
 
-发奖逻辑在宿主侧，由 `Options.rewardFn func(*TaskProgress)` 注入：
+发奖逻辑在宿主侧，由导出的 `Options.RewardFn` 注入：
+
+```go
+type RewardKey struct {
+    MemberID int64
+    TaskID   int64
+    CycleKey string
+}
+func (k RewardKey) String() string // "<MemberID>:<TaskID>:<CycleKey>"
+
+type RewardFn func(ctx context.Context, key RewardKey, p *TaskProgress)
+```
 
 - 仅当任务 `GrantMode == AUTO` 且本次判定达标时回调一次，`OnEvent` 与 `UpdateTask` 两条路径一致；
-- 回调入参是即将落库的任务对象，可用 `GetDef().Reward` 读 `reward_json`；
-- 顺序为**先发奖后落库**；回调没有返回值，发奖失败不会阻断写入，写入失败也可能已经发奖——
-  宿主必须自带幂等；
+- `key` 由框架从 `p.MemberID / p.TaskID / p.CycleKey` 显式构造并盖章，`p` 是即将落库的任务对象，
+  可用 `p.GetDef().Reward` 读 `reward_json`；
+- 顺序为**先发奖后落库**；回调没有返回值，发奖失败不会阻断写入，写入失败也可能已经发奖；
 - `CLAIM` 达标只落 `completed`，引擎不回调，等宿主发放；
 - 终态任务不再被推进，故不会重复发奖；
-- 回调在 `e.mu` 与事务行锁内执行，禁止在回调里再次调用引擎处理同一任务。
+- 回调在 `e.mu` 与事务行锁内执行，`ctx` 供宿主设置超时 / 取消。
+
+**接入清单（硬项，缺一不可）**
+
+1. **以 `key.String()` 为唯一去重键**：发奖流水 / 去重表按 `<MemberID>:<TaskID>:<CycleKey>`
+   建唯一键。框架现在提供这个幂等键，宿主不要再自己从 `p` 里另拼一套规则。
+2. **回调必须幂等**：同一 `key.String()` 重复进入时不得重复发放。回调刻意不返回 `error`——
+   `applyProgress` 在回调前已把 `p.Status` 置为 `claimed`，若让回调阻断落库，会造出
+   「内存终态 + DB 未落库 + 不再重发奖 + 丢进度」的新不一致；失败由宿主按 `key` 重试补偿。
+3. **禁止在回调里再次调用引擎处理同一任务**：回调仍在 `e.mu` 与事务行锁内，重入会死锁或重复推进。
+4. **远程发奖必须设超时**：发奖 RPC 在锁内执行，会拉长锁持有时间（**已知风险**，本轮未把回调
+   移出锁）；用 `ctx` 施加超时 / 取消，避免拖住该会员的全部事件。
 
 ## 完成通知
 
@@ -123,13 +146,17 @@ if err := db.InitCache(db.CacheConfigFrom(app.Cfg.Cache), app.Redis.Get()); err 
 // 2. 把 task_def / task_progress 绑定到缓存层
 if err := taskengine.OpenStorage(app.MySQL); err != nil { ... }
 
-// 3. 每个会员一个引擎
+// 3. 每个会员一个引擎（示例需 import "context"）
 engine, err := taskengine.New(taskengine.Options{
-    memberID: uid,  // 见「已知缺口」
-    rewardFn: func(p *taskengine.TaskProgress) { /* 按 p.GetDef().Reward 发放 */ },
+    MemberID: uid,
+    RewardFn: func(ctx context.Context, key taskengine.RewardKey, p *taskengine.TaskProgress) {
+        // 以 key.String() 幂等去重，再按 p.GetDef().Reward 发放；ctx 用于超时 / 取消
+        grantOnce(ctx, key.String(), p.GetDef().Reward)
+    },
 })
 ```
 
+`Options.MemberID` / `Options.RewardFn` 均为导出字段，包外宿主可直接装配。
 `New` 会立即 `Reload`（读 `task_def` + 该会员 `task_progress`），缓存层未初始化时构造失败。
 建表见 `task_engine/schema.sql`；历史库需先执行 `task_engine/migrate_unique_progress.sql`
 补三列唯一键。`CreateDef`/`UpdateDef` 是包级存储原语，入参都是完整的 `TaskDef`：
@@ -145,6 +172,8 @@ engine, err := taskengine.New(taskengine.Options{
 - 落库依赖 `task_progress(member_id, task_id, cycle_key)` 唯一键，走
   `INSERT ... ON DUPLICATE KEY UPDATE`，每个周期严格一行。
 - 内存对象与 Redis 里是同一份进度；进程崩溃最多丢失最后一个 flush 周期。
+- `mustSave=false` 只允许用于可丢失的任务进度 / 统计类；资金 / 账本列的唯一合法写路径是
+  `db.Increment` / `db.CompareAndSwap`（同步落库），硬约束见 `db/cache_api.go` 与根 `README.md`。
 
 ## 关键语义
 
@@ -157,14 +186,14 @@ engine, err := taskengine.New(taskengine.Options{
 
 ## 已知缺口
 
-- `Options.memberID` 与 `Options.rewardFn` 目前是**未导出**字段，包外宿主无法装配，
-  只能在包内（或测试）构造；导出前本包不具备对外可用性。
 - 引擎按「每会员一个 Engine」设计且任务对象常驻内存：装配层要自己持有/回收这批实例，
   在线人数即内存任务数。
 - `Remove()` 调用后引擎不可再使用；调用前必须确保该会员没有并发的事件或查询
   （摘链会立即生效，不与 Range 快照对齐）。
 - 任务对象的进度字段在摘挂时受 `e.mu` 保护，但 `GetTask` 读字段不加锁；
   同一会员的事件必须串行投递（单逻辑线程）。
+- `Options.RewardFn` 在 `e.mu` 与事务行锁内执行，远程发奖会拉长锁持有时间；
+  若要把回调移出锁，须同时处理「先发奖后落库」的顺序语义，属行为变更。
 
 ## 存储注意事项
 
@@ -176,4 +205,60 @@ engine, err := taskengine.New(taskengine.Options{
   Redis 里的旧定义在键过期前不可见。定义变更统一走 `UpdateDef` + `taskglobal.Reload`。
 - `CacheSave` 是全行覆盖：调用方必须持有完整行（`UpdateDef` 会先读旧行合并）。
 - `defs` 与四条链都是单进程视图；多实例部署时任务定义变更需各自 `Reload`。
-- 运行集成测试需提供真实 Redis/MySQL（见 `storage_test.go` 中的 `TASKENGINE_TEST_*` 环境变量）。
+- 集成测试的环境变量、专用库要求与破坏性操作见下节「集成测试门禁」。
+
+## 集成测试门禁（TASKENGINE_TEST_*）
+
+本包**没有 in-memory 假存储**：`db.InitCache` 固定 Redis store、`CacheBindMySQL` 固定真实
+MySQL 仓储、所有数据接口固定进程级全局单例、`task_engine` 直调 `db.Cache*` 包级函数，
+公开面没有一处可插拔点。因此行为用例只能在**专用隔离库**上真跑；不要尝试重建旧式假存储
+（可行性判定见 `deliverables/software-company/fix-plan-2026-11-09.md` §2）。
+
+### 环境变量（7 个，全部必填，运行时注入）
+
+| 变量 | 含义 | 约束 |
+|---|---|---|
+| `TASKENGINE_TEST_MYSQL_HOST` | MySQL 地址 `host:port` | 指向专用隔离库 |
+| `TASKENGINE_TEST_MYSQL_USER` | MySQL 用户名 | — |
+| `TASKENGINE_TEST_MYSQL_PASSWORD` | MySQL 密码 | 可为空串；值不写入仓库任何文件 |
+| `TASKENGINE_TEST_MYSQL_DB` | MySQL 库名 | **必须含 `test`**（`storage_test.go` 护栏） |
+| `TASKENGINE_TEST_REDIS_ADDR` | Redis 地址 | 指向专用隔离 Redis DB |
+| `TASKENGINE_TEST_REDIS_PASSWORD` | Redis 密码 | 可为空串 |
+| `TASKENGINE_TEST_REDIS_DB` | Redis 库编号 | 整数，缺省 0 |
+
+> 凭据只由运行环境注入：`bench/run.ps1 -Integration` **只校验这 7 个变量是否已定义**，
+> 不保存、不硬编码任何值；缺任一个即显式报错退出，绝不允许静默退回全 SKIP。
+> 密码允许空串、`REDIS_DB` 允许 0，所以判据是「变量是否存在」而不是「值是否非空」。
+> `db/dbcache` 的事务层真库测试复用同一组变量。
+> **Windows PowerShell 5.1 下 `$env:X = ""` 会直接删除该变量**，空密码无法表示成
+> 「已定义但为空」；需要空值时请改用 pwsh（PowerShell 7）或 CI 注入，不要用 PS 5.1 伪造空值。
+
+### 破坏性操作（务必先读）
+
+- `setupStorage` → `initStorage` → `recreateSchema` 会
+  **`DROP TABLE IF EXISTS task_progress / task_def` 后按 `schema.sql` 重建**——
+  是 **DROP TABLE 后重建，不是 TRUNCATE**，目标库里同名表的数据会全部消失。
+- 每个用例首次进入时 `resetStorage` 还会 `TRUNCATE TABLE task_progress / task_def`
+  并清空 `*task_*` 的 Redis 键。
+- 库名必须含 `test`：`storage_test.go` 的护栏对其它库名直接 `Fatal`，防止误连业务库。
+- **因此这 7 个变量必须指向专用隔离 MySQL 库与专用 Redis DB，严禁指向业务库或任何有数据的库。**
+
+### 跑法
+
+```powershell
+# 先由运行环境注入上面 7 个变量（不要写进任何文件），再：
+powershell -File bench/run.ps1 -Integration
+# 或单包直跑：
+go test -timeout 600s -count=1 -v ./task_engine/
+```
+
+`-count=1` **必需**：不加时同包重复运行会命中测试缓存，「绿」可能只是上一次的结果。
+环境变量未配齐时 `go test` 会把依赖存储的用例整组 `Skip`，**SKIP 不等于通过**；
+门禁判据是 `--- SKIP:` 行数 = 0、`--- FAIL:` 行数 = 0、真跑用例数 ≥ 35。
+`bench/run.ps1 -Integration` 的输出写 `docs/taskengine-integration.txt`
+（`docs/` 被 `.gitignore:38` 忽略，属本地产物，不入库）。
+`localtimer` 是时序敏感包，连跑 3 次的约定仍然适用（见 `docs/testing-conventions.md`）。
+
+> 警告：`git clean -xfd` 会清掉本地所有被忽略的 `p0_`~`p3_` 评审轮次测试资产。
+> 这些文件 untracked 且被 `.gitignore` 忽略，清理后 git 无法恢复；清理前必须先把它们
+> 归档到仓库外的目录（发布策略与命名约定见根 `README.md` 的「开发」段）。

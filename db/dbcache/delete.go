@@ -98,8 +98,11 @@ func (e *Engine) remove(ctx context.Context, b *binding, cond any) error {
 		return fmt.Errorf("dbcache: delete %s: %w", b.table, err)
 	}
 	if _, err := e.store.DelRow(ctx, b.keys.dirty, b.keys.rowPrefix+key, b.keys.retry, tombKey, key, ttl); err != nil {
-		// 数据库已删除，Redis 清理失败只告警：墓碑随 TTL 过期，读路径回源即修正。
-		vars.Warning("dbcache %s: clear cached row %s: %v", b.table, key, err)
+		// 数据库已删除、墓碑已立，但行 hash 可能还在：queryOne 的点查命中行 hash
+		// 就直接返回、不检查墓碑，只告警会留下「库已删、缓存仍返回旧行」的静默不一致。
+		// 与 mutate.go 的刷新失败统一口径：升级为 Error + 主动失效行（重试 DelRow）。
+		vars.Error("dbcache %s: clear cached row %s failed (row invalidated): %v", b.table, key, err)
+		e.invalidateCached(ctx, b, vals)
 	}
 	return nil
 }

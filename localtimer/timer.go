@@ -390,7 +390,11 @@ func (t *Timer) removeWithLock(cleanPool bool) releaseOutcome {
 //
 // 判定为「立即归还」时同步抢占 putClaimed：两条路径（endTick 补做与业务 Remove）
 // 同时得出 releaseNow 时，只有抢占成功的一方真正执行 Put。
-func (t *Timer) requestReleaseLocked() releaseOutcome {
+func (t *Timer) requestReleaseLocked() (outcome releaseOutcome) {
+	// 取一次 7 标志快照交给状态表（state_table.go）；生产构建里断言钩子为空操作，
+	// debug 构建用它核对仲裁结论，不改变任何标志语义或返回行为。
+	before := t.snapshotReleaseState()
+	defer func() { assertReleaseArbitration(before, outcome) }()
 	// 凭证闸在最前：手工构造的宿主对象连「池」这个概念都不该参与
 	if !t.fromPool.Load() {
 		// 在仲裁处留痕：Put 里的同名闸门是兜底，正常路径永远走不到那里
@@ -614,17 +618,17 @@ func (t *Timer) TryAdvance() bool {
 	return true
 }
 
-// HasNext 检查是否有下一次执行。
+// HasNext 检查是否有下一次执行。名字像只读，实则有改期副作用。
 //
-// Deprecated: 此方法带有改期副作用（判定为「有下一次」时把 nextTime 推进到
-// now+interval），名字暗示只读但实际有写入。新代码应使用 TryAdvance 替代。
-// 本方法保留以确保向后兼容，内部委托给 TryAdvance。
+// Deprecated: 判定为「有下一次」时会把 nextTime 推进到 now+interval 并扣减剩余
+// 次数（有限次定时器），名字暗示只读但实际有写入。新代码必须使用 TryAdvance
+// （本文件 :592-615）：它把「成功推进」显式表达在行为里；HasNext 仅为兼容既有
+// TimerInterface 契约保留，不要在新代码里调用。本方法内部委托给 TryAdvance。
 //
-// S67 桶化后这条要格外当心 —— 节点在链期间它的桶位是按入链那一刻的 nextTime
-// 算定的，光改 nextTime 不会换桶，最坏要等游标绕完一整圈才被重看（秒档 60s、
-// 分档 10min）。库内调用点（executeTimer 续期）都发生在「已摘链、尚未重挂」
-// 的窗口里，因此安全；业务若在定时器仍在调度时直接调它改期，必须紧跟一次
-// AddTimer 重挂。
+// S67 桶化后要格外当心：节点在链期间桶位按入链那一刻的 nextTime 算定，光改
+// nextTime 不会换桶，最坏要等游标绕完一整圈才被重看（秒档 60s、分档 10min）。
+// 库内调用点（executeTimer 续期）都发生在「已摘链、尚未重挂」的窗口里，因此安全；
+// 业务若在定时器仍在调度时直接调它改期，必须紧跟一次 AddTimer 重挂。
 func (t *Timer) HasNext() bool {
 	return t.TryAdvance()
 }

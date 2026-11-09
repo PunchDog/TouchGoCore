@@ -11,12 +11,35 @@ import (
 	"context"
 	"reflect"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
 	mysqldb "touchgocore/db/mysql"
 	"touchgocore/vars"
 )
+
+// startTxSpan 以调用方 / 事务 ctx 为父开启 span；ctx 为 nil 时回退 background。
+//
+// 不引入全局 tracer 单例（otel.Tracer 是包级函数，未配置 provider 时返回 noop），
+// 也不配置采样率 / 后端：埋点只提供上下文透传，不改变任何业务语义。
+func startTxSpan(ctx context.Context, spanName string) (context.Context, trace.Span) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return otel.Tracer("touchgocore.dbcache.tx").Start(ctx, spanName)
+}
+
+// recordTxSpanError 把错误记到 span；不改变任何返回值语义。
+func recordTxSpanError(span trace.Span, err error) {
+	if err == nil {
+		return
+	}
+	span.RecordError(err)
+	span.SetStatus(codes.Error, err.Error())
+}
 
 // Tx 是一组在单连接上执行的读写；由 BeginTx 创建。
 type Tx struct {
@@ -27,18 +50,23 @@ type Tx struct {
 
 // BeginTx 开启缓存层事务。
 func BeginTx(ctx context.Context) (*Tx, error) {
+	ctx, span := startTxSpan(ctx, "touchgocore.dbcache.tx.BeginTx")
+	defer span.End()
 	e := Default()
 	if e == nil {
+		recordTxSpanError(span, ErrNotInitialized)
 		return nil, ErrNotInitialized
 	}
 	e.mu.RLock()
 	c := e.mysqlClient
 	e.mu.RUnlock()
 	if c == nil {
+		recordTxSpanError(span, ErrTableUnbound)
 		return nil, ErrTableUnbound
 	}
 	raw, err := c.BeginTx(ctx)
 	if err != nil {
+		recordTxSpanError(span, err)
 		return nil, err
 	}
 	return &Tx{e: e, raw: raw}, nil
@@ -48,8 +76,15 @@ func BeginTx(ctx context.Context) (*Tx, error) {
 func WrapTx(raw *mysqldb.Tx) *Tx { return &Tx{e: Default(), raw: raw} }
 
 // Commit 提交并执行提交后刷新；刷新失败只影响缓存新鲜度，不回滚已提交事务。
+//
+// 刷新失败（HSetAll / DelRow 等）由 mutate.go 的 invalidateCached 主动失效该行
+// 缓存并写 vars.Error 留痕，让下次点查必然回源；因此本方法仍只返回
+// t.raw.Commit() 的错误——让调用方收到刷新错误会误判「事务未提交」，是语义陷阱。
 func (t *Tx) Commit() error {
+	_, span := startTxSpan(t.Context(), "touchgocore.dbcache.tx.Commit")
+	defer span.End()
 	if err := t.raw.Commit(); err != nil {
+		recordTxSpanError(span, err)
 		return err
 	}
 	for _, fn := range t.refreshes {
@@ -59,7 +94,13 @@ func (t *Tx) Commit() error {
 }
 
 // Rollback 回滚事务；丢弃全部提交后刷新动作。
-func (t *Tx) Rollback() error { return t.raw.Rollback() }
+func (t *Tx) Rollback() error {
+	_, span := startTxSpan(t.Context(), "touchgocore.dbcache.tx.Rollback")
+	defer span.End()
+	err := t.raw.Rollback()
+	recordTxSpanError(span, err)
+	return err
+}
 
 // Context 返回事务 ctx。
 func (t *Tx) Context() context.Context { return t.raw.Context() }
@@ -273,19 +314,26 @@ func TxDeleteIn(t *Tx, ctx context.Context, table, keyColumn string, ids []any) 
 }
 
 // dropCached 在事务提交后清掉一行的缓存（墓碑 + 行 hash + 脏账）。
+//
+// SetTomb 失败不能中断清理：DelRow 的 deleteScript 本身会 SET 墓碑，继续尝试
+// 仍可完成「立墓碑 + 删行 hash + 销脏账/重试账」。DelRow 也失败时升级为
+// vars.Error 并再走一次 invalidateCached（重试 DelRow）兜底。
 func (e *Engine) dropCached(b *binding, vals []condVal) {
 	key, err := keyFromCond(b.meta, vals)
 	if err != nil {
+		vars.Error("dbcache %s: 删除后清缓存无法推导行键: %v", b.table, err)
 		return
 	}
 	tombKey := b.keys.tombPrefix + key
 	ttl := e.tombTTL()
 	ctx := context.Background()
 	if err := e.store.SetTomb(ctx, tombKey, ttl); err != nil {
-		return
+		// 不再直接 return：DelRow 脚本会自行补立墓碑。
+		vars.Error("dbcache %s: 删除后立墓碑失败（行 %s，继续尝试 DelRow）: %v", b.table, key, err)
 	}
 	if _, err := e.store.DelRow(ctx, b.keys.dirty, b.keys.rowPrefix+key, b.keys.retry, tombKey, key, ttl); err != nil {
-		vars.Warning("dbcache %s: 删除后清缓存失败（库已提交）: %v", b.table, err)
+		vars.Error("dbcache %s: 删除后清缓存失败（库已提交，行 %s 主动失效）: %v", b.table, key, err)
+		e.invalidateCached(ctx, b, vals)
 	}
 }
 

@@ -15,10 +15,11 @@ import (
 
 // Options Engine 构造参数。
 type Options struct {
-	// memberID 该引擎绑定的玩家 ID；一个会员一个 Engine。
-	memberID int64
-	// rewardFn AUTO 达标时的发奖回调；为 nil 则不发奖。
-	rewardFn func(*TaskProgress)
+	// MemberID 该引擎绑定的玩家 ID；一个会员一个 Engine。
+	MemberID int64
+	// RewardFn AUTO 达标时的发奖回调；为 nil 则不发奖。
+	// 回调以框架构造的 RewardKey 作为幂等键，契约见 reward.go。
+	RewardFn RewardFn
 }
 
 // Engine 任务引擎（单会员视图）。
@@ -42,7 +43,7 @@ type Engine struct {
 	membertasks      map[int64]*TaskProgress // taskID → 任务
 	triggerlist      map[Trigger]NodeList    // 触发点 → 任务节点链
 	memberID         int64                   // 绑定的玩家 ID
-	rewardFn         func(*TaskProgress)     // AUTO 发奖回调
+	rewardFn         RewardFn                // AUTO 发奖回调
 }
 
 // New 构造引擎，并立即 Reload 任务定义与会员进度。
@@ -59,8 +60,8 @@ func New(opts Options) (*Engine, error) {
 	}
 	e.SetData(e)
 
-	e.memberID = opts.memberID
-	e.rewardFn = opts.rewardFn
+	e.memberID = opts.MemberID
+	e.rewardFn = opts.RewardFn
 
 	// 定义索引由进程级注册表加载，本引擎按同一批定义重建链表；失败则构造失败。
 	ctx := context.Background()
@@ -437,7 +438,7 @@ func (e *Engine) advance(ctx context.Context, t *TaskProgress, parm *ProgressPar
 	achieved := applyProgress(t, def, parm, now)
 	// 达标先发奖，再落库、切链。
 	if achieved && def.GrantMode == GrantAuto {
-		e.reward(t)
+		e.reward(ctx, t)
 	}
 	if err := e.persist(ctx, t); err != nil {
 		return err
@@ -515,10 +516,20 @@ func (e *Engine) persist(ctx context.Context, t *TaskProgress) error {
 }
 
 // reward 触发宿主发奖回调；回调没有返回值，失败无法回滚本次写入。
-func (e *Engine) reward(p *TaskProgress) {
-	if e.rewardFn != nil {
-		e.rewardFn(p)
+//
+// 幂等键由框架从 *TaskProgress 的 MemberID/TaskID/CycleKey 显式构造，
+// 宿主必须以 key.String() 去重。回调在 e.mu 与事务行锁内执行（见 README），
+// 发奖若是远程调用会拉长锁持有时间，ctx 供宿主设置超时 / 取消。
+func (e *Engine) reward(ctx context.Context, p *TaskProgress) {
+	if e.rewardFn == nil || p == nil {
+		return
 	}
+	key := RewardKey{
+		MemberID: p.MemberID,
+		TaskID:   p.TaskID,
+		CycleKey: p.CycleKey,
+	}
+	e.rewardFn(ctx, key, p)
 }
 
 // notifyDepthKey 完成通知的递归深度键。

@@ -1,10 +1,10 @@
 // Package taskengine 提供与具体业务无关的任务进度引擎。
 //
-// 一个 Engine 绑定一个玩家（Options.memberID），对外入口：
+// 一个 Engine 绑定一个玩家（Options.MemberID），对外入口：
 //
 //	OnEvent    按 ProgressParm.Trigger 推进该会员进行中任务；
 //	GetTask    查询单个任务（taskID>0）或任务列表（taskID==0），返回常驻的 *TaskProgress；
-//	UpdateTask 按传入的 ProgressParm 推进指定任务；AUTO 达标先回调 rewardFn 再落 claimed；
+//	UpdateTask 按传入的 ProgressParm 推进指定任务；AUTO 达标先回调 Options.RewardFn 再落 claimed；
 //	Reload     按全局加载的定义与会员进度重建链表归属；
 //	Remove     释放全部任务节点与自身注册节点，调用后引擎不可再使用。
 //
@@ -29,13 +29,16 @@
 // ADD 用 ProgressParmAdd 累加；与 TargetCount 按 TargetCountType（> / = / <，空按 =）
 // 比较，达成即完成。
 //
-// 发奖由宿主注入的 Options.rewardFn 完成：只有 AUTO 达标时引擎回调一次，
-// 回调入参是即将落库的任务对象；CLAIM 只落 completed，等宿主自行发放。
-// 完成通知的触发点是固定常量 CompletedNotifyTrigger。
+// 发奖由宿主注入的 Options.RewardFn（类型 RewardFn）完成：只有 AUTO 达标时引擎回调一次，
+// 入参是即将落库的任务对象与框架显式构造的 RewardKey（MemberID / TaskID / CycleKey）。
+// 宿主必须以 key.String() 作为唯一去重键并保证回调幂等；CLAIM 只落 completed，
+// 等宿主自行发放。完成通知的触发点是固定常量 CompletedNotifyTrigger。
+// 回调没有返回值、在 e.mu 与事务行锁内执行，见 reward.go 与 README「发奖」。
 //
 // 存储读写统一走 touchgocore/db 的缓存门面：读用 CacheQuery、写用 CacheSave，
-// 包内不区分 Redis 与数据库。使用前必须先 db.InitCache 并调用 OpenStorage
-// 把 task_def / task_progress 绑定到统一缓存层。
+// 包内不区分 Redis 与数据库。进度写用 mustSave=false（延迟落库），只允许用于可丢失的
+// 任务进度；资金 / 账本列禁止该路径，硬约束见 db 包注释。使用前必须先 db.InitCache
+// 并调用 OpenStorage 把 task_def / task_progress 绑定到统一缓存层。
 //
 // 本包是库，不是 Service：没有 Run/Stop 生命周期，由调用方在装配层构造 *Engine 并持有。
 package taskengine

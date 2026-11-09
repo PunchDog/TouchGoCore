@@ -4,16 +4,63 @@
 // touchgocore/db 后即可使用 CacheInsert / CacheQuery / CacheSave / CacheDelete
 // 四个数据接口（CacheBind* 仅用于表绑定）。
 // 子包不 import 根 db，因此这里的反向引用不会形成循环依赖。
+//
+// 资金 / 账本列写路径硬约束（接入前置条件，不是现存漏洞）：
+//
+//   - 资金列、余额、账本与状态跃迁的唯一合法写路径是 Increment / CompareAndSwap
+//     （同步落库）：二者在数据库侧完成原子累加 / 条件更新，返回前已落库并同步
+//     刷新缓存行，不存在延迟窗口。
+//   - CacheSave 的 mustSave=false 只写 Redis + 登记脏账，由定时 flush 批量落库，
+//     滞后约一个 flush_interval_ms（默认 3s），进程崩溃会丢掉最后一个周期；
+//     因此只允许用于可丢失的任务进度 / 统计类数据（当前唯一消费方是
+//     task_engine 的进度写），资金 / 账本列一律禁止。
+//   - 资金 / 状态类强一致读必须用 NoCache()：直查数据库，不经过 Redis 行 hash。
+//   - 定性：pay / tron / ton / bsc / sol / ledger 等资金链路当前完全不读 dbcache
+//     （全仓 db.Cache* 调用只出现在 task_engine/）。以上是「资金链路接入 dbcache
+//     之前必须满足的接入前置约束」，不是当前已经存在的资金漏洞；接入前还须复核
+//     缓存刷新失败时的主动失效兜底。
+//
+// 已知取舍（R-4）：dbcache 的默认引擎是进程级全局单例（db/dbcache/engine.go 的
+// defaultEngine），一进程只能装一套缓存配置，多租户隔离与并行测试受限，相关测试须串行。
 package db
 
 import (
 	"context"
 
 	"github.com/redis/go-redis/v9"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 
 	"touchgocore/config"
 	"touchgocore/db/dbcache"
 )
+
+// startDBSpan 从调用方 ctx 开启数据接口 span；ctx 为 nil 时回退 background。
+//
+// 不引入全局 tracer 单例（otel.Tracer 是包级函数，未配置 provider 时返回 noop），
+// 也不配置采样率 / 后端：埋点只提供上下文透传，不改变任何业务语义。
+// 返回的 ctx 带 span，继续传给 dbcache 以便下游埋点挂在同一条链路上。
+func startDBSpan(ctx context.Context, spanName, table string) (context.Context, trace.Span) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return otel.Tracer("touchgocore.db").Start(ctx, spanName,
+		trace.WithAttributes(
+			attribute.String("db.system", "touchgocore.dbcache"),
+			attribute.String("db.table", table),
+		))
+}
+
+// recordDBSpanError 把错误记到 span；不改变任何返回值语义。
+func recordDBSpanError(span trace.Span, err error) {
+	if err == nil {
+		return
+	}
+	span.RecordError(err)
+	span.SetStatus(codes.Error, err.Error())
+}
 
 // CacheEngine 是统一缓存层实例。
 type CacheEngine = dbcache.Engine
@@ -196,6 +243,15 @@ func SecretSet(cols map[string]any) CacheOption {
 }
 
 // NoCache 读路径强制直查数据库（秘密列投影等不允许进缓存的读）。
+//
+// 资金 / 账本 / 状态类强一致读必须使用本选项：默认点查会命中 Redis 行 hash，
+// 缓存刷新失败时可能读到旧值。这是「资金链路接入 dbcache 前必须满足的接入前置
+// 约束」之一；当前资金链路未接入 dbcache，本条不是现存漏洞的修补。
+//
+// 写侧另有通用兜底：提交后刷新（HSetAll）或删除清理（DelRow）失败时，框架由
+// dbcache.invalidateCached 主动失效该行（立墓碑 + 删旧行 hash + 销脏账/重试账）
+// 并写 vars.Error 留痕，使下次点查必然回源；该兜底对所有表无条件生效，不依赖
+// 调用方是否加了 NoCache。
 func NoCache() CacheOption {
 	return func(o *dbcache.Options) { o.NoCache = true }
 }
@@ -425,24 +481,51 @@ func Count(column string) CacheOption {
 
 // CacheQuery 按条件查询：out 传 *T 查单条，传 *[]T 查列表。
 func CacheQuery[T any](ctx context.Context, table string, cond any, out any, opts ...CacheOption) error {
-	return dbcache.Query[T](ctx, table, cond, out, opts...)
+	ctx, span := startDBSpan(ctx, "touchgocore.db.CacheQuery", table)
+	defer span.End()
+	err := dbcache.Query[T](ctx, table, cond, out, opts...)
+	recordDBSpanError(span, err)
+	return err
 }
 
 // CacheSave 全值写入一行；mustSave 决定是否在返回前落库。
+//
+// mustSave=false 是延迟写：只更新 Redis 行 hash 并登记脏账，由缓存层定时批量落库，
+// 滞后约一个 flush_interval_ms（默认 3s），进程崩溃最多丢掉最后一个周期。
+// 因此它只适用于可丢失的任务进度 / 统计类数据（当前唯一消费方是 task_engine 的
+// 进度写），资金 / 账本列与状态跃迁一律禁止。
+//
+// 资金 / 账本列的唯一合法写路径是 Increment / CompareAndSwap（同步落库，见
+// dbcache/save.go 的 resolveMySQL 分支），强一致读配套使用 NoCache()。
+// 当前资金链路完全不接 dbcache，本条是接入前置约束，不是现存资金漏洞。
 func CacheSave[T any](ctx context.Context, table string, key string, row *T, mustSave bool, opts ...CacheOption) error {
+	ctx, span := startDBSpan(ctx, "touchgocore.db.CacheSave", table)
+	defer span.End()
 	if o := dbcache.ParseOptions(opts); o.InTx != nil {
-		return dbcache.RunTx(ctx, o.InTx)
+		err := dbcache.RunTx(ctx, o.InTx)
+		recordDBSpanError(span, err)
+		return err
 	}
-	return dbcache.Save[T](ctx, table, key, row, mustSave, opts...)
+	err := dbcache.Save[T](ctx, table, key, row, mustSave, opts...)
+	recordDBSpanError(span, err)
+	return err
 }
 
 // CacheInsert 插入一行，唯一键冲突返回 affected=0（不覆盖已有行）。
 func CacheInsert[T any](ctx context.Context, table string, row *T, opts ...CacheOption) (int64, error) {
-	return dbcache.Insert[T](ctx, table, row, opts...)
+	ctx, span := startDBSpan(ctx, "touchgocore.db.CacheInsert", table)
+	defer span.End()
+	n, err := dbcache.Insert[T](ctx, table, row, opts...)
+	recordDBSpanError(span, err)
+	return n, err
 }
 
 // CacheDelete 物理删除一行：先删数据库，再清 Redis 行 hash、脏账与重试账，
 // 并留下删除墓碑阻止在途脏账回写。cond 必须覆盖表的全部 KeyColumns。
 func CacheDelete(ctx context.Context, table string, cond any, opts ...CacheOption) error {
-	return dbcache.Delete(ctx, table, cond, opts...)
+	ctx, span := startDBSpan(ctx, "touchgocore.db.CacheDelete", table)
+	defer span.End()
+	err := dbcache.Delete(ctx, table, cond, opts...)
+	recordDBSpanError(span, err)
+	return err
 }

@@ -20,10 +20,11 @@ const (
 	CycleScheduled = "SCHEDULED"
 )
 
-// 发放模式决定达标后落哪个状态，以及引擎是否调用 Options.rewardFn：
+// 发放模式决定达标后落哪个状态，以及引擎是否调用 Options.RewardFn：
 // AUTO 先发奖再落 claimed，CLAIM 只落 completed 等宿主自行发放。
+// AUTO 回调携带框架构造的 RewardKey，宿主须以 key.String() 幂等去重（见 reward.go）。
 const (
-	// GrantAuto 达标时引擎调用 rewardFn，随后落 claimed。
+	// GrantAuto 达标时引擎调用 Options.RewardFn，随后落 claimed。
 	GrantAuto = "AUTO"
 	// GrantClaim 达标只落 completed，引擎不发奖。
 	GrantClaim = "CLAIM"

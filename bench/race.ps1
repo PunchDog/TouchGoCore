@@ -1,4 +1,4 @@
-# bench/race.ps1
+﻿# bench/race.ps1
 # 一键运行全量测试（带 -race），验证并发安全
 # 用法：powershell -File bench/race.ps1
 param(
@@ -13,7 +13,8 @@ $packages = @(
     ".", "./db", "./rpc", "./websocket", "./golua", "./localtimer",
     "./vars", "./list", "./syncmap", "./random", "./ranking",
     "./corectx", "./metrics", "./ini", "./gin",
-    "./example/gatewayserver/gatepb"
+    "./example/gatewayserver/gatepb",
+    "./task_engine", "./db/dbcache"
 )
 
 $outputPath = Join-Path $root $Output

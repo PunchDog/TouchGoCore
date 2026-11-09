@@ -32,6 +32,8 @@ const metricsReadHeaderTimeout = 5 * time.Second
 // /metrics 端点服务起来」（HTTP 服务、pprof、token 鉴权、时间轮积压采集器），
 // metrics/ 包负责「Prometheus 指标本身的定义与注册」。别名把两者串在了同一个
 // 名字空间里，读代码时容易误判成本包又实现了一遍指标。
+// 这些别名同时也是 `go doc` 的导航别名：改名反而会破坏根包到 metrics/ 包的导航，
+// 因此按 docs/dead-exports.md:31-34 的既有结论只做注释澄清，不动任何声明。
 //
 // 别名刻意保留：外部业务仓库可能正通过根包引用它们，仓内零引用不构成删除依据。
 // 新代码请直接使用 touchgocore/metrics 下的对应单例。

@@ -9,7 +9,9 @@ package dbcache
 // 语义：
 //   - 条件必须完整覆盖行键（拒绝全表/多行更新）；
 //   - 更新在 MySQL 同步执行，失败原样上抛；
-//   - 成功且 affected>0 时重读该行刷新 Redis；Redis 失败只告警（缓存是优化）。
+//   - 成功且 affected>0 时重读该行刷新 Redis；刷新失败由 invalidateCached
+//     主动失效该行（立墓碑 + 删旧行 hash + 销脏账/重试账）并写 vars.Error，
+//     绝不留下「库新缓存旧」的静默不一致。
 // ============================================================================
 
 import (
@@ -165,7 +167,27 @@ func (e *Engine) refreshFromDB(ctx context.Context, b *binding, vals []condVal) 
 		return
 	}
 	if err := e.store.HSetAll(ctx, b.keys.rowPrefix+key, b.keys.tombPrefix+key, fields, b.ttl); err != nil {
-		vars.Warning("dbcache %s: 写后刷新缓存失败（库已提交）: %v", b.table, err)
+		// 库里已是新值、Redis 里还是旧行 hash 且无墓碑；queryOne 的点查命中行 hash
+		// 就直接返回、完全不检查墓碑，所以只告警会留下「库新缓存旧」的静默不一致。
+		// 升级为 Error 并主动失效整行，让下次读必然回源。
+		vars.Error("dbcache %s: 写后刷新缓存失败（库已提交，主动失效行 %s）: %v", b.table, key, err)
+		e.invalidateCached(ctx, b, vals)
+	}
+}
+
+// invalidateCached 主动失效一行的缓存：立墓碑 + 删行 hash + 销脏账/重试账。
+//
+// 写侧刷新 / 删除清理失败时必须调用。kvStore.DelRow 对应的 deleteScript 在一个
+// Lua 脚本里一次完成上述四件事：SET 墓碑、ZREM 脏账、HDEL 重试计数、DEL 行 hash；
+// 生产与内存 fake 实现语义一致。墓碑只防在途脏账回写，真正让点查回源的是删行 hash。
+func (e *Engine) invalidateCached(ctx context.Context, b *binding, vals []condVal) {
+	key, err := keyFromCond(b.meta, vals)
+	if err != nil {
+		vars.Error("dbcache %s: 主动失效缓存无法推导行键: %v", b.table, err)
+		return
+	}
+	if _, err := e.store.DelRow(ctx, b.keys.dirty, b.keys.rowPrefix+key, b.keys.retry, b.keys.tombPrefix+key, key, e.tombTTL()); err != nil {
+		vars.Error("dbcache %s: 主动失效缓存行 %s 失败（库已提交）: %v", b.table, key, err)
 	}
 }
 

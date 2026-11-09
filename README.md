@@ -126,6 +126,31 @@ go test ./... -count=1
 
 `go build ./...` 会连带编译 `example/` 的 3 个包（同属主模块），那里的编译错误是真错误。
 
+### 缓存层资金写路径硬约束
+
+统一缓存层（`db` 门面 / `db/dbcache`）对资金 / 账本 / 状态跃迁类列有强制写入口径：
+
+- **唯一合法写路径是 `db.Increment` / `db.CompareAndSwap`（同步落库）**：二者在数据库侧完成
+  原子累加 / 条件更新并同步刷新缓存行，返回前已落库，不存在延迟窗口。
+- `CacheSave(..., mustSave=false)` **只写 Redis + 登记脏账**，由定时 flush 批量落库，滞后约
+  一个 `flush_interval_ms`（默认 3s），进程崩溃会丢掉最后一个周期。**只允许用于可丢失的
+  任务进度 / 统计类数据**，当前唯一消费方是 `task_engine` 的进度写；资金 / 账本列一律禁止。
+- 资金 / 状态类的**强一致读必须用 `db.NoCache()`**：直查数据库、不经过 Redis 行 hash。
+- **这是接入前置约束，不是当前资金漏洞**：`pay / tron / ton / bsc / sol / ledger` 等资金链路
+  当前**完全不读 dbcache**（全仓 `db.Cache*` 调用只出现在 `task_engine/`）。以上是「资金链路
+  接入 dbcache 之前必须满足的条件」，接入前还须复核缓存刷新失败时的主动失效兜底。
+- **已知取舍（R-4）**：`dbcache` 的默认引擎是进程级全局单例
+  （`db/dbcache/engine.go` 的 `defaultEngine`），一进程只能装一套缓存配置，多租户隔离与
+  并行测试受限，相关测试必须串行。
+- **缓存刷新失败的写侧兜底（一致性）**：提交后刷新（`HSetAll`）或删除清理（`DelRow`）
+  失败时，框架由 `dbcache.invalidateCached` 主动失效该行——立墓碑、删旧行 hash、
+  销脏账与重试账，并写 `vars.Error` 留痕，使下次点查必然回源。点查命中行 hash 会
+  直接返回、不检查墓碑，所以只告警会留下「库新缓存旧」的静默不一致；这是对所有表
+  无条件生效的通用兜底，不依赖调用方是否加了 `NoCache`。`Tx.Commit` 仍只返回事务
+  提交错误，刷新失败不回滚已提交事务（实现见 `db/dbcache/mutate.go`、`tx.go`、`delete.go`）。
+
+同一口径写在 `db/cache_api.go` 的包注释与 `CacheSave` / `NoCache` 的 GoDoc 里。
+
 本仓的开发过程资产不进版本库，clone 里看不到、也不必找：`docs/` 下的重构与评审报告、
 文件名带 `p0_`~`p3_` 评审轮次前缀的测试、只含 `Benchmark` 的 `*_bench_test.go`。
 判定口径写在 `.gitignore` 里，新写的测试若取这些命名会被静默忽略。

@@ -1,24 +1,19 @@
 package dbcache
 
 // ============================================================================
-// 事务原语：同一 MySQL 连接内读写，缓存刷新在 COMMIT 成功后执行
+// 事务原语：Redis 权威的延迟原子批。
 //
-// 与 Save 的延迟回写不同：事务内的写直接落 MySQL（真源），提交成功后才把
-// 变更行重读并写穿 Redis；回滚/panic 不刷新缓存。
+// BeginTx 不再依赖 MySQL 连接：事务状态是一份私有 overlay（txState），写缓冲成
+// writeOp 序列并在 overlay 上即时求值（读己写），Commit 经 txScript 一次原子重放
+// 到 Redis，Rollback 直接丢弃 overlay。MySQL 只是提交后由脏账异步物化的 sink。
 // ============================================================================
 
 import (
 	"context"
-	"reflect"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
-	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
-
-	mysqldb "touchgocore/db/mysql"
-	"touchgocore/vars"
 )
 
 // startTxSpan 以调用方 / 事务 ctx 为父开启 span；ctx 为 nil 时回退 background。
@@ -41,14 +36,13 @@ func recordTxSpanError(span trace.Span, err error) {
 	span.SetStatus(codes.Error, err.Error())
 }
 
-// Tx 是一组在单连接上执行的读写；由 BeginTx 创建。
+// Tx 是一段框架内部事务的句柄；由 BeginTx 创建，内部持有 Redis 权威 overlay。
 type Tx struct {
-	e         *Engine
-	raw       *mysqldb.Tx
-	refreshes []func()
+	st  *txState
+	ctx context.Context
 }
 
-// BeginTx 开启缓存层事务。
+// BeginTx 开启缓存层事务（只依赖 Redis，不需要 MySQL 连接）。
 func BeginTx(ctx context.Context) (*Tx, error) {
 	ctx, span := startTxSpan(ctx, "touchgocore.dbcache.tx.BeginTx")
 	defer span.End()
@@ -57,64 +51,61 @@ func BeginTx(ctx context.Context) (*Tx, error) {
 		recordTxSpanError(span, ErrNotInitialized)
 		return nil, ErrNotInitialized
 	}
-	e.mu.RLock()
-	c := e.mysqlClient
-	e.mu.RUnlock()
-	if c == nil {
-		recordTxSpanError(span, ErrTableUnbound)
-		return nil, ErrTableUnbound
-	}
-	raw, err := c.BeginTx(ctx)
-	if err != nil {
-		recordTxSpanError(span, err)
-		return nil, err
-	}
-	return &Tx{e: e, raw: raw}, nil
+	st := newTxState(e, ctx)
+	return &Tx{st: st, ctx: context.WithValue(ctx, txKey{}, st)}, nil
 }
 
-// WrapTx 用已有事务句柄构造缓存层事务（测试/集成场景复用外部连接）。
-func WrapTx(raw *mysqldb.Tx) *Tx { return &Tx{e: Default(), raw: raw} }
-
-// Commit 提交并执行提交后刷新；刷新失败只影响缓存新鲜度，不回滚已提交事务。
-//
-// 刷新失败（HSetAll / DelRow 等）由 mutate.go 的 invalidateCached 主动失效该行
-// 缓存并写 vars.Error 留痕，让下次点查必然回源；因此本方法仍只返回
-// t.raw.Commit() 的错误——让调用方收到刷新错误会误判「事务未提交」，是语义陷阱。
+// Commit 经 txScript 一次原子重放全部缓冲写到 Redis；无论成败都释放行锁。
 func (t *Tx) Commit() error {
 	_, span := startTxSpan(t.Context(), "touchgocore.dbcache.tx.Commit")
 	defer span.End()
-	if err := t.raw.Commit(); err != nil {
+	st, err := t.state()
+	if err != nil {
 		recordTxSpanError(span, err)
 		return err
 	}
-	for _, fn := range t.refreshes {
-		fn()
-	}
-	return nil
-}
-
-// Rollback 回滚事务；丢弃全部提交后刷新动作。
-func (t *Tx) Rollback() error {
-	_, span := startTxSpan(t.Context(), "touchgocore.dbcache.tx.Rollback")
-	defer span.End()
-	err := t.raw.Rollback()
+	err = st.commit(t.ctx)
 	recordTxSpanError(span, err)
 	return err
 }
 
-// Context 返回事务 ctx。
-func (t *Tx) Context() context.Context { return t.raw.Context() }
+// Rollback 丢弃 overlay 与缓冲写、释放行锁；Redis 分毫不动。
+func (t *Tx) Rollback() error {
+	_, span := startTxSpan(t.Context(), "touchgocore.dbcache.tx.Rollback")
+	defer span.End()
+	st, err := t.state()
+	if err != nil {
+		recordTxSpanError(span, err)
+		return err
+	}
+	err = st.rollback(t.ctx)
+	recordTxSpanError(span, err)
+	return err
+}
 
-// DB 暴露事务内的 gorm 会话（迁移期兼容直连写；新代码优先用 CacheTx* 原语）。
-func (t *Tx) DB() *gorm.DB { return t.raw.DB }
+// Context 返回事务 ctx（携带 txState，供四个数据接口在事务内路由）。
+func (t *Tx) Context() context.Context {
+	if t == nil {
+		return context.Background()
+	}
+	return t.ctx
+}
 
-// TxQuery 事务内查询：单条（*T）或列表（*[]T），始终读事务连接，不读 Redis。
+// state 返回事务状态；句柄无效时 ErrNotInitialized。
+func (t *Tx) state() (*txState, error) {
+	if t == nil || t.st == nil {
+		return nil, ErrNotInitialized
+	}
+	return t.st, nil
+}
+
+// TxQuery 事务内查询：单条（*T）或列表（*[]T），读 overlay 叠加 Redis 真值（读己写）。
 func TxQuery[T any](t *Tx, ctx context.Context, table string, cond any, out any) error {
-	e, err := t.engine()
+	st, err := t.state()
 	if err != nil {
 		return err
 	}
-	b, err := e.lookupTyped(table, typeOf[T]())
+	b, err := st.e.lookupTyped(table, typeOf[T]())
 	if err != nil {
 		return err
 	}
@@ -122,38 +113,20 @@ func TxQuery[T any](t *Tx, ctx context.Context, table string, cond any, out any)
 	if err != nil {
 		return err
 	}
-	repo := mysqldb.NewTxRepository[T](t.raw)
-	q := buildMySQLQuery(vals, b.orderBy)
-	switch o := out.(type) {
-	case *T:
-		row, ferr := repo.FindOne(ctx, q)
-		if ferr != nil {
-			return ferr
-		}
-		*o = *row
-	case *[]T:
-		rows, ferr := repo.FindAll(ctx, q)
-		if ferr != nil {
-			return ferr
-		}
-		res := make([]T, 0, len(rows))
-		for _, r := range rows {
-			res = append(res, *r)
-		}
-		*o = res
-	default:
-		return ErrBadOut
-	}
-	return nil
-}
-
-// TxLockOne 事务内按行键 SELECT ... FOR UPDATE。
-func TxLockOne[T any](t *Tx, ctx context.Context, table string, cond any, out *T) error {
-	e, err := t.engine()
+	rows, err := st.matchingRows(ctx, b, vals, &Options{})
 	if err != nil {
 		return err
 	}
-	b, err := e.lookupTyped(table, typeOf[T]())
+	return decodeRows[T](b, rows, out)
+}
+
+// TxLockOne 事务内按完整行键取行锁并读单行（读己写）；非完整行键拒绝。
+func TxLockOne[T any](t *Tx, ctx context.Context, table string, cond any, out *T) error {
+	st, err := t.state()
+	if err != nil {
+		return err
+	}
+	b, err := st.e.lookupTyped(table, typeOf[T]())
 	if err != nil {
 		return err
 	}
@@ -164,74 +137,95 @@ func TxLockOne[T any](t *Tx, ctx context.Context, table string, cond any, out *T
 	if !condIsExactKey(b.meta, vals) {
 		return ErrPartialKey
 	}
-	gx := applyCond(t.raw.DB.WithContext(ctx).Table(b.table), vals).
-		Clauses(clause.Locking{Strength: "UPDATE"})
-	return gx.Take(out).Error
+	rows, err := st.matchingRows(ctx, b, vals, &Options{ForUpdate: true})
+	if err != nil {
+		return err
+	}
+	if len(rows) == 0 {
+		return ErrNoRows
+	}
+	row, err := b.decode(rows[0])
+	if err != nil {
+		return err
+	}
+	*out = *row.(*T)
+	return nil
 }
 
-// TxSave 事务内整行 upsert（冲突列 = 绑定的 KeyColumns），提交后刷新该行缓存。
+// TxSave 事务内整行写（冲突列 = 绑定的 KeyColumns），结果即时进 overlay。
 func TxSave[T any](t *Tx, ctx context.Context, table string, row *T) error {
 	if row == nil {
 		return ErrNilRow
 	}
-	e, err := t.engine()
+	st, err := t.state()
 	if err != nil {
 		return err
 	}
-	b, err := e.lookupTyped(table, typeOf[T]())
+	b, err := st.e.lookupTyped(table, typeOf[T]())
 	if err != nil {
 		return err
 	}
-	cols := make([]clause.Column, len(b.conflictCols))
-	for i, c := range b.conflictCols {
-		cols[i] = clause.Column{Name: c}
-	}
-	gx := t.raw.DB.WithContext(ctx).Table(table).
-		Clauses(clause.OnConflict{Columns: cols, UpdateAll: true})
-	if err := gx.Create(row).Error; err != nil {
-		return err
-	}
-	if vals := keyValsFromRow(b, any(row)); len(vals) > 0 {
-		t.refreshes = append(t.refreshes, func() {
-			e.refreshFromDB(context.Background(), b, vals)
-		})
-	}
-	return nil
+	return st.saveInTx(ctx, b, "", any(row), &Options{})
 }
 
-// TxIncrement 事务内原子累加，提交后刷新该行。
+// TxIncrement 事务内单行原子累加（条件须完整覆盖行键）。
 func TxIncrement(t *Tx, ctx context.Context, table string, cond any, column string, delta int64) (int64, error) {
-	e, err := t.engine()
+	st, err := t.state()
 	if err != nil {
 		return 0, err
 	}
-	b, _, err := e.resolveMySQL(table)
+	b, err := st.e.lookupTable(table)
 	if err != nil {
 		return 0, err
 	}
-	return e.incrementOn(ctx, t.raw.DB.WithContext(ctx), b, cond, column, delta, t.afterCommit)
+	vals, err := parseCond(b.meta, b.kind, cond)
+	if err != nil {
+		return 0, err
+	}
+	return st.incrementInTx(ctx, b, vals, column, delta, &Options{})
 }
 
-// TxCompareAndSwap 事务内条件更新，提交后刷新该行。
+// TxAtomicMax 事务内单行原子取大（条件须完整覆盖行键）。
+func TxAtomicMax(t *Tx, ctx context.Context, table string, cond any, column string, value int64) (int64, error) {
+	st, err := t.state()
+	if err != nil {
+		return 0, err
+	}
+	b, err := st.e.lookupTable(table)
+	if err != nil {
+		return 0, err
+	}
+	vals, err := parseCond(b.meta, b.kind, cond)
+	if err != nil {
+		return 0, err
+	}
+	return st.maxInTx(ctx, b, vals, column, value, &Options{})
+}
+
+// TxCompareAndSwap 事务内单行条件更新（expect 全部命中才写 set）。
 func TxCompareAndSwap(t *Tx, ctx context.Context, table string, cond any, expect, set map[string]any) (int64, error) {
-	e, err := t.engine()
+	st, err := t.state()
 	if err != nil {
 		return 0, err
 	}
-	b, _, err := e.resolveMySQL(table)
+	b, err := st.e.lookupTable(table)
 	if err != nil {
 		return 0, err
 	}
-	return e.casOn(ctx, t.raw.DB.WithContext(ctx), b, cond, expect, set, t.afterCommit)
+	vals, err := parseCond(b.meta, b.kind, cond)
+	if err != nil {
+		return 0, err
+	}
+	return st.casInTx(ctx, b, vals, expect, set, &Options{})
 }
 
-// TxUpdateIn 事务内按单列 id 集合做条件更新（多行 CAS），提交后逐行刷新缓存。
+// TxUpdateIn 事务内按单列行键集合逐行 CAS（多行条件更新）；keyColumn 须为完整行键。
 func TxUpdateIn(t *Tx, ctx context.Context, table, keyColumn string, ids []any, expect, set map[string]any) (int64, error) {
-	e, err := t.engine()
+	st, err := t.state()
 	if err != nil {
 		return 0, err
 	}
-	b, _, err := e.resolveMySQL(table)
+	b, err := st.e.lookupTable(table)
 	if err != nil {
 		return 0, err
 	}
@@ -244,53 +238,25 @@ func TxUpdateIn(t *Tx, ctx context.Context, table, keyColumn string, ids []any, 
 	if len(set) == 0 {
 		return 0, ErrBadColumn
 	}
-	for col := range expect {
-		if err := validateColumn(b, col); err != nil {
-			return 0, err
+	var total int64
+	for _, id := range ids {
+		vals := []condVal{{Column: keyColumn, Values: []any{id}}}
+		n, cerr := st.casInTx(ctx, b, vals, expect, set, &Options{})
+		if cerr != nil {
+			return 0, cerr
 		}
+		total += n
 	}
-	for col := range set {
-		if err := validateColumn(b, col); err != nil {
-			return 0, err
-		}
-	}
-	gx := t.raw.DB.WithContext(ctx).Table(table).Where("`"+keyColumn+"` IN ?", ids)
-	for col, v := range expect {
-		gx = applyExpect(gx, col, v)
-	}
-	res := gx.UpdateColumns(set)
-	if res.Error != nil {
-		return 0, res.Error
-	}
-	if res.RowsAffected > 0 {
-		for _, id := range ids {
-			vals := []condVal{{Column: keyColumn, Values: []any{id}}}
-			t.refreshes = append(t.refreshes, func() {
-				e.refreshFromDB(context.Background(), b, vals)
-			})
-		}
-	}
-	return res.RowsAffected, nil
+	return total, nil
 }
 
-// engine 返回已初始化的引擎；未装配缓存时返回 ErrNotInitialized（调用方降级直连）。
-func (t *Tx) engine() (*Engine, error) {
-	if t == nil || t.e == nil {
-		return nil, ErrNotInitialized
-	}
-	return t.e, nil
-}
-
-// afterCommit 把刷新动作排进提交后队列。
-func (t *Tx) afterCommit(fn func()) { t.refreshes = append(t.refreshes, fn) }
-
-// TxDeleteIn 事务内按单列 id 集合删除，提交后清对应缓存行。
+// TxDeleteIn 事务内按单列行键集合逐行删除（立墓碑防异步回源复活）。
 func TxDeleteIn(t *Tx, ctx context.Context, table, keyColumn string, ids []any) (int64, error) {
-	e, err := t.engine()
+	st, err := t.state()
 	if err != nil {
 		return 0, err
 	}
-	b, _, err := e.resolveMySQL(table)
+	b, err := st.e.lookupTable(table)
 	if err != nil {
 		return 0, err
 	}
@@ -300,62 +266,5 @@ func TxDeleteIn(t *Tx, ctx context.Context, table, keyColumn string, ids []any) 
 	if err := validateColumn(b, keyColumn); err != nil {
 		return 0, err
 	}
-	res := t.raw.DB.WithContext(ctx).Table(table).Where("`"+keyColumn+"` IN ?", ids).Delete(nil)
-	if res.Error != nil {
-		return 0, res.Error
-	}
-	if res.RowsAffected > 0 {
-		for _, id := range ids {
-			vals := []condVal{{Column: keyColumn, Values: []any{id}}}
-			t.refreshes = append(t.refreshes, func() { e.dropCached(b, vals) })
-		}
-	}
-	return res.RowsAffected, nil
-}
-
-// dropCached 在事务提交后清掉一行的缓存（墓碑 + 行 hash + 脏账）。
-//
-// SetTomb 失败不能中断清理：DelRow 的 deleteScript 本身会 SET 墓碑，继续尝试
-// 仍可完成「立墓碑 + 删行 hash + 销脏账/重试账」。DelRow 也失败时升级为
-// vars.Error 并再走一次 invalidateCached（重试 DelRow）兜底。
-func (e *Engine) dropCached(b *binding, vals []condVal) {
-	key, err := keyFromCond(b.meta, vals)
-	if err != nil {
-		vars.Error("dbcache %s: 删除后清缓存无法推导行键: %v", b.table, err)
-		return
-	}
-	tombKey := b.keys.tombPrefix + key
-	ttl := e.tombTTL()
-	ctx := context.Background()
-	if err := e.store.SetTomb(ctx, tombKey, ttl); err != nil {
-		// 不再直接 return：DelRow 脚本会自行补立墓碑。
-		vars.Error("dbcache %s: 删除后立墓碑失败（行 %s，继续尝试 DelRow）: %v", b.table, key, err)
-	}
-	if _, err := e.store.DelRow(ctx, b.keys.dirty, b.keys.rowPrefix+key, b.keys.retry, tombKey, key, ttl); err != nil {
-		vars.Error("dbcache %s: 删除后清缓存失败（库已提交，行 %s 主动失效）: %v", b.table, key, err)
-		e.invalidateCached(ctx, b, vals)
-	}
-}
-
-// keyValsFromRow 从行结构体按行键列取值，用于提交后重读。
-func keyValsFromRow(b *binding, row any) []condVal {
-	v := reflect.ValueOf(row)
-	for v.Kind() == reflect.Pointer {
-		if v.IsNil() {
-			return nil
-		}
-		v = v.Elem()
-	}
-	if v.Kind() != reflect.Struct {
-		return nil
-	}
-	out := make([]condVal, 0, len(b.meta.KeyCols))
-	for _, col := range b.meta.KeyCols {
-		fi, ok := b.meta.ByColumn[col]
-		if !ok {
-			return nil
-		}
-		out = append(out, condVal{Column: col, Values: []any{v.Field(b.meta.Fields[fi].Index).Interface()}})
-	}
-	return out
+	return st.deleteWhereInTx(ctx, b, []Range{{Column: keyColumn, Op: "IN", Value: ids}})
 }

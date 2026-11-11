@@ -64,7 +64,9 @@ func encodeValue(v reflect.Value) (string, error) {
 		return encodeValue(v.Elem())
 	}
 	if v.Type() == timeType {
-		return v.Interface().(time.Time).UTC().Format(time.RFC3339Nano), nil
+		// 定宽 UTC（9 位纳秒）：lex 索引字典序=时间序；RFC3339Nano 变宽会破坏排序。
+		// decodeTime 兼容旧变宽格式，旧缓存行解码不受影响。
+		return v.Interface().(time.Time).UTC().Format("2006-01-02T15:04:05.000000000Z"), nil
 	}
 	if v.Type() == durationType {
 		return strconv.FormatInt(v.Int(), 10), nil

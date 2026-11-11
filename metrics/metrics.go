@@ -80,6 +80,23 @@ var (
 		Help: "数据库连接数",
 	}, []string{"db_type", "state"})
 
+	dbcacheSinkLagGauge = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "touchgocore_dbcache_sink_lag",
+		Help: "dbcache 待物化到 sink 的脏键数（dirty + dirtyDel）",
+	}, []string{"table"})
+	dbcacheTxConflictCounter = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "touchgocore_dbcache_tx_conflict_total",
+		Help: "dbcache 事务冲突中止总数（锁等待超时 / 提交时锁丢失）",
+	}, []string{"table"})
+	dbcacheScanBudgetCounter = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "touchgocore_dbcache_scan_budget_exceeded_total",
+		Help: "dbcache 键集扫描超预算 fail-closed 次数",
+	}, []string{"table"})
+	dbcacheSinkAbsentCounter = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "touchgocore_dbcache_sink_absent_total",
+		Help: "dbcache mustSave 但 sink 缺席的告警放行次数",
+	}, []string{"table"})
+
 	logMessagesCounter = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "touchgocore_log_messages_total",
 		Help: "日志消息总数",
@@ -106,6 +123,10 @@ func Init() {
 			luaCallCounter,
 			luaCallLatency,
 			dbConnectionsGauge,
+			dbcacheSinkLagGauge,
+			dbcacheTxConflictCounter,
+			dbcacheScanBudgetCounter,
+			dbcacheSinkAbsentCounter,
 			logMessagesCounter,
 			// 不带 Go/Process 采集器时，/metrics 只有一堆业务计数器，
 			// 内存、goroutine、CPU 这些最常见的告警维度全部缺失。
@@ -253,4 +274,33 @@ type logMetrics struct{}
 func (logMetrics) IncMessages(level string) {
 	Init()
 	logMessagesCounter.WithLabelValues(level).Inc()
+}
+
+// DBCache 是 dbcache Redis 权威缓存层的运维指标入口。
+var DBCache = dbcacheMetrics{}
+
+type dbcacheMetrics struct{}
+
+// SetSinkLag 记录一张表待物化到 sink 的脏键数（每次 flush tick 刷新）。
+func (dbcacheMetrics) SetSinkLag(table string, n float64) {
+	Init()
+	dbcacheSinkLagGauge.WithLabelValues(table).Set(n)
+}
+
+// IncTxConflict 记录一次事务冲突中止（锁等待超时 / 提交时锁丢失）。
+func (dbcacheMetrics) IncTxConflict(table string) {
+	Init()
+	dbcacheTxConflictCounter.WithLabelValues(table).Inc()
+}
+
+// IncScanBudget 记录一次键集扫描超预算 fail-closed。
+func (dbcacheMetrics) IncScanBudget(table string) {
+	Init()
+	dbcacheScanBudgetCounter.WithLabelValues(table).Inc()
+}
+
+// IncSinkAbsent 记录一次 mustSave 无 sink 的告警放行。
+func (dbcacheMetrics) IncSinkAbsent(table string) {
+	Init()
+	dbcacheSinkAbsentCounter.WithLabelValues(table).Inc()
 }

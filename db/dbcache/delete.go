@@ -4,16 +4,14 @@ import (
 	"context"
 	"fmt"
 	"time"
-
-	"touchgocore/vars"
 )
 
 // Delete 物理删除一行。
 //
 // cond 与 Query 的条件结构体同形（指针字段 + cache:"col" tag），且必须恰好覆盖
-// 全部 KeyColumns：只允许按完整行键删除，拒绝可能命中多行的条件。删除顺序为
-// 「立墓碑 → 删数据库 → 清 Redis 行 hash / 脏账 / 重试账」；数据库删除失败时
-// 回滚墓碑并原样保留 Redis 内容，由调用方重试。
+// 全部 KeyColumns：只允许按完整行键删除，拒绝可能命中多行的条件。删除在 Redis
+// 侧一条 Lua 原子完成「立墓碑 + 删行/秘密/索引/守卫/键集 + 销脏账/重试/租约」，
+// 有 sink 时入 dirtyDel 异步删库（失败退避重试不丢）；Redis 写成功即删除成功。
 func Delete(ctx context.Context, table string, cond any, opt ...Option) error {
 	e := defaultEngine.Load()
 	if e == nil {
@@ -70,11 +68,8 @@ func applyRangeConds(b *binding, vals []condVal, ranges []Range) ([]condVal, err
 	return vals, nil
 }
 
-// remove 执行单行删除。
+// remove 执行单行删除：Redis 原子删 + 有 sink 时入 dirtyDel 异步物化。
 func (e *Engine) remove(ctx context.Context, b *binding, cond any) error {
-	if b.sinkDelete == nil {
-		return fmt.Errorf("%w: table %s has no delete source", ErrBadCond, b.table)
-	}
 	vals, err := parseCond(b.meta, b.kind, cond)
 	if err != nil {
 		return err
@@ -86,32 +81,16 @@ func (e *Engine) remove(ctx context.Context, b *binding, cond any) error {
 	if err != nil {
 		return err
 	}
-	tombKey := b.keys.tombPrefix + key
-	ttl := e.tombTTL()
-	if err := e.store.SetTomb(ctx, tombKey, ttl); err != nil {
-		return fmt.Errorf("dbcache: delete %s: tomb: %w", b.table, err)
+	op := &writeOp{
+		Op:      "delete",
+		Sink:    b.sinkDelete != nil,
+		Due:     time.Now().Add(b.interval).UnixMilli(),
+		TombTTL: e.tombTTL().Milliseconds(),
 	}
-	if err := e.deleteRows(ctx, b, vals); err != nil {
-		if derr := e.store.DelTomb(ctx, tombKey); derr != nil {
-			vars.Error("dbcache %s: rollback tomb %s: %v", b.table, key, derr)
-		}
+	if _, err := e.applyWrite(ctx, b, key, op); err != nil {
 		return fmt.Errorf("dbcache: delete %s: %w", b.table, err)
 	}
-	if _, err := e.store.DelRow(ctx, b.keys.dirty, b.keys.rowPrefix+key, b.keys.retry, tombKey, key, ttl); err != nil {
-		// 数据库已删除、墓碑已立，但行 hash 可能还在：queryOne 的点查命中行 hash
-		// 就直接返回、不检查墓碑，只告警会留下「库已删、缓存仍返回旧行」的静默不一致。
-		// 与 mutate.go 的刷新失败统一口径：升级为 Error + 主动失效行（重试 DelRow）。
-		vars.Error("dbcache %s: clear cached row %s failed (row invalidated): %v", b.table, key, err)
-		e.invalidateCached(ctx, b, vals)
-	}
 	return nil
-}
-
-// deleteRows 以落库超时预算调用绑定的删除闭包。
-func (e *Engine) deleteRows(ctx context.Context, b *binding, vals []condVal) error {
-	fctx, cancel := context.WithTimeout(ctx, e.cfg.FlushTimeout)
-	defer cancel()
-	return b.sinkDelete(fctx, vals)
 }
 
 // tombTTL 是删除墓碑的存活时间：覆盖一次在途落库的最长耗时尚有余量。

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"touchgocore/db"
+	mysqldb "touchgocore/db/mysql"
 )
 
 // 两张表名：绑定与读写共用同一常量，避免字符串散落。
@@ -46,6 +47,8 @@ var (
 	storageOnce sync.Once
 	// storageErr 首次装配的错误；nil 表示成功。
 	storageErr error
+	// storageClient 装配时使用的 MySQL 客户端；Reload 回源刷新定义时复用。
+	storageClient *db.Client
 )
 
 // OpenStorage 把 task_progress 与 task_def 绑定到统一缓存层。
@@ -62,10 +65,13 @@ func OpenStorage(client *db.Client) error {
 			storageErr = ErrCacheNotInitialized
 			return
 		}
+		storageClient = client
 		if err := db.CacheBindMySQL[TaskProgress](tableTaskProgress, client, db.CacheBindOption[TaskProgress]{
 			KeyColumns:      []string{"member_id", "task_id", "cycle_key"},
 			ConflictColumns: []string{"member_id", "task_id", "cycle_key"},
 			OrderBy:         []string{"id DESC"},
+			// 迁移期：Redis 冷启动时允许回源 MySQL 读历史进度行（墓碑门控防复活）。
+			AllowSourceBackfill: true,
 		}); err != nil {
 			storageErr = err
 			return
@@ -73,6 +79,8 @@ func OpenStorage(client *db.Client) error {
 		if err := db.CacheBindMySQL[TaskDef](tableTaskDef, client, db.CacheBindOption[TaskDef]{
 			KeyColumns:      []string{"id"},
 			ConflictColumns: []string{"id"},
+			// 迁移期：Redis 冷启动时允许回源 MySQL 读历史任务定义。
+			AllowSourceBackfill: true,
 		}); err != nil {
 			storageErr = err
 		}
@@ -124,8 +132,9 @@ func loadDef(ctx context.Context, id int64) (*TaskDef, error) {
 
 // listEnabledDefs 读取全部启用定义，并按 id 升序返回。
 //
-// 列表查询由缓存层直查 DB，不带排序，所以这里补一次内存排序，
-// 保证 Reload 建链与 GetTask 的顺序稳定。
+// 列表读走 Redis 权威键集（不含排序），所以这里补一次内存排序，
+// 保证 Reload 建链与 GetTask 的顺序稳定。后台若绕过缓存直写 DB，由 Reload
+// 先经 refreshDefsFromSource 回源同步，见 global.go。
 func listEnabledDefs(ctx context.Context) ([]TaskDef, error) {
 	enabled := int8(1)
 	var rows []TaskDef
@@ -133,6 +142,57 @@ func listEnabledDefs(ctx context.Context) ([]TaskDef, error) {
 		return nil, err
 	}
 	sort.SliceStable(rows, func(i, j int) bool { return rows[i].ID < rows[j].ID })
+	return rows, nil
+}
+
+// refreshDefsFromSource 把 MySQL 中的任务定义全量同步回 Redis 权威缓存。
+//
+// 后台可能存在绕过缓存直写 task_def 的路径（新增 / 停用 / 删除）。列表读只扫
+// Redis 键集，不回源，所以 Reload 前必须先做一次源表同步：逐行 CacheSave 覆盖
+// 缓存，再删除缓存中源表已不存在的行。storageClient 未装配（纯 Redis 模式）时跳过。
+func refreshDefsFromSource(ctx context.Context) error {
+	if storageClient == nil {
+		return nil
+	}
+	repo := mysqldb.NewRepository[TaskDef](storageClient)
+	rows, err := repo.FindAll(ctx, mysqldb.NewQuery())
+	if err != nil {
+		return err
+	}
+	// live 记录源表现存主键；同步过程中顺带清理缓存里已删除的定义。
+	live := make(map[int64]struct{}, len(rows))
+	for _, row := range rows {
+		if row == nil {
+			continue
+		}
+		live[row.ID] = struct{}{}
+		if err := db.CacheSave[TaskDef](ctx, tableTaskDef, "", row, false); err != nil {
+			return err
+		}
+	}
+	cached, err := listAllDefs(ctx)
+	if err != nil {
+		return err
+	}
+	for i := range cached {
+		if _, ok := live[cached[i].ID]; ok {
+			continue
+		}
+		id := cached[i].ID
+		if err := db.CacheDelete(ctx, tableTaskDef, &defIDCond{ID: &id}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// listAllDefs 读取缓存中的全部定义（含停用），供回源后的差集清理。
+// 普通列表读拒绝空条件，这里用 id IS NOT NULL 走 spec 全键集扫描。
+func listAllDefs(ctx context.Context) ([]TaskDef, error) {
+	var rows []TaskDef
+	if err := db.CacheQuery[TaskDef](ctx, tableTaskDef, nil, &rows, db.NotNull("id")); err != nil {
+		return nil, err
+	}
 	return rows, nil
 }
 

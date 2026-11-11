@@ -17,7 +17,7 @@ func BindPostgres[T any](table string, c *pgdb.Client, opt BindOption[T]) error 
 	if e == nil {
 		return ErrNotInitialized
 	}
-	keys, err := makeTableKeys(e.cfg.KeyPrefix, table)
+	keys, err := makeTableKeys(e.cfg.KeyPrefix, table, e.cfg.GlobalSlot)
 	if err != nil {
 		return err
 	}
@@ -38,6 +38,22 @@ func BindPostgres[T any](table string, c *pgdb.Client, opt BindOption[T]) error 
 	}
 	b.srcFindList = func(ctx context.Context, vals []condVal) ([]any, error) {
 		rows, ferr := rep.FindAll(ctx, buildPostgresQuery(vals, nil))
+		if ferr != nil {
+			return nil, ferr
+		}
+		out := make([]any, len(rows))
+		for i, row := range rows {
+			out[i] = row
+		}
+		return out, nil
+	}
+	// srcPage 按首个行键列升序分页捞源表，供 BackfillTable 全量播种。
+	b.srcPage = func(ctx context.Context, offset, limit int) ([]any, error) {
+		q := pgdb.NewQuery().Limit(limit).Offset(offset)
+		if len(b.meta.KeyCols) > 0 {
+			q.OrderAsc(b.meta.KeyCols[0])
+		}
+		rows, ferr := rep.FindAll(ctx, q)
 		if ferr != nil {
 			return nil, ferr
 		}

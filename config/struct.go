@@ -70,21 +70,31 @@ const (
 	DBTypePostgres = "postgres"
 )
 
-// CacheConfig 统一数据库缓存层配置（Redis 一级 + 定时回写 DB）。
+// CacheConfig 统一数据库缓存层配置（Redis 权威 + 可选异步回写 DB）。
 //
 // nil 或 enabled=false 时不启用缓存层。时长统一 _ms 整数约定；
-// <=0 的字段在装配时回落 dbcache 框架默认值（ttl_ms 除外：0 表示关闭 TTL）。
+// <=0 的字段在装配时回落 dbcache 框架默认值。Redis 即真源：ttl_ms>0 会被钳到 0
+// 并告警（行过期=丢数据）；旧部署残留值无需改 conf 即可安全运行。
 type CacheConfig struct {
 	Enabled         bool   `json:"enabled"`           // 总开关
 	DBType          string `json:"db_type"`           // 回写库类型：mysql/mongo/postgres；空=mysql
 	KeyPrefix       string `json:"key_prefix"`        // Redis 键前缀，默认 tgc
-	TTLMS           int    `json:"ttl_ms"`            // 行 hash 物理过期毫秒；0=不过期
+	TTLMS           int    `json:"ttl_ms"`            // 已废弃：权威模式行不过期，>0 钳到 0 并告警
 	FlushIntervalMS int    `json:"flush_interval_ms"` // 延迟落库扫描间隔，默认 3000
 	QueryTimeoutMS  int    `json:"query_timeout_ms"`  // 单次查询超时，默认 2000
 	FlushTimeoutMS  int    `json:"flush_timeout_ms"`  // 单次落库超时，默认 10000
 	CloseBudgetMS   int    `json:"close_budget_ms"`   // 停机 final flush 预算，默认 5000
 	MaxRetry        int    `json:"max_retry"`         // 失败退避档位上限，默认 5
 	DirtyBatchSize  int    `json:"dirty_batch_size"`  // 每批领取的脏键数，默认 200
+
+	MaxScanRows  int    `json:"max_scan_rows"`  // 无索引扫描预算，默认 100000，超限 fail-closed
+	TxRowLocks   *bool  `json:"tx_row_locks"`   // 行锁开关；nil=默认 true（资金链读己写安全前提）
+	TxLockWaitMS int    `json:"tx_lock_wait_ms"` // 行锁等待上限，默认 5000
+	TxLockTTLMS  int    `json:"tx_lock_ttl_ms"`  // 行锁 PX 存活，默认 30000
+	SinkRequired bool   `json:"sink_required"`  // true 时 mustSave 无 sink 报错；默认 false 告警放行
+	GlobalSlot   bool   `json:"global_slot"`    // true 时全表同槽 {prefix}（Cluster 跨表事务必须）
+	SpecTimeZone string `json:"spec_timezone"`  // DateBucket 分桶时区，默认 UTC
+	RequireAOF   *bool  `json:"require_aof"`    // nil=默认 true：Init 检查 AOF，缺失响亮告警
 }
 
 // TLSConfig 通用服务端 TLS（Gin / WebSocket 直连场景；前置反代可保持 enable=false）

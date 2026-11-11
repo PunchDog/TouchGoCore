@@ -74,6 +74,11 @@ func (g *Golbal) loadDefs(ctx context.Context) ([]TaskDef, error) {
 // 任务定义变更后应调用本方法；建议在低峰调用。
 // 单个引擎重建失败不阻断其余引擎，返回首个错误。
 func (g *Golbal) Reload(ctx context.Context) error {
+	// 后台可能绕过缓存直写 task_def；先回源同步，保证新增/停用/删除对
+	// Redis 权威列表读可见，再重建索引与各引擎链表。
+	if err := refreshDefsFromSource(ctx); err != nil {
+		return err
+	}
 	rows, err := g.loadDefs(ctx)
 	if err != nil {
 		return err

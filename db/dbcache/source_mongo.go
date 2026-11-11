@@ -27,7 +27,7 @@ func BindMongo[T any](table string, dbo MongoCollection, opt BindOption[T]) erro
 	if e == nil {
 		return ErrNotInitialized
 	}
-	keys, err := makeTableKeys(e.cfg.KeyPrefix, table)
+	keys, err := makeTableKeys(e.cfg.KeyPrefix, table, e.cfg.GlobalSlot)
 	if err != nil {
 		return err
 	}

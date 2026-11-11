@@ -319,7 +319,56 @@ func keyFromCond(meta *tableMeta, vals []condVal) (string, error) {
 	return strings.Join(parts, ":"), nil
 }
 
-// keyFromRow 按 KeyCols 顺序从行对象推导 Redis 行键；任一键列为零值即报错。
+// unescapeKeySegment 还原 escapeKeySegment 的转义（顺序与编码相反）。
+func unescapeKeySegment(s string) string {
+	s = strings.ReplaceAll(s, "%3A", ":")
+	s = strings.ReplaceAll(s, "%25", "%")
+	return s
+}
+
+// valsFromConditions 从结构化条件（db.Condition）推导行键定位值：只取键列上的
+// 单值等值（=）条件。condVals 在 o.Cond 缺席时调用它，让 db.Condition("id","=",x)
+// 这类「写路径定位条件」能推导行键（与 MatchStruct 等价）；非键列条件不参与键推导，
+// 仍由 casInTx/incrementInTx 经 rangesToDescs 当作守卫消费。缺键列或多值由
+// condIsExactKey 兜底拒为 ErrPartialKey（fail-closed，绝不退化成全表写）。
+func valsFromConditions(meta *tableMeta, ranges []Range) []condVal {
+	if !meta.HasKey {
+		return nil
+	}
+	out := make([]condVal, 0, len(meta.KeyCols))
+	for _, col := range meta.KeyCols {
+		for _, r := range ranges {
+			if r.Table == "" && r.Column == col && r.Op == "=" {
+				out = append(out, condVal{Column: col, Values: []any{r.Value}})
+				break
+			}
+		}
+	}
+	return out
+}
+
+// valsFromKey 把行键反解成键列条件（异步 sinkDelete 用）：拆分、去转义、按列类型解码。
+func valsFromKey(meta *tableMeta, key string) ([]condVal, error) {
+	parts := strings.Split(key, ":")
+	if len(parts) != len(meta.KeyCols) {
+		return nil, fmt.Errorf("%w: key %q", ErrKeyMissing, key)
+	}
+	out := make([]condVal, 0, len(parts))
+	for i, col := range meta.KeyCols {
+		raw := unescapeKeySegment(parts[i])
+		f := meta.Fields[meta.ByColumn[col]]
+		v, err := decodeValue(raw, f.Type)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, condVal{Column: col, Values: []any{v.Interface()}})
+	}
+	return out, nil
+}
+
+// keyFromRow 按 KeyCols 顺序从行对象推导 Redis 行键。
+// 零值整数键列合法（如 cut_point_record 抽奖行 participation_id=0），与
+// keyFromCond 允许 0 对齐；仅空串 / nil 指针 / nil 接口视为缺失而报错。
 func keyFromRow(meta *tableMeta, rv reflect.Value) (string, error) {
 	parts := make([]string, 0, len(meta.KeyCols))
 	for _, col := range meta.KeyCols {
@@ -329,8 +378,8 @@ func keyFromRow(meta *tableMeta, rv reflect.Value) (string, error) {
 		}
 		f := meta.Fields[pos]
 		fv := rv.Field(f.Index)
-		if isZeroValue(fv) {
-			return "", fmt.Errorf("%w: key column %s is zero", ErrKeyMissing, col)
+		if isMissingKeyValue(fv) {
+			return "", fmt.Errorf("%w: key column %s is empty", ErrKeyMissing, col)
 		}
 		s, err := encodeValue(fv)
 		if err != nil {
@@ -339,6 +388,22 @@ func keyFromRow(meta *tableMeta, rv reflect.Value) (string, error) {
 		parts = append(parts, escapeKeySegment(s))
 	}
 	return strings.Join(parts, ":"), nil
+}
+
+// isMissingKeyValue 判断行键列是否缺失：仅 nil 指针/接口与空串算缺失。
+// 整数/浮点零值是合法键，故不复用 isZeroValue——insert.go 的自增取号仍须
+// 把整数 0 视为「待分配」，两者语义不同，不能合并。
+func isMissingKeyValue(v reflect.Value) bool {
+	if !v.IsValid() {
+		return true
+	}
+	switch v.Kind() {
+	case reflect.Pointer, reflect.Interface:
+		return v.IsNil()
+	case reflect.String:
+		return v.Len() == 0
+	}
+	return false
 }
 
 // isZeroValue 判断键列是否为空值（空字符串 / 0 / nil 指针）。

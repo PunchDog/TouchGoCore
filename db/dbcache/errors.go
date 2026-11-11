@@ -31,4 +31,12 @@ var (
 	ErrNilRow = errors.New("dbcache: nil row")
 	// ErrPartialKey 表示删除条件未覆盖全部行键列（拒绝多行删除）。
 	ErrPartialKey = errors.New("dbcache: delete requires all key columns")
+	// ErrDuplicateKey 表示唯一守卫冲突（Save 撞上其它行的唯一列值）。
+	ErrDuplicateKey = errors.New("dbcache: duplicate unique key")
+	// ErrTxConflict 表示事务冲突：行锁等待超时、锁归属丢失或提交校验失败。
+	ErrTxConflict = errors.New("dbcache: transaction conflict")
+	// ErrSinkRequired 表示 SinkRequired=true 时 mustSave 写入没有可用 sink。
+	ErrSinkRequired = errors.New("dbcache: sink required but absent")
+	// ErrScanBudgetExceeded 表示无索引扫描超过 MaxScanRows 预算（fail-closed）。
+	ErrScanBudgetExceeded = errors.New("dbcache: scan budget exceeded")
 )

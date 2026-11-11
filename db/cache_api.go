@@ -5,20 +5,28 @@
 // 四个数据接口（CacheBind* 仅用于表绑定）。
 // 子包不 import 根 db，因此这里的反向引用不会形成循环依赖。
 //
+// 权威模型：Redis 是唯一读写权威，MySQL 是可拆卸的异步 sink（滞后物化视图）。
+// 拔掉 MySQL（BindRedis / BindMySQL(nil)）不影响 Redis 读写、事务与列表。
+//
 // 资金 / 账本列写路径硬约束（接入前置条件，不是现存漏洞）：
 //
-//   - 资金列、余额、账本与状态跃迁的唯一合法写路径是 Increment / CompareAndSwap
-//     （同步落库）：二者在数据库侧完成原子累加 / 条件更新，返回前已落库并同步
-//     刷新缓存行，不存在延迟窗口。
-//   - CacheSave 的 mustSave=false 只写 Redis + 登记脏账，由定时 flush 批量落库，
-//     滞后约一个 flush_interval_ms（默认 3s），进程崩溃会丢掉最后一个周期；
-//     因此只允许用于可丢失的任务进度 / 统计类数据（当前唯一消费方是
-//     task_engine 的进度写），资金 / 账本列一律禁止。
-//   - 资金 / 状态类强一致读必须用 NoCache()：直查数据库，不经过 Redis 行 hash。
+//   - 资金列、余额、账本与状态跃迁的唯一合法写路径是 Increment / CompareAndSwap：
+//     二者在 Redis 侧 Lua 对 live 行原子校验条件后应用（HINCRBY 保 int64 精确），
+//     校验失败零副作用（affected=0）；成功后登记脏账，由 sink 异步物化。读己写
+//     由 Redis 权威保证，不存在「库已写、缓存未刷新」的双真源窗口。
+//   - CacheSave 的 mustSave=false 只写 Redis + 登记脏账，由定时 flush 批量物化到
+//     sink，滞后约一个 flush_interval_ms（默认 3s）；Redis 权威写即时生效，崩溃
+//     丢数据风险由 Redis AOF 兜底（RequireAOF 缺失响亮告警），sink 只是滞后视图。
+//     该模式只用于可容忍 sink 滞后的任务进度 / 统计类数据（当前唯一消费方是
+//     task_engine 的进度写）。
+//   - mustSave=true 在返回前同步物化到 sink（flushKey）；sink 缺席时按
+//     Config.SinkRequired 告警放行（false）或报 ErrSinkRequired（true）——两种
+//     情形下 Redis 权威写都已成功，错误/告警只针对缺席的物化视图。
+//   - 强一致读默认即读 Redis 权威行（点查命中即真值）；NoCache 历史上「直查数据库」
+//     的语义在 Redis 权威下不再成立（库是滞后 sink，读它反而陈旧）。
 //   - 定性：pay / tron / ton / bsc / sol / ledger 等资金链路当前完全不读 dbcache
 //     （全仓 db.Cache* 调用只出现在 task_engine/）。以上是「资金链路接入 dbcache
-//     之前必须满足的接入前置约束」，不是当前已经存在的资金漏洞；接入前还须复核
-//     缓存刷新失败时的主动失效兜底。
+//     之前必须满足的接入前置约束」，不是当前已经存在的资金漏洞。
 //
 // 已知取舍（R-4）：dbcache 的默认引擎是进程级全局单例（db/dbcache/engine.go 的
 // defaultEngine），一进程只能装一套缓存配置，多租户隔离与并行测试受限，相关测试须串行。
@@ -102,6 +110,14 @@ var (
 	ErrCacheNilRow = dbcache.ErrNilRow
 	// ErrCachePartialKey 表示 CacheDelete 的条件未覆盖全部行键列。
 	ErrCachePartialKey = dbcache.ErrPartialKey
+	// ErrCacheDuplicateKey 表示唯一列组冲突（Insert 幂等冲突 / Save 守卫撞他行）。
+	ErrCacheDuplicateKey = dbcache.ErrDuplicateKey
+	// ErrCacheTxConflict 表示事务行锁等待超时（资金链读己写竞争）。
+	ErrCacheTxConflict = dbcache.ErrTxConflict
+	// ErrCacheSinkRequired 表示 SinkRequired=true 时 mustSave 写入没有可用 sink。
+	ErrCacheSinkRequired = dbcache.ErrSinkRequired
+	// ErrCacheScanBudgetExceeded 表示无索引扫描超过 MaxScanRows 预算（fail-closed）。
+	ErrCacheScanBudgetExceeded = dbcache.ErrScanBudgetExceeded
 )
 
 // ==================== 生命周期 ====================
@@ -131,6 +147,22 @@ func CloseCache() { dbcache.Close() }
 // FlushCache 立即把指定表的全部脏键写入数据库。
 func FlushCache(ctx context.Context, table string) error { return dbcache.Flush(ctx, table) }
 
+// FlushAllCache 把所有存在待物化脏账的表立即写入数据库（无脏账的表跳过）。
+func FlushAllCache(ctx context.Context) error { return dbcache.FlushAll(ctx) }
+
+// FlushKeyCache 精确物化一个脏键（只落该行，不触碰同表其它脏账）。
+func FlushKeyCache(ctx context.Context, table, key string) error {
+	return dbcache.FlushKey(ctx, table, key)
+}
+
+// CacheKeyOf 按表绑定从行推导 Redis 行键。
+func CacheKeyOf[T any](table string, row *T) (string, error) { return dbcache.KeyOf(table, row) }
+
+// CacheKeyFromCond 按表绑定从完整行键条件推导 Redis 行键。
+func CacheKeyFromCond(table string, cond any) (string, error) {
+	return dbcache.KeyFromCond(table, cond)
+}
+
 // ==================== 表绑定 ====================
 
 // CacheBindMySQL 把表绑定到 MySQL 后端。
@@ -138,9 +170,21 @@ func CacheBindMySQL[T any](table string, c *Client, opt CacheBindOption[T]) erro
 	return dbcache.BindMySQL[T](table, c, opt)
 }
 
+// CacheBindRedis 把表绑定为纯 Redis 权威（无 sink）：拔掉 MySQL 不影响读写。
+// 资金表用此入口（AllowSourceBackfill 强制 false，fail-closed）。
+func CacheBindRedis[T any](table string, opt CacheBindOption[T]) error {
+	return dbcache.BindRedis[T](table, opt)
+}
+
 // CacheBindPostgres 把表绑定到 PostgreSQL 后端。
 func CacheBindPostgres[T any](table string, c *PostgresClient, opt CacheBindOption[T]) error {
 	return dbcache.BindPostgres[T](table, c, opt)
+}
+
+// CacheBackfill 把源表分页全量播种进 Redis（迁移/冷启动工具）：已有行不覆盖、
+// 墓碑存活不复活，重复调用幂等。返回值是本次实际新播种的行数。
+func CacheBackfill[T any](ctx context.Context, table string, pageSize int) (int64, error) {
+	return dbcache.BackfillTable[T](ctx, table, pageSize)
 }
 
 // CacheBindMongo 把表绑定到 MongoDB 集合。
@@ -153,10 +197,18 @@ func CacheBindMongo[T any](table string, dbo *DbOperate, opt CacheBindOption[T])
 // CacheOption 一次数据操作的扩展参数（事务/行锁/原子累加/CAS）。
 type CacheOption = dbcache.Option
 
-// ForUpdate 单行查询加 SELECT ... FOR UPDATE（必须在 InTx 内）。
+// CacheOptions 是解析后的 option 集合（门面导出，免得消费方借子包）。
+type CacheOptions = dbcache.Options
+
+// ParseCacheOptions 把若干 CacheOption 解析为 CacheOptions（纯读取，无副作用）。
+func ParseCacheOptions(opts ...CacheOption) *CacheOptions {
+	return dbcache.ParseOptions(opts)
+}
+
+// ForUpdate 单行查询取 Redis 行锁（必须在 InTx 内；TxRowLocks 是资金链读己写安全前提）。
 func ForUpdate() CacheOption { return func(o *dbcache.Options) { o.ForUpdate = true } }
 
-// Increment 让 CacheSave 执行数据库侧原子累加。
+// Increment 让 CacheSave 执行 Redis 侧 Lua 原子累加（HINCRBY 保 int64 精确）。
 func Increment(column string, delta int64) CacheOption {
 	return func(o *dbcache.Options) {
 		o.Increment = column
@@ -164,7 +216,16 @@ func Increment(column string, delta int64) CacheOption {
 	}
 }
 
-// CompareAndSwap 让 CacheSave 执行条件更新（expect 全部命中才写 set）。
+// AtomicMax 让 CacheSave 执行 Redis 侧 Lua 原子取大（column = max(column, value)）。
+// 行缺席或条件不命中 affected=0；命中即写（值不变也算命中），单 Lua op 无竞态。
+func AtomicMax(column string, value int64) CacheOption {
+	return func(o *dbcache.Options) {
+		o.AtomicMax = column
+		o.MaxValue = value
+	}
+}
+
+// CompareAndSwap 让 CacheSave 执行 Redis 侧 Lua 条件更新（expect 全部命中才写 set）。
 func CompareAndSwap(expect, set map[string]any) CacheOption {
 	return func(o *dbcache.Options) {
 		o.CASExpect = expect
@@ -229,29 +290,47 @@ func Affected(n *int64) CacheOption {
 	return func(o *dbcache.Options) { o.Affected = n }
 }
 
-// SequenceIncrement 原子取号：INSERT 新行取 0，冲突时 col=LAST_INSERT_ID(col+delta)，
-// 结果写 out。必须在事务内使用（MySQL 会话语义）。
+// SequenceIncrement 原子取号：新行插入取 0，已有行把 col 加 delta 并回填 out
+// （Redis 事务内即时求值，非 MySQL 会话）。必须在事务内使用。
 func SequenceIncrement(column string, delta int64, out *int64) CacheOption {
 	return func(o *dbcache.Options) {
 		o.Sequence = &dbcache.SequenceSpec{Column: column, Delta: delta, Out: out}
 	}
 }
 
-// SecretSet 只写不缓存的秘密列（passwd_hash / from_private_key 等）。
+// SecretSet 只写不默认投影的秘密列（passwd_hash / from_private_key 等）：
+// 值进 Redis :s: 秘密 hash（永不进行 hash），经 sinkSecrets 落库；读回须显式
+// WithSecrets()。
 func SecretSet(cols map[string]any) CacheOption {
 	return func(o *dbcache.Options) { o.SecretSet = cols }
 }
 
-// NoCache 读路径强制直查数据库（秘密列投影等不允许进缓存的读）。
+// WithSecrets 读侧显式开启秘密列投影（passwd_hash / from_private_key 等白名单列）。
+// 默认查询永不返回秘密列；仅鉴权场景（登录口令摘要 / 支付私钥校验）使用。
+// 读的是 Redis 权威 :s: hash，不回源数据库。
+func WithSecrets() CacheOption {
+	return func(o *dbcache.Options) { o.WithSecrets = true }
+}
+
+// FromSource 让列表/spec 读以源库为真值：基表与 JOIN 表从 MySQL 读取并按条件
+// 在 Go 侧求值，结果尽力回填 Redis（save NX）。单行点查仍读 Redis 权威行。
+// 与 WithSecrets 同时置位时不生效（秘密列只存在于 Redis :s:）。
+func FromSource() CacheOption {
+	return func(o *dbcache.Options) { o.FromSource = true }
+}
+
+// IncludeTombstoned 让 FromSource 读不按墓碑跳过：仅供「删除后由源库重建」的
+// 显式刷新使用。普通列表读必须保留墓碑门控，防止已删行复活。
+func IncludeTombstoned() CacheOption {
+	return func(o *dbcache.Options) { o.IncludeTombstoned = true }
+}
+
+// NoCache 历史上表示「绕过缓存行 hash、直查数据库」的强一致读。
 //
-// 资金 / 账本 / 状态类强一致读必须使用本选项：默认点查会命中 Redis 行 hash，
-// 缓存刷新失败时可能读到旧值。这是「资金链路接入 dbcache 前必须满足的接入前置
-// 约束」之一；当前资金链路未接入 dbcache，本条不是现存漏洞的修补。
-//
-// 写侧另有通用兜底：提交后刷新（HSetAll）或删除清理（DelRow）失败时，框架由
-// dbcache.invalidateCached 主动失效该行（立墓碑 + 删旧行 hash + 销脏账/重试账）
-// 并写 vars.Error 留痕，使下次点查必然回源；该兜底对所有表无条件生效，不依赖
-// 调用方是否加了 NoCache。
+// Redis 权威化后该语义不再成立：数据库只是滞后 sink，读它反而陈旧；默认点查
+// 命中 Redis 权威行即真值（强一致）。本选项保留签名兼容，置位后读路径改走
+// Redis spec 引擎（键集扫描 + 条件过滤），仍读同一 Redis 真源，不再回源数据库。
+// 资金 / 状态类强一致读无需再依赖本选项——默认读即权威。
 func NoCache() CacheOption {
 	return func(o *dbcache.Options) { o.NoCache = true }
 }
@@ -488,15 +567,16 @@ func CacheQuery[T any](ctx context.Context, table string, cond any, out any, opt
 	return err
 }
 
-// CacheSave 全值写入一行；mustSave 决定是否在返回前落库。
+// CacheSave 全值写入一行；mustSave 决定是否在返回前同步物化到 sink。
 //
-// mustSave=false 是延迟写：只更新 Redis 行 hash 并登记脏账，由缓存层定时批量落库，
-// 滞后约一个 flush_interval_ms（默认 3s），进程崩溃最多丢掉最后一个周期。
-// 因此它只适用于可丢失的任务进度 / 统计类数据（当前唯一消费方是 task_engine 的
-// 进度写），资金 / 账本列与状态跃迁一律禁止。
+// 无论 mustSave 真假，Redis 权威写都即时生效（行 hash + 脏账）。mustSave=false
+// 由定时 flush 异步物化到 sink，滞后约一个 flush_interval_ms（默认 3s），只适用
+// 于可容忍 sink 滞后的任务进度 / 统计类数据（当前唯一消费方是 task_engine 的
+// 进度写）。mustSave=true 在返回前经 flushKey 同步物化；sink 缺席时按
+// Config.SinkRequired 告警放行（false）或报 ErrSinkRequired（true），Redis 写均已成功。
 //
-// 资金 / 账本列的唯一合法写路径是 Increment / CompareAndSwap（同步落库，见
-// dbcache/save.go 的 resolveMySQL 分支），强一致读配套使用 NoCache()。
+// 资金 / 账本列与状态跃迁的唯一合法写路径是 Increment / CompareAndSwap（Redis
+// Lua 原子应用，见 dbcache/mutate.go），强一致读默认即读 Redis 权威行。
 // 当前资金链路完全不接 dbcache，本条是接入前置约束，不是现存资金漏洞。
 func CacheSave[T any](ctx context.Context, table string, key string, row *T, mustSave bool, opts ...CacheOption) error {
 	ctx, span := startDBSpan(ctx, "touchgocore.db.CacheSave", table)
@@ -520,8 +600,10 @@ func CacheInsert[T any](ctx context.Context, table string, row *T, opts ...Cache
 	return n, err
 }
 
-// CacheDelete 物理删除一行：先删数据库，再清 Redis 行 hash、脏账与重试账，
-// 并留下删除墓碑阻止在途脏账回写。cond 必须覆盖表的全部 KeyColumns。
+// CacheDelete 物理删除一行：Redis 侧单条 Lua 原子 op 删行 hash / 秘密 / 索引 /
+// 键集并立删除墓碑、销脏账/重试账（权威写即时生效），sink 删除经 dirtyDel 异步
+// 物化。墓碑阻止在途脏账回写与迁移期回源复活。cond 必须覆盖表的全部 KeyColumns。
+// Redis 失败直接上抛且零副作用（fail-closed），没有「数据库兜底」旁路。
 func CacheDelete(ctx context.Context, table string, cond any, opts ...CacheOption) error {
 	ctx, span := startDBSpan(ctx, "touchgocore.db.CacheDelete", table)
 	defer span.End()

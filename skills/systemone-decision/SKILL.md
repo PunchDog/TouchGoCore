@@ -1,6 +1,6 @@
 ---
 name: systemone-decision
-description: 在定稿实施计划前、plan 模式下把 plan 写成文件之前，以及修改代码前，强制调用阿里云百炼 SystemOne 决策模型（decision-model-preview）对候选方案做结构化裁决（choice/noul/score 判定+概率+置信度）。plan 模式下落盘 plan.md/TODO/方案文档前必须先经此裁决，把 choice 方案选型、score 风险评级、noul 可行性判据写进 plan 再落盘，保证计划准确性，禁止跳过裁决直接落盘。也用于实时规划阶段比较多个实施方案、修改代码前评估改动方案、需要 choice 多选一裁决、score 风险/优先级评级、noul 是否判断的场景，拿到客观结构化判定而非仅靠语言模型自述。决策模型只输出结构化 JSON 不生成文本，适合作为方案裁决器（arbiter），不适合替代对话模型。
+description: 修改代码前、比较多个候选方案、评估风险/优先级/是否安全、定稿实施计划时，调用阿里云百炼 SystemOne 决策模型（decision-model-preview）做结构化裁决（choice/noul/score 判定+概率+置信度）。正常模式与 plan 模式均适用：正常模式下动代码前若存在≥2个候选方案或需风险评估，先裁决再动手；plan 模式下落盘 plan.md/TODO/方案文档前必须先裁决，把 choice 方案选型、score 风险评级、noul 可行性判据写进 plan 再落盘，禁止跳过裁决直接落盘。触发词：方案对比、方案裁决、风险评估、哪个方案更好、是否安全、choice、score、noul、定稿计划。决策模型只输出结构化 JSON 不生成文本，适合作为方案裁决器（arbiter），不适合替代对话模型。
 ---
 
 # SystemOne 决策模型方案裁决器
@@ -28,6 +28,15 @@ description: 在定稿实施计划前、plan 模式下把 plan 写成文件之�
 3. 只有当裁决完成、关键判据已落进 plan 内容，才把 plan 文件写出去。
 
 跳过裁决直接落盘属于流程违规：计划中若有未裁决的方案分歧点，先补裁决再定稿。用户已明确拍板某个方案时豁免（此时无分歧，无需裁决）。
+
+## 硬闸：正常模式代码编辑由 PreToolUse hook 强制
+
+全局 hook `~/.qoder-cn/hooks/systemone-gate.mjs`（settings.json 的 PreToolUse，matcher Edit|Write|MultiEdit|NotebookEdit）拦截代码文件编辑：
+
+- 裁决成功时脚本自动写回执 `~/.qoder-cn/state/systemone-receipt.json`，30 分钟内的代码编辑放行。
+- 无新鲜回执时编辑被阻断（exit 2），按提示先裁决再重试。
+- 豁免场景（用户已拍板 / 单一明确方案）用 `--exempt` 登记理由，同样写回执留审计痕迹，禁止伪造回执。
+- 文档/配置类文件、`.qoder-cn/`、`skills/`、`hooks/` 路径不受闸；紧急关闸设 `SYSTEMONE_GATE=off`。
 
 ## 调用方法
 
@@ -59,6 +68,7 @@ PY="C:/Users/TouchGo/AppData/Local/Programs/Python/Python313/python.exe"
 | `--score` | 评分问题，格式 `等级id=低,中,高`，可重复 |
 | `--question` | 问题的统一说明 |
 | `--raw` | 额外打印原始 JSON |
+| `--exempt` | 豁免登记：不调 API，`--state` 作为豁免理由写回执（仅限用户已拍板/单一明确方案） |
 
 ## 鉴权（前置条件）
 

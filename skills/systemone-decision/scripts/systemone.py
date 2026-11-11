@@ -15,6 +15,7 @@ import argparse
 import json
 import os
 import sys
+import time
 import urllib.request
 import urllib.error
 
@@ -29,6 +30,18 @@ if sys.stderr.encoding and sys.stderr.encoding.lower() != "utf-8":
 DEFAULT_BASE = "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
 # 当前百炼决策模型编码（限时免费阶段）
 DEFAULT_MODEL = "decision-model-preview"
+
+# 裁决回执路径：PreToolUse 闸（hooks/systemone-gate.mjs）凭它判断近期是否裁决过
+RECEIPT_PATH = os.path.join(os.path.expanduser("~"), ".qoder-cn", "state", "systemone-receipt.json")
+
+
+def write_receipt(kind, detail):
+    """裁决成功或豁免登记后写回执，供代码编辑闸校验时效。"""
+    receipt = {"ts": time.time(), "kind": kind}
+    receipt.update(detail)
+    os.makedirs(os.path.dirname(RECEIPT_PATH), exist_ok=True)
+    with open(RECEIPT_PATH, "w", encoding="utf-8") as f:
+        json.dump(receipt, f, ensure_ascii=False)
 
 
 def _parse_choice(raw):
@@ -165,8 +178,15 @@ def main():
     p.add_argument("--workspace", default=os.environ.get("SYSTEMONE_WORKSPACE", ""), help="workspace id，拼进 URL 时用")
     p.add_argument("--timeout", type=int, default=60, help="请求超时秒数")
     p.add_argument("--raw", action="store_true", help="额外打印原始 JSON")
+    p.add_argument("--exempt", action="store_true", help="豁免登记：不调 API，把 --state 作为豁免理由写回执（仅限用户已拍板/单一明确方案）")
     args = p.parse_args()
     args_timeout = args.timeout
+
+    # 豁免通道：用户已拍板或方案唯一时，登记理由即可过闸，留审计痕迹
+    if args.exempt:
+        write_receipt("exempt", {"reason": str(args.state)[:500]})
+        print(f"[systemone-decision] 豁免已登记：{str(args.state)[:80]}")
+        return
 
     if not args.api_key:
         die("缺少 API Key：用 --api-key 或设置 DASHSCOPE_API_KEY / SYSTEMONE_API_KEY", 2)
@@ -181,6 +201,9 @@ def main():
 
     if result.get("code") or result.get("error"):
         die(f"服务端返回错误：{result}", 3)
+
+    # 裁决成功落回执，30 分钟内的代码编辑闸凭此放行
+    write_receipt("decision", {"request_id": result.get("request_id", ""), "state": str(args.state)[:500]})
 
     summary, usage_line = summarize(result)
     print("=== SystemOne 裁决 ===")

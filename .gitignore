@@ -74,5 +74,9 @@ zalo/probe/probe.env
 
 # Docker-OSX 本地运行参数（可能含代理地址）；模板 docker-osx/.env.example 入库。
 docker-osx/.env
+
+# 千问 AI Platform 本地凭据（含 API Key）。根级锚定，避免误伤子目录里
+# 需要入库的 .env 模板。
+/.env
 deliverables/gstack/
 deliverables/software-company/

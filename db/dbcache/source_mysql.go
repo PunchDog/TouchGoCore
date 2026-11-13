@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	mysqldb "touchgocore/db/mysql"
+	"touchgocore/vars"
 )
 
 // BindMySQL 把一张表绑定到缓存层。c 非空时挂载 MySQL 回源 + 异步 sink（滞后物化
@@ -67,6 +68,28 @@ func BindMySQL[T any](table string, c *mysqldb.Client, opt BindOption[T]) error 
 		}
 		return out, nil
 	}
+	// seedSeq：自增表的序列播种（取源表 MAX(自增列) 抬高 :seq）。
+	// 没有它，新前缀冷启动时序列从 0 起，取号从 1 开始，必然撞上回填/历史行键；
+	// Insert 冲突只返回 affected=0，只追加台账（point_log 之类）会因此丢行。
+	if b.autoInc != "" && columnNameRe.MatchString(b.autoInc) {
+		col := b.autoInc
+		srcTable := rep.TableName()
+		b.seedSeq = func(ctx context.Context) (int64, error) {
+			var maxID int64
+			row := c.Engine().WithContext(ctx).Table(srcTable).
+				Select("COALESCE(MAX(`" + col + "`), 0)").Row()
+			if serr := row.Scan(&maxID); serr != nil {
+				return 0, serr
+			}
+			if maxID <= 0 {
+				return 0, nil
+			}
+			if serr := e.store.SeqSeed(ctx, b.keys.seq, maxID); serr != nil {
+				return 0, serr
+			}
+			return maxID, nil
+		}
+	}
 	b.sinkBatch = func(ctx context.Context, rows []any) error {
 		typed := make([]*T, len(rows))
 		for i, row := range rows {
@@ -105,7 +128,17 @@ func BindMySQL[T any](table string, c *mysqldb.Client, opt BindOption[T]) error 
 		return c.Engine().WithContext(ctx).Table(rep.TableName()).
 			Where(strings.Join(parts, " AND "), args...).Updates(secrets).Error
 	}
-	return e.register(b)
+	if err := e.register(b); err != nil {
+		return err
+	}
+	// 绑定时播种一次：库里可能已经有大量历史行，而 Redis 序列是新的。
+	// 失败只告警不拒启动（表可能尚未迁移），调用方侧还有「取号撞键要重试」的兜底。
+	if b.seedSeq != nil {
+		if _, serr := b.seedSeq(context.Background()); serr != nil {
+			vars.Error("dbcache %s: 自增序列播种失败，取号可能与既有行键冲突: %v", table, serr)
+		}
+	}
+	return nil
 }
 
 // buildMySQLQuery 把条件拼成单个 AND 表达式。

@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	pgdb "touchgocore/db/postgres"
+	"touchgocore/vars"
 )
 
 // BindPostgres 把一张表绑定到 PostgreSQL 后端。
@@ -63,6 +64,28 @@ func BindPostgres[T any](table string, c *pgdb.Client, opt BindOption[T]) error 
 		}
 		return out, nil
 	}
+	// seedSeq：自增表的序列播种（取源表 MAX(自增列) 抬高 :seq）。
+	// 与 MySQL 同源同因：新前缀冷启动序列从 0 起，取号会撞上回填/历史行键，
+	// Insert 冲突只返回 affected=0，只追加台账会因此丢行。
+	if b.autoInc != "" && columnNameRe.MatchString(b.autoInc) {
+		col := b.autoInc
+		srcTable := rep.TableName()
+		b.seedSeq = func(ctx context.Context) (int64, error) {
+			var maxID int64
+			row := c.Engine().WithContext(ctx).Table(srcTable).
+				Select(`COALESCE(MAX("` + col + `"), 0)`).Row()
+			if serr := row.Scan(&maxID); serr != nil {
+				return 0, serr
+			}
+			if maxID <= 0 {
+				return 0, nil
+			}
+			if serr := e.store.SeqSeed(ctx, b.keys.seq, maxID); serr != nil {
+				return 0, serr
+			}
+			return maxID, nil
+		}
+	}
 	b.sinkBatch = func(ctx context.Context, rows []any) error {
 		typed := make([]*T, len(rows))
 		for i, row := range rows {
@@ -76,7 +99,16 @@ func BindPostgres[T any](table string, c *pgdb.Client, opt BindOption[T]) error 
 	b.sinkDelete = func(ctx context.Context, vals []condVal) error {
 		return rep.DeleteBy(ctx, buildPostgresQuery(vals, nil))
 	}
-	return e.register(b)
+	if err := e.register(b); err != nil {
+		return err
+	}
+	// 绑定时播种一次（库里可能已有大量历史行，而 Redis 序列是新的）。
+	if b.seedSeq != nil {
+		if _, serr := b.seedSeq(context.Background()); serr != nil {
+			vars.Error("dbcache %s: 自增序列播种失败，取号可能与既有行键冲突: %v", table, serr)
+		}
+	}
+	return nil
 }
 
 // buildPostgresQuery 把条件拼成单个 AND 表达式。

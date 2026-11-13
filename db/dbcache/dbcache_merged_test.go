@@ -613,6 +613,16 @@ func (s *fakeStore) SeqAlloc(_ context.Context, key string, delta int64) (int64,
 	return n, nil
 }
 
+func (s *fakeStore) SeqSeed(_ context.Context, key string, floor int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cur, _ := strconv.ParseInt(s.m.strs[key], 10, 64)
+	if cur < floor {
+		s.m.strs[key] = strconv.FormatInt(floor, 10)
+	}
+	return nil
+}
+
 func (s *fakeStore) TryLock(_ context.Context, key, txid string, ttlMS, waitMS int64) (bool, error) {
 	deadline := time.Now().Add(time.Duration(waitMS) * time.Millisecond)
 	for {

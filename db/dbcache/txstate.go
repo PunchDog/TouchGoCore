@@ -199,6 +199,11 @@ func (s *txState) apply(ctx context.Context, b *binding, key string, op *writeOp
 	op.Key = key
 	op.Idx = b.idxDescs()
 	op.UQ = b.uniques
+	// 唯一守卫可能指向「他行」：必须先把对方行/墓碑加载进 overlay，否则
+	// guardStale 会把有效守卫误判成陈旧而放行（见 loadGuardTargets 注释）。
+	if err := s.loadGuardTargets(ctx, b, k, op, s.mem.hashes[k.row]); err != nil {
+		return nil, err
+	}
 	res := applyOne(s.mem, k, op, s.mem.hashes[k.row], time.Now().UnixMilli())
 	if res.Err != "" {
 		return nil, txWriteErr(b, key, res.Err)
@@ -213,6 +218,69 @@ func (s *txState) apply(ctx context.Context, b *binding, key string, op *writeOp
 		delete(s.deleted, mk)
 	}
 	return res, nil
+}
+
+// loadGuardTargets 把唯一守卫指向的「他行」加载进 overlay（行 hash + 墓碑存活态）。
+//
+// 为什么必须加载：guardStale 判定守卫是否陈旧，靠的是「对方行 hash 是否在内存里」
+// 与「对方墓碑是否存活」。loadRow 只加载本次写的那一行，跨行唯一冲突时对方行不在
+// overlay，guardStale 于是把**有效**守卫误判成陈旧而放行：
+//
+//   - 内存判定返回 affected=1，Lua 重放命中守卫返回 affected=0；
+//   - commit 只取整体错误、不回收逐 op 结果，调用方最终拿到 1 却一行也没写。
+//
+// 后果是 InsertRow 在事务内彻底失去幂等语义（UNIQUE(member_id, wa_jid) 之类的
+// 「只插一次」全靠它），而失败是静默的 —— 台账没落、加分照发。这里把对方行显式
+// 拉进内存，让内存判定与 Lua 判定同源。
+func (s *txState) loadGuardTargets(ctx context.Context, b *binding, k writeKeys, op *writeOp, old map[string]string) error {
+	if len(b.uniques) == 0 {
+		return nil
+	}
+	uq := s.mem.hashes[k.uq]
+	if len(uq) == 0 {
+		return nil
+	}
+	for _, group := range b.uniques {
+		probe := make(map[string]string, len(group))
+		for _, col := range group {
+			if v, ok := op.Fields[col]; ok {
+				probe[col] = v
+				continue
+			}
+			if v, ok := op.Set[col]; ok {
+				probe[col] = v
+				continue
+			}
+			probe[col] = old[col]
+		}
+		cur := uq[guardField(group, probe)]
+		if cur == "" || cur == op.Key {
+			continue
+		}
+		rowKey := b.keys.rowPrefix + cur
+		if !s.loaded[rowKey] {
+			h, err := s.e.store.HGetAll(ctx, rowKey)
+			if err != nil {
+				return err
+			}
+			if len(h) > 0 {
+				s.mem.hashes[rowKey] = h
+			}
+			s.loaded[rowKey] = true
+		}
+		tombKey := b.keys.tombPrefix + cur
+		if !s.tombLoaded[tombKey] {
+			alive, err := s.e.store.TombAlive(ctx, tombKey)
+			if err != nil {
+				return err
+			}
+			if alive {
+				s.mem.strs[tombKey] = "1"
+			}
+			s.tombLoaded[tombKey] = true
+		}
+	}
+	return nil
 }
 
 // commit 经 txScript 一次原子重放全部缓冲写；无论成败都释放行锁。

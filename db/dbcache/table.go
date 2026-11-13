@@ -58,6 +58,10 @@ type binding struct {
 	srcFindOne   func(context.Context, []condVal) (any, error)
 	srcFindList  func(context.Context, []condVal) ([]any, error)
 	srcPage      func(ctx context.Context, offset, limit int) ([]any, error)
+	// seedSeq 把自增序列抬到「源表当前最大 id」之上：换前缀/清库后序列从 0 起，
+	// 不抬就会与既有行撞键（Insert 返回 affected=0，只追加台账会因此丢行）。
+	// 无自增列或无源时为 nil。
+	seedSeq      func(ctx context.Context) (int64, error)
 	sinkBatch    func(context.Context, []any) error
 	sinkDelete   func(context.Context, []condVal) error
 	sinkSecrets  func(context.Context, []condVal, map[string]any) error

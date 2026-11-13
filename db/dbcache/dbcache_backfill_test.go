@@ -253,3 +253,87 @@ func TestDBCacheMetricsRecorded(t *testing.T) {
 		t.Fatalf("sink lag 应 >=1（3 行脏账），实际 %v", lag)
 	}
 }
+
+// TestSeqSeedRaisesOnly 序列播种只抬不降：播种值低于当前值时不得把号压回去
+// （并发下压号会让两个调用方拿到同一个 id，只追加台账就会丢行）。
+func TestSeqSeedRaisesOnly(t *testing.T) {
+	_, fs := gapEngine(t, true)
+	ctx := context.Background()
+	key := "{seqseed}:seq"
+	if err := fs.SeqSeed(ctx, key, 500); err != nil {
+		t.Fatalf("SeqSeed 500: %v", err)
+	}
+	if err := fs.SeqSeed(ctx, key, 100); err != nil {
+		t.Fatalf("SeqSeed 100: %v", err)
+	}
+	if got, _ := fs.SeqAlloc(ctx, key, 0); got != 500 {
+		t.Fatalf("播种只抬不降，期望 500，实际 %d", got)
+	}
+	if err := fs.SeqSeed(ctx, key, 900); err != nil {
+		t.Fatalf("SeqSeed 900: %v", err)
+	}
+	if got, _ := fs.SeqAlloc(ctx, key, 0); got != 900 {
+		t.Fatalf("播种应抬到 900，实际 %d", got)
+	}
+}
+
+// TestBackfillSeedsAutoIncrementSeq 回填必须把自增序列抬到源表最大 id 之上：
+// 否则新前缀冷启动后第一次取号会撞上刚灌进来的行键，Insert 返回 affected=0，
+// 调用方按「插入成功」继续就丢行。
+func TestBackfillSeedsAutoIncrementSeq(t *testing.T) {
+	// 自增列只在 BindOption 里声明（行结构体用的是 cache tag，不是 gorm tag），
+	// 所以这里单独装一台引擎按 AutoIncrement 绑定，不用 gapEngine 的通用绑定。
+	fs := newFakeStore()
+	cfg := DefaultConfig()
+	cfg.KeyPrefix = "gapbfseq20261113"
+	cfg.RequireAOF = false
+	e := newEngine(cfg, fs)
+	old := defaultEngine.Swap(e)
+	t.Cleanup(func() { defaultEngine.Store(old) })
+	ctx := context.Background()
+	b := bindGap[gapMember](t, e, gapMemberTable, BindOption[gapMember]{AutoIncrement: "id"})
+	src := []*gapMember{{ID: 100, Point: 1}, {ID: 200, Point: 2}}
+	b.srcPage = func(_ context.Context, offset, limit int) ([]any, error) {
+		if offset >= len(src) {
+			return nil, nil
+		}
+		end := offset + limit
+		if end > len(src) {
+			end = len(src)
+		}
+		out := make([]any, 0, end-offset)
+		for _, r := range src[offset:end] {
+			out = append(out, r)
+		}
+		return out, nil
+	}
+	// 模拟 BindMySQL 给自增表挂的播种闭包（真实现取源表 MAX(id)）。
+	b.seedSeq = func(ctx context.Context) (int64, error) {
+		var maxID int64
+		for _, r := range src {
+			if r.ID > maxID {
+				maxID = r.ID
+			}
+		}
+		if err := e.store.SeqSeed(ctx, b.keys.seq, maxID); err != nil {
+			return 0, err
+		}
+		return maxID, nil
+	}
+
+	if n, err := BackfillTable[gapMember](ctx, gapMemberTable, 10); err != nil || n != 2 {
+		t.Fatalf("回填应 2 行，实际 n=%d err=%v", n, err)
+	}
+	// 回填后取号必须从 201 起，不能从 1 起（1 不撞，但 100/200 会撞）。
+	var row gapMember
+	row.Point = 3
+	if _, err := Insert(ctx, gapMemberTable, &row); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+	if row.ID != 201 {
+		t.Fatalf("回填后取号应为 201（源表最大 id 200 + 1），实际 %d", row.ID)
+	}
+	if m := readGapMember(t, 201); m.Point != 3 {
+		t.Fatalf("新行应可读回，实际 point=%d", m.Point)
+	}
+}

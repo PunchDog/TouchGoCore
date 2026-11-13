@@ -35,6 +35,7 @@ type kvStore interface {
 	IndexCard(ctx context.Context, key string) (int64, error)
 	RowsGet(ctx context.Context, keys []string) ([]map[string]string, error)
 	SeqAlloc(ctx context.Context, key string, delta int64) (int64, error)
+	SeqSeed(ctx context.Context, key string, floor int64) error
 	TryLock(ctx context.Context, key, txid string, ttlMS, waitMS int64) (bool, error)
 	Unlock(ctx context.Context, key, txid string) error
 	RequeueInflight(ctx context.Context, inflightKey, dirtyKey string, nowMS int64) (int64, error)
@@ -295,6 +296,28 @@ func (s *redisStore) RowsGet(ctx context.Context, keys []string) ([]map[string]s
 
 func (s *redisStore) SeqAlloc(ctx context.Context, key string, delta int64) (int64, error) {
 	return s.rdb.IncrBy(ctx, key, delta).Result()
+}
+
+// seqSeedScript 只抬不降：当前值已 >= floor 时保持原值。
+// 用 Lua 而不是 GET+SET，是为了并发下也不会把别人刚涨上去的号压回来。
+const seqSeedScript = `
+local cur = tonumber(redis.call('GET', KEYS[1]) or '0')
+local floor = tonumber(ARGV[1])
+if cur < floor then redis.call('SET', KEYS[1], floor) end
+return 1
+`
+
+// SeqSeed 把自增序列抬到至少 floor（只抬不降）。
+//
+// 为什么需要：SeqAlloc 是裸 INCRBY，序列只从 Redis 里的当前值继续。新前缀（换
+// key_prefix、清库重建、测试命名空间）冷启动时序列从 0 起，而源表/回填行里已有
+// 大批 id —— 取号必然撞上既有行键，Insert 冲突返回 affected=0，调用方若按
+// 「插入成功」继续就会丢行（point_log 这类只追加台账丢的就是账）。
+func (s *redisStore) SeqSeed(ctx context.Context, key string, floor int64) error {
+	if floor <= 0 {
+		return nil
+	}
+	return s.rdb.Eval(ctx, seqSeedScript, []string{key}, floor).Err()
 }
 
 func (s *redisStore) TryLock(ctx context.Context, key, txid string, ttlMS, waitMS int64) (bool, error) {

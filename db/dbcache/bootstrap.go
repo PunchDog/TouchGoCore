@@ -79,5 +79,12 @@ func BackfillTable[T any](ctx context.Context, table string, pageSize int) (int6
 			break
 		}
 	}
+	// 回填把源表历史行（连同自增 id）灌进了 Redis，序列必须跟着抬上去，
+	// 否则接下来第一次取号就会撞上刚灌进来的行键（Insert 返回 affected=0）。
+	if b.seedSeq != nil {
+		if _, serr := b.seedSeq(ctx); serr != nil {
+			return seeded, serr
+		}
+	}
 	return seeded, nil
 }

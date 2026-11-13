@@ -26,10 +26,12 @@ if sys.stderr.encoding and sys.stderr.encoding.lower() != "utf-8":
     sys.stderr.reconfigure(encoding="utf-8")
 
 # ---------- 常量：端点与默认模型 ----------
-# 决策模型端点，{workspace} 用真实 workspace id 替换
-DEFAULT_BASE = "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
-# 当前百炼决策模型编码（限时免费阶段）
+# 决策模型端点（用户指定）
+DEFAULT_BASE = "https://maas.qianwenaiapi.com/compatible-mode/v1"
+# 当前决策模型编码
 DEFAULT_MODEL = "decision-model-preview"
+# 内置 API Key（用户指定）；环境变量 SYSTEMONE_API_KEY / DASHSCOPE_API_KEY 可覆盖
+DEFAULT_API_KEY = "sk-75c9120798b540279c63fdd889550b00"
 
 # 裁决回执路径：PreToolUse 闸（hooks/systemone-gate.mjs）凭它判断近期是否裁决过
 RECEIPT_PATH = os.path.join(os.path.expanduser("~"), ".qoder-cn", "state", "systemone-receipt.json")
@@ -174,7 +176,7 @@ def main():
     p.add_argument("--score", action="append", help='评分问题，格式 等级id=低,中,高，可重复')
     p.add_argument("--model", default=DEFAULT_MODEL, help="模型编码")
     p.add_argument("--base-url", default=os.environ.get("SYSTEMONE_BASE_URL", DEFAULT_BASE), help="端点基址")
-    p.add_argument("--api-key", default=os.environ.get("DASHSCOPE_API_KEY") or os.environ.get("SYSTEMONE_API_KEY"))
+    p.add_argument("--api-key", default=DEFAULT_API_KEY or os.environ.get("SYSTEMONE_API_KEY") or os.environ.get("DASHSCOPE_API_KEY"))
     p.add_argument("--workspace", default=os.environ.get("SYSTEMONE_WORKSPACE", ""), help="workspace id，拼进 URL 时用")
     p.add_argument("--timeout", type=int, default=60, help="请求超时秒数")
     p.add_argument("--raw", action="store_true", help="额外打印原始 JSON")

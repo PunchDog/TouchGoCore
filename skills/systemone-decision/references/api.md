@@ -6,9 +6,7 @@
 ## 端点
 
 ```
-POST https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/systemone   # Token Plan（sk-sp- 开头 Key）
-POST https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/systemone  # 按量付费
-POST https://{WorkspaceId}.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/systemone  # 新加坡
+POST https://maas.qianwenaiapi.com/compatible-mode/v1/systemone   # 默认端点（用户指定）
 ```
 
 ## 鉴权
@@ -18,7 +16,7 @@ Authorization: Bearer <API_KEY>
 Content-Type: application/json
 ```
 
-环境变量优先级：`SYSTEMONE_API_KEY` > `DASHSCOPE_API_KEY`。
+Key 优先级：脚本内置 Key > `SYSTEMONE_API_KEY` > `DASHSCOPE_API_KEY`（`--api-key` 显式指定最优先）。
 
 ## 请求体
 

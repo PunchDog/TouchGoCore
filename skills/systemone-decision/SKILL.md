@@ -72,11 +72,9 @@ PY="C:/Users/TouchGo/AppData/Local/Programs/Python/Python313/python.exe"
 
 ## 鉴权（前置条件）
 
-API Key 从环境变量读取，优先级 `SYSTEMONE_API_KEY` > `DASHSCOPE_API_KEY`。若缺失，脚本退出码 2 并提示。
+默认端点为 `https://maas.qianwenaiapi.com/compatible-mode/v1`，脚本已内置 API Key，开箱即用，无需额外配置。
 
-用 Token Plan Key（`sk-sp-` 开头）走 token-plan 端点（默认，限时免费）；用按量 Key 则设 `SYSTEMONE_BASE_URL` 为 `{WorkspaceId}.cn-beijing.maas.aliyuncs.com/compatible-mode/v1`。
-
-配置前先确认 Key 已就绪：`echo ${DASHSCOPE_API_KEY:+已设置}`。不要把 Key 写进代码或仓库。
+如需覆盖：Key 优先级为内置 Key > `SYSTEMONE_API_KEY` > `DASHSCOPE_API_KEY`（避免环境里的旧 Key 覆盖新 Key），也可用 `--api-key` 显式指定；端点可用 `SYSTEMONE_BASE_URL` 或 `--base-url` 覆盖。全部缺失时脚本退出码 2 并提示。不要把 Key 写进业务仓库。
 
 ## 输出解读
 

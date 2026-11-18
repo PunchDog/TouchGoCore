@@ -189,7 +189,7 @@ def fetch_models(base_url: str) -> list[dict]:
 def build_workbuddy_entry(model: dict, base_url: str, api_key: str, vision: bool, name_label: str) -> dict:
     return {
         "id": model["id"],            # 规范模型 ID，不带前缀
-        "name": name_label,           # WorkBuddy 的 name 字段即前缀标签（opencode / token plan），客户端自行拼接显示
+        "name": name_label,           # WorkBuddy name 为 "前缀:模型ID"（如 opencode:deepseek-v4.1-flash）
         "vendor": "Custom",
         "url": base_url,
         "apiKey": api_key,
@@ -340,7 +340,7 @@ def main(argv: list[str] | None = None) -> int:
         old = [e for e in existing if stale(e)]
         kept = existing if args.keep_old else [e for e in existing if not stale(e)]
         for model in models:
-            kept.append(build_workbuddy_entry(model, base_url, api_key, model["vision"], prefix))
+            kept.append(build_workbuddy_entry(model, base_url, api_key, model["vision"], prefixed_name(args.source, model["id"])))
 
         print(f"target=workbuddy source={args.source} base_url={base_url} path={wb_path}")
         print(f"  removed_old={len(old)} added={len(models)} total={len(kept)}")

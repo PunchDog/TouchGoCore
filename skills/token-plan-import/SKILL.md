@@ -21,7 +21,7 @@ agent_created: true
 2. 兜底看脚本安装路径：落在 `~/.qoder-cn/skills/` → Qoder，落在 `~/.workbuddy/` → WorkBuddy。
 3. 都识别不出则报错，要求显式 `--target`。
 
-**显示名前缀**：`token-plan` → `token plan`，`opencode-go` → `opencode`。WorkBuddy 直接把 `name` 字段赋值为前缀本身（如 `"name": "opencode"`），客户端自行拼接显示；Qoder 的 `displayName` 用 `前缀:<名>` 形态。模型 ID 保持规范不加前缀。网关返回名若自带前缀会先剥掉再统一加（Qoder 侧），保证结果确定。
+**显示名前缀**：`token-plan` → `token plan`，`opencode-go` → `opencode`。WorkBuddy 的 `name` 字段为 `前缀:模型ID`（如 `"name": "opencode:deepseek-v4.1-flash"`）；Qoder 的 `displayName` 为 `前缀:<显示名>`。模型 ID（`id` / `name`）保持规范不加前缀。网关返回名若自带前缀会先剥掉再统一加，保证结果确定。
 
 **导入前清理**：默认先删除目标客户端里的同来源旧模型——同端点条目，以及带当前来源前缀但端点已变的历史残留；其他来源/其他端点的条目保留。`--keep-old` 可关闭清理。
 

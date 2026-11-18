@@ -1,0 +1,802 @@
+[
+  {
+    "name": "deepseek-v4.1-flash",
+    "displayName": "DeepSeek V4.1 Flash 1017",
+    "format": "openai",
+    "source": "custom",
+    "baseUrl": "http://127.0.0.1:7863/opencode/v1",
+    "apiKey": "oc_sk_0181347b4303_0HC1o_1fUf4TbhrJcoAa5iVEI3J556YO",
+    "multiModalSupported": true,
+    "reasoningSupported": true,
+    "reasoningEnabled": true,
+    "reasoningEffort": "high",
+    "reasoning": {
+      "effort": "high",
+      "defaultEffort": "high",
+      "supportedEfforts": [
+        "low",
+        "high"
+      ],
+      "summary": "auto",
+      "canDisableThinking": false
+    },
+    "maxInputTokens": 200000,
+    "enabled": true,
+    "isDefault": false
+  },
+  {
+    "name": "deepseek-v4-pro",
+    "displayName": "DeepSeek V4 Pro",
+    "format": "openai",
+    "source": "custom",
+    "baseUrl": "http://127.0.0.1:7863/opencode/v1",
+    "apiKey": "oc_sk_0181347b4303_0HC1o_1fUf4TbhrJcoAa5iVEI3J556YO",
+    "multiModalSupported": false,
+    "reasoningSupported": true,
+    "reasoningEnabled": true,
+    "reasoningEffort": "high",
+    "reasoning": {
+      "effort": "high",
+      "defaultEffort": "high",
+      "supportedEfforts": [
+        "low",
+        "high"
+      ],
+      "summary": "auto",
+      "canDisableThinking": false
+    },
+    "maxInputTokens": 200000,
+    "enabled": true,
+    "isDefault": false
+  },
+  {
+    "name": "glm-5.2",
+    "displayName": "GLM-5.2",
+    "format": "openai",
+    "source": "custom",
+    "baseUrl": "http://127.0.0.1:7863/opencode/v1",
+    "apiKey": "oc_sk_0181347b4303_0HC1o_1fUf4TbhrJcoAa5iVEI3J556YO",
+    "multiModalSupported": false,
+    "reasoningSupported": true,
+    "reasoningEnabled": true,
+    "reasoningEffort": "high",
+    "reasoning": {
+      "effort": "high",
+      "defaultEffort": "high",
+      "supportedEfforts": [
+        "low",
+        "high"
+      ],
+      "summary": "auto",
+      "canDisableThinking": false
+    },
+    "maxInputTokens": 200000,
+    "enabled": true,
+    "isDefault": false
+  },
+  {
+    "name": "glm-5.3",
+    "displayName": "GLM-5.3",
+    "format": "openai",
+    "source": "custom",
+    "baseUrl": "http://127.0.0.1:7863/opencode/v1",
+    "apiKey": "oc_sk_0181347b4303_0HC1o_1fUf4TbhrJcoAa5iVEI3J556YO",
+    "multiModalSupported": false,
+    "reasoningSupported": true,
+    "reasoningEnabled": true,
+    "reasoningEffort": "high",
+    "reasoning": {
+      "effort": "high",
+      "defaultEffort": "high",
+      "supportedEfforts": [
+        "low",
+        "high"
+      ],
+      "summary": "auto",
+      "canDisableThinking": false
+    },
+    "maxInputTokens": 200000,
+    "enabled": true,
+    "isDefault": false
+  },
+  {
+    "name": "grok-4.7",
+    "displayName": "Grok 4.7",
+    "format": "openai",
+    "source": "custom",
+    "baseUrl": "http://127.0.0.1:7863/opencode/v1",
+    "apiKey": "oc_sk_0181347b4303_0HC1o_1fUf4TbhrJcoAa5iVEI3J556YO",
+    "multiModalSupported": true,
+    "reasoningSupported": true,
+    "reasoningEnabled": true,
+    "reasoningEffort": "high",
+    "reasoning": {
+      "effort": "high",
+      "defaultEffort": "high",
+      "supportedEfforts": [
+        "low",
+        "high"
+      ],
+      "summary": "auto",
+      "canDisableThinking": false
+    },
+    "maxInputTokens": 200000,
+    "enabled": true,
+    "isDefault": false
+  },
+  {
+    "name": "muse-spark-1.2-contributor",
+    "displayName": "Muse Spark 1.2 Contributor",
+    "format": "openai",
+    "source": "custom",
+    "baseUrl": "http://127.0.0.1:7863/opencode/v1",
+    "apiKey": "oc_sk_0181347b4303_0HC1o_1fUf4TbhrJcoAa5iVEI3J556YO",
+    "multiModalSupported": true,
+    "reasoningSupported": true,
+    "reasoningEnabled": true,
+    "reasoningEffort": "high",
+    "reasoning": {
+      "effort": "high",
+      "defaultEffort": "high",
+      "supportedEfforts": [
+        "low",
+        "high"
+      ],
+      "summary": "auto",
+      "canDisableThinking": false
+    },
+    "maxInputTokens": 200000,
+    "enabled": true,
+    "isDefault": false
+  },
+  {
+    "name": "muse-spark-1.3-contributor",
+    "displayName": "Muse Spark 1.3 Contributor",
+    "format": "openai",
+    "source": "custom",
+    "baseUrl": "http://127.0.0.1:7863/opencode/v1",
+    "apiKey": "oc_sk_0181347b4303_0HC1o_1fUf4TbhrJcoAa5iVEI3J556YO",
+    "multiModalSupported": true,
+    "reasoningSupported": true,
+    "reasoningEnabled": true,
+    "reasoningEffort": "high",
+    "reasoning": {
+      "effort": "high",
+      "defaultEffort": "high",
+      "supportedEfforts": [
+        "low",
+        "high"
+      ],
+      "summary": "auto",
+      "canDisableThinking": false
+    },
+    "maxInputTokens": 200000,
+    "enabled": true,
+    "isDefault": false
+  },
+  {
+    "name": "glm-5.3-flash",
+    "displayName": "GLM-5.3-Flash",
+    "format": "openai",
+    "source": "custom",
+    "baseUrl": "http://127.0.0.1:7863/opencode/v1",
+    "apiKey": "oc_sk_0181347b4303_0HC1o_1fUf4TbhrJcoAa5iVEI3J556YO",
+    "multiModalSupported": true,
+    "reasoningSupported": true,
+    "reasoningEnabled": true,
+    "reasoningEffort": "high",
+    "reasoning": {
+      "effort": "high",
+      "defaultEffort": "high",
+      "supportedEfforts": [
+        "low",
+        "high"
+      ],
+      "summary": "auto",
+      "canDisableThinking": false
+    },
+    "maxInputTokens": 200000,
+    "enabled": true,
+    "isDefault": false
+  },
+  {
+    "name": "gpt-5.6-luna",
+    "displayName": "GPT-5.6 Luna",
+    "format": "openai",
+    "source": "custom",
+    "baseUrl": "http://127.0.0.1:7863/opencode/v1",
+    "apiKey": "oc_sk_0181347b4303_0HC1o_1fUf4TbhrJcoAa5iVEI3J556YO",
+    "multiModalSupported": true,
+    "reasoningSupported": true,
+    "reasoningEnabled": true,
+    "reasoningEffort": "high",
+    "reasoning": {
+      "effort": "high",
+      "defaultEffort": "high",
+      "supportedEfforts": [
+        "low",
+        "high"
+      ],
+      "summary": "auto",
+      "canDisableThinking": false
+    },
+    "maxInputTokens": 200000,
+    "enabled": true,
+    "isDefault": false
+  },
+  {
+    "name": "gpt-6-luna",
+    "displayName": "GPT-6 Luna",
+    "format": "openai",
+    "source": "custom",
+    "baseUrl": "http://127.0.0.1:7863/opencode/v1",
+    "apiKey": "oc_sk_0181347b4303_0HC1o_1fUf4TbhrJcoAa5iVEI3J556YO",
+    "multiModalSupported": true,
+    "reasoningSupported": true,
+    "reasoningEnabled": true,
+    "reasoningEffort": "high",
+    "reasoning": {
+      "effort": "high",
+      "defaultEffort": "high",
+      "supportedEfforts": [
+        "low",
+        "high"
+      ],
+      "summary": "auto",
+      "canDisableThinking": false
+    },
+    "maxInputTokens": 200000,
+    "enabled": true,
+    "isDefault": false
+  },
+  {
+    "name": "claude-haiku-5-5",
+    "displayName": "Claude Haiku 5.5",
+    "format": "openai",
+    "source": "custom",
+    "baseUrl": "http://127.0.0.1:7863/opencode/v1",
+    "apiKey": "oc_sk_0181347b4303_0HC1o_1fUf4TbhrJcoAa5iVEI3J556YO",
+    "multiModalSupported": true,
+    "reasoningSupported": true,
+    "reasoningEnabled": true,
+    "reasoningEffort": "high",
+    "reasoning": {
+      "effort": "high",
+      "defaultEffort": "high",
+      "supportedEfforts": [
+        "low",
+        "high"
+      ],
+      "summary": "auto",
+      "canDisableThinking": false
+    },
+    "maxInputTokens": 200000,
+    "enabled": true,
+    "isDefault": false
+  },
+  {
+    "name": "hy3",
+    "displayName": "Hy3",
+    "format": "openai",
+    "source": "custom",
+    "baseUrl": "http://127.0.0.1:7863/opencode/v1",
+    "apiKey": "oc_sk_0181347b4303_0HC1o_1fUf4TbhrJcoAa5iVEI3J556YO",
+    "multiModalSupported": false,
+    "reasoningSupported": true,
+    "reasoningEnabled": true,
+    "reasoningEffort": "high",
+    "reasoning": {
+      "effort": "high",
+      "defaultEffort": "high",
+      "supportedEfforts": [
+        "low",
+        "high"
+      ],
+      "summary": "auto",
+      "canDisableThinking": false
+    },
+    "maxInputTokens": 200000,
+    "enabled": true,
+    "isDefault": false
+  },
+  {
+    "name": "hy4-preview",
+    "displayName": "Hy4 preview",
+    "format": "openai",
+    "source": "custom",
+    "baseUrl": "http://127.0.0.1:7863/opencode/v1",
+    "apiKey": "oc_sk_0181347b4303_0HC1o_1fUf4TbhrJcoAa5iVEI3J556YO",
+    "multiModalSupported": false,
+    "reasoningSupported": true,
+    "reasoningEnabled": true,
+    "reasoningEffort": "high",
+    "reasoning": {
+      "effort": "high",
+      "defaultEffort": "high",
+      "supportedEfforts": [
+        "low",
+        "high"
+      ],
+      "summary": "auto",
+      "canDisableThinking": false
+    },
+    "maxInputTokens": 200000,
+    "enabled": true,
+    "isDefault": false
+  },
+  {
+    "name": "kimi-k2.7-code",
+    "displayName": "Kimi K2.7 Code",
+    "format": "openai",
+    "source": "custom",
+    "baseUrl": "http://127.0.0.1:7863/opencode/v1",
+    "apiKey": "oc_sk_0181347b4303_0HC1o_1fUf4TbhrJcoAa5iVEI3J556YO",
+    "multiModalSupported": true,
+    "reasoningSupported": true,
+    "reasoningEnabled": true,
+    "reasoningEffort": "high",
+    "reasoning": {
+      "effort": "high",
+      "defaultEffort": "high",
+      "supportedEfforts": [
+        "low",
+        "high"
+      ],
+      "summary": "auto",
+      "canDisableThinking": false
+    },
+    "maxInputTokens": 200000,
+    "enabled": true,
+    "isDefault": false
+  },
+  {
+    "name": "kimi-k3",
+    "displayName": "Kimi K3",
+    "format": "openai",
+    "source": "custom",
+    "baseUrl": "http://127.0.0.1:7863/opencode/v1",
+    "apiKey": "oc_sk_0181347b4303_0HC1o_1fUf4TbhrJcoAa5iVEI3J556YO",
+    "multiModalSupported": true,
+    "reasoningSupported": true,
+    "reasoningEnabled": true,
+    "reasoningEffort": "high",
+    "reasoning": {
+      "effort": "high",
+      "defaultEffort": "high",
+      "supportedEfforts": [
+        "low",
+        "high"
+      ],
+      "summary": "auto",
+      "canDisableThinking": false
+    },
+    "maxInputTokens": 200000,
+    "enabled": true,
+    "isDefault": false
+  },
+  {
+    "name": "mimo-v2.6-flash",
+    "displayName": "MiMo-V2.6-Flash",
+    "format": "openai",
+    "source": "custom",
+    "baseUrl": "http://127.0.0.1:7863/opencode/v1",
+    "apiKey": "oc_sk_0181347b4303_0HC1o_1fUf4TbhrJcoAa5iVEI3J556YO",
+    "multiModalSupported": true,
+    "reasoningSupported": true,
+    "reasoningEnabled": true,
+    "reasoningEffort": "high",
+    "reasoning": {
+      "effort": "high",
+      "defaultEffort": "high",
+      "supportedEfforts": [
+        "low",
+        "high"
+      ],
+      "summary": "auto",
+      "canDisableThinking": false
+    },
+    "maxInputTokens": 200000,
+    "enabled": true,
+    "isDefault": false
+  },
+  {
+    "name": "mimo-v2.6-pro",
+    "displayName": "MiMo-V2.6-Pro",
+    "format": "openai",
+    "source": "custom",
+    "baseUrl": "http://127.0.0.1:7863/opencode/v1",
+    "apiKey": "oc_sk_0181347b4303_0HC1o_1fUf4TbhrJcoAa5iVEI3J556YO",
+    "multiModalSupported": true,
+    "reasoningSupported": true,
+    "reasoningEnabled": true,
+    "reasoningEffort": "high",
+    "reasoning": {
+      "effort": "high",
+      "defaultEffort": "high",
+      "supportedEfforts": [
+        "low",
+        "high"
+      ],
+      "summary": "auto",
+      "canDisableThinking": false
+    },
+    "maxInputTokens": 200000,
+    "enabled": true,
+    "isDefault": false
+  },
+  {
+    "name": "minimax-m3",
+    "displayName": "MiniMax-M3",
+    "format": "openai",
+    "source": "custom",
+    "baseUrl": "http://127.0.0.1:7863/opencode/v1",
+    "apiKey": "oc_sk_0181347b4303_0HC1o_1fUf4TbhrJcoAa5iVEI3J556YO",
+    "multiModalSupported": true,
+    "reasoningSupported": true,
+    "reasoningEnabled": true,
+    "reasoningEffort": "high",
+    "reasoning": {
+      "effort": "high",
+      "defaultEffort": "high",
+      "supportedEfforts": [
+        "low",
+        "high"
+      ],
+      "summary": "auto",
+      "canDisableThinking": false
+    },
+    "maxInputTokens": 200000,
+    "enabled": true,
+    "isDefault": false
+  },
+  {
+    "name": "minimax-m3.1-flash",
+    "displayName": "MiniMax M3.1 Flash",
+    "format": "openai",
+    "source": "custom",
+    "baseUrl": "http://127.0.0.1:7863/opencode/v1",
+    "apiKey": "oc_sk_0181347b4303_0HC1o_1fUf4TbhrJcoAa5iVEI3J556YO",
+    "multiModalSupported": true,
+    "reasoningSupported": true,
+    "reasoningEnabled": true,
+    "reasoningEffort": "high",
+    "reasoning": {
+      "effort": "high",
+      "defaultEffort": "high",
+      "supportedEfforts": [
+        "low",
+        "high"
+      ],
+      "summary": "auto",
+      "canDisableThinking": false
+    },
+    "maxInputTokens": 200000,
+    "enabled": true,
+    "isDefault": false
+  },
+  {
+    "name": "longcat-2.0",
+    "displayName": "LongCat-2.0",
+    "format": "openai",
+    "source": "custom",
+    "baseUrl": "http://127.0.0.1:7863/opencode/v1",
+    "apiKey": "oc_sk_0181347b4303_0HC1o_1fUf4TbhrJcoAa5iVEI3J556YO",
+    "multiModalSupported": false,
+    "reasoningSupported": true,
+    "reasoningEnabled": true,
+    "reasoningEffort": "high",
+    "reasoning": {
+      "effort": "high",
+      "defaultEffort": "high",
+      "supportedEfforts": [
+        "low",
+        "high"
+      ],
+      "summary": "auto",
+      "canDisableThinking": false
+    },
+    "maxInputTokens": 200000,
+    "enabled": true,
+    "isDefault": false
+  },
+  {
+    "name": "step-5-preview",
+    "displayName": "Step 5 Preview",
+    "format": "openai",
+    "source": "custom",
+    "baseUrl": "http://127.0.0.1:7863/opencode/v1",
+    "apiKey": "oc_sk_0181347b4303_0HC1o_1fUf4TbhrJcoAa5iVEI3J556YO",
+    "multiModalSupported": true,
+    "reasoningSupported": true,
+    "reasoningEnabled": true,
+    "reasoningEffort": "high",
+    "reasoning": {
+      "effort": "high",
+      "defaultEffort": "high",
+      "supportedEfforts": [
+        "low",
+        "high"
+      ],
+      "summary": "auto",
+      "canDisableThinking": false
+    },
+    "maxInputTokens": 200000,
+    "enabled": true,
+    "isDefault": false
+  },
+  {
+    "name": "beam-free",
+    "displayName": "Beam Free",
+    "format": "openai",
+    "source": "custom",
+    "baseUrl": "http://127.0.0.1:7863/opencode/v1",
+    "apiKey": "oc_sk_0181347b4303_0HC1o_1fUf4TbhrJcoAa5iVEI3J556YO",
+    "multiModalSupported": false,
+    "reasoningSupported": true,
+    "reasoningEnabled": true,
+    "reasoningEffort": "high",
+    "reasoning": {
+      "effort": "high",
+      "defaultEffort": "high",
+      "supportedEfforts": [
+        "low",
+        "high"
+      ],
+      "summary": "auto",
+      "canDisableThinking": false
+    },
+    "maxInputTokens": 200000,
+    "enabled": true,
+    "isDefault": false
+  },
+  {
+    "name": "qwen3.8-max",
+    "displayName": "Qwen3.8 Max",
+    "format": "openai",
+    "source": "custom",
+    "baseUrl": "http://127.0.0.1:7863/opencode/v1",
+    "apiKey": "oc_sk_0181347b4303_0HC1o_1fUf4TbhrJcoAa5iVEI3J556YO",
+    "multiModalSupported": true,
+    "reasoningSupported": true,
+    "reasoningEnabled": true,
+    "reasoningEffort": "high",
+    "reasoning": {
+      "effort": "high",
+      "defaultEffort": "high",
+      "supportedEfforts": [
+        "low",
+        "high"
+      ],
+      "summary": "auto",
+      "canDisableThinking": false
+    },
+    "maxInputTokens": 200000,
+    "enabled": true,
+    "isDefault": false
+  },
+  {
+    "name": "qwen3.8-flash",
+    "displayName": "Qwen3.8 Flash",
+    "format": "openai",
+    "source": "custom",
+    "baseUrl": "http://127.0.0.1:7863/opencode/v1",
+    "apiKey": "oc_sk_0181347b4303_0HC1o_1fUf4TbhrJcoAa5iVEI3J556YO",
+    "multiModalSupported": true,
+    "reasoningSupported": true,
+    "reasoningEnabled": true,
+    "reasoningEffort": "high",
+    "reasoning": {
+      "effort": "high",
+      "defaultEffort": "high",
+      "supportedEfforts": [
+        "low",
+        "high"
+      ],
+      "summary": "auto",
+      "canDisableThinking": false
+    },
+    "maxInputTokens": 200000,
+    "enabled": true,
+    "isDefault": false
+  },
+  {
+    "name": "qwen3.7-plus",
+    "displayName": "Qwen3.7 Plus",
+    "format": "openai",
+    "source": "custom",
+    "baseUrl": "http://127.0.0.1:7863/opencode/v1",
+    "apiKey": "oc_sk_0181347b4303_0HC1o_1fUf4TbhrJcoAa5iVEI3J556YO",
+    "multiModalSupported": true,
+    "reasoningSupported": true,
+    "reasoningEnabled": true,
+    "reasoningEffort": "high",
+    "reasoning": {
+      "effort": "high",
+      "defaultEffort": "high",
+      "supportedEfforts": [
+        "low",
+        "high"
+      ],
+      "summary": "auto",
+      "canDisableThinking": false
+    },
+    "maxInputTokens": 200000,
+    "enabled": true,
+    "isDefault": false
+  },
+  {
+    "name": "kimi-k3.1-pro",
+    "displayName": "Kimi K3.1 Pro",
+    "format": "openai",
+    "source": "custom",
+    "baseUrl": "http://127.0.0.1:7863/opencode/v1",
+    "apiKey": "oc_sk_0181347b4303_0HC1o_1fUf4TbhrJcoAa5iVEI3J556YO",
+    "multiModalSupported": true,
+    "reasoningSupported": true,
+    "reasoningEnabled": true,
+    "reasoningEffort": "high",
+    "reasoning": {
+      "effort": "high",
+      "defaultEffort": "high",
+      "supportedEfforts": [
+        "low",
+        "high"
+      ],
+      "summary": "auto",
+      "canDisableThinking": false
+    },
+    "maxInputTokens": 200000,
+    "enabled": true,
+    "isDefault": false
+  },
+  {
+    "name": "iceman-contributor-free",
+    "displayName": "Iceman Contributor Free",
+    "format": "openai",
+    "source": "custom",
+    "baseUrl": "http://127.0.0.1:7863/opencode/v1",
+    "apiKey": "oc_sk_0181347b4303_0HC1o_1fUf4TbhrJcoAa5iVEI3J556YO",
+    "multiModalSupported": false,
+    "reasoningSupported": true,
+    "reasoningEnabled": true,
+    "reasoningEffort": "high",
+    "reasoning": {
+      "effort": "high",
+      "defaultEffort": "high",
+      "supportedEfforts": [
+        "low",
+        "high"
+      ],
+      "summary": "auto",
+      "canDisableThinking": false
+    },
+    "maxInputTokens": 200000,
+    "enabled": true,
+    "isDefault": false
+  },
+  {
+    "name": "gemini-4-argon",
+    "displayName": "Gemini 4 Argon",
+    "format": "openai",
+    "source": "custom",
+    "baseUrl": "http://127.0.0.1:7863/opencode/v1",
+    "apiKey": "oc_sk_0181347b4303_0HC1o_1fUf4TbhrJcoAa5iVEI3J556YO",
+    "multiModalSupported": true,
+    "reasoningSupported": true,
+    "reasoningEnabled": true,
+    "reasoningEffort": "high",
+    "reasoning": {
+      "effort": "high",
+      "defaultEffort": "high",
+      "supportedEfforts": [
+        "low",
+        "high"
+      ],
+      "summary": "auto",
+      "canDisableThinking": false
+    },
+    "maxInputTokens": 200000,
+    "enabled": true,
+    "isDefault": false
+  },
+  {
+    "name": "hy4",
+    "displayName": "Hy4",
+    "format": "openai",
+    "source": "custom",
+    "baseUrl": "http://127.0.0.1:7863/opencode/v1",
+    "apiKey": "oc_sk_0181347b4303_0HC1o_1fUf4TbhrJcoAa5iVEI3J556YO",
+    "multiModalSupported": true,
+    "reasoningSupported": true,
+    "reasoningEnabled": true,
+    "reasoningEffort": "high",
+    "reasoning": {
+      "effort": "high",
+      "defaultEffort": "high",
+      "supportedEfforts": [
+        "low",
+        "high"
+      ],
+      "summary": "auto",
+      "canDisableThinking": false
+    },
+    "maxInputTokens": 200000,
+    "enabled": true,
+    "isDefault": false
+  },
+  {
+    "name": "longcat-2.5-free",
+    "displayName": "LongCat 2.5 Free",
+    "format": "openai",
+    "source": "custom",
+    "baseUrl": "http://127.0.0.1:7863/opencode/v1",
+    "apiKey": "oc_sk_0181347b4303_0HC1o_1fUf4TbhrJcoAa5iVEI3J556YO",
+    "multiModalSupported": true,
+    "reasoningSupported": true,
+    "reasoningEnabled": true,
+    "reasoningEffort": "high",
+    "reasoning": {
+      "effort": "high",
+      "defaultEffort": "high",
+      "supportedEfforts": [
+        "low",
+        "high"
+      ],
+      "summary": "auto",
+      "canDisableThinking": false
+    },
+    "maxInputTokens": 200000,
+    "enabled": true,
+    "isDefault": false
+  },
+  {
+    "name": "hy4-flash-free",
+    "displayName": "Hy4 flash Free",
+    "format": "openai",
+    "source": "custom",
+    "baseUrl": "http://127.0.0.1:7863/opencode/v1",
+    "apiKey": "oc_sk_0181347b4303_0HC1o_1fUf4TbhrJcoAa5iVEI3J556YO",
+    "multiModalSupported": true,
+    "reasoningSupported": true,
+    "reasoningEnabled": true,
+    "reasoningEffort": "high",
+    "reasoning": {
+      "effort": "high",
+      "defaultEffort": "high",
+      "supportedEfforts": [
+        "low",
+        "high"
+      ],
+      "summary": "auto",
+      "canDisableThinking": false
+    },
+    "maxInputTokens": 200000,
+    "enabled": true,
+    "isDefault": false
+  },
+  {
+    "name": "qwen4-max",
+    "displayName": "Qwen4 Max",
+    "format": "openai",
+    "source": "custom",
+    "baseUrl": "http://127.0.0.1:7863/opencode/v1",
+    "apiKey": "oc_sk_0181347b4303_0HC1o_1fUf4TbhrJcoAa5iVEI3J556YO",
+    "multiModalSupported": true,
+    "reasoningSupported": true,
+    "reasoningEnabled": true,
+    "reasoningEffort": "high",
+    "reasoning": {
+      "effort": "high",
+      "defaultEffort": "high",
+      "supportedEfforts": [
+        "low",
+        "high"
+      ],
+      "summary": "auto",
+      "canDisableThinking": false
+    },
+    "maxInputTokens": 200000,
+    "enabled": true,
+    "isDefault": false
+  }
+]

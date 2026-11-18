@@ -579,14 +579,35 @@ func TestQuery_Chain(t *testing.T) {
 		OrderDesc("created_at").
 		Limit(20).
 		Offset(40)
-	if q.whereExpr != "age > ?" {
-		t.Fatalf("Gt 应覆盖 whereExpr: %q", q.whereExpr)
+	// Where 语义为 AND 追加（修复覆盖缺陷）：前置条件不得被后续条件丢掉，
+	// 否则租户隔离等前置 Where 会被静默覆盖成跨租户查询。
+	if q.whereExpr != "(id > ?) AND (age > ?)" {
+		t.Fatalf("链式 Where 应 AND 追加: %q", q.whereExpr)
+	}
+	if len(q.whereArgs) != 2 || q.whereArgs[0] != 10 || q.whereArgs[1] != 18 {
+		t.Fatalf("链式 Where args 应保留全部参数: %v", q.whereArgs)
 	}
 	if len(q.orders) != 1 {
 		t.Fatalf("OrderDesc 数量异常: %d", len(q.orders))
 	}
 	if q.limit != 20 || q.offset != 40 {
 		t.Fatalf("Limit/Offset: %d/%d", q.limit, q.offset)
+	}
+}
+
+func TestQuery_WhereAppendTenantSafety(t *testing.T) {
+	// 回归：租户条件 + 业务筛选的链式组合必须同时保留（跨租户漏洞回归闸）。
+	q := NewQuery().Where("tenant_id = ?", 1001).Where("action = ?", "block")
+	if q.whereExpr != "(tenant_id = ?) AND (action = ?)" {
+		t.Fatalf("租户条件被覆盖: %q", q.whereExpr)
+	}
+	if len(q.whereArgs) != 2 {
+		t.Fatalf("参数丢失: %v", q.whereArgs)
+	}
+	// 空表达式不应破坏已有条件。
+	q.Where("   ")
+	if q.whereExpr != "(tenant_id = ?) AND (action = ?)" {
+		t.Fatalf("空 Where 不应改变条件: %q", q.whereExpr)
 	}
 }
 

@@ -20,10 +20,22 @@ func NewQuery() *Query {
 	return &Query{}
 }
 
-// Where 追加 WHERE 条件
+// Where 追加 WHERE 条件（多次调用以 AND 连接，与 GORM 的 Where 语义一致）。
+//
+// 修复记录：旧实现直接覆盖 whereExpr，链式 .Where(a).Where(b) 会静默丢掉
+// 前一个条件——租户隔离等前置条件被覆盖即成跨租户漏洞。现改为 AND 追加。
+// 含 OR 的表达式请自行加括号：q.Where("(a = ? OR b = ?)", x, y)。
 func (q *Query) Where(expr string, args ...any) *Query {
-	q.whereExpr = expr
-	q.whereArgs = append([]any(nil), args...)
+	expr = strings.TrimSpace(expr)
+	if expr == "" {
+		return q
+	}
+	if q.whereExpr == "" {
+		q.whereExpr = expr
+	} else {
+		q.whereExpr = "(" + q.whereExpr + ") AND (" + expr + ")"
+	}
+	q.whereArgs = append(q.whereArgs, args...)
 	return q
 }
 

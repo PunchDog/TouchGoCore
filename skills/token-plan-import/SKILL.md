@@ -135,5 +135,5 @@ python scripts/import_token_plan.py --target generic --source opencode-go
 - `failed to fetch http://127.0.0.1:7863/opencode/v1/models`：本地网关没起或网络不通；偶发 403 可能是网关会话态抖动，稍后重试。
 - 模型名对不上：用 `/models` 返回的 `id`，不要用显示名。
 - WorkBuddy 里思考仍是关闭：确认 `reasoning.defaultEffort="high"` 与 `onlyReasoning=true` 已写入；导入后重启 WorkBuddy。
-- Qoder 导入后模型不出现在下拉：确认版本支持「自定义模型 JSON 导入」，否则逐条手工添加 `name/baseUrl/apiKey`。
+- Qoder 导入后模型不出现在下拉：先确认已重启 Qoder；再核对 `settings.json` 的 `providers` 段是否写入了 `type=openai-compatible` 的 provider。直写未生效时用 `--out` 导出片段走 UI 批量导入。
 - 401/403：Key 过期或额度耗尽；OpenCode Go 受限模型（DeepSeek V4.1 Flash / V4 Pro、LongCat 2.5 Free 需 Global 区域；Muse Spark 1.x Contributor 需允许训练端点）还要在 Console › Settings › Privacy 放行。

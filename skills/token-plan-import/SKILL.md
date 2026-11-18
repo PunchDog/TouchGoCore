@@ -1,6 +1,6 @@
 ---
 name: token-plan-import
-description: 把 OpenAI 兼容模型批量导入到 WorkBuddy / Qoder 等客户端，默认自动识别当前宿主。支持两种模型来源：opencode-go（每次从本地网关 http://127.0.0.1:7863/opencode/v1 实时拉取模型清单）与 token-plan（千问 Token Plan 默认 6 个模型）。触发词：token plan、千问 token plan、导入模型、批量导入、qianwenai、opencode go、opencode-go 导入、open_code_token_plan。目标格式：auto（自动识别宿主）、WorkBuddy（写 ~/.workbuddy/models.json）、Qoder（直写 settings.json providers 段，--out 改为导出粘贴片段）、generic（通用片段）。显示名统一加来源前缀（token plan: / opencode:），导入前清理同来源旧模型。token-plan 用 TOKEN_PLAN_API_KEY，opencode-go 用 OPEN_CODE_TOKEN_PLAN_API_KEY。
+description: 把 OpenAI 兼容模型批量导入到 WorkBuddy / CodeBuddy / Qoder 等客户端，默认自动识别当前宿主。支持两种模型来源：opencode-go（每次从本地网关 http://127.0.0.1:7863/opencode/v1 实时拉取模型清单）与 token-plan（千问 Token Plan 默认 6 个模型）。触发词：token plan、千问 token plan、导入模型、批量导入、qianwenai、opencode go、opencode-go 导入、open_code_token_plan、codebuddy 导入。目标格式：auto（自动识别宿主）、WorkBuddy（写 ~/.workbuddy/models.json）、CodeBuddy（写 ~/.codebuddy/models.json，{"models":[...]} 包装）、Qoder（直写 settings.json providers 段，--out 改为导出粘贴片段）、generic（通用片段）。显示名统一加来源前缀（token plan: / opencode:），导入前清理同来源旧模型。Qoder 导入模型默认思考强度为 high。token-plan 用 TOKEN_PLAN_API_KEY，opencode-go 用 OPEN_CODE_TOKEN_PLAN_API_KEY。
 agent_created: true
 ---
 
@@ -13,21 +13,21 @@ agent_created: true
 两个维度：
 
 - **来源 `--source`**：`token-plan`（默认，6 个模型）或 `opencode-go`（每次运行都从 `<base-url>/models` 实时拉取，不写死清单）。
-- **目标 `--target`**：`auto`（默认，自动识别宿主客户端）、`workbuddy`（写 `~/.workbuddy/models.json`）、`qoder`（直写 Qoder `settings.json` 的 `providers` 段；加 `--out` 则改为导出 JSON 粘贴片段）、`generic`（最小 OpenAI 兼容片段）。
+- **目标 `--target`**：`auto`（默认，自动识别宿主客户端）、`workbuddy`（写 `~/.workbuddy/models.json`，顶层数组）、`codebuddy`（写 `~/.codebuddy/models.json`，`{"models": [...]}` 对象包装，条目字段与 WorkBuddy 相同）、`qoder`（直写 Qoder `settings.json` 的 `providers` 段；加 `--out` 则改为导出 JSON 粘贴片段）、`generic`（最小 OpenAI 兼容片段）。
 
 **宿主自动识别**（`--target auto`）：
 
-1. 环境变量 `QODER_CONFIG_DIR` / `QODER_PRODUCT_ID` 存在 → Qoder；`WORKBUDDY_*` 前缀变量存在 → WorkBuddy。
-2. 兜底看脚本安装路径：落在 `~/.qoder-cn/skills/` → Qoder，落在 `~/.workbuddy/` → WorkBuddy。
+1. 环境变量 `QODER_CONFIG_DIR` / `QODER_PRODUCT_ID` 存在 → Qoder；`WORKBUDDY_*` 前缀变量存在 → WorkBuddy；`CODEBUDDY_*` 前缀变量存在 → CodeBuddy。
+2. 兜底看脚本安装路径：落在 `~/.qoder-cn/skills/` → Qoder，落在 `~/.workbuddy/` → WorkBuddy，落在 `~/.codebuddy/` → CodeBuddy。
 3. 都识别不出则报错，要求显式 `--target`。
 
-**显示名前缀**：`token-plan` → `token plan`，`opencode-go` → `opencode`。WorkBuddy 的 `name` 字段为 `前缀:模型ID`（如 `"name": "opencode:deepseek-v4.1-flash"`）；Qoder 的 `displayName` 为 `前缀:<显示名>`。模型 ID（`id` / `name`）保持规范不加前缀。网关返回名若自带前缀会先剥掉再统一加，保证结果确定。
+**显示名前缀**：`token-plan` → `token plan`，`opencode-go` → `opencode`。WorkBuddy / CodeBuddy 的 `name` 字段为 `前缀:模型ID`（如 `"name": "opencode:deepseek-v4.1-flash"`）；Qoder 的 `displayName` 为 `前缀:<显示名>`。模型 ID（`id` / `name`）保持规范不加前缀。网关返回名若自带前缀会先剥掉再统一加，保证结果确定。
 
 **导入前清理**：默认先删除目标客户端里的同来源旧模型——同端点条目，以及带当前来源前缀但端点已变的历史残留；其他来源/其他端点的条目保留。`--keep-old` 可关闭清理。
 
-**运行中客户端会覆写配置**：WorkBuddy / Qoder 运行时可能用内存态回写 `models.json` / `settings.json`，把刚导入的内容盖掉（实测 WorkBuddy 在写入 9 秒后覆写过一次）。导入后务必重启目标客户端；若发现前缀/清单丢失，关闭客户端后重跑导入。
+**运行中客户端会覆写配置**：WorkBuddy / CodeBuddy / Qoder 运行时可能用内存态回写 `models.json` / `settings.json`，把刚导入的内容盖掉（实测 WorkBuddy 在写入 9 秒后覆写过一次）。导入后务必重启目标客户端；若发现前缀/清单丢失，关闭客户端后重跑导入。
 
-本技能**只写 WorkBuddy / Qoder 等客户端配置，不改 `~/.config/opencode/opencode.json`**。
+本技能**只写 WorkBuddy / CodeBuddy / Qoder 等客户端配置，不改 `~/.config/opencode/opencode.json`**。
 
 ## 端点与凭据
 
@@ -59,10 +59,10 @@ agent_created: true
 
 导入的每条模型都显式开启高思考：
 
-- WorkBuddy：`supportsReasoning=true`、`onlyReasoning=true`、`reasoning={ effort: "high", defaultEffort: "high", supportedEfforts: ["low","high"], summary: "auto", canDisableThinking: false }`。
-- Qoder：`reasoningSupported=true`、`reasoningEnabled=true`、`reasoningEffort="high"`，并带同样的 `reasoning` 对象。
+- WorkBuddy / CodeBuddy：`supportsReasoning=true`、`onlyReasoning=true`、`reasoning={ effort: "high", defaultEffort: "high", supportedEfforts: ["high","low"], summary: "auto", canDisableThinking: false }`。
+- Qoder：provider models 的 `capabilities.thinking` 为 `{ modes: ["enabled"], supportedEffortLevels: ["high","low"], supportsEffort: true }`，另带 `reasoningSupported=true`、`reasoningEnabled=true`、`reasoningEffort="high"`（粘贴片段模式）。
 
-依据：WorkBuddy 内置 model catalog 用 `reasoning.defaultEffort` + `onlyReasoning` 控制思考模式与强度。
+依据：WorkBuddy 内置 model catalog 用 `reasoning.defaultEffort` + `onlyReasoning` 控制思考模式与强度。Qoder 应用源码（`resolveByokProtocolEffortPolicy` / `resolveChatModelReasoningEffort`）对 openai 协议默认强度为 `medium`，**不在模型强度清单里时回退取 `supportedEffortLevels[0]`**；settings.json 解析器不读任何 defaultEffort 字段，用户手选强度存在 state.vscdb（不可直写）。因此 `supportedEffortLevels` 必须 **high 放首位**（`["high","low"]`），默认思考才是 high；写成 `["low","high"]` 会默认落到 low。
 
 ## 用法
 
@@ -74,10 +74,11 @@ agent_created: true
 python scripts/import_token_plan.py --source opencode-go
 ```
 
-在 Qoder 会话里运行会自动直写 Qoder `settings.json`；在 WorkBuddy 里运行则写 `models.json`。也可显式指定：
+在 Qoder 会话里运行会自动直写 Qoder `settings.json`；在 WorkBuddy 里运行则写 `models.json`；在 CodeBuddy 里运行写其 `models.json`。也可显式指定：
 
 ```bash
 python scripts/import_token_plan.py --target workbuddy --source opencode-go
+python scripts/import_token_plan.py --target codebuddy --source opencode-go
 python scripts/import_token_plan.py --target qoder --source opencode-go
 ```
 
@@ -85,7 +86,7 @@ python scripts/import_token_plan.py --target qoder --source opencode-go
 
 - 实时拉取 `http://127.0.0.1:7863/opencode/v1/models`。
 - **先清理同来源旧模型**（同端点 + 带来源前缀的历史残留），再写入本次清单；其他来源条目保留。`--keep-old` 可保留旧条目。
-- WorkBuddy：写入前备份 `models.json.bak`；打印 `removed_old / added / total`。
+- WorkBuddy / CodeBuddy：写入前备份 `models.json.bak`；打印 `removed_old / added / total`。CodeBuddy 保持 `{"models": [...]}` 对象包装，条目字段与 WorkBuddy 一致。
 - Qoder：按 `providers` 段实测 schema 写入一个 `qoder-custom-<uuid>` provider（`type=openai-compatible`、`protocol=openai`、`authType=bearer`，models 数组含 thinking/vision 能力），备份 `settings.json.bak`；打印 `removed_old_providers / added_provider / models`。**导入后重启 Qoder** 才会出现在模型列表。
 
 ### 2. 导出 opencode-go 模型粘贴片段（Qoder UI 手工导入兜底）
@@ -115,7 +116,7 @@ python scripts/import_token_plan.py --target generic --source opencode-go
 
 ## 常用参数
 
-- `--target auto|workbuddy|qoder|generic` 目标客户端，默认 auto（自动识别宿主）
+- `--target auto|workbuddy|codebuddy|qoder|generic` 目标客户端，默认 auto（自动识别宿主）
 - `--source token-plan|opencode-go` 模型来源，默认 token-plan
 - `--models grok-4.7,auto` 从来源结果里筛选子集
 - `--api-key <key>` 显式指定 Key
@@ -123,6 +124,7 @@ python scripts/import_token_plan.py --target generic --source opencode-go
 - `--vision-models kimi-k3,hy4` 覆盖图像模型清单
 - `--out <path>` qoder/generic 导出粘贴片段（qoder 加此参数则不直写 settings.json），默认 stdout
 - `--workbuddy-path <path>` 覆盖 models.json 路径
+- `--codebuddy-path <path>` 覆盖 CodeBuddy models.json 路径
 - `--qoder-settings-path <path>` 覆盖 Qoder settings.json 路径（默认取 `QODER_CONFIG_DIR` 或 `~/.qoder-cn`）
 - `--keep-old` 保留同来源旧条目（默认先清理）
 - `--dry-run` 只打印，不写文件
@@ -135,5 +137,6 @@ python scripts/import_token_plan.py --target generic --source opencode-go
 - `failed to fetch http://127.0.0.1:7863/opencode/v1/models`：本地网关没起或网络不通；偶发 403 可能是网关会话态抖动，稍后重试。
 - 模型名对不上：用 `/models` 返回的 `id`，不要用显示名。
 - WorkBuddy 里思考仍是关闭：确认 `reasoning.defaultEffort="high"` 与 `onlyReasoning=true` 已写入；导入后重启 WorkBuddy。
+- Qoder 里思考默认不是 high：核对 `settings.json` providers 段模型的 `capabilities.thinking.supportedEffortLevels` 是否 high 在首位（`["high","low"]`）；Qoder 对 openai 协议默认 medium，不在清单时取列表第一个。重跑导入并重启 Qoder。
 - Qoder 导入后模型不出现在下拉：先确认已重启 Qoder；再核对 `settings.json` 的 `providers` 段是否写入了 `type=openai-compatible` 的 provider。直写未生效时用 `--out` 导出片段走 UI 批量导入。
 - 401/403：Key 过期或额度耗尽；OpenCode Go 受限模型（DeepSeek V4.1 Flash / V4 Pro、LongCat 2.5 Free 需 Global 区域；Muse Spark 1.x Contributor 需允许训练端点）还要在 Console › Settings › Privacy 放行。

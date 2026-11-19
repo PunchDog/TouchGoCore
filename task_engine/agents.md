@@ -1,0 +1,70 @@
+# agents.md — task_engine
+
+> 状态：已启用 ｜ 最后同步：2026-11-19 ｜ 依赖层级：L4
+>
+> 维护口径：目录级事实源；变更同步直接上级索引与 `docs/repo-layout.md`
+
+## 1. 目录职责
+
+与业务无关的任务/进度引擎：一个 Engine 绑定一个玩家，按触发事件推进任务，达标 AUTO 发奖（宿主注入 RewardFn，必须幂等）。内存里用四条链表表达任务状态，进度写走 db 缓存门面的 mustSave=false 延迟落库。库，不是 Service：没有 Run/Stop。
+
+## 2. 入口文件
+
+| 文件 | 作用 | 变更敏感度 |
+|---|---|---|
+| `doc.go` | 整体模型与内存链表 | 中 |
+| `README.md` | 整体模型与内存链表 | 中 |
+| `engine.go` | 引擎入口 | 高 |
+| `list.go` | 查询任务 | 中 |
+| `global.go` | 查询任务 | 中 |
+| `reward.go` | 发奖回调 | 中 |
+| `policy.go` | 发奖回调 | 中 |
+| `cache.go` | 存储绑定与缓存 | 中 |
+| `schema.sql` | 表结构 | 中 |
+| `migrate_unique_progress.sql` | 表结构 | 中 |
+| `errors.go` | 错误 | 中 |
+
+## 3. 关键文件清单
+
+| 文件 | 职责 | 变更敏感度 |
+|---|---|---|
+| `engine.go` | 类型 Options/Engine；函数 New/Reload/Remove/OnEvent/UpdateTask | 高 |
+| `cache.go` | 函数 OpenStorage/CreateDef/UpdateDef | 中 |
+| `types.go` | 类型 ProgressParm/TaskDef/TaskProgress；函数 TableName/GetDef/TaskProgressDone/TaskCycleKey/StartOfWeekUTC/EffectiveTargetCount/TargetReached | 中 |
+| `global.go` | 类型 NodeList/Trigger/Golbal；函数 Reload | 中 |
+| `list.go` | 函数 GetTask | 中 |
+| `doc.go` | 内部实现 | 中 |
+| `reward.go` | 类型 RewardKey/RewardFn；函数 String | 中 |
+| `errors.go` | 内部实现 | 中 |
+
+## 4. 对外接口 / 依赖
+
+- **对外暴露**：`Options`、`Engine`、`New`、`Reload`、`Remove`、`OnEvent`、`UpdateTask`、`OpenStorage`、`CreateDef`、`UpdateDef`、`ProgressParm`、`TaskDef`、`TaskProgress`、`TableName`、`GetDef`、`TaskProgressDone`、`TaskCycleKey`、`StartOfWeekUTC` 等
+- **允许依赖**：`db`、`db/mysql`、`list`、`syncmap`、`util`（内部依赖，由 go list 现算）
+- **禁止依赖**：禁止 import 不在允许依赖清单中的 `touchgocore/*` 包（当前仅：`db`、`db/mysql`、`list`、`syncmap`、`util`）；禁止反向依赖上层。
+- **依赖本目录的模块**：—
+
+## 5. 禁止跨模块直连约束
+
+- 使用前必须 db.InitCache 并 OpenStorage 把 task_def / task_progress 绑到统一缓存层。
+- 进度口径：INVITE 覆盖、ADD 累加，与 TargetCount 按 > / = / < 比较。
+- 跨层依赖只向 `db`、`db/mysql`、`list`、`syncmap`、`util` 方向；禁止反向引用上层包。
+- 新增/删除/重命名文件必须同步本索引与直接上级索引，否则后续变更会走偏。
+
+## 6. 相关规范文档锚点
+
+- `task_engine/doc.go`、`task_engine/README.md`
+- `db/cache_api.go` 包注释（资金列禁止延迟落库）
+
+## 7. 裁决检查项（改码前逐项确认）
+
+- [ ] 是否新增/删除/重命名文件或导出符号？→ 必裁，并同步上级索引
+- [ ] 是否改变对外暴露的核心类型/函数签名？→ 必裁（本仓被外部业务工程 import，导出面即 API）
+
+## 8. 子目录索引
+
+无子目录。
+
+---
+
+本文件是目录级事实源，随代码演进需同步；细节以实际代码与包注释为准。

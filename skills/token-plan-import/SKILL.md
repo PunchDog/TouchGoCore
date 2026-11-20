@@ -1,6 +1,6 @@
 ---
 name: token-plan-import
-description: 把 OpenAI 兼容模型批量导入到 WorkBuddy / CodeBuddy / Qoder 等客户端，默认自动识别当前宿主。支持两种模型来源：opencode-go（每次从本地网关 http://127.0.0.1:7863/opencode/v1 实时拉取模型清单）与 token-plan（千问 Token Plan 默认 6 个模型）。触发词：token plan、千问 token plan、导入模型、批量导入、qianwenai、opencode go、opencode-go 导入、open_code_token_plan、codebuddy 导入。目标格式：auto（自动识别宿主）、WorkBuddy（写 ~/.workbuddy/models.json）、CodeBuddy（写 ~/.codebuddy/models.json，{"models":[...]} 包装）、Qoder（直写 settings.json providers 段，--out 改为导出粘贴片段）、generic（通用片段）。显示名统一加来源前缀（token plan: / opencode:），导入前清理同来源旧模型。Qoder 导入模型默认思考强度为 high。token-plan 用 TOKEN_PLAN_API_KEY，opencode-go 用 OPEN_CODE_TOKEN_PLAN_API_KEY。
+description: 把 OpenAI 兼容模型批量导入到 WorkBuddy / CodeBuddy / Qoder 等客户端，默认自动识别当前宿主。调用时先让用户从 providers.json 选择订阅商并输入 api-key，由 agent 把 key 写入该订阅商对应的用户级系统环境变量，再按既有流程导入。支持两种内置订阅商：token-plan（千问 Token Plan 默认 6 个模型，用 TOKEN_PLAN_API_KEY）与 opencode-go（从本地网关 http://127.0.0.1:7863/opencode/v1 实时拉取模型清单，用 OPEN_CODE_TOKEN_PLAN_API_KEY），可通过 providers.json 扩展。触发词：token plan、千问 token plan、导入模型、批量导入、qianwenai、opencode go、opencode-go 导入、open_code_token_plan、codebuddy 导入、选择订阅商、订阅商导入。目标格式：auto（自动识别宿主）、WorkBuddy（写 ~/.workbuddy/models.json）、CodeBuddy（写 ~/.codebuddy/models.json，{"models":[...]} 包装）、Qoder（直写 settings.json providers 段，--out 改为导出粘贴片段）、generic（通用片段）。显示名统一加来源前缀（token plan: / opencode:），导入前清理同来源旧模型。Qoder 导入模型默认思考强度为 high。
 agent_created: true
 ---
 
@@ -29,7 +29,69 @@ agent_created: true
 
 本技能**只写 WorkBuddy / CodeBuddy / Qoder 等客户端配置，不改 `~/.config/opencode/opencode.json`**。
 
+## 调用流程（必须先做，三步）
+
+每次调用本 skill，agent 按以下顺序执行，不得跳过前两步直接跑脚本。
+
+### 第 1 步：选择订阅商
+
+读取同目录 `providers.json`，把 `providers[]` 的 `name` 列成选项让用户选（用 AskUserQuestion，可多列几个）。订阅商表以该文件为准，新增商家只改 JSON，不改脚本。
+
+字段含义：
+
+| 字段 | 作用 |
+| --- | --- |
+| `id` | 短名，如 `token-plan` |
+| `name` | 展示给用户的选择项 |
+| `source` | 传给脚本 `--source`，只能是 `token-plan` 或 `opencode-go` |
+| `base_url` | 传给脚本 `--base-url` |
+| `catalog` | `builtin`=用 `models` 清单；`live`=运行时拉 `<base_url>/models` |
+| `env` | 该商家 api-key 对应的用户级系统变量名 |
+| `models` / `vision_models` | 仅 `builtin` 需要，传给 `--models` / `--vision-models` |
+
+### 第 2 步：输入 api-key 并写入系统变量
+
+用户提供 key 后，agent 用 `setx` 写到用户级环境变量（与 `OPEN_CODE_TOKEN_PLAN_API_KEY` 持平，`HKCU\Environment`，当前权限即可，不需要管理员）：
+
+```bash
+setx "<该商家的 env 值>" "<用户提供的 key>"
+```
+
+- 禁止把 key 写进仓库文件或对话回显之外的落盘产物；只在命令参数里用一次。
+- 脚本 `read_env()` 会先读进程环境，再兜底读 `HKCU\Environment`，所以 `setx` 后无需重开终端即可被脚本读到。
+- 变量值与订阅商一一对应，不要复用另一个商家的变量（如 opencode-go 只读 `OPEN_CODE_TOKEN_PLAN_API_KEY`，不回退到 `TOKEN_PLAN_API_KEY`）。
+
+### 第 3 步：按既有流程导入
+
+把订阅商字段拼成脚本参数执行。脚本只内置 `TOKEN_PLAN_API_KEY` / `OPEN_CODE_TOKEN_PLAN_API_KEY` 两个变量名，新增商家的 `env` 脚本不认识。因此**统一把刚写入系统变量的 key 传给 `--api-key`**，这样任何订阅商都走同一套现有调用，不依赖脚本变量清单。
+
+```bash
+# 通用形式：source / base_url / models 都取自 providers.json 选中项
+setx "<env>" "<key>"
+python scripts/import_token_plan.py --target auto \
+  --source "<source>" --base-url "<base_url>" --api-key "<key>" \
+  [--models "<逗号分隔 models>" --vision-models "<逗号分隔 vision_models>"]
+
+# token-plan（builtin 清单）
+setx "TOKEN_PLAN_API_KEY" "<key>"
+python scripts/import_token_plan.py --target auto --source token-plan \
+  --base-url "https://token-plan.maas.qianwenaiapi.com/compatible-mode/v1" --api-key "<key>" \
+  --models "glm-5.3,deepseek-v4-pro,deepseek-v4.1-flash-1017,qwen3.8-flash,qwen4-max,auto" \
+  --vision-models "qwen4-max,glm-5.3"
+
+# opencode-go（live 清单，无需 --models/--vision-models）
+setx "OPEN_CODE_TOKEN_PLAN_API_KEY" "<key>"
+python scripts/import_token_plan.py --target auto --source opencode-go \
+  --base-url "http://127.0.0.1:7863/opencode/v1" --api-key "<key>"
+```
+
+`--api-key` 优先级最高，会覆盖脚本读环境变量的结果，两者值一致，所以既满足「setx 写入系统变量」又保证新商家可用。
+
+后续导出片段（`--out`）、筛选（`--models`）、演练（`--dry-run`）等用法不变，见下文。
+
 ## 端点与凭据
+
+内置订阅商 table 以同目录 `providers.json` 为准，下表仅作速查；扩展商家只改 JSON。
 
 | 来源 | Base URL | 模型 ID |
 | --- | --- | --- |

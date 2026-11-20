@@ -21,6 +21,7 @@
 |---|---|---|
 | feedback-core-rules.md | 强制记忆口径 | 中 |
 | systemone-decision/、terse-output/、token-plan-import/ 各自目录 | 各 skill 用法 | 中 |
+| `token-plan-import/providers.json` | 导入 skill 的订阅商表（名称/base-url/模型来源/环境变量），调用时先选商家再写 key | 中 |
 
 ## 4. 对外接口 / 依赖
 

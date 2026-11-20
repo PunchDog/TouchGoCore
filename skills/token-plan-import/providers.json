@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "providers": [
+    {
+      "id": "token-plan",
+      "name": "千问 Token Plan",
+      "source": "token-plan",
+      "base_url": "https://token-plan.maas.qianwenaiapi.com/compatible-mode/v1",
+      "catalog": "builtin",
+      "env": "TOKEN_PLAN_API_KEY",
+      "models": [
+        "glm-5.3",
+        "deepseek-v4-pro",
+        "deepseek-v4.1-flash-1017",
+        "qwen3.8-flash",
+        "qwen4-max",
+        "auto"
+      ],
+      "vision_models": ["qwen4-max", "glm-5.3"]
+    },
+    {
+      "id": "opencode-go",
+      "name": "OpenCode Go 本地网关",
+      "source": "opencode-go",
+      "base_url": "http://127.0.0.1:7863/opencode/v1",
+      "catalog": "live",
+      "env": "OPEN_CODE_TOKEN_PLAN_API_KEY"
+    }
+  ]
+}
